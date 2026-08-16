@@ -65,6 +65,7 @@ import {
   recordSpawnObserved,
   subagentProofSnapshot,
 } from "./subagent-proofs.mjs";
+import { subagentEffort } from "./multi-agent-state.mjs";
 import { mergeCodexAppTools } from "./codex-app-tools.mjs";
 import { activityMetadataFromHeaders } from "./codex-session-names.mjs";
 import { translateGatewayError } from "./error-translation.mjs";
@@ -1934,6 +1935,30 @@ async function handleResponses(request, response, requestUrl) {
         model: route.gatewayModel,
         input: routedInput,
       };
+      // Codex chooses a child's model; this is where an operator gets to
+      // choose its depth. Applied only to turns Codex marked as a child, so a
+      // parent conversation on the same model is untouched -- running one
+      // model differently in the two roles is the whole point.
+      //
+      // The level is deliberately not validated against the model here. A
+      // provider that rejects an unsupported effort says so in a way the
+      // operator can read, whereas silently dropping the setting looks like
+      // the feature never worked.
+      const childEffort = request.headers["x-openai-subagent"]
+        ? subagentEffort(route.slug)
+        : undefined;
+      // This leaves on the Responses API, where the effort travels inside
+      // `reasoning`. A flat `reasoning_effort` is a Chat Completions field:
+      // LiteLLM's Responses bridge derives its own effort from `reasoning`
+      // whenever the client sent one -- and Codex always does -- then that
+      // derived value overwrites anything flat the router set, so a flat-only
+      // override never reaches the provider. Set both: `reasoning.effort` is
+      // what actually travels, and the flat field is what a bare
+      // chat-completions gateway would read.
+      if (childEffort) {
+        routed.reasoning_effort = childEffort;
+        routed.reasoning = { ...(routed.reasoning || {}), effort: childEffort };
+      }
       normalizeAutoToolChoice(routed, route);
       // Native OpenAI traffic keeps client_metadata; routed providers do not
       // consume it and the strict ones reject the unknown field.

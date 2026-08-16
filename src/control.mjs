@@ -103,10 +103,21 @@ function nativeCodexModels(catalogPath, hiddenModels = new Set(), subagentSettin
         native: true,
         multiAgentVersion: model.multi_agent_version || "v1",
         visible: !hiddenModels.has(model.slug),
+        ...reasoningLevelField(model.supported_reasoning_levels),
       }));
   } catch {
     return [];
   }
+}
+
+// Registry entries carry objects ({ effort, description }); the merged catalog
+// carries the same list in Codex's wire shape. Both reduce to the effort names
+// a surface can offer.
+function reasoningLevelField(levels) {
+  const names = (Array.isArray(levels) ? levels : [])
+    .map((level) => (typeof level === "string" ? level : level?.effort))
+    .filter((level) => typeof level === "string" && level);
+  return names.length ? { reasoningLevels: names } : {};
 }
 
 // --- per-target probes (run with MODEL_ROUTER_TARGET set) -------------------
@@ -186,6 +197,11 @@ async function emitProbe() {
     enabled: enabledProviders.includes(model.provider),
     multiAgentVersion: model.multiAgentVersion || "v1",
     visible: !hiddenModels.has(model.slug),
+    // The ladders differ per model, so a surface offering a subagent effort
+    // has to be told which levels this one accepts rather than guessing from a
+    // global list. Omitted when the model advertises none, so an entry without
+    // a ladder keeps the exact shape it always had.
+    ...reasoningLevelField(model.reasoningLevels),
   }));
   const models = TARGET === "codex"
     ? [
@@ -780,6 +796,24 @@ async function finalizeLocalModelPublication() {
   return warnings;
 }
 
+// What this model says it supports, read from the merged catalog Codex reads
+// so the answer matches what would actually be sent. An empty list means the
+// catalog could not be read, and the caller treats that as "do not block".
+async function modelReasoningLevels(slug) {
+  try {
+    const { MERGED_CATALOG_PATH } = await import("./paths.mjs");
+    const parsed = JSON.parse(readFileSync(MERGED_CATALOG_PATH, "utf8"));
+    const entry = (parsed.models || []).find((model) => String(model.slug) === slug);
+    const levels = entry?.supported_reasoning_levels;
+    if (!Array.isArray(levels)) return [];
+    return levels
+      .map((level) => (typeof level === "string" ? level : level?.effort))
+      .filter((level) => typeof level === "string" && level);
+  } catch {
+    return [];
+  }
+}
+
 async function knownModelSlug(slug) {
   try {
     const { MERGED_CATALOG_PATH } = await import("./paths.mjs");
@@ -802,6 +836,7 @@ async function handleSubagents(action, value, flag, rest = []) {
     replaceMultiAgentState,
     setMultiAgentMode,
     setMultiAgentModel,
+    setSubagentEffort,
     setMultiAgentModels,
     subagentSettingsSnapshot,
   } = await import("./multi-agent-state.mjs");
@@ -858,6 +893,21 @@ async function handleSubagents(action, value, flag, rest = []) {
       const { spawnDetachedVerification } = await import("./subagent-verify.mjs");
       spawnDetachedVerification([value]);
     }
+  } else if (action === "effort") {
+    if (!(await knownModelSlug(value))) {
+      throw new Error(`Unknown model slug: ${value}`);
+    }
+    const requested = String(flag || "").trim();
+    // Validated against what this model advertises rather than a global list:
+    // the ladders differ per model, and an effort the provider will reject is
+    // better refused here, where the operator is watching, than mid-spawn.
+    const levels = await modelReasoningLevels(value);
+    if (requested && requested !== "default" && levels.length && !levels.includes(requested)) {
+      throw new Error(
+        `${value} does not support reasoning effort "${requested}". Supported: ${levels.join(", ")}`,
+      );
+    }
+    setSubagentEffort(value, requested === "default" ? undefined : requested);
   } else if (action === "provider") {
     if (!["on", "off"].includes(flag)) {
       throw new Error("Usage: control subagents provider <provider-id> <on|off>");
@@ -886,7 +936,8 @@ async function handleSubagents(action, value, flag, rest = []) {
   } else {
     throw new Error(
       "Usage: control subagents status|select-all|unselect-all|mode <all|selected|proven>|" +
-        "set <model-slug> <on|off>|provider <provider-id> <on|off>|verify [model-slug ...]",
+        "set <model-slug> <on|off>|effort <model-slug> <level|default>|" +
+        "provider <provider-id> <on|off>|verify [model-slug ...]",
     );
   }
   refreshModelSettingsCatalog();
