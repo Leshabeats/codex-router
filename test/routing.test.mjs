@@ -5394,6 +5394,16 @@ test("a proven subagent is demoted by a later rejection and by a child that neve
     // Both demotions have to be readable in the log, even under the QUIET the
     // production LaunchAgent hard-sets: a picker entry that vanishes with no
     // line explaining it is unexplainable.
+    //
+    // Waited for rather than read straight off, because the demotion writes
+    // the proof file *before* it logs (`settle` in router.mjs), and the log
+    // goes down a pipe -- which node writes asynchronously on macOS. So the
+    // file the loop above polls can already say `failed` while the line
+    // explaining it is still in flight; a bare read caught that ~1% of runs
+    // and blamed the ceiling for a demotion that had in fact already fired.
+    // The wait is on the line's arrival only: what is asserted is unchanged.
+    await waitForStderr(router, /subagent demoted: deepseek\/deepseek-v4-flash/);
+    await waitForStderr(router, /subagent demoted: deepseek\/deepseek-v4-pro/);
     const errors = router.testErrors();
     assert.match(errors, /subagent demoted: deepseek\/deepseek-v4-flash/);
     assert.match(errors, /subagent demoted: deepseek\/deepseek-v4-pro/);
