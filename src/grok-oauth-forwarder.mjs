@@ -22,8 +22,16 @@ import { normalizeSchemaLiterals, objectRootToolSchema } from "./tool-schema-roo
 import {
   applyResponsesEvent,
   createTurnState,
+  DEFAULT_PROGRESS_ONLY_MAX_TEXT,
+  DEFAULT_PROGRESS_ONLY_MIN_OUTPUT_TOKENS,
   finalizeTurn,
-  sseDataFromBlock,
+  isProgressOnlyStop,
+  mergeMappedUsage,
+  parseSseBlockEvent,
+  requestOffersClientTools,
+  shouldPreferRetryTurn,
+  toolCallDeltas,
+  withProgressOnlyNudge,
 } from "./grok-oauth-turn.mjs";
 import { VERSION } from "./version.mjs";
 import { installStableFetchTransport } from "./fetch-transport.mjs";
@@ -40,6 +48,37 @@ const GROK_BASE = (
 ).replace(/\/+$/, "");
 const INTERNAL_KEY = process.env.MODEL_ROUTER_INTERNAL_KEY;
 const QUIET = process.env.MODEL_ROUTER_QUIET === "1";
+const PROGRESS_ONLY_RETRY = process.env.CODEX_ROUTER_GROK_PROGRESS_ONLY_RETRY !== "0";
+const PROGRESS_ONLY_MAX_TEXT = envNonNegativeInt(
+  "CODEX_ROUTER_GROK_PROGRESS_ONLY_MAX_TEXT",
+  DEFAULT_PROGRESS_ONLY_MAX_TEXT,
+);
+const PROGRESS_ONLY_MIN_OUTPUT_TOKENS = envNonNegativeInt(
+  "CODEX_ROUTER_GROK_PROGRESS_ONLY_MIN_OUTPUT_TOKENS",
+  DEFAULT_PROGRESS_ONLY_MIN_OUTPUT_TOKENS,
+);
+
+function envNonNegativeInt(name, fallback) {
+  const parsed = Number(process.env[name]);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : fallback;
+}
+
+async function drainUpstreamBody(body) {
+  if (!body) return;
+  try {
+    if (typeof body.cancel === "function") {
+      await body.cancel();
+      return;
+    }
+  } catch {
+    // Fall through to a read-drain when cancel is unavailable or rejected.
+  }
+  try {
+    await body.arrayBuffer();
+  } catch {
+    // A failed retry must not leave the socket unread.
+  }
+}
 
 // Hosted search tools run on xAI's Responses backend, matching Grok Build:
 // attach bare web_search + x_search and let the model choose when/how to search.
@@ -288,13 +327,9 @@ function nextSseBoundary(buffer) {
 }
 
 function dispatchSseBlock(rawEvent, handlers) {
-  const data = sseDataFromBlock(rawEvent);
-  if (!data || data === "[DONE]") return;
-  try {
-    handlers(JSON.parse(data));
-  } catch {
-    // Ignore malformed upstream events while preserving the rest of the stream.
-  }
+  const event = parseSseBlockEvent(rawEvent);
+  if (event === undefined) return;
+  handlers(event);
 }
 
 async function consumeResponsesStream(upstreamBody, handlers) {
@@ -329,9 +364,13 @@ async function handleChatCompletions(request, response) {
   const chat = JSON.parse((await readRequestBody(request)).toString("utf8"));
   const wantsStream = chat.stream === true;
   const model = typeof chat.model === "string" ? chat.model : "";
-  const responsesRequest = toResponsesRequest(chat, {
-    hostedSearchEnabled: hostedSearchEnabledFor(model),
-  });
+  const hostedSearchEnabled = hostedSearchEnabledFor(model);
+  const responsesRequest = toResponsesRequest(chat, { hostedSearchEnabled });
+  const holdOptions = {
+    maxText: PROGRESS_ONLY_MAX_TEXT,
+    minOutputTokens: PROGRESS_ONLY_MIN_OUTPUT_TOKENS,
+  };
+  const mayRetry = PROGRESS_ONLY_RETRY && requestOffersClientTools(chat);
 
   const controller = new AbortController();
   request.once("aborted", () => controller.abort());
@@ -339,10 +378,10 @@ async function handleChatCompletions(request, response) {
     if (!response.writableEnded) controller.abort();
   });
 
-  const requestUpstream = (accessToken) => fetch(`${GROK_BASE}/responses`, {
+  const requestUpstream = (accessToken, body) => fetch(`${GROK_BASE}/responses`, {
     method: "POST",
     headers: upstreamHeaders(accessToken, model, chat?.messages),
-    body: JSON.stringify(responsesRequest),
+    body: JSON.stringify(body),
     signal: controller.signal,
   });
   let accessToken;
@@ -358,12 +397,12 @@ async function handleChatCompletions(request, response) {
     });
     return;
   }
-  let upstream = await requestUpstream(accessToken);
+  let upstream = await requestUpstream(accessToken, responsesRequest);
   if (upstream.status === 401) {
     await upstream.arrayBuffer();
     try {
       accessToken = await ensureFreshGrokOAuthToken({ force: true });
-      upstream = await requestUpstream(accessToken);
+      upstream = await requestUpstream(accessToken, responsesRequest);
     } catch {
       writeJson(response, 401, {
         error: {
@@ -416,14 +455,62 @@ async function handleChatCompletions(request, response) {
     }
   };
 
-  const onEvent = (event) => {
+  await consumeResponsesStream(upstream.body, (event) => {
     applyResponsesEvent(turnState, event);
     emitPendingDeltas();
-  };
+  });
 
-  await consumeResponsesStream(upstream.body, onEvent);
-  const turn = finalizeTurn(turnState);
+  let turn = finalizeTurn(turnState);
   emitPendingDeltas();
+  let retried = false;
+
+  if (mayRetry && isProgressOnlyStop(turn, holdOptions)) {
+    const retryChat = withProgressOnlyNudge(chat);
+    const retryRequest = toResponsesRequest(retryChat, { hostedSearchEnabled });
+    let secondUpstream;
+    try {
+      secondUpstream = await requestUpstream(accessToken, retryRequest);
+    } catch (error) {
+      console.error(
+        `[grok-oauth] progress-only-retry-failed=true model=${model} error=${error?.name || "Error"}`,
+      );
+      secondUpstream = undefined;
+    }
+    if (secondUpstream && (!secondUpstream.ok || !secondUpstream.body)) {
+      await drainUpstreamBody(secondUpstream.body);
+      console.error(
+        `[grok-oauth] progress-only-retry-failed=true model=${model} status=${secondUpstream.status}`,
+      );
+    } else if (secondUpstream?.body) {
+      const secondState = createTurnState();
+      await consumeResponsesStream(secondUpstream.body, (event) => {
+        applyResponsesEvent(secondState, event);
+      });
+      const second = finalizeTurn(secondState);
+      const mergedUsage = mergeMappedUsage(turn.usage, second.usage);
+      retried = true;
+      const preferTools = shouldPreferRetryTurn(second);
+      console.error(
+        `[grok-oauth] progress-only-retried=true retries=1 model=${model} prefer=${preferTools ? "retry" : "first"}`,
+      );
+      if (preferTools) {
+        if (wantsStream) {
+          for (const delta of toolCallDeltas(second)) {
+            response.write(OPENAI_ROLE_CHUNK(id, created, model, delta));
+          }
+        }
+        turn = {
+          contentText: turn.contentText,
+          toolCalls: second.toolCalls,
+          usage: mergedUsage,
+          deltas: [...turn.deltas, ...toolCallDeltas(second)],
+          finishReason: "tool_calls",
+        };
+      } else {
+        turn = { ...turn, usage: mergedUsage };
+      }
+    }
+  }
 
   if (wantsStream) {
     response.write(OPENAI_ROLE_CHUNK(id, created, model, {}, turn.finishReason));
@@ -447,7 +534,7 @@ async function handleChatCompletions(request, response) {
     });
   }
 
-  if (!QUIET) {
+  if (!QUIET && !retried) {
     console.error(`[grok-oauth] model=${model} status=${upstream.status}`);
   }
 }

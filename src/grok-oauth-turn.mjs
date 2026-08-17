@@ -11,6 +11,113 @@ export function sseDataFromBlock(rawEvent) {
   return dataLines.length ? dataLines.join("\n") : undefined;
 }
 
+// Parse one SSE block to a JSON event. Malformed JSON is a skipped event;
+// the caller must not wrap `handlers()` in the same try/catch.
+export function parseSseBlockEvent(rawEvent) {
+  const data = sseDataFromBlock(rawEvent);
+  if (!data || data === "[DONE]") return undefined;
+  try {
+    return JSON.parse(data);
+  } catch {
+    return undefined;
+  }
+}
+
+export const DEFAULT_PROGRESS_ONLY_MAX_TEXT = 120;
+export const DEFAULT_PROGRESS_ONLY_MIN_OUTPUT_TOKENS = 400;
+// The trigger below cannot tell a stalled turn from a finished one -- a task
+// that ends "Done." is byte-for-byte the same shape as one that stops after
+// "Next I will update the deck.". So the nudge must let the model decline. An
+// imperative "call tools now" makes a finished turn invent a tool call, and
+// `shouldPreferRetryTurn` would then graft that call onto the answer and the
+// client would run it. Offering the no-tool branch first routes the finished
+// case into keep-first instead.
+const PROGRESS_ONLY_NUDGE =
+  "If your previous message already completed the task, restate the final answer " +
+  "and call no tool. Otherwise continue the same task now by calling the tools you need.";
+
+export function requestOffersClientTools(chat) {
+  return (
+    Array.isArray(chat?.tools) &&
+    chat.tools.some((tool) => tool?.type === "function" && tool.function?.name)
+  );
+}
+
+// Not a detector for "the model stalled" -- no such signal exists in the turn.
+// This matches the observable shape: short visible text, no client tool call,
+// and enough output tokens that the model clearly reasoned. A finished task
+// answered in one line matches too, which is why the retry has to be safe to
+// lose rather than accurate to fire. See PROGRESS_ONLY_NUDGE.
+export function isProgressOnlyStop(
+  turn,
+  {
+    maxText = DEFAULT_PROGRESS_ONLY_MAX_TEXT,
+    minOutputTokens = DEFAULT_PROGRESS_ONLY_MIN_OUTPUT_TOKENS,
+  } = {},
+) {
+  if (!turn || (turn.toolCalls && turn.toolCalls.length > 0)) return false;
+  const text = typeof turn.contentText === "string" ? turn.contentText : "";
+  if (text.length > maxText) return false;
+  const tokens = Number(turn.usage?.completion_tokens);
+  return Number.isFinite(tokens) && tokens >= minOutputTokens;
+}
+
+// Prefer the retry only when it actually called a tool. A second short
+// status sentence is not an improvement; keep the first answer.
+export function shouldPreferRetryTurn(second) {
+  return Boolean(second?.toolCalls?.length);
+}
+
+export function toolCallDeltas(turn) {
+  return (turn?.deltas || []).filter(
+    (delta) => Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0,
+  );
+}
+
+export function withProgressOnlyNudge(chat) {
+  const messages = Array.isArray(chat?.messages) ? chat.messages : [];
+  return {
+    ...chat,
+    messages: [...messages, { role: "user", content: PROGRESS_ONLY_NUDGE }],
+  };
+}
+
+function markProgressOnlyUsage(usage) {
+  if (!usage) return { retries: 1, progress_only_retried: true };
+  return { ...usage, retries: 1, progress_only_retried: true };
+}
+
+export function mergeMappedUsage(first, second) {
+  if (!first) return markProgressOnlyUsage(second);
+  if (!second) return markProgressOnlyUsage(first);
+  const prompt = (first.prompt_tokens || 0) + (second.prompt_tokens || 0);
+  const completion = (first.completion_tokens || 0) + (second.completion_tokens || 0);
+  const cached =
+    first.prompt_tokens_details?.cached_tokens === undefined &&
+    second.prompt_tokens_details?.cached_tokens === undefined
+      ? undefined
+      : (first.prompt_tokens_details?.cached_tokens || 0) +
+        (second.prompt_tokens_details?.cached_tokens || 0);
+  const reasoning =
+    first.completion_tokens_details?.reasoning_tokens === undefined &&
+    second.completion_tokens_details?.reasoning_tokens === undefined
+      ? undefined
+      : (first.completion_tokens_details?.reasoning_tokens || 0) +
+        (second.completion_tokens_details?.reasoning_tokens || 0);
+  const merged = {
+    prompt_tokens: prompt,
+    completion_tokens: completion,
+    total_tokens: prompt + completion,
+    retries: 1,
+    progress_only_retried: true,
+  };
+  if (cached !== undefined) merged.prompt_tokens_details = { cached_tokens: cached };
+  if (reasoning !== undefined) {
+    merged.completion_tokens_details = { reasoning_tokens: reasoning };
+  }
+  return merged;
+}
+
 const TOOL_ITEM_TYPES = new Set(["function_call", "custom_tool_call"]);
 
 export function createTurnState() {
