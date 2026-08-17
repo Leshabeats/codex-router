@@ -8,7 +8,7 @@
       "ownedBy": "commandcode",
       "baseUrl": "https://api.commandcode.ai/provider/v1",
       "baseUrlEnv": "COMMANDCODE_BASE_URL",
-      "planNote": "Needs the Command Code Provider plan.",
+      "planNote": "Every Command Code plan except Go includes Provider API access; GOAT, Pro, Max, Team, and Provider accounts use this API and meter against their own credits.",
       "credential": {
         "environment": [
           "COMMAND_CODE_API_KEY",
@@ -19,15 +19,7 @@
         "keychainServices": [
           "codex-router-commandcode"
         ],
-        "prompt": "Command Code API key",
-        "cliSession": {
-          "directory": ".commandcode",
-          "file": "auth.json",
-          "field": "apiKey",
-          "homeEnv": "COMMANDCODE_CLI_HOME",
-          "label": "Command Code CLI sign-in",
-          "loginCommand": "command-code login"
-        }
+        "prompt": "Command Code API key"
       }
     },
     {
@@ -49,15 +41,7 @@
         "keychainServices": [
           "codex-router-commandcode"
         ],
-        "prompt": "Command Code API key",
-        "cliSession": {
-          "directory": ".commandcode",
-          "file": "auth.json",
-          "field": "apiKey",
-          "homeEnv": "COMMANDCODE_CLI_HOME",
-          "label": "Command Code CLI sign-in",
-          "loginCommand": "command-code login"
-        }
+        "prompt": "Command Code API key"
       }
     }
   ]

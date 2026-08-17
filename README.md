@@ -457,52 +457,29 @@ entry — the key or the address is already the boundary.
 Command Code's official Provider API is an OpenAI-compatible chat completions
 surface plus an Anthropic Messages surface at `https://api.commandcode.ai/provider/v1`
 (`COMMAND_CODE_API_KEY` or `COMMANDCODE_API_KEY` in the environment, or store
-the key once, or reuse a `command-code login` session). It requires the
-Provider plan or higher and uses the same key that authenticates the Command
-Code CLI. Everything appears as one
+the key once). Every plan except Go has API access; GOAT, Pro, Max, Team, and
+Provider accounts use the API. Everything appears as one
 "Command Code" provider; internally the catalog is split between
 `commandcode` for Chat Completions models and `commandcode-messages` for
 models that require the Messages protocol (Claude).
 
-**The Provider plan is required, and signing in does not grant it.** A Go-plan
-account can run the Command Code CLI but is refused by `/provider/v1` with
-`Your Go plan doesn't include API access`. That is an entitlement, not a
-credential problem: no sign-in, key, or reinstall changes it. Check the plan
+**The Go plan is the exception.** A Go-plan account is refused by `/provider/v1`
+with `Your Go plan doesn't include API access`. That is an entitlement, not a
+credential problem: no key or reinstall changes it. Check the plan
 at [commandcode.ai/billing](https://commandcode.ai/billing) before enabling
 this provider.
 
-Given the Provider plan, there are two ways to authenticate, and either one is
-enough.
-
-**Sign in through the browser (OAuth).** `command-code login` opens the
-Command Code authorization page, receives the callback on a temporary local
-server, and writes the key it mints to `~/.commandcode/auth.json`. The router
-reads that file, so a signed-in machine needs no key of its own:
-
-```sh
-npm install -g command-code
-command-code login
-./bin/model-router codex providers enable commandcode
-```
-
-The macOS tray offers the same flow: the Command Code row has an
-**Install & Sign In** button (**Sign In** once the CLI is present) next to
-**Add Key**. `command-code login` draws a full-screen terminal interface, so
-the tray opens a Terminal window to run it and waits for the credential rather
-than piping it. The router only reads that file — it never rewrites, copies,
-or deletes it — so `command-code logout` also revokes the router's access.
-
-**Store a key instead.** Create one in Command Code Studio and save it here:
+**Store an API key.** Create one in Command Code Studio and save it here:
 
 ```sh
 ./bin/model-router codex provider-key commandcode set
 ./bin/model-router codex providers enable commandcode
 ```
 
-When both exist, the exported environment variable wins, then the key stored
-here, then the macOS Keychain, and the CLI sign-in last: a key you deliberately
-saved is never silently replaced by a session. `doctor` names whichever source
-is live.
+When multiple API-key sources exist, the exported environment variable wins,
+then the key stored here, then the macOS Keychain. `doctor` names whichever
+source is live. The router does not install, launch, or read a Command Code
+CLI session.
 
 | Picker label | Model ID |
 | --- | --- |
@@ -1446,4 +1423,3 @@ References: [Kimi Code CLI OAuth](https://www.kimi.com/help/kimi-code/cli-gettin
 and [opencodex](https://github.com/lidge-jun/opencodex).
 
 MIT licensed. See [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md).
-

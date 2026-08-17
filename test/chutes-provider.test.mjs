@@ -26,7 +26,6 @@ function isolatedEnvironment(testRoot, extra = {}) {
     CODEX_ROUTER_SKIP_LAUNCHCTL: "1",
     KIMI_CODE_HOME: path.join(testRoot, "kimi-code"),
     GROK_AUTH_PATH: path.join(testRoot, "grok", "auth.json"),
-    COMMANDCODE_CLI_HOME: path.join(testRoot, "commandcode"),
     CHUTES_API_KEY: "",
     CHUTES_API_BASE_URL: "",
     ...extra,

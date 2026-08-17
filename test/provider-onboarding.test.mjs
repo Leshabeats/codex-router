@@ -72,6 +72,8 @@ test("provider onboarding reports install, login, and API key actions without se
     assert.equal(byId["grok-api"].action, "add-key");
     assert.equal(byId["anthropic-api"].action, "add-key");
     assert.equal(byId["minimax-token-plan"].action, "add-key");
+    assert.equal(byId.commandcode.action, "add-key");
+    assert.equal("signIn" in byId.commandcode, false);
     assert.equal(byId["github-copilot"].action, "add-key");
     assert.equal(byId["github-copilot"].credentialLabel, "GitHub token");
     assert.equal("credentialLabel" in byId["deepseek"], false);
