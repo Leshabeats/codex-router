@@ -92,12 +92,28 @@ async function loadProvider() {
   };
 }
 
-function devinCliVersion() {
-  const binary = commandOnPath("devin");
+// The third element of a `spawnableCommand` result is not optional decoration.
+// For a Windows `.cmd`/`.bat` shim it carries `windowsVerbatimArguments`, which
+// is what stops Node from re-quoting a line that has already been escaped for
+// cmd.exe. Dropping it hands cmd.exe a doubly-quoted command line, and the
+// probe reports "unknown" for a Devin CLI that is installed and working --
+// the exact misreading this whole module exists to avoid. Every other call
+// site in the repository spreads it; this one did not.
+export function devinCliVersion({
+  spawnSyncImpl = spawnSync,
+  lookUp = commandOnPath,
+  platform = process.platform,
+} = {}) {
+  const binary = lookUp("devin", { platform });
   if (!binary) return "not on PATH";
   try {
-    const { command, args } = spawnableCommand(binary, ["--version"]);
-    const result = spawnSync(command, args, { encoding: "utf8", timeout: 15_000, windowsHide: true });
+    const { command, args, options } = spawnableCommand(binary, ["--version"], platform);
+    const result = spawnSyncImpl(command, args, {
+      ...options,
+      encoding: "utf8",
+      timeout: 15_000,
+      windowsHide: true,
+    });
     const text = `${result.stdout || ""}${result.stderr || ""}`.trim();
     return text.split("\n")[0]?.slice(0, 120) || "unknown";
   } catch {

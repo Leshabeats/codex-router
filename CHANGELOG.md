@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- **The Devin CLI probe no longer reports "unknown" for a Devin CLI that is
+  installed and working.** `devinCliVersion` was the one call site out of
+  twenty that took `command` and `args` from `spawnableCommand` and threw away
+  the third field. For a Windows `.cmd` shim — which is what npm installs —
+  that field carries `windowsVerbatimArguments`, and without it Node re-quotes
+  a command line that has already been escaped for cmd.exe. The version came
+  back empty and the probe printed `unknown`, which reads as "you do not have
+  the CLI" to the one person running a probe written specifically to stop that
+  misdiagnosis. The probe's own convention — every outside edge injectable — now
+  covers this edge too, so the options, the cmd.exe hop, and the POSIX
+  pass-through are all asserted on every platform rather than only on Windows.
+
+- **The Windows command-line escaping is now pinned against the hazards that
+  could not previously be caught off Windows.** `spawnableCommand` builds one
+  cmd.exe command line, and until now the only proof it was armed correctly was
+  an end-to-end test that runs a real shim and therefore skips everywhere else.
+  A pipe, a redirect, a `!`, and a trailing backslash before a closing quote —
+  the four that would end the quoted span or start a second command if the
+  escaping were wrong — are now asserted in rendered form on every platform,
+  and added to the set the Windows job runs for real. No behaviour changed: the
+  escaping already matched `cross-spawn` character for character.
+
 - **Running the test suite no longer resets your subagents.**
   `test/state-owner.test.mjs` ran the real `src/catalog.mjs` against a scratch
   state directory while inheriting the developer's own `CODEX_HOME`. No

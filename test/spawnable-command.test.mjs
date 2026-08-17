@@ -145,6 +145,17 @@ const TRICKY_ARGUMENTS = [
   "a&b",
   "100%",
   "caret^value",
+  // A pipe and a redirect are the two that would hand cmd.exe a second command
+  // rather than an argument if the escaping were wrong, so they belong in the
+  // set that is run for real rather than only rendered.
+  "a|b",
+  "a>b<c",
+  // `!` only expands under `cmd /V:ON`, which this module never asks for --
+  // pinned so a future flag change cannot quietly turn it into an expansion.
+  "bang!value",
+  // A trailing backslash is the classic Windows argv hazard: unescaped it
+  // escapes the closing quote and swallows the rest of the command line.
+  "C:\\dir with space\\",
 ];
 
 // Deliberately awkward, and all of it legal on Windows: the runner's own temp
@@ -250,6 +261,59 @@ test("only an npm cmd-shim under node_modules/.bin takes the second escape layer
   assert.equal(needsDoubleEscape("C:\\p\\node_modules\\.bin\\codex.CMD"), true);
   assert.equal(needsDoubleEscape("C:\\Users\\ann\\AppData\\Roaming\\npm\\codex.cmd"), false);
   assert.equal(needsDoubleEscape("C:\\tools\\codex.cmd"), false);
+});
+
+// The end-to-end tests above are the ones that settle the question, but they
+// only run on Windows. These pin the rendered form of each classic cmd.exe
+// hazard on every platform, so a change to the escaping is caught by the Linux
+// and macOS runs too instead of waiting for a Windows job.
+test("every cmd.exe metacharacter is rendered as data, not as syntax", () => {
+  const escapes = {
+    // A pipe or a redirect is the pair that would start a second command.
+    "a|b": '^"a^|b^"',
+    "a>b<c": '^"a^>b^<c^"',
+    "a&b": '^"a^&b^"',
+    // `^` itself has to survive one round of caret-stripping.
+    "a^b": '^"a^^b^"',
+    // Delayed expansion is never enabled, and `!` is escaped regardless.
+    "bang!value": '^"bang^!value^"',
+    "100%": '^"100^%^"',
+    // A quote is escaped for the child's parser and armed against cmd.exe.
+    'say "hi"': '^"say^ \\^"hi\\^"^"',
+    // A trailing backslash is doubled so it cannot escape the closing quote
+    // and swallow the rest of the command line.
+    "C:\\dir with space\\": '^"C:\\dir^ with^ space\\\\^"',
+    // No metacharacter and no space means nothing to escape, trailing
+    // backslash included -- there is no quote for it to run into.
+    "C:\\dir\\": "C:\\dir\\",
+    // An empty argument still has to arrive as an empty argument.
+    "": '^"^"',
+  };
+  for (const [input, expected] of Object.entries(escapes)) {
+    assert.equal(escapeWindowsShellArgument(input), expected, `escaping ${JSON.stringify(input)}`);
+  }
+});
+
+test("a hazardous argument cannot break out of the command line it is placed in", () => {
+  // The whole line, not just the argument: this is the string cmd.exe is
+  // handed, and the only quotes it may act on are the outermost pair.
+  const line = spawnableCommand(
+    "C:\\npm\\devin.cmd",
+    ["a|b", "C:\\dir with space\\", "& shutdown /s"],
+    "win32",
+  ).args[3];
+  assert.ok(line.startsWith('"C:\\npm\\devin.cmd '), line);
+  assert.ok(line.endsWith('"'), line);
+  // `/s` makes cmd.exe strip only the outermost quote pair and take the rest
+  // verbatim, so the characters that could end that span or start a second
+  // command must all be caret-armed inside it. Spaces are the one exception:
+  // a bare space is the argument separator, and any space *within* an argument
+  // is armed by the check above.
+  const interior = line.slice(1, -1);
+  for (const [index, character] of [...interior].entries()) {
+    if (!/["&|<>]/.test(character)) continue;
+    assert.equal(interior[index - 1], "^", `unarmed ${character} at ${index} in ${interior}`);
+  }
 });
 
 test("an ordinary token is passed through bare, so a shim's %1 still matches", () => {

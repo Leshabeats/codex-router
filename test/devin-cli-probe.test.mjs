@@ -10,7 +10,7 @@ import {
   parseEndStreamPayload,
 } from "../src/connect-stream-audit.mjs";
 import { DEFAULT_MAX_TOKENS } from "../src/devin-probe-checks.mjs";
-import { runProbe } from "../src/devin-cli-probe.mjs";
+import { devinCliVersion, runProbe } from "../src/devin-cli-probe.mjs";
 
 // The provider's own modules land with the Devin CLI branch. The probe takes
 // them by injection so its wiring -- which stage runs, which check fires on
@@ -534,4 +534,51 @@ test("every failure the checks can emit is explained in the guide", () => {
 test("the guide is reachable from the README index rather than only from a link someone remembers", () => {
   const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
   assert.match(readme, /\(docs\/DEVIN-CLI-PROBE\.md\)/);
+});
+
+// A `.cmd` shim is what npm installs on Windows, and `spawnableCommand` answers
+// for one with `windowsVerbatimArguments` set. This call site used to drop the
+// options object, so Node re-quoted a command line that was already escaped for
+// cmd.exe and the version read back empty -- reported as "unknown" for a CLI
+// that was installed and working, which is precisely the kind of misdiagnosis
+// this probe is written to prevent.
+test("the version probe keeps the spawn options a Windows shim needs", () => {
+  let seen;
+  const version = devinCliVersion({
+    platform: "win32",
+    lookUp: () => "C:\\Users\\ann\\AppData\\Roaming\\npm\\devin.cmd",
+    spawnSyncImpl: (command, args, options) => {
+      seen = { command, args, options };
+      return { stdout: "devin 1.2.3\n", stderr: "" };
+    },
+  });
+  assert.equal(version, "devin 1.2.3");
+  assert.equal(seen.options.windowsVerbatimArguments, true);
+  // The cmd.exe hop is still the one spawnableCommand built, not a raw shim.
+  assert.deepEqual(seen.args.slice(0, 3), ["/d", "/s", "/c"]);
+  assert.match(seen.args[3], /devin\.cmd --version"$/);
+  // Options the probe sets itself are not lost to the spread either.
+  assert.equal(seen.options.encoding, "utf8");
+  assert.equal(seen.options.windowsHide, true);
+});
+
+test("a Devin CLI that is not on PATH is reported as such rather than as unknown", () => {
+  assert.equal(devinCliVersion({ lookUp: () => undefined }), "not on PATH");
+});
+
+// A POSIX binary is pass-through: no cmd.exe, no options, nothing added.
+test("the version probe spawns a plain binary directly", () => {
+  let seen;
+  devinCliVersion({
+    platform: "linux",
+    lookUp: () => "/usr/local/bin/devin",
+    spawnSyncImpl: (command, args, options) => {
+      seen = { command, args, options };
+      return { stdout: "devin 9.9.9", stderr: "" };
+    },
+  });
+  assert.equal(seen.command, "/usr/local/bin/devin");
+  assert.deepEqual(seen.args, ["--version"]);
+  assert.equal(seen.options.windowsVerbatimArguments, undefined);
+  assert.equal(seen.options.shell, undefined);
 });
