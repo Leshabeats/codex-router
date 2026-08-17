@@ -313,6 +313,23 @@ test("a real closed port is refused rather than aborted", async () => {
   assert.ok(Date.now() - started < 2_500, "a refused port must not stretch the budget");
 });
 
+test("a health response body is drained when no service name is required", async () => {
+  let drained = false;
+  await waitForHealth({
+    label: "API forwarder",
+    url: URL_UNDER_TEST,
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      arrayBuffer: async () => {
+        drained = true;
+        return new ArrayBuffer(0);
+      },
+    }),
+  });
+  assert.equal(drained, true);
+});
+
 test("a shutdown interrupts the wait", async () => {
   let shuttingDown = false;
   setTimeout(() => {
