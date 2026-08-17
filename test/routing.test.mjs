@@ -5705,3 +5705,95 @@ test("reasoning survives the replay onto tool-call and prose assistant turns ali
     rmSync(stateDir, { recursive: true, force: true });
   }
 });
+
+// #292: the same "The `reasoning_content` in the thinking mode must be passed
+// back to the API" 400, but reached without a subagent and without a tool call
+// anywhere -- a thinking-mode answer followed by an ordinary follow-up in the
+// same conversation. #256's coverage drives that carry through a tool loop and
+// a subagent-shaped tail in one array, so the plainest path a user can walk is
+// only covered incidentally there. Pinned separately: a regression that broke
+// just this shape would still leave #256's test green.
+test("a plain follow-up after a thinking turn replays its reasoning", async () => {
+  const gatewayBodies = [];
+  const gateway = await mockServer(async (request, response) => {
+    gatewayBodies.push(await bodyJson(request));
+    json(response, 200, { output: [{ type: "message", role: "assistant", content: "ok" }] });
+  });
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "reasoning-followup-state-"));
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    MODEL_ROUTER_STATE_DIR: stateDir,
+    CODEX_ROUTER_QUIET: "1",
+  });
+  // Exactly what Codex replays on turn two: the first prompt, the reasoning it
+  // stored for the thinking answer (`content: null`, which is the shape
+  // LiteLLM's Responses->chat translation drops outright), that answer, and
+  // the follow-up. No function_call, no custom_tool_call, no subagent.
+  const input = [
+    { type: "message", role: "user", content: [{ type: "input_text", text: "who wrote Dune?" }] },
+    {
+      type: "reasoning",
+      id: "rs_292",
+      summary: [{ type: "summary_text", text: "Dune is Frank Herbert's, published 1965." }],
+      content: null,
+    },
+    {
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "Frank Herbert." }],
+    },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "and the sequel?" }] },
+  ];
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const response = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer CODEX_CALLER_SECRET",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "opencode-go/deepseek-v4-flash",
+        stream: false,
+        input,
+      }),
+    });
+    assert.equal(response.status, 200, await response.text());
+    const forwarded = gatewayBodies[0].input;
+    const text = (item) =>
+      (Array.isArray(item?.content) ? item.content : [])
+        .map((part) => (typeof part?.text === "string" ? part.text : ""))
+        .join("\n");
+
+    // The reasoning reaches the provider on the assistant turn it produced --
+    // as message content, the only place the translation preserves it.
+    const answer = forwarded.find(
+      (item) => item?.type === "message" && item.role === "assistant",
+    );
+    assert.ok(answer, "the assistant turn never reached the provider");
+    assert.match(
+      text(answer),
+      /Dune is Frank Herbert's, published 1965\./,
+      "the thinking-mode reasoning was dropped before the provider saw it",
+    );
+    // And the answer itself is still there: the carry prepends, never replaces.
+    assert.match(text(answer), /Frank Herbert\./);
+    // The follow-up is still the last thing the provider is asked about.
+    assert.equal(forwarded.at(-1).role, "user");
+
+    // One assistant message, not two in a row -- the shape opencode Go's
+    // Console endpoint rejects outright.
+    for (let index = 1; index < forwarded.length; index += 1) {
+      if (forwarded[index - 1]?.role !== "assistant") continue;
+      if (forwarded[index]?.role !== "assistant") continue;
+      assert.fail("two assistant messages ended up back to back");
+    }
+  } finally {
+    await stopChild(router);
+    await closeServer(gateway.server);
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
