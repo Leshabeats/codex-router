@@ -162,6 +162,12 @@ export function normalizeTokenUsage(value) {
   const retries = tokenCount(value.retries);
   const progressOnlyRetried =
     value.progress_only_retried === true || value.progressOnlyRetried === true;
+  const billedInputTokens = tokenCount(
+    value.billed_input_tokens ?? value.billed_prompt_tokens ?? value.billedInputTokens,
+  );
+  const billedOutputTokens = tokenCount(
+    value.billed_output_tokens ?? value.billed_completion_tokens ?? value.billedOutputTokens,
+  );
   return {
     inputTokens: inputTokens || 0,
     outputTokens: outputTokens || 0,
@@ -169,6 +175,8 @@ export function normalizeTokenUsage(value) {
     ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),
     ...(retries !== undefined && retries > 0 ? { retries } : {}),
     ...(progressOnlyRetried ? { progressOnlyRetried: true } : {}),
+    ...(billedInputTokens !== undefined ? { billedInputTokens } : {}),
+    ...(billedOutputTokens !== undefined ? { billedOutputTokens } : {}),
   };
 }
 

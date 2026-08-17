@@ -25,6 +25,7 @@ export function parseSseBlockEvent(rawEvent) {
 
 export const DEFAULT_PROGRESS_ONLY_MAX_TEXT = 120;
 export const DEFAULT_PROGRESS_ONLY_MIN_OUTPUT_TOKENS = 400;
+export const REPAIR_FINAL_TOOL = "__codex_router_submit_final";
 // The trigger below cannot tell a stalled turn from a finished one -- a task
 // that ends "Done." is byte-for-byte the same shape as one that stops after
 // "Next I will update the deck.". So the nudge must let the model decline. An
@@ -35,6 +36,40 @@ export const DEFAULT_PROGRESS_ONLY_MIN_OUTPUT_TOKENS = 400;
 const PROGRESS_ONLY_NUDGE =
   "If your previous message already completed the task, restate the final answer " +
   "and call no tool. Otherwise continue the same task now by calling the tools you need.";
+// After a tool result the model is mid-task. Leading with "if you are done,
+// stop" lets it treat a status sentence as completion. Lead with continue,
+// and still allow a finished request to call nothing.
+const AFTER_TOOL_NUDGE =
+  "The previous tool call finished. Continue the user's task now. " +
+  "You must make exactly one function call: call the next task tool if more work is needed, " +
+  `or call ${REPAIR_FINAL_TOOL} with the complete final answer if the task is fully done. ` +
+  "Do not return prose outside a function call.";
+
+const REPAIR_FINAL_TOOL_DEFINITION = {
+  type: "function",
+  function: {
+    name: REPAIR_FINAL_TOOL,
+    description: "Submit the complete final answer only when the user's task is fully finished.",
+    parameters: {
+      type: "object",
+      properties: { answer: { type: "string" } },
+      required: ["answer"],
+      additionalProperties: false,
+    },
+  },
+};
+
+// The last non-system message is a tool result. Language-independent: a
+// short stop after tool output is a mid-task stall, not a caption match.
+export function lastClientMessageWasToolResult(chat) {
+  const messages = Array.isArray(chat?.messages) ? chat.messages : [];
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!message || message.role === "system") continue;
+    return message.role === "tool";
+  }
+  return false;
+}
 
 export function requestOffersClientTools(chat) {
   return (
@@ -48,14 +83,24 @@ export function requestOffersClientTools(chat) {
 // and enough output tokens that the model clearly reasoned. A finished task
 // answered in one line matches too, which is why the retry has to be safe to
 // lose rather than accurate to fire. See PROGRESS_ONLY_NUDGE.
+//
+// After a tool result, a short no-tool stop is mid-task even when this turn
+// was cheap. The token floor stays for turns that follow a user message, so
+// a one-line verdict like "Done." is not retried.
 export function isProgressOnlyStop(
   turn,
   {
     maxText = DEFAULT_PROGRESS_ONLY_MAX_TEXT,
     minOutputTokens = DEFAULT_PROGRESS_ONLY_MIN_OUTPUT_TOKENS,
+    afterToolResult = false,
   } = {},
 ) {
   if (!turn || (turn.toolCalls && turn.toolCalls.length > 0)) return false;
+  // After a tool result, prose alone is never accepted as proof of completion.
+  // It is repaired into either another client tool call or an internal final
+  // answer, regardless of length. This is the invariant that prevents a long
+  // progress update from bypassing the short-text heuristic.
+  if (afterToolResult) return true;
   const text = typeof turn.contentText === "string" ? turn.contentText : "";
   if (text.length > maxText) return false;
   const tokens = Number(turn.usage?.completion_tokens);
@@ -68,17 +113,75 @@ export function shouldPreferRetryTurn(second) {
   return Boolean(second?.toolCalls?.length);
 }
 
+// A repair turn after a tool result is a protocol decision, not a prose
+// heuristic. The retry must either call a tool or explicitly certify a final
+// answer tool call requested above. Anything else is an invalid repair
+// and must become a visible router error rather than a clean `stop`.
+export function classifyAfterToolRepair(second) {
+  const calls = Array.isArray(second?.toolCalls) ? second.toolCalls : [];
+  if (calls.length !== 1) return { action: "fail" };
+  const [call] = calls;
+  if (call?.function?.name !== REPAIR_FINAL_TOOL) return { action: "tools" };
+  let args;
+  try {
+    args = JSON.parse(call.function.arguments || "{}");
+  } catch {
+    return { action: "fail" };
+  }
+  const finalText = typeof args?.answer === "string" ? args.answer.trim() : "";
+  if (!finalText) return { action: "fail" };
+  return { action: "final", contentText: finalText };
+}
+
+// Codex needs the context size of the selected attempt, not the sum of two
+// prompts. Keep aggregate billed usage in explicit extension fields so a
+// retry cannot make a ~150k context look like ~300k to the client.
+export function selectedRetryUsage(first, second) {
+  const selected = second || first;
+  const usage = selected ? { ...selected } : {};
+  const billedPromptTokens =
+    (first?.prompt_tokens || 0) + (second?.prompt_tokens || 0);
+  const billedCompletionTokens =
+    (first?.completion_tokens || 0) + (second?.completion_tokens || 0);
+  return {
+    ...usage,
+    retries: 1,
+    progress_only_retried: true,
+    billed_prompt_tokens: billedPromptTokens,
+    billed_completion_tokens: billedCompletionTokens,
+  };
+}
+
 export function toolCallDeltas(turn) {
   return (turn?.deltas || []).filter(
     (delta) => Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0,
   );
 }
 
-export function withProgressOnlyNudge(chat) {
+export function withProgressOnlyNudge(chat, { afterToolResult = false } = {}) {
   const messages = Array.isArray(chat?.messages) ? chat.messages : [];
-  return {
+  const nudged = {
     ...chat,
-    messages: [...messages, { role: "user", content: PROGRESS_ONLY_NUDGE }],
+    messages: [
+      ...messages,
+      {
+        // Keep the tool result as the last model input. A trailing user message
+        // starts a new conversational turn on xAI and can make a forced tool
+        // choice complete empty. Developer text is hoisted into `instructions`.
+        role: afterToolResult ? "developer" : "user",
+        content: afterToolResult ? AFTER_TOOL_NUDGE : PROGRESS_ONLY_NUDGE,
+      },
+    ],
+  };
+  if (!afterToolResult) return nudged;
+  const tools = Array.isArray(chat?.tools) ? chat.tools : [];
+  return {
+    ...nudged,
+    tools: [
+      ...tools.filter((tool) => tool?.function?.name !== REPAIR_FINAL_TOOL),
+      REPAIR_FINAL_TOOL_DEFINITION,
+    ],
+    tool_choice: "required",
   };
 }
 
@@ -123,6 +226,7 @@ const TOOL_ITEM_TYPES = new Set(["function_call", "custom_tool_call"]);
 export function createTurnState() {
   return {
     contentText: "",
+    reasoningText: "",
     toolCalls: [],
     toolByItemId: new Map(),
     usage: undefined,
@@ -233,6 +337,18 @@ export function applyResponsesEvent(state, event) {
       }
       break;
     }
+    // xAI streams grok-4.6 summaries as reasoning_summary_text, and also
+    // documents reasoning_text. Both belong on the chat `reasoning_content`
+    // field so LiteLLM can put them back on the Responses reasoning channel
+    // Codex uses to show-then-collapse thinking.
+    case "response.reasoning_summary_text.delta":
+    case "response.reasoning_text.delta": {
+      if (event.delta) {
+        state.reasoningText += event.delta;
+        state.deltas.push({ reasoning_content: event.delta });
+      }
+      break;
+    }
     case "response.output_item.added":
     case "response.output_item.done": {
       const item = event.item;
@@ -277,6 +393,7 @@ export function finalizeTurn(state) {
   backfillToolArgumentDeltas(state);
   return {
     contentText: state.contentText,
+    reasoningText: state.reasoningText,
     toolCalls: state.toolCalls,
     usage: state.usage,
     deltas: state.deltas,

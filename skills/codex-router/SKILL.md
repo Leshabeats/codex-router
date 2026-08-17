@@ -1,6 +1,6 @@
 ---
 name: codex-router
-description: Orientation for custom (non-OpenAI) models running in the Codex app through the codex-router proxy. Explains that the app's native tools arrive as flattened codex_app__ and mcp__ names, that the router restores them so the app executes them, and which companion skills to read before threads, browser, or computer-use work. Use when the session uses a custom (non-OpenAI) model, for example deepseek-v4-flash or mimo-v2.5, when codex_app__ or mcp__ tool names appear in the tool list, or when thread, browser, or computer-use work is requested.
+description: Orientation for custom (non-OpenAI) models running in the Codex app through the codex-router proxy. Explains that the app's native tools arrive as flattened codex_app__ and mcp__ names, that the router restores them so the app executes them, which companion skills to read before threads, browser, or computer-use work, and that a turn with no tool call ends the task. Use when the session uses a custom (non-OpenAI) model, for example deepseek-v4-flash or mimo-v2.5, when codex_app__ or mcp__ tool names appear in the tool list, when a tool result just arrived and more work remains, or when thread, browser, or computer-use work is requested.
 ---
 
 # Codex Router (custom models in the Codex app)
@@ -40,6 +40,9 @@ turns.
 1. Use the tools you were given. Do not build workarounds.
 2. Read the companion skill before the relevant work.
 3. When a call fails, fix the arguments from the skill, then retry.
+4. A turn with no tool call ends the task. After a tool result, if more work
+   still needs a tool, call it in the same turn. Do not only announce the next
+   step. Text-only is for when the user's request is fully done.
 
 ## Spawned threads and model inheritance
 

@@ -304,30 +304,33 @@ arguments without holding the full turn, so Codex sees the tool call instead of
 mistaking the preceding status text for the completed task.
 
 A remaining Grok OAuth shape is a progress-only stop: the model reasons,
-emits a short status sentence, and never calls a tool. Attempt 1 still
-streams live. When the client actually offered tools, the forwarder retries
-once with a trailing user nudge and appends only the retry's tool calls onto
-the same open stream, so Codex sees the status sentence followed by the tool
-call. The first answer is kept if the retry also produces no tools.
+emits a status sentence, and never calls a tool. On turns following a user
+message, attempt 1 still streams live; when the client offered tools and the
+short-text/token trigger fires, the forwarder retries once and appends a
+retry tool call onto the same stream. On turns following a tool result, the
+stricter certified-repair path below stages the response before sending it.
 
 The trigger is a shape, not a diagnosis, and it is worth knowing which turns
-pay for it. Nothing in a finished turn distinguishes it from a stalled one, so
-**a completed task answered in one line is retried too** — "Yes, that is
-correct." with 1,500 reasoning-heavy output tokens looks exactly like "Next I
-will update the deck.". Because grok-4.6 reasons by default, the
-`output_tokens` floor is met on essentially every turn, so what actually
-decides is the 120-character text limit. That is why the nudge offers the
-no-tool branch first: a finished turn restates its answer, calls nothing, and
-keeps the first answer rather than being talked into a tool call the client
-would then run. The cost of a false positive is one extra round trip, not a
-wrong action. Raise `CODEX_ROUTER_GROK_PROGRESS_ONLY_MIN_OUTPUT_TOKENS` or
-lower `CODEX_ROUTER_GROK_PROGRESS_ONLY_MAX_TEXT` to fire less often.
+pay for it. After a tool result, every no-tool prose response is held and
+repaired once — no language match, token floor, or length threshold. The
+repair must call exactly one function: either a client tool or the private
+router final-answer tool. The latter is converted to ordinary assistant text
+and never reaches Codex. A retry that does neither returns an explicit 502; it
+is never converted into a clean `stop`. After a user message the older rule
+remains: both a finished one-liner and a stalled plan retry when output tokens
+clear the floor, and the nudge offers the no-tool branch first so "Yes, that
+is correct." is not talked into a call the client would then run. Raise
+`CODEX_ROUTER_GROK_PROGRESS_ONLY_MIN_OUTPUT_TOKENS` or lower
+`CODEX_ROUTER_GROK_PROGRESS_ONLY_MAX_TEXT` to fire less often on that
+user-message path; those settings do not weaken the post-tool invariant.
 
-Both attempts are billed; the usage object sums them and sets
+Both attempts are billed. The usage returned to Codex reports only the
+selected attempt's context size, while the local ledger retains the aggregate
+as billed input/output tokens. The response sets
 `progress_only_retried: true`, and the log line `progress-only-retried=true`
-is never gated on `MODEL_ROUTER_QUIET`. To pay once and see the raw first
-attempt, set `CODEX_ROUTER_GROK_PROGRESS_ONLY_RETRY=0`. The retry does not
-run when the request offered no tools.
+is never gated on `MODEL_ROUTER_QUIET`. To disable the invariant and see the
+raw first attempt, set `CODEX_ROUTER_GROK_PROGRESS_ONLY_RETRY=0`; this kill
+switch is intentionally unsafe for unattended tool loops.
 
 The router holds the entire response until it knows the turn produced something.
 When nothing arrives it discards that attempt and retries the identical request

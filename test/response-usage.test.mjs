@@ -40,6 +40,8 @@ test("normalizes Responses and Chat Completions token usage", () => {
       total_tokens: 14,
       retries: 1,
       progress_only_retried: true,
+      billed_prompt_tokens: 21,
+      billed_completion_tokens: 9,
     }),
     {
       inputTokens: 10,
@@ -47,6 +49,8 @@ test("normalizes Responses and Chat Completions token usage", () => {
       totalTokens: 14,
       retries: 1,
       progressOnlyRetried: true,
+      billedInputTokens: 21,
+      billedOutputTokens: 9,
     },
   );
 });

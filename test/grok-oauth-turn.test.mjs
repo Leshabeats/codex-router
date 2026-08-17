@@ -3,12 +3,16 @@ import test from "node:test";
 
 import {
   applyResponsesEvent,
+  classifyAfterToolRepair,
   collectResponsesEvents,
   createTurnState,
   isProgressOnlyStop,
+  lastClientMessageWasToolResult,
   mergeMappedUsage,
   parseSseBlockEvent,
   requestOffersClientTools,
+  REPAIR_FINAL_TOOL,
+  selectedRetryUsage,
   shouldPreferRetryTurn,
   sseDataFromBlock,
   toolCallDeltas,
@@ -126,6 +130,21 @@ test("applyResponsesEvent accumulates output text", () => {
   assert.equal(state.contentText, "先看");
 });
 
+test("collectResponsesEvents maps xAI reasoning deltas onto reasoning_content", () => {
+  const turn = collectResponsesEvents([
+    { type: "response.reasoning_summary_text.delta", delta: "先想" },
+    { type: "response.reasoning_text.delta", delta: "再想" },
+    { type: "response.output_text.delta", delta: "答案" },
+  ]);
+  assert.equal(turn.reasoningText, "先想再想");
+  assert.equal(turn.contentText, "答案");
+  assert.deepEqual(turn.deltas, [
+    { reasoning_content: "先想" },
+    { reasoning_content: "再想" },
+    { content: "答案" },
+  ]);
+});
+
 test("sseDataFromBlock joins repeated data fields the way SSE requires", () => {
   const payload = { type: "response.output_text.delta", delta: "hi" };
   const pretty = JSON.stringify(payload, null, 2);
@@ -154,7 +173,7 @@ test("parseSseBlockEvent skips malformed JSON and leaves handlers to throw", () 
 
 test("isProgressOnlyStop requires short text, no tools, and enough output tokens", () => {
   const progress = {
-    contentText: "Next I will update the deck.",
+    contentText: "Still thinking about it.",
     toolCalls: [],
     usage: { completion_tokens: 1660 },
   };
@@ -167,6 +186,51 @@ test("isProgressOnlyStop requires short text, no tools, and enough output tokens
   assert.equal(
     isProgressOnlyStop({ ...progress, usage: { completion_tokens: 12 } }),
     false,
+  );
+});
+
+test("isProgressOnlyStop retries a cheap stop after a tool result", () => {
+  const stop = {
+    contentText: "The figures are ready.",
+    toolCalls: [],
+    usage: { completion_tokens: 95 },
+  };
+  assert.equal(isProgressOnlyStop(stop, { afterToolResult: true }), true);
+  assert.equal(isProgressOnlyStop(stop), false);
+  assert.equal(isProgressOnlyStop({ ...stop, toolCalls: [{ id: "c1" }] }, { afterToolResult: true }), false);
+});
+
+test("isProgressOnlyStop requires certification for long prose after a tool result", () => {
+  assert.equal(
+    isProgressOnlyStop(
+      {
+        contentText: "This may look final, but the router cannot infer task completion. ".repeat(4),
+        toolCalls: [],
+        usage: { completion_tokens: 20 },
+      },
+      { afterToolResult: true },
+    ),
+    true,
+  );
+});
+
+test("lastClientMessageWasToolResult ignores system and user tails", () => {
+  assert.equal(lastClientMessageWasToolResult({ messages: [] }), false);
+  assert.equal(
+    lastClientMessageWasToolResult({
+      messages: [{ role: "user", content: "go" }],
+    }),
+    false,
+  );
+  assert.equal(
+    lastClientMessageWasToolResult({
+      messages: [
+        { role: "system", content: "You are Codex." },
+        { role: "assistant", tool_calls: [{ id: "c1" }] },
+        { role: "tool", tool_call_id: "c1", content: "ok" },
+      ],
+    }),
+    true,
   );
 });
 
@@ -205,6 +269,68 @@ test("withProgressOnlyNudge appends a user message so the instructions prefix st
   assert.match(nudged.messages.at(-1).content, /^If your previous message already completed/);
   assert.match(nudged.messages.at(-1).content, /call no tool/);
   assert.match(nudged.messages.at(-1).content, /Otherwise continue the same task now/);
+});
+
+test("withProgressOnlyNudge leads with continue after a tool result", () => {
+  const nudged = withProgressOnlyNudge(
+    { messages: [{ role: "tool", content: "ok" }] },
+    { afterToolResult: true },
+  );
+  assert.equal(nudged.messages.at(-1).role, "developer");
+  assert.match(nudged.messages.at(-1).content, /^The previous tool call finished/);
+  assert.match(nudged.messages.at(-1).content, /call the next task tool/);
+  assert.match(nudged.messages.at(-1).content, new RegExp(REPAIR_FINAL_TOOL));
+  assert.equal(nudged.tool_choice, "required");
+  assert.equal(nudged.tools.at(-1).function.name, REPAIR_FINAL_TOOL);
+  assert.doesNotMatch(nudged.messages.at(-1).content, /^If your previous message already completed/);
+});
+
+test("classifyAfterToolRepair accepts only tools or a certified non-empty final answer", () => {
+  assert.deepEqual(
+    classifyAfterToolRepair({
+      toolCalls: [{ id: "c1", function: { name: "exec_command", arguments: "{}" } }],
+      contentText: "status",
+    }),
+    { action: "tools" },
+  );
+  assert.deepEqual(
+    classifyAfterToolRepair({
+      toolCalls: [
+        { function: { name: REPAIR_FINAL_TOOL, arguments: JSON.stringify({ answer: "Done." }) } },
+      ],
+    }),
+    { action: "final", contentText: "Done." },
+  );
+  assert.deepEqual(classifyAfterToolRepair({ toolCalls: [], contentText: "Still working." }), {
+    action: "fail",
+  });
+  assert.deepEqual(
+    classifyAfterToolRepair({
+      toolCalls: [
+        { function: { name: REPAIR_FINAL_TOOL, arguments: JSON.stringify({ answer: "   " }) } },
+      ],
+    }),
+    { action: "fail" },
+  );
+  assert.deepEqual(classifyAfterToolRepair({
+    toolCalls: [{ function: { name: REPAIR_FINAL_TOOL, arguments: "{" } }],
+  }), {
+    action: "fail",
+  });
+});
+
+test("selectedRetryUsage reports selected context and separate aggregate billing", () => {
+  const usage = selectedRetryUsage(
+    { prompt_tokens: 150_000, completion_tokens: 180, total_tokens: 150_180 },
+    { prompt_tokens: 151_000, completion_tokens: 90, total_tokens: 151_090 },
+  );
+  assert.equal(usage.prompt_tokens, 151_000);
+  assert.equal(usage.completion_tokens, 90);
+  assert.equal(usage.total_tokens, 151_090);
+  assert.equal(usage.billed_prompt_tokens, 301_000);
+  assert.equal(usage.billed_completion_tokens, 270);
+  assert.equal(usage.retries, 1);
+  assert.equal(usage.progress_only_retried, true);
 });
 
 test("mergeMappedUsage adds both attempts and marks retries", () => {

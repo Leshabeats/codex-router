@@ -21,14 +21,17 @@ import { grokOAuthStatus } from "./grok-oauth-status.mjs";
 import { normalizeSchemaLiterals, objectRootToolSchema } from "./tool-schema-root.mjs";
 import {
   applyResponsesEvent,
+  classifyAfterToolRepair,
   createTurnState,
   DEFAULT_PROGRESS_ONLY_MAX_TEXT,
   DEFAULT_PROGRESS_ONLY_MIN_OUTPUT_TOKENS,
   finalizeTurn,
   isProgressOnlyStop,
+  lastClientMessageWasToolResult,
   mergeMappedUsage,
   parseSseBlockEvent,
   requestOffersClientTools,
+  selectedRetryUsage,
   shouldPreferRetryTurn,
   toolCallDeltas,
   withProgressOnlyNudge,
@@ -370,7 +373,10 @@ async function handleChatCompletions(request, response) {
     maxText: PROGRESS_ONLY_MAX_TEXT,
     minOutputTokens: PROGRESS_ONLY_MIN_OUTPUT_TOKENS,
   };
-  const mayRetry = PROGRESS_ONLY_RETRY && requestOffersClientTools(chat);
+  const afterToolResult = lastClientMessageWasToolResult(chat);
+  const mayRetry =
+    PROGRESS_ONLY_RETRY && (afterToolResult || requestOffersClientTools(chat));
+  const strictAfterToolRepair = PROGRESS_ONLY_RETRY && afterToolResult;
 
   const controller = new AbortController();
   request.once("aborted", () => controller.abort());
@@ -435,18 +441,26 @@ async function handleChatCompletions(request, response) {
   const created = Math.floor(Date.now() / 1_000);
   const turnState = createTurnState();
   let emittedDeltaCount = 0;
+  let streamStarted = false;
 
-  if (wantsStream) {
+  const startStream = () => {
+    if (!wantsStream || streamStarted) return;
     response.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
       Connection: "keep-alive",
     });
     response.write(OPENAI_ROLE_CHUNK(id, created, model, { role: "assistant", content: "" }));
-  }
+    streamStarted = true;
+  };
+
+  // A post-tool turn can only be classified after its terminal event. Hold it
+  // so an invalid repair can still become an HTTP error instead of a 200 that
+  // Codex records as completed. Ordinary turns keep their live streaming.
+  if (wantsStream && !strictAfterToolRepair) startStream();
 
   const emitPendingDeltas = () => {
-    if (!wantsStream) return;
+    if (!wantsStream || !streamStarted) return;
     while (emittedDeltaCount < turnState.deltas.length) {
       response.write(
         OPENAI_ROLE_CHUNK(id, created, model, turnState.deltas[emittedDeltaCount]),
@@ -463,9 +477,17 @@ async function handleChatCompletions(request, response) {
   let turn = finalizeTurn(turnState);
   emitPendingDeltas();
   let retried = false;
+  let repairFailure;
 
-  if (mayRetry && isProgressOnlyStop(turn, holdOptions)) {
-    const retryChat = withProgressOnlyNudge(chat);
+  const progressOnly = isProgressOnlyStop(turn, { ...holdOptions, afterToolResult });
+  if (progressOnly && strictAfterToolRepair && !mayRetry) {
+    repairFailure = {
+      code: "progress_only_no_client_tools",
+      message:
+        "Grok stopped after a tool result, but the repair request had no callable client tools.",
+    };
+  } else if (mayRetry && progressOnly) {
+    const retryChat = withProgressOnlyNudge(chat, { afterToolResult });
     const retryRequest = toResponsesRequest(retryChat, { hostedSearchEnabled });
     let secondUpstream;
     try {
@@ -481,38 +503,97 @@ async function handleChatCompletions(request, response) {
       console.error(
         `[grok-oauth] progress-only-retry-failed=true model=${model} status=${secondUpstream.status}`,
       );
+      if (strictAfterToolRepair) {
+        repairFailure = {
+          code: "progress_only_retry_failed",
+          message: "Grok stopped after a tool result and its repair request failed upstream.",
+        };
+      }
     } else if (secondUpstream?.body) {
       const secondState = createTurnState();
       await consumeResponsesStream(secondUpstream.body, (event) => {
         applyResponsesEvent(secondState, event);
       });
       const second = finalizeTurn(secondState);
-      const mergedUsage = mergeMappedUsage(turn.usage, second.usage);
       retried = true;
-      const preferTools = shouldPreferRetryTurn(second);
+      const repair = strictAfterToolRepair
+        ? classifyAfterToolRepair(second)
+        : { action: shouldPreferRetryTurn(second) ? "tools" : "first" };
       console.error(
-        `[grok-oauth] progress-only-retried=true retries=1 model=${model} prefer=${preferTools ? "retry" : "first"}`,
+        `[grok-oauth] progress-only-retried=true retries=1 model=${model} prefer=${repair.action}`,
       );
-      if (preferTools) {
-        if (wantsStream) {
+      if (repair.action === "tools") {
+        const usage = strictAfterToolRepair
+          ? selectedRetryUsage(turn.usage, second.usage)
+          : mergeMappedUsage(turn.usage, second.usage);
+        if (wantsStream && streamStarted) {
           for (const delta of toolCallDeltas(second)) {
             response.write(OPENAI_ROLE_CHUNK(id, created, model, delta));
           }
         }
         turn = {
-          contentText: turn.contentText,
+          contentText: strictAfterToolRepair ? "" : turn.contentText,
+          reasoningText: strictAfterToolRepair ? second.reasoningText : turn.reasoningText,
           toolCalls: second.toolCalls,
-          usage: mergedUsage,
-          deltas: [...turn.deltas, ...toolCallDeltas(second)],
+          usage,
+          deltas: strictAfterToolRepair
+            ? toolCallDeltas(second)
+            : [...turn.deltas, ...toolCallDeltas(second)],
           finishReason: "tool_calls",
         };
+        if (streamStarted) emittedDeltaCount = turn.deltas.length;
+      } else if (repair.action === "final") {
+        turn = {
+          contentText: repair.contentText,
+          reasoningText: second.reasoningText,
+          toolCalls: [],
+          usage: selectedRetryUsage(turn.usage, second.usage),
+          deltas: [{ content: repair.contentText }],
+          finishReason: "stop",
+        };
+        emittedDeltaCount = 0;
+      } else if (repair.action === "fail") {
+        repairFailure = {
+          code: "progress_only_unrepairable",
+          message:
+            "Grok stopped after a tool result. The router retried once, but the retry neither called a tool nor returned a certified final answer.",
+        };
       } else {
-        turn = { ...turn, usage: mergedUsage };
+        turn = { ...turn, usage: mergeMappedUsage(turn.usage, second.usage) };
       }
+    } else if (strictAfterToolRepair) {
+      repairFailure = {
+        code: "progress_only_retry_failed",
+        message: "Grok stopped after a tool result and its repair request produced no response.",
+      };
     }
   }
 
+  if (repairFailure) {
+    console.error(
+      `[grok-oauth] progress-only-unrepairable=true model=${model} code=${repairFailure.code}`,
+    );
+    writeJson(response, 502, {
+      error: {
+        message: repairFailure.message,
+        type: "api_error",
+        code: repairFailure.code,
+      },
+    });
+    return;
+  }
+
   if (wantsStream) {
+    const wasStarted = streamStarted;
+    startStream();
+    if (wasStarted) {
+      emitPendingDeltas();
+    } else {
+      for (const delta of turn.deltas || []) {
+        response.write(OPENAI_ROLE_CHUNK(id, created, model, delta));
+      }
+      emittedDeltaCount = turn.deltas?.length || 0;
+    }
     response.write(OPENAI_ROLE_CHUNK(id, created, model, {}, turn.finishReason));
     if (turn.usage) {
       response.write(
@@ -523,6 +604,7 @@ async function handleChatCompletions(request, response) {
     response.end();
   } else {
     const message = { role: "assistant", content: turn.contentText || null };
+    if (turn.reasoningText) message.reasoning_content = turn.reasoningText;
     if (turn.toolCalls.length) message.tool_calls = turn.toolCalls;
     writeJson(response, 200, {
       id,
