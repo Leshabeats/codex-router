@@ -448,7 +448,12 @@ and every client saw a bare "Connection error" naming nothing.
    used to end the service before it spawned anything, with an EINVAL naming
    neither the file nor the reason. Never reintroduce a bare
    `spawn(command, args)` in `start.mjs`; `test/gateway-restart.test.mjs` guards
-   the shape, because the behaviour itself cannot be exercised on POSIX. Note
+   the shape, because the behaviour itself cannot be exercised on POSIX. All
+   three fields of the result are load-bearing, `options` included: for a batch
+   shim it carries `windowsVerbatimArguments`, without which Node re-quotes a
+   command line that is already escaped for cmd.exe. A call site that spreads
+   only `command` and `args` is a Windows bug that POSIX CI cannot see — it was
+   how `devinCliVersion` came to report "unknown" for an installed CLI. Note
    the one cost of the batch path: the service then holds the `cmd.exe` hop
    rather than the gateway, so a signal reaches the hop and the real process is
    orphaned. That is strictly better than not starting at all, and it is another
