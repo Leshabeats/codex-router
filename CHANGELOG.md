@@ -281,7 +281,10 @@
   own rejection on the same providers. "Compact old tool results" was reported
   alongside this and is not involved — the aging pass only ever rewrites the
   `output` of a tool result, and now has a test proving the reasoning and
-  assistant turns around it come through by reference.
+  assistant turns around it come through by reference. A subagent is not
+  required to reach this: an ordinary follow-up after any thinking-mode answer
+  fails the same way on a build that predates the fix, and that plainest path
+  is pinned by its own test.
 - **A single bad upstream response could take the whole router down.** LiteLLM
   1.96.0 raises out of its own request handler while mapping an upstream 429 —
   opencode Zen's exhausted free tier is one reliable way to reach it — and the
