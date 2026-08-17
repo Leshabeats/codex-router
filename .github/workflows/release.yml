@@ -87,7 +87,7 @@ jobs:
       # Before the checksums are taken, so the companion binaries are covered by
       # SHA256SUMS and the provenance attestation like every other asset.
       - name: Collect the companion binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: tray-*
           path: dist
