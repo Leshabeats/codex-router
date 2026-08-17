@@ -2,6 +2,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 import { PROVIDERS, providerNeedsNoKey } from "./model-registry.mjs";
+import { devinCliStatus } from "./devin-cli-status.mjs";
 import { grokOAuthStatus } from "./grok-oauth-status.mjs";
 import { kimiOAuthStatus } from "./oauth-status.mjs";
 import { credentialStatus } from "./provider-credentials.mjs";
@@ -24,6 +25,7 @@ import {
 const SIGN_IN_STATUS = Object.freeze({
   "kimi-oauth": { status: kimiOAuthStatus, setup: "run `kimi login`" },
   "grok-oauth": { status: grokOAuthStatus, setup: "run `grok login --oauth`" },
+  "devin-cli": { status: devinCliStatus, setup: "run `devin auth login`" },
 });
 
 function configured(provider) {

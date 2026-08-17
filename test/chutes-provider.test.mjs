@@ -138,7 +138,9 @@ test("Chutes public-catalog fixtures drive discovery, deterministic curation, an
     const fixture = path.join(testRoot, "models.json");
     writeFileSync(fixture, JSON.stringify({
       data: [
-        { id: "moonshotai/Kimi-K3-TEE", object: "model" },
+        { id: "moonshotai/Kimi-K3-TEE", object: "model", context_length: 262144 },
+        // A record the catalog sizes in silence: curation falls back rather
+        // than inventing a window for it.
         { id: "zai-org/GLM-5.2-TEE", object: "model" },
       ],
     }));
@@ -154,6 +156,7 @@ test("Chutes public-catalog fixtures drive discovery, deterministic curation, an
       registered: [],
       unregistered: ["moonshotai/Kimi-K3-TEE", "zai-org/GLM-5.2-TEE"],
       unavailable: [],
+      contextLengths: { "moonshotai/Kimi-K3-TEE": 262144 },
       note: "Discovery never edits the registry. New models must pass the live compatibility test before they are listed in Codex.",
     });
 
@@ -174,6 +177,11 @@ test("Chutes public-catalog fixtures drive discovery, deterministic curation, an
     assert.equal(stored.models[0].provider, "chutes");
     assert.equal(stored.models[0].upstreamModel, "moonshotai/Kimi-K3-TEE");
     assert.equal(stored.models[0].requestProfile, undefined);
+    // The catalog said how big this model is, so curation stores that rather
+    // than the conservative 131072 guess -- and the compaction threshold
+    // Codex reads follows from it (#266).
+    assert.equal(stored.models[0].contextWindow, 262144);
+    assert.equal(stored.models[0].autoCompact, 222822);
     assert.deepEqual(
       stored.models[0].reasoningLevels.map((level) => level.effort),
       ["high"],

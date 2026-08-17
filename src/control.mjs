@@ -5,10 +5,11 @@ import { fileURLToPath } from "node:url";
 
 import { pickerCommandArgs } from "./control-args.mjs";
 import { promoteNativeMultiAgent } from "./catalog.mjs";
+import { withNativeContextVariants } from "./native-context-variants.mjs";
 // The publish marker lives under the shared state directory, which does not
 // vary by target, so reading it here does not disturb the per-target probes
 // below that re-import paths with their own MODEL_ROUTER_TARGET.
-import { DSH_CATALOG_PATH } from "./paths.mjs";
+import { DSH_CATALOG_PATH, GEMINI_CATALOG_PATH } from "./paths.mjs";
 // Same reasoning: presence is a property of the shared plane, not of a target,
 // so the overview can resolve it statically without perturbing those probes.
 import { presenceSnapshot } from "./presence-state.mjs";
@@ -27,7 +28,12 @@ const REPO_ROOT = path.resolve(path.dirname(SELF), "..");
 // run. `dsh-models.json` is written by the publish and removed by the
 // uninstall, so its presence is exactly the question being asked.
 const DSH_PUBLISHED = DSH_CATALOG_PATH;
-const TARGETS = existsSync(DSH_PUBLISHED) ? ["codex", "dsh"] : ["codex"];
+const GEMINI_PUBLISHED = GEMINI_CATALOG_PATH;
+const TARGETS = [
+  "codex",
+  ...(existsSync(DSH_PUBLISHED) ? ["dsh"] : []),
+  ...(existsSync(GEMINI_PUBLISHED) ? ["gemini"] : []),
+];
 const args = process.argv.slice(2);
 
 function targetIsActive(target) {
@@ -35,6 +41,9 @@ function targetIsActive(target) {
   // service's own status for more than one of them. For the harness it is
   // whether the route has been published into its settings document.
   if (target === "dsh") return existsSync(DSH_PUBLISHED);
+  // Same question for Gemini CLI: whether this router published its `.env`
+  // block. The CLI itself is not a resident process there is anything to poll.
+  if (target === "gemini") return existsSync(GEMINI_PUBLISHED);
   const result = spawnSync(process.execPath, [path.join(REPO_ROOT, "src", "service.mjs"), "status"], {
     env: { ...process.env, MODEL_ROUTER_TARGET: target },
     encoding: "utf8",
@@ -84,12 +93,25 @@ async function shippedNativeVisionEngines(hidden) {
   return installedNativeVisionEngines({ hidden });
 }
 
-function nativeCodexModels(catalogPath, hiddenModels = new Set(), subagentSettings = {}) {
+function nativeCodexModels(
+  catalogPath,
+  hiddenModels = new Set(),
+  subagentSettings = {},
+  { contextVariants = true } = {},
+) {
   if (!existsSync(catalogPath)) return [];
   try {
     const parsed = JSON.parse(readFileSync(catalogPath, "utf8"));
     return promoteNativeMultiAgent(
-      Array.isArray(parsed.models) ? parsed.models : [],
+      // The capture holds what Codex published; the extended-window variants
+      // are the router's own additions to the same group, and the tray is
+      // where they are switched on, so they have to be drawn here too. The
+      // catalog build derives them from this same list, so the rows the
+      // operator sees and the entries Codex reads cannot drift apart.
+      withNativeContextVariants(
+        Array.isArray(parsed.models) ? parsed.models : [],
+        { enabled: contextVariants },
+      ),
       subagentSettings,
       hiddenModels,
     )
@@ -203,14 +225,20 @@ async function emitProbe() {
     // a ladder keeps the exact shape it always had.
     ...reasoningLevelField(model.reasoningLevels),
   }));
+  const selectedModel = TARGET === "codex" ? configuredDefaultModel(CONFIG_PATH) : undefined;
+  const codexConfig = TARGET === "codex" ? codexConfigSnapshot() : undefined;
   const models = TARGET === "codex"
     ? [
-        ...nativeCodexModels(NATIVE_CATALOG_PATH, hiddenModels, subagentSettings),
+        ...nativeCodexModels(NATIVE_CATALOG_PATH, hiddenModels, subagentSettings, {
+          // A login-free install republishes external models under the native
+          // slugs Codex allowlists, and a synthesized slug is not one of them.
+          // The catalog build drops the variants there for the same reason, so
+          // the tray must not offer a row the picker will never show.
+          contextVariants: !codexConfig?.login_free,
+        }),
         ...routedModels,
       ]
     : routedModels;
-  const selectedModel = TARGET === "codex" ? configuredDefaultModel(CONFIG_PATH) : undefined;
-  const codexConfig = TARGET === "codex" ? codexConfigSnapshot() : undefined;
 
   process.stdout.write(
     JSON.stringify({
@@ -403,7 +431,9 @@ function refreshActiveTarget(target) {
       ? [process.execPath, [path.join(REPO_ROOT, "src", "catalog.mjs")]]
       : target === "dsh"
         ? [process.execPath, [path.join(REPO_ROOT, "src", "dsh-config-manager.mjs"), "install"]]
-        : undefined;
+        : target === "gemini"
+          ? [process.execPath, [path.join(REPO_ROOT, "src", "gemini-config-manager.mjs"), "install"]]
+          : undefined;
   if (!command) return;
   const result = spawnSync(command[0], command[1], {
     env: { ...process.env, MODEL_ROUTER_TARGET: target },
@@ -944,9 +974,80 @@ async function handleSubagents(action, value, flag, rest = []) {
   process.stdout.write(`${JSON.stringify(subagentSettingsSnapshot())}\n`);
 }
 
-async function handleToolResultAging(action, nativeAction) {
+const TOOL_RESULT_AGING_USAGE =
+  "Usage: control tool-result-aging status|on|off|native <on|off>|ttl <days|off|default>|" +
+  "purge [--yes] [--dry-run] [--expired]";
+
+// Emptying the store deletes the only copy of bytes the model already saw, so
+// the default is the report and not the deletion: an invocation without --yes
+// says exactly what it would remove and removes nothing. --dry-run says the
+// same thing on purpose rather than by omission, and outranks --yes so a
+// wrapper that always passes consent can still preview.
+//
+// --expired removes only what the TTL has outlived. The store expires on the
+// next write to it, so this is the same sweep run by hand: it is what an
+// operator uses to reclaim a store that filled before the TTL existed, or one
+// on an install where compaction is off and nothing is going to write again.
+async function handleToolResultAgingPurge(flags) {
+  const {
+    describeRetentionAge,
+    describeRetentionTtl,
+    expireRetainedToolResults,
+    formatRetentionBytes,
+    purgeRetainedToolResults,
+  } = await import("./tool-result-retention.mjs");
+  const { retentionTtlMs } = await import("./tool-result-aging-state.mjs");
+  const requested = new Set(flags);
+  const previewOnly = requested.has("--dry-run") || !(requested.has("--yes") || requested.has("-y"));
+  const expiredOnly = requested.has("--expired");
+  const ttlMs = retentionTtlMs();
+  if (expiredOnly && ttlMs === 0) {
+    throw new Error(
+      "Retained tool results have no TTL: this install was told to keep them. " +
+        "Set one with ./bin/control tool-result-aging ttl <days>, or purge without --expired.",
+    );
+  }
+  const result = expiredOnly
+    ? expireRetainedToolResults({ dryRun: previewOnly, ttlMs })
+    : purgeRetainedToolResults({ dryRun: previewOnly });
+  const age =
+    result.oldestAgeMs === undefined ? "" : `, oldest ${describeRetentionAge(result.oldestAgeMs)} old`;
+  const scope = expiredOnly ? ` older than ${describeRetentionTtl(ttlMs)}` : "";
+  if (!result.exists || result.files === 0) {
+    process.stderr.write(`No retained tool results in ${result.path}; nothing to purge.\n`);
+  } else if (expiredOnly && result.expired === 0) {
+    process.stderr.write(
+      `Nothing in ${result.path} is older than ${describeRetentionTtl(ttlMs)}` +
+        ` (${result.results} retained result(s)${age}); nothing to purge.\n`,
+    );
+  } else if (previewOnly) {
+    process.stderr.write(
+      `Would remove ${result.removed} file(s)${scope} ` +
+        `(${result.results} retained result(s)${age}) ` +
+        `and reclaim ${formatRetentionBytes(result.reclaimedBytes)} from ${result.path}.\n` +
+        `Nothing was deleted. Re-run with --yes to empty it: ` +
+        `./bin/control tool-result-aging purge${expiredOnly ? " --expired" : ""} --yes\n`,
+    );
+  } else {
+    process.stderr.write(
+      `Removed ${result.removed} file(s)${scope} and reclaimed ` +
+        `${formatRetentionBytes(result.reclaimedBytes)} from ${result.path}.\n`,
+    );
+  }
+  if (result.foreign.length) {
+    process.stderr.write(
+      `Left ${result.foreign.length} entry/entries this store did not write in place: ` +
+        `${result.foreign.slice(0, 5).join(", ")}\n`,
+    );
+  }
+  process.stdout.write(`${JSON.stringify(result)}\n`);
+  if (result.failed.length) process.exitCode = 1;
+}
+
+async function handleToolResultAging(action, nativeAction, flags = []) {
   const {
     setNativeToolResultAgingEnabled,
+    setRetentionTtlDays,
     setToolResultAgingEnabled,
     toolResultAgingSnapshot,
   } = await import("./tool-result-aging-state.mjs");
@@ -955,19 +1056,78 @@ async function handleToolResultAging(action, nativeAction) {
     process.stdout.write(`${JSON.stringify(toolResultAgingSnapshot())}\n`);
     return;
   }
+  if (desired === "purge") {
+    await handleToolResultAgingPurge(flags);
+    return;
+  }
+  // How long a retained original lives. `off` is a real answer and is kept
+  // verbatim -- an operator who wants the archive keeps it -- while `default`
+  // clears the answer so a later release's number applies again.
+  if (desired === "ttl") {
+    const requested = String(nativeAction ?? "").trim();
+    if (!requested) throw new Error(TOOL_RESULT_AGING_USAGE);
+    if (requested === "default") {
+      setRetentionTtlDays(undefined);
+    } else if (requested === "off" || requested === "never") {
+      setRetentionTtlDays(0);
+    } else {
+      setRetentionTtlDays(requested.replace(/d$/u, ""));
+    }
+    process.stdout.write(`${JSON.stringify(toolResultAgingSnapshot())}\n`);
+    return;
+  }
   if (desired === "native") {
     if (nativeAction !== "on" && nativeAction !== "off") {
-      throw new Error("Usage: control tool-result-aging status|on|off|native <on|off>");
+      throw new Error(TOOL_RESULT_AGING_USAGE);
     }
     setNativeToolResultAgingEnabled(nativeAction === "on");
     process.stdout.write(`${JSON.stringify(toolResultAgingSnapshot())}\n`);
     return;
   }
   if (desired !== "on" && desired !== "off") {
-    throw new Error("Usage: control tool-result-aging status|on|off|native <on|off>");
+    throw new Error(TOOL_RESULT_AGING_USAGE);
   }
   setToolResultAgingEnabled(desired === "on");
   process.stdout.write(`${JSON.stringify(toolResultAgingSnapshot())}\n`);
+}
+
+// Failover has one switch, one optional order, and one escape hatch. The
+// escape hatch matters most: a cooldown is the router refusing to send to a
+// provider, and an operator who believes it is wrong needs a way to say so
+// without waiting out a window somebody else's clock chose.
+async function handleFailover(action, ...rest) {
+  const {
+    clearAllProviderCooldowns,
+    readFailoverSettings,
+    readProviderCooldowns,
+    setFailoverChain,
+    setFailoverEnabled,
+  } = await import("./model-failover.mjs");
+  const snapshot = () => ({
+    ...readFailoverSettings(),
+    cooldowns: readProviderCooldowns(),
+  });
+  const desired = action || "status";
+  if (desired === "status") {
+    process.stdout.write(`${JSON.stringify(snapshot(), null, 2)}\n`);
+    return;
+  }
+  if (desired === "on" || desired === "off") {
+    setFailoverEnabled(desired === "on");
+  } else if (desired === "chain") {
+    setFailoverChain(rest);
+  } else if (desired === "auto") {
+    setFailoverChain([]);
+  } else if (desired === "reset") {
+    // Every recorded window at once. A provider is asked again on the very
+    // next turn, and answers for itself.
+    clearAllProviderCooldowns();
+  } else {
+    throw new Error(
+      "Usage: control failover status|on|off|chain <model-slug,...>|auto|reset",
+    );
+  }
+  process.stdout.write(`${JSON.stringify(snapshot(), null, 2)}\n`);
 }
 
 // The bridge changes what the picker advertises (image input on text-only
@@ -1757,12 +1917,11 @@ async function handlePicker(action, value, flag) {
     let slugs;
     if (provider === "openai") {
       const { NATIVE_CATALOG_PATH } = await import("./paths.mjs");
-      const parsed = JSON.parse(readFileSync(NATIVE_CATALOG_PATH, "utf8"));
-      slugs = Array.isArray(parsed.models)
-        ? parsed.models
-            .filter((model) => model.visibility === "list")
-            .map((model) => String(model.slug))
-        : [];
+      // Through the same helper the tray draws its rows with, so the group's
+      // Show all / Hide all covers every row in the group. Reading the capture
+      // straight off disk skipped the extended-window variants, which left
+      // "Hide all" with one row still showing.
+      slugs = nativeCodexModels(NATIVE_CATALOG_PATH).map((model) => model.slug);
     } else {
       const { canonicalProviderId, readProviderSelection } = await import(
         "./provider-selection.mjs"
@@ -1990,11 +2149,13 @@ if (args.includes("--probe")) {
 } else if (args[0] === "subagents") {
   await handleSubagents(args[1], args[2], args[3], args.slice(2));
 } else if (args[0] === "tool-result-aging") {
-  await handleToolResultAging(args[1], args[2]);
+  await handleToolResultAging(args[1], args[2], args.slice(2));
 } else if (args[0] === "local-models") {
   await handleLocalModels(args[1], args[2], ...args.slice(3));
 } else if (args[0] === "vision-bridge") {
   await handleVisionBridge(args[1] || "status", args[2], args[3]);
+} else if (args[0] === "failover") {
+  await handleFailover(args[1], ...args.slice(2));
 } else if (args[0] === "picker") {
   await handlePicker(...pickerCommandArgs(args));
 } else if (args[0] === "service") {

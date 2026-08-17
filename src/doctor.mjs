@@ -28,6 +28,8 @@ import {
   CONFIG_PATH,
   DSH_CATALOG_PATH,
   DSH_SETTINGS_PATH,
+  GEMINI_CATALOG_PATH,
+  GEMINI_ENV_PATH,
   INTERNAL_SECRET_PATH,
   LITELLM_CONFIG_PATH,
   MERGED_CATALOG_PATH,
@@ -53,6 +55,11 @@ import {
   readVisionBridgeSettings,
   visionBridgeConfigured,
 } from "./vision-bridge-state.mjs";
+import {
+  failoverTierCounts,
+  readFailoverSettings,
+  readProviderCooldowns,
+} from "./model-failover.mjs";
 import { contextWindowDrift, describeContextWindowDrift } from "./context-window-drift.mjs";
 import { observedInputCeilings } from "./usage-events.mjs";
 import { venvRuntimeProblem } from "./venv-runtime.mjs";
@@ -60,6 +67,13 @@ import {
   dependencyRepairHint,
   isHomebrewManaged,
 } from "./dependency-repair.mjs";
+import {
+  describeRetentionAge,
+  describeRetentionTtl,
+  formatRetentionBytes,
+  retainedToolResultsUsage,
+} from "./tool-result-retention.mjs";
+import { retentionTtlMs } from "./tool-result-aging-state.mjs";
 
 const checks = [];
 const add = (status, name, detail, fix) => checks.push({ status, name, detail, fix });
@@ -327,14 +341,22 @@ if (codexTarget) {
 }
 // Both clients hold the managed base URL, which is a local caller capability,
 // so both documents are held to the same privacy bound.
-const privacyTarget = codexTarget ? CONFIG_PATH : DSH_SETTINGS_PATH;
+const privacyTarget = codexTarget
+  ? CONFIG_PATH
+  : TARGET === "gemini"
+    ? GEMINI_ENV_PATH
+    : DSH_SETTINGS_PATH;
 const configMode = existsSync(privacyTarget)
   ? statSync(privacyTarget).mode & 0o777
   : undefined;
 const configProtected = privateFileIsProtected(privacyTarget);
 add(
   configProtected ? "ok" : "fail",
-  codexTarget ? "Codex config privacy" : "Harness settings privacy",
+  codexTarget
+    ? "Codex config privacy"
+    : TARGET === "gemini"
+      ? "Gemini environment privacy"
+      : "Harness settings privacy",
   configMode === undefined
     ? "missing"
     : process.platform === "win32"
@@ -353,7 +375,9 @@ let requiredModels = new Set();
 // model as unoffered on a machine that has no Codex at all.
 const routedTransportActive = codexTarget
   ? routedCatalogConfigured(existsSync(CONFIG_PATH) ? readFileSync(CONFIG_PATH, "utf8") : "")
-  : existsSync(DSH_CATALOG_PATH);
+  : TARGET === "gemini"
+    ? existsSync(GEMINI_CATALOG_PATH)
+    : existsSync(DSH_CATALOG_PATH);
 // An install made with --no-provider --no-discovery is idle on purpose: the
 // selection is an explicit empty list and the discovery marker is set. That
 // state is what the operator asked for, so the empty selection and the empty
@@ -519,6 +543,55 @@ if (visionSettings.enabled && !visionEngine) {
     "Run ./bin/model-router codex control vision-bridge on to let text-only models read pasted images.",
   );
 }
+// A cooldown is the router declining to send to a provider, which looks
+// exactly like the provider being broken if nobody says so out loud. Report
+// every live one with its expiry, so "why is my model not being used" has an
+// answer here rather than in the log.
+const failoverSettings = readFailoverSettings();
+const activeCooldowns = Object.entries(readProviderCooldowns());
+if (!failoverSettings.enabled) {
+  add(
+    "ok",
+    "Model failover",
+    "off -- a provider that runs out of usage ends the turn",
+    "Run ./bin/model-router codex control failover on to let a turn continue on another enabled model.",
+  );
+} else if (activeCooldowns.length) {
+  add(
+    "warn",
+    "Model failover",
+    `holding off ${activeCooldowns
+      .map(([id, entry]) => `${id} until ${entry.until} (${entry.reason || "reported empty"})`)
+      .join(", ")}`,
+    "Each clears itself at that time, or on the provider's next successful answer. " +
+      "Run ./bin/model-router codex control failover reset to clear them now.",
+  );
+} else if (failoverSettings.chain.length) {
+  add(
+    "ok",
+    "Model failover",
+    `on, in the order you set: ${failoverSettings.chain.join(" -> ")}`,
+    "Run ./bin/model-router codex control failover auto to hand the order back to the ranking.",
+  );
+} else {
+  // Count what the ranking can actually reach rather than restating the tier
+  // order. "Free models first" is only true where a free model exists, and on
+  // a machine that has curated none it describes an order that cannot happen.
+  const failoverHidden = readHiddenModels();
+  const failoverCounts = failoverTierCounts(
+    requiredRoutedModels.filter((model) => !failoverHidden.has(model.slug)),
+  );
+  add(
+    "ok",
+    "Model failover",
+    failoverCounts.free
+      ? `on, ${failoverCounts.free} free model(s) first then ${failoverCounts.subscription} of your own`
+      : `on, ${failoverCounts.subscription} of your own providers -- no free model is curated, so nothing cheaper is tried first`,
+    failoverCounts.free
+      ? "Run ./bin/model-router codex control failover chain <model-slug,...> to choose the order yourself."
+      : "Free catalogs change without notice so none are checked in. Run ./bin/model-router codex curate-models opencode-free to give failover a free first stop.",
+  );
+}
 // The same list the catalog writes definitions from, so a model switched off
 // as a subagent is expected to have no definition rather than a missing one.
 // Codex-only: these are files in Codex's own agents directory, and the harness
@@ -642,6 +715,52 @@ add(
   "Run ./bin/doctor --fix; this capability is generated locally and is not a provider key.",
 );
 
+// Tool-result retention is the one place this router keeps model-visible
+// *content* on disk rather than counts and bytes, and it has no eviction and no
+// TTL. Reporting it here is the difference between an operator learning about
+// the store from this line and learning about it while hunting disk usage. The
+// row exists whether or not the store does: "nothing retained" is the answer
+// most installs should see, and seeing it is how the directory becomes
+// discoverable at all.
+try {
+  const ttlMs = retentionTtlMs();
+  const retention = retainedToolResultsUsage({ ttlMs });
+  // The TTL expires on the next write to the store, so a count here is what is
+  // already dead rather than what has been removed -- the same way a cooldown
+  // reads as gone before anything deletes it. Naming it is what tells an
+  // operator whose install stopped compacting that `purge --expired` is the
+  // sweep, not a wait.
+  const expiry =
+    !retention.exists || ttlMs === 0
+      ? ""
+      : retention.expired
+        ? `, ${retention.expired} past the ${describeRetentionTtl(ttlMs)} TTL`
+        : `, TTL ${describeRetentionTtl(ttlMs)}`;
+  const retentionDetail = !retention.exists
+    ? `nothing retained; no store at ${retention.path}`
+    : `${retention.results} retained result(s), ${formatRetentionBytes(retention.bytes)}` +
+      `${retention.oldestAgeMs === undefined ? "" : `, oldest ${describeRetentionAge(retention.oldestAgeMs)} old`}` +
+      `${expiry}` +
+      ` in ${retention.path}`;
+  add(
+    retention.capacityReached || retention.foreign.length ? "warn" : "ok",
+    "Retained tool results",
+    retention.capacityReached
+      ? `${retentionDetail} -- at capacity, so new eligible results now pass through uncompacted`
+      : retention.foreign.length
+        ? `${retentionDetail}; ${retention.foreign.length} entry/entries this store did not write`
+        : retentionDetail,
+    "Run ./bin/control tool-result-aging purge to see what would be removed, then --yes to empty it.",
+  );
+} catch (error) {
+  add(
+    "warn",
+    "Retained tool results",
+    error instanceof Error ? error.message : String(error),
+    "Run ./bin/control tool-result-aging purge to inspect the store.",
+  );
+}
+
 // Per-provider credential rows are themselves discovery: each one resolves the
 // provider's credential. Under --no-discovery the resolvers answer nothing by
 // design, so 26 rows of "not configured" would report the guard's output as
@@ -756,7 +875,57 @@ for (const provider of PROVIDERS.values()) {
   }
 }
 
-if (TARGET === "dsh") {
+if (TARGET === "gemini") {
+  try {
+    const gemini = childJson("gemini-config-manager.mjs", ["status"]);
+    add(
+      gemini.installed && gemini.baseUrlManaged ? "ok" : "fail",
+      "Gemini routing config",
+      gemini.installed
+        ? gemini.baseUrlManaged
+          ? `${gemini.managedKeys.join(", ")} in ${gemini.envPath}`
+          : `${gemini.envPath} names a base URL this router does not serve (${gemini.baseUrl})`
+        : `no managed block in ${gemini.envPath}`,
+      "Run ./bin/model-router gemini enable.",
+    );
+    // A managed key assigned outside the block is the failure mode this
+    // integration has that the others do not: dotenv lets the last assignment
+    // of a key win, so a duplicate silently decides the endpoint or the
+    // credential and nothing about the file says which one is in force.
+    add(
+      gemini.documentReadable && !gemini.conflicts.length ? "ok" : "fail",
+      "Gemini environment conflicts",
+      !gemini.documentReadable
+        ? `${gemini.envPath} could not be read plainly; its managed block markers are damaged`
+        : gemini.conflicts.length
+          ? gemini.conflicts.map(({ key, line }) => `${key} (line ${line})`).join(", ")
+          : "no competing assignments",
+      `Remove or comment out the competing assignments in ${gemini.envPath}, then run ./bin/model-router gemini enable.`,
+    );
+    // The model list is served live off the router's own catalog, so it cannot
+    // drift. The published default model can: it is one slug, written once, and
+    // a default naming a model the routable set has lost puts every fresh
+    // session on a 404 before the user has typed anything.
+    const drift = childJson("gemini-config-manager.mjs", ["drift"]);
+    add(
+      drift.defaultMissing ? "warn" : "ok",
+      "Gemini default model",
+      gemini.defaultModel
+        ? drift.defaultMissing
+          ? `${gemini.defaultModel} is no longer routable`
+          : gemini.defaultModel
+        : "not set; Gemini CLI will use its own default unless --model is passed",
+      "Run ./bin/model-router gemini enable to republish.",
+    );
+  } catch (error) {
+    add(
+      "fail",
+      "Gemini routing config",
+      error instanceof Error ? error.message : String(error),
+      `Inspect ${GEMINI_ENV_PATH}, then run ./bin/model-router gemini enable.`,
+    );
+  }
+} else if (TARGET === "dsh") {
   try {
     const dsh = childJson("dsh-config-manager.mjs", ["status"]);
     add(
@@ -905,6 +1074,13 @@ try {
 }
 
 const health = await waitForRouterHealth({ timeoutMs: serviceLoaded ? 30_000 : 2_000 });
+// A router that answers while a dependency is down is not the same outcome as
+// a router that never answered, and saying "not ready" for both sent operators
+// looking for a dead service when the gateway was the thing that died. The
+// gateway is restarted in place, so this state is usually transient.
+const degradedDependencies = Array.isArray(health.degradedPayload?.degraded)
+  ? health.degradedPayload.degraded
+  : [];
 add(
   health.ok ? "ok" : serviceStoppedByDesign ? "warn" : "fail",
   "Router health",
@@ -912,7 +1088,12 @@ add(
     ? `version ${health.payload.version}`
     : serviceStoppedByDesign
       ? "not serving; the background service is following Codex"
-      : `not ready on 127.0.0.1:${PORTS.router} after ${serviceLoaded ? 30 : 2} seconds; ${health.error}`,
+      : degradedDependencies.length
+        ? `serving on 127.0.0.1:${PORTS.router} but ${health.error}` +
+          (degradedDependencies.includes("gateway")
+            ? "; the service restarts a crashed gateway in place, so check the log for its restart lines"
+            : "")
+        : `not ready on 127.0.0.1:${PORTS.router} after ${serviceLoaded ? 30 : 2} seconds; ${health.error}`,
   "Run ./bin/doctor --fix. If it still fails, create a support bundle.",
 );
 

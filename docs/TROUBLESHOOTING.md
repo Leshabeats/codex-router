@@ -197,9 +197,16 @@ release, curate it for your own machine:
 
 Curated entries live in the state directory's `user-models.json` with the
 context window, image support, and reasoning efforts you provide during
-curation (conservative defaults otherwise), are skipped automatically if a
-later registry update ships the same model, and are removed by re-running
-the command and deselecting them.
+curation — the context window taken from the provider's advertised
+`context_length` when you do not name one, and from a conservative default only
+when the provider advertises none — are skipped automatically if a later
+registry update ships the same model, and are removed by re-running the command
+and deselecting them.
+
+An entry curated before the router read that advertised size keeps whatever it
+was given: an additive `--models` run deliberately leaves existing metadata
+alone. Edit `contextWindow` and `autoCompact` in `user-models.json` directly, or
+`--remove` the model and curate it again, then regenerate with `./bin/install`.
 
 ## A session ran past the context window instead of compacting
 
@@ -227,6 +234,30 @@ grep -c estimatedInputTokens "$CODEX_HOME/codex-router/usage-events.jsonl"
 Report zero-token responses to the provider; only they can fix the source. To
 see the provider's own numbers in Codex again, set
 `CODEX_ROUTER_ZERO_INPUT_ESTIMATE=0` in the service environment.
+
+## A session compacts on every turn instead of getting work done
+
+The same substitution read against a window that is too small. Check what the
+model is declared as:
+
+```sh
+grep -A2 '"contextWindow"' "$CODEX_HOME/codex-router/user-models.json"
+```
+
+Curation now stores the `context_length` the provider's catalog advertises, but
+a model curated before that landed kept the conservative 131072 default — and a
+model that really carries a million tokens is then told to compact at 110,000,
+which a real conversation reaches long before it needs to. Compare it against
+what the provider says:
+
+```sh
+./bin/discover-models PROVIDER --json
+```
+
+Fix it by editing `contextWindow` and `autoCompact` (85% of the window) in
+`user-models.json`, or by `./bin/curate-models PROVIDER --remove MODEL_ID` and
+curating the model again. Either way run `./bin/install` and restart the
+service so the picker catalog and the gateway routes carry the new figures.
 
 ## Finished subagents stay Working
 
@@ -264,6 +295,39 @@ to Codex: it has no code path for "the model said nothing", so it records the
 empty response as a completed turn and the agent appears to stop for no reason.
 Reasoning-only turns count — a model that thinks and then says nothing produces
 exactly this.
+
+Grok OAuth previously had a nearby parser failure with the same visible shape:
+the upstream could put a `function_call` only in `response.output_item.done`,
+emit a `custom_tool_call`, or end the final SSE block without a trailing blank
+line. The forwarder now accepts all three shapes and restores final tool
+arguments without holding the full turn, so Codex sees the tool call instead of
+mistaking the preceding status text for the completed task.
+
+A remaining Grok OAuth shape is a progress-only stop: the model reasons,
+emits a short status sentence, and never calls a tool. Attempt 1 still
+streams live. When the client actually offered tools, the forwarder retries
+once with a trailing user nudge and appends only the retry's tool calls onto
+the same open stream, so Codex sees the status sentence followed by the tool
+call. The first answer is kept if the retry also produces no tools.
+
+The trigger is a shape, not a diagnosis, and it is worth knowing which turns
+pay for it. Nothing in a finished turn distinguishes it from a stalled one, so
+**a completed task answered in one line is retried too** — "Yes, that is
+correct." with 1,500 reasoning-heavy output tokens looks exactly like "Next I
+will update the deck.". Because grok-4.6 reasons by default, the
+`output_tokens` floor is met on essentially every turn, so what actually
+decides is the 120-character text limit. That is why the nudge offers the
+no-tool branch first: a finished turn restates its answer, calls nothing, and
+keeps the first answer rather than being talked into a tool call the client
+would then run. The cost of a false positive is one extra round trip, not a
+wrong action. Raise `CODEX_ROUTER_GROK_PROGRESS_ONLY_MIN_OUTPUT_TOKENS` or
+lower `CODEX_ROUTER_GROK_PROGRESS_ONLY_MAX_TEXT` to fire less often.
+
+Both attempts are billed; the usage object sums them and sets
+`progress_only_retried: true`, and the log line `progress-only-retried=true`
+is never gated on `MODEL_ROUTER_QUIET`. To pay once and see the raw first
+attempt, set `CODEX_ROUTER_GROK_PROGRESS_ONLY_RETRY=0`. The retry does not
+run when the request offered no tools.
 
 The router holds the entire response until it knows the turn produced something.
 When nothing arrives it discards that attempt and retries the identical request
@@ -411,6 +475,45 @@ native endpoints instead of sending them through the Responses-only router.
 Run `./bin/enable` again after updating, fully quit Codex, and reopen it so the
 managed realtime overrides take effect. User-owned realtime endpoint overrides
 are preserved.
+
+## Retained tool results are using disk
+
+Tool-result compaction can park the exact original bytes of a result it rewrote
+in `<state dir>/retained-tool-results`. That store is owner-only, is excluded
+from support bundles, and is bounded rather than evicting — at its cap it stops
+accepting new results and eligible results pass through uncompacted.
+
+`./bin/doctor` reports the store on every run: file count, total size, the age
+of the oldest entry, and the TTL. To empty it:
+
+```sh
+./bin/control tool-result-aging purge          # what it would remove
+./bin/control tool-result-aging purge --yes    # remove it
+```
+
+Without `--yes` nothing is deleted. The purge removes only files the store
+itself wrote, only inside that one directory, and refuses to follow a symlink
+out of it; anything else that ends up there is reported and left alone. Deleting
+retained bytes is not reversible — a compacted result in an open session keeps
+its hash and head/tail evidence, but the original is gone.
+
+Retained results expire after 7 days by default, so most stores never need a
+purge at all. Nothing sweeps on a timer: entries expire when the store is next
+written to. On an install where compaction is off, or one that filled before the
+TTL existed, nothing is going to write again — run the sweep by hand:
+
+```sh
+./bin/control tool-result-aging purge --expired        # what has aged out
+./bin/control tool-result-aging purge --expired --yes  # remove it
+```
+
+`--expired` removes only entries past the TTL, under the same containment as a
+full purge, and never removes the store's key. Change the lifetime with
+`./bin/control tool-result-aging ttl <days>`, keep everything with `ttl off`, or
+return to the shipped default with `ttl default`. If doctor reports the store at
+its cap and the entries are recent, the TTL has nothing to drain yet: purge it
+or shorten the TTL. `CODEX_ROUTER_TOOL_RESULT_AGING=0` stops compaction but does
+not stop expiry.
 
 ## Uninstall retained files
 

@@ -98,6 +98,10 @@ export function recordUsageEvent({
   // cover both attempts, because both were sent and both were billed. This
   // marker is what says the reported spend belongs to two attempts at one turn.
   emptyCompletionRetried,
+  // True when the Grok OAuth forwarder retried a progress-only stop and summed
+  // both attempts into this event. Distinct from transport `retries`, which do
+  // not double the token counts.
+  progressOnlyRetried,
   // True when the turn was empty and the router could not repair it, because
   // the attempt had already been relayed: the upstream proved it was generating
   // before it produced nothing, so the hold was over and a retry would have
@@ -131,6 +135,13 @@ export function recordUsageEvent({
   // two: compare it against the eligibility floor.
   toolResultsEvaluated,
   toolResultBytesLargest,
+  // Present only on a turn the router moved to another model because the one
+  // the operator asked for reported it had no usage left. `model` and
+  // `provider` above name what actually served the turn; this names what was
+  // asked for. Without it a rescued turn is indistinguishable from an operator
+  // who simply changed models, which is the difference between "your provider
+  // is empty" and "you switched".
+  failoverFrom,
   at = Date.now(),
 }) {
   const event = {
@@ -149,6 +160,7 @@ export function recordUsageEvent({
     ...(streamAborted === true ? { streamAborted: true } : {}),
     ...(emptyCompletion === true ? { emptyCompletion: true } : {}),
     ...(emptyCompletionRetried === true ? { emptyCompletionRetried: true } : {}),
+    ...(progressOnlyRetried === true ? { progressOnlyRetried: true } : {}),
     ...(emptyCompletionUnrepairable === true
       ? { emptyCompletionUnrepairable: true }
       : {}),
@@ -156,6 +168,9 @@ export function recordUsageEvent({
       ? { emptyCompletionGuardReleased: true }
       : {}),
     ...(safeRetryCount(retries) !== undefined ? { retries: safeRetryCount(retries) } : {}),
+    ...(typeof failoverFrom === "string" && failoverFrom.trim()
+      ? { failoverFrom: safeText(failoverFrom, "unknown") }
+      : {}),
     ...(safeTokenCount(inputTokens) !== undefined
       ? { inputTokens: safeTokenCount(inputTokens) }
       : {}),
@@ -382,6 +397,7 @@ export function recentUsageEvents({ sinceMs = 24 * 60 * 60 * 1000, limit = 1_000
           ...(event.emptyCompletionRetried === true
             ? { emptyCompletionRetried: true }
             : {}),
+          ...(event.progressOnlyRetried === true ? { progressOnlyRetried: true } : {}),
           ...(event.emptyCompletionGuardReleased === true
             ? { emptyCompletionGuardReleased: true }
             : {}),

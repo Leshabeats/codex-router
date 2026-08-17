@@ -2,20 +2,22 @@
 
 Use Anthropic, Kimi, DeepSeek, xAI, GitHub Copilot, opencode Go, Command Code,
 and future external models inside the Codex App and CLI — or inside
-[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) — through
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) or
+[Gemini CLI](https://github.com/google-gemini/gemini-cli) — through
 one local, credential-isolating router.
 The integration speaks the Responses API and merges external entries into
 Codex's native model catalog, so routed models appear in the normal picker
 next to the native GPT models. The same routed models publish into the
-harness as one provider route, so they appear in its Models page too.
+harness as one provider route, so they appear in its Models page too, and into
+Gemini CLI through a Gemini-shaped endpoint the router serves for it.
 
-Both clients share one installation: one background service, one gateway, one
-set of provider credentials, one provider selection. Installing the second
-integration does not ask for a single key again.
+Every client shares one installation: one background service, one gateway, one
+set of provider credentials, one provider selection. Installing a second or
+third integration does not ask for a single key again.
 
 Codex Router is an independent community project. It is not affiliated with or
 endorsed by OpenAI, GitHub, Anthropic, Moonshot AI, DeepSeek, OpenRouter,
-opencode, or the referenced opencodex project.
+opencode, Google, or the referenced opencodex project.
 
 ## Give the link to your agent
 
@@ -296,7 +298,11 @@ the ones you want, and stores them as user models in protected state
 command and deselecting). Curation asks for each new model's context window,
 image support, and reasoning efforts — so curated models get the effort
 switcher in the picker — and everything defaults conservatively when
-unanswered. The non-interactive `--models id1,id2` form is additive: it keeps
+unanswered. The context window is not guessed when the provider publishes one:
+the `context_length` its catalog advertises for the model is offered as the
+default and stored by both curation forms, so a million-token model is not
+filed as a 131K one and told to compact at 110K. The non-interactive
+`--models id1,id2` form is additive: it keeps
 existing curated entries and their metadata while adding the named models;
 `--efforts minimal,low,medium,high,xhigh` sets the new entries' ladder. Remove
 entries explicitly with `--remove id1,id2`. Every value stays editable in
@@ -418,7 +424,7 @@ because what it holds is whatever somebody put in it.
 
 | Model | Endpoint | Auth |
 | --- | --- | --- |
-| Qwen3.8 27B (Free) | `https://g9hnto0u7lvbu837.us-east-2.aws.endpoints.huggingface.cloud/v1` | none |
+| Qwen3.8-27-free-victor | `https://g9hnto0u7lvbu837.us-east-2.aws.endpoints.huggingface.cloud/v1` | none |
 
 That first model is a free community [Hugging Face Inference
 Endpoint](https://huggingface.co/spaces/victor/Qwen3.8-27B-free-endpoint) for
@@ -452,7 +458,7 @@ entry — the key or the address is already the boundary.
 > something to depend on: nothing in this repository can keep them working, and
 > a failure here is not a bug the project can fix.
 
-### Command Code Provider API
+### Command Code
 
 Command Code's official Provider API is an OpenAI-compatible chat completions
 surface plus an Anthropic Messages surface at `https://api.commandcode.ai/provider/v1`
@@ -510,9 +516,11 @@ enabling or disabling either toggles the whole family together. The live
 catalog is available without authentication from
 `https://api.commandcode.ai/provider/v1/models`, and additional models can be
 added per machine with `./bin/curate-models commandcode`. Point
-`COMMANDCODE_BASE_URL` elsewhere to override the endpoint. Command Code does
-not document an account-balance API, so the tray links to Command Code Studio
-for credits and usage.
+`COMMANDCODE_BASE_URL` elsewhere to override the endpoint — both routes follow
+it, so a redirected provider stays coherent. The tray reports the plan's
+remaining credits and its 5-hour and weekly windows from the same undocumented
+billing route the official CLI polls, and links to Command Code Studio when
+that route is unavailable.
 
 ### Meta Model API
 
@@ -561,8 +569,10 @@ Add a key, then pick the models you want from the provider's live catalog:
 ```
 
 Curated entries use the context window, image support, and reasoning efforts
-you provide during curation (conservative defaults otherwise) and are local
-to your machine. Verify a model before relying on it:
+you provide during curation — the context window falling back to the one the
+provider's catalog advertises, and to a conservative default only when it
+advertises none — and are local to your machine. Verify a model before relying
+on it:
 
 ```sh
 ./bin/test-model 'groq/MODEL_ID' --live --yes
@@ -638,6 +648,45 @@ to OpenAI's own endpoint, and an install that has never run it keeps the
 pre-existing behavior. Set `CODEX_ROUTER_TOOL_RESULT_AGING=0` for a hard
 environment-level override that disables both the routed and the native path.
 
+Where compaction parks the exact original bytes of a result it rewrote, they go
+to an owner-private store at `<state dir>/retained-tool-results` (override with
+`MODEL_ROUTER_TOOL_RESULT_RETENTION_DIR`). Nothing evicts that store, so both a
+way to see it and a way to empty it are part of the feature:
+
+```sh
+./bin/doctor                                     # count, size, oldest entry, TTL
+./bin/control tool-result-aging purge            # says what it would remove
+./bin/control tool-result-aging purge --yes      # removes it
+./bin/control tool-result-aging purge --expired  # only what the TTL outlived
+./bin/control tool-result-aging ttl 30           # keep retained results 30 days
+./bin/control tool-result-aging ttl off          # keep them until purged
+./bin/control tool-result-aging ttl default      # back to 7 days
+```
+
+The doctor row appears whether or not the store exists, because an install that
+has never retained anything is the answer most people should see and seeing it
+is how the directory becomes discoverable at all. The purge is a report by
+default: without `--yes` it prints what it would remove and removes nothing, and
+`--dry-run` says the same thing explicitly and outranks `--yes`. It removes only
+files this store wrote, only inside that one directory, never recursing and
+never following a symlink out of it; anything else that ends up there is left in
+place and named.
+
+**Retained results expire after 7 days.** Nothing ever reads those bytes back
+into a turn — the receipt tells the model to repeat the tool call — so a
+retained original's only reader is you, and only while the session that produced
+it still matters. A week is also what keeps the store's caps from becoming
+permanent: at 512 files or 512 MiB retention stops accepting new results, and
+with a TTL that state drains by itself instead of waiting for somebody to notice
+it. Nothing sweeps on a timer: the store expires when it is next written to, and
+`purge --expired` runs the same sweep by hand, with the same `--yes` consent and
+the same containment as a full purge. The key that binds the store to this
+install is never expired, only purged. `ttl off` keeps everything until an
+explicit purge and is remembered verbatim, and the
+`CODEX_ROUTER_TOOL_RESULT_AGING=0` kill switch does not disable expiry — it
+stops the router rewriting context, while expiry is disk hygiene for bytes that
+are already written.
+
 To estimate the effect without spending provider quota, run:
 
 ```bash
@@ -678,6 +727,42 @@ supports_standalone_web_search = true
 
 The generated path is local caller authentication. Do not paste the complete
 managed URL into an issue.
+
+### Run GPT-5.6 Sol at its documented 1M context window
+
+OpenAI documents GPT-5.6 Sol at 1,050,000 tokens. The catalog Codex ships
+declares 272,000, and it has moved more than once
+([openai/codex#31860](https://github.com/openai/codex/issues/31860),
+[#32806](https://github.com/openai/codex/issues/32806)). The single-install
+answer is `model_context_window` and `model_auto_compact_token_limit` in
+`~/.codex/config.toml`; the router's answer is a second entry in the picker, so
+the choice is per task rather than per machine:
+
+| Picker label | Model ID | Context window | Auto-compaction |
+| --- | --- | --- | --- |
+| GPT-5.6-Sol (1M context) | `gpt-5.6-sol-1m` | 1,000,000 | 900,000 |
+
+It is the same upstream model. Everything else in the entry — instructions,
+reasoning ladder, image input, subagent behavior — is copied from
+`gpt-5.6-sol`, and the router rewrites the slug back before the turn leaves for
+chatgpt.com, so OpenAI only ever sees the model it published.
+
+**It ships switched off,** because it costs more than the model it shadows: a
+turn resends the whole conversation, and a request above 272,000 input tokens
+is billed at a higher rate *in full*. Switch it on under **OpenAI** in the
+router Settings model list, or:
+
+```sh
+./bin/control picker set gpt-5.6-sol-1m show    # and `hide` to put it back
+```
+
+Your answer is remembered. Later catalog rebuilds never re-apply the default to
+a model you have already decided, in either direction. Fully quit and reopen
+Codex afterwards — the picker is read at startup.
+
+A login-free install does not get this entry: signed-out Codex only displays
+native slugs from a server-supplied allowlist, and a slot spent on a
+synthesized slug is a slot a routed model does not get.
 
 ### Windows Codex Desktop running through WSL
 
@@ -1112,6 +1197,84 @@ How the local path differs from a paid engine:
   a paid vision engine still reads better; the local option is about cost and
   privacy, not peak quality.
 
+### Keep working when a provider runs out of usage
+
+A coding-plan window closes, a weekly quota lands, a balance empties — and the
+turn you were in the middle of used to stop there. Codex can do nothing with a
+billing error, so the session ended, subagents included, while every other model
+you had configured sat unused.
+
+Now the turn is **rebuilt for the next eligible model and sent again**. You get
+one clean answer. It is **on by default**, and it only ever uses models you have
+already enabled and credentialed.
+
+```sh
+./bin/control failover status
+./bin/control failover off      # a provider running out ends the turn, as before
+```
+
+Turning it off is remembered permanently; an update never turns it back on.
+
+**What counts as running out** is deliberately narrow: an exhausted balance or
+plan limit, a `402`, or a `429` that asks you to wait more than a minute.
+Everything else keeps the error it always gave — a rejected key still says the
+key was rejected, an unknown model still says so, and a provider outage is still
+reported rather than hidden. Swapping models to dodge a bad credential would
+only bury the one fact that fixes it.
+
+**Which model answers instead**, in order:
+
+1. Free models — the anonymous gateways, if you have curated any
+2. Everything else you have enabled, in the picker's own preference order
+
+**A free first stop is not automatic, and that is deliberate.** The free
+catalogs at `opencode-free` and `kilo-free` are picked out by naming rules their
+vendors change without notice, so none are checked in, and an anonymous provider
+is never enabled for you — turning one on sends your prompts to a third-party
+endpoint with no credential, which has to be your choice. Until you make it,
+failover goes straight to your own providers. `doctor` says which of the two
+you are in. To give failover a free first stop:
+
+```sh
+./bin/providers enable opencode-free
+./bin/model-router codex curate-models opencode-free
+```
+
+A model served from your own machine is never chosen automatically, for the same
+reason the vision bridge does not choose one: your runtime might not be running.
+Name it in a chain and it is used. A model whose context window cannot hold the
+conversation is skipped, so a quota failure never turns into a "too many tokens"
+failure. Choose the order yourself, or hand the choice back:
+
+```sh
+./bin/control failover chain opencode-free/big-pickle,kimi-api/kimi-k3
+./bin/control failover auto
+```
+
+**When a provider tells you when it will be back, that is believed.** The next
+turn skips it outright instead of paying for the same rejection again, and it
+starts being used the moment the window passes — or the next time it answers
+successfully, whichever comes first. Reset times are never invented, only read
+from the provider, and capped at six hours. `doctor` shows anything currently
+being held off and when it clears:
+
+```sh
+./bin/control failover reset   # clear every hold now and ask again next turn
+```
+
+**You are never left guessing which model answered.** The tray Island names the
+model actually serving, `router.log` records every swap (even with the quiet
+flag the background service sets), and the usage graphs mark the turn with the
+model you originally asked for. Nothing is written into your transcript — Codex
+replays assistant output back as input, so a note from the router would come
+back next turn as a sentence the model thinks it wrote.
+
+Compaction gets the same treatment: a compaction that cannot run ends a long
+session just as surely as a turn that cannot run.
+
+Note: your signed-in ChatGPT plan is **not** currently used as a fallback tier.
+Routed models fall back to other routed models only.
+
 ## Make models appear in DeepSeek Harness
 
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`)
@@ -1188,6 +1351,59 @@ inherits the default model selection, so it is already routed once this route
 is the default. To put children on a *different* routed model, paste the block
 from `./bin/model-router dsh subagent-preset` into your preset's
 `agent.cordis.yml` — the router will not edit a preset it does not own.
+
+## Make models appear in Gemini CLI
+
+[Gemini CLI](https://github.com/google-gemini/gemini-cli) (`gemini`) speaks only
+the Gemini API, so the router serves it one: a Gemini-shaped endpoint that
+translates each turn into the same Responses request Codex makes and answers
+with the same models. Google ships no bring-your-own-provider setting, but the
+CLI does read its endpoint, its credential, and its default model from the
+environment — which is the whole integration.
+
+```sh
+./install.sh --target gemini --auto --providers configured
+# or, on an install that already serves Codex:
+./bin/model-router gemini enable
+```
+
+That writes one marker block into `~/.gemini/.env`:
+
+```sh
+# BEGIN codex-router-gemini
+GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:4202/_codex-router/<caller-key>/gemini
+GEMINI_API_KEY=<caller-key>
+GEMINI_MODEL=anthropic/claude-opus-4-6
+# END codex-router-gemini
+```
+
+The next `gemini` run picks it up — there is nothing to restart. If the CLI asks
+how to authenticate, choose **Use Gemini API key** once; the key is this
+router's local caller capability, not a Google one, and it never leaves the
+machine.
+
+**What is preserved.** Your `settings.json` is never opened for writing: it is
+JSONC and carries your comments, and this integration does not need it. Every
+other line of `~/.gemini/.env` is left exactly as it was, and
+`./bin/model-router gemini disable` removes the block and restores the file. An
+assignment of one of those three keys *outside* the block stops the publish with
+the line named rather than being silently overwritten — `dotenv` lets the last
+assignment win, so a duplicate would quietly decide which endpoint is in force.
+
+**Picking a model.** `--model vendor/slug` overrides the published default for
+one run; `GEMINI_MODEL` in the block is the default for the rest. Pass
+`--no-default-model` to `src/gemini-config-manager.mjs install` to leave the key
+out entirely, in which case the CLI falls back to its own Gemini default — which
+this router does not route, so a turn without `--model` will be refused by name.
+
+**What is not served.** Embeddings (`:embedContent`) are refused with a named
+501: no routed provider exposes an embedding endpoint through the router, and a
+fabricated vector would be worse than an error. `:countTokens` is answered from
+a byte-count estimate rather than by spending a real turn upstream.
+
+**Native GPT models** publish here under the same rule as the harness, described
+above: while this machine has a usable Codex session, and withheld the moment it
+does not.
 
 ## macOS tray control panel
 
@@ -1312,6 +1528,7 @@ specific bytes. Browser and computer-use execution remains live-only.
 ./bin/model-router codex enable
 ./bin/model-router codex uninstall
 ./bin/control vision-bridge status
+./bin/control failover status
 ```
 
 Every command takes `dsh` in place of `codex` to act on the DeepSeek Harness
@@ -1323,6 +1540,15 @@ integration instead:
 ./bin/model-router dsh status
 ./bin/model-router dsh subagent-preset   # block to paste for a routed child model
 ./bin/model-router dsh disable           # remove the route, keep everything else
+```
+
+…or `gemini` to act on the Gemini CLI integration:
+
+```sh
+./bin/model-router gemini enable         # publish the routed models
+./bin/model-router gemini doctor
+./bin/model-router gemini status
+./bin/model-router gemini disable        # remove the managed block, keep the rest
 ```
 
 The optional live check makes one small request per selected provider and may
@@ -1412,6 +1638,7 @@ streaming, image-input, tool-call, and context behavior are verified. See
 - [Architecture and request flow](docs/HOW-IT-WORKS.md)
 - [Security and credential handling](SECURITY.md)
 - [Provider development and tests](docs/DEVELOPMENT.md)
+- [Verifying the Devin CLI provider](docs/DEVIN-CLI-PROBE.md)
 - [Changelog](CHANGELOG.md)
 
 References: [Kimi Code CLI OAuth](https://www.kimi.com/help/kimi-code/cli-getting-started),
