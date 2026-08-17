@@ -7,6 +7,7 @@ import {
   httpErrorStatus,
   pipeResponse,
   readRequestBody,
+  reportListenFailure,
   requireInternalAuth,
   writeJson,
 } from "./http-utils.mjs";
@@ -1053,6 +1054,7 @@ const server = http.createServer((request, response) => {
 });
 
 applyKeepAliveTimeouts(server);
+reportListenFailure(server, { label: "api-forwarder", host: LISTEN_HOST, port: LISTEN_PORT });
 server.listen(LISTEN_PORT, LISTEN_HOST, () => {
   console.error("[api-forwarder] listening");
 });

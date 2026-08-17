@@ -70,7 +70,18 @@ async function squat(port) {
   // the port being unavailable is meant to look like.
   server.on("connection", (socket) => socket.destroy());
   await new Promise((resolve, reject) => {
-    server.once("error", reject);
+    // Named, because this bind failing is a failure of the *fixture*, not of
+    // the gate under test, and the two read identically in CI otherwise: both
+    // arrive as `EADDRINUSE 127.0.0.1:<port>` with nothing saying which end
+    // wanted the port.
+    server.once("error", (error) =>
+      reject(
+        new Error(
+          `the test could not hold 127.0.0.1:${port} for the Devin forwarder to collide with: ${error.code || error.message}`,
+          { cause: error },
+        ),
+      ),
+    );
     server.listen(port, "127.0.0.1", resolve);
   });
   return {
@@ -146,9 +157,35 @@ async function runStartup({ curatedDevinModel = false, occupyDevinPort = false }
     // after this function returns, by which point it is gone either way.
     return { exit, errors, devinPort, squatterHeldPort: squatter ? squatter.listening() : undefined };
   } finally {
-    if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+    // start.mjs writes into `stateDir` and re-creates it on the way (every
+    // state writer here does `mkdirSync` with `recursive` before it appends),
+    // so removing the tree while it is still winding down races its own
+    // teardown: `rmSync` unlinks the children, the child re-creates one, and
+    // the final `rmdir` fails with ENOTEMPTY. Wait for it to be gone first.
+    await stopChild(child);
     if (squatter) await squatter.close();
     rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
+// SIGTERM is not a signal on Windows: Node emulates it with TerminateProcess,
+// so a process that is already exiting on its own may never be reachable. Fall
+// back to SIGKILL rather than waiting out a run.
+async function stopChild(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  child.kill("SIGTERM");
+  const exited = new Promise((resolve) => child.once("exit", resolve));
+  let hardStop;
+  await Promise.race([
+    exited,
+    new Promise((resolve) => {
+      hardStop = setTimeout(resolve, 5_000);
+    }),
+  ]);
+  clearTimeout(hardStop);
+  if (child.exitCode === null && child.signalCode === null) {
+    child.kill("SIGKILL");
+    await exited;
   }
 }
 

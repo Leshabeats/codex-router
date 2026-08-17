@@ -105,6 +105,12 @@ async function closeServer(server) {
 async function bridgeUpstreams({ visionDelayMs = VISION_DELAY_MS } = {}) {
   const state = {
     visionRequests: [],
+    // How many reads the engine was serving at once, and the most it ever
+    // served at once. Parallelism is a fact about this number, not about a
+    // stopwatch: three reads that overlap peak at 3 and three that queue peak
+    // at 1, whatever the machine's load does to the elapsed time.
+    visionInFlight: 0,
+    visionPeakInFlight: 0,
     gatewayRequests: [],
     visionStatus: 200,
     transcript: TRANSCRIPT,
@@ -117,16 +123,22 @@ async function bridgeUpstreams({ visionDelayMs = VISION_DELAY_MS } = {}) {
     if (request.url === "/vision/v1/chat/completions") {
       const body = await bodyJson(request);
       state.visionRequests.push(body);
-      if (visionDelayMs) {
-        await new Promise((resolve) => setTimeout(resolve, visionDelayMs));
+      state.visionInFlight += 1;
+      state.visionPeakInFlight = Math.max(state.visionPeakInFlight, state.visionInFlight);
+      try {
+        if (visionDelayMs) {
+          await new Promise((resolve) => setTimeout(resolve, visionDelayMs));
+        }
+        if (state.visionStatus !== 200) {
+          json(response, state.visionStatus, { error: { message: "engine unavailable" } });
+          return;
+        }
+        json(response, 200, {
+          choices: [{ message: { role: "assistant", content: state.transcript } }],
+        });
+      } finally {
+        state.visionInFlight -= 1;
       }
-      if (state.visionStatus !== 200) {
-        json(response, state.visionStatus, { error: { message: "engine unavailable" } });
-        return;
-      }
-      json(response, 200, {
-        choices: [{ message: { role: "assistant", content: state.transcript } }],
-      });
       return;
     }
     if (request.url === "/v1/responses") {
@@ -619,9 +631,16 @@ test("images in one turn are read together, not one after another", async () => 
     assert.equal(result.status, 200);
     assert.equal(upstreams.state.visionRequests.length, 3);
     report(`3 images in one turn: ${result.ms.toFixed(0)}ms for 3 x ${VISION_DELAY_MS}ms reads`);
-    assert.ok(
-      result.ms < VISION_DELAY_MS * 2.5,
-      `3 reads finished in ${result.ms.toFixed(0)}ms, which is no better than serial`,
+    // Was: `result.ms < VISION_DELAY_MS * 2.5`. That measured the machine as
+    // much as the router -- a busy box pushed a perfectly parallel turn past
+    // the bound -- and it was also weaker than it looked, since two reads
+    // together followed by a third fits under 2.5x while still being partly
+    // serial. The engine counting its own concurrent callers settles the same
+    // question exactly: all three overlapped, or they did not.
+    assert.equal(
+      upstreams.state.visionPeakInFlight,
+      3,
+      `the three reads never overlapped: at most ${upstreams.state.visionPeakInFlight} was in flight at once`,
     );
     const evidence = textParts(upstreams.state.gatewayRequests.at(-1).input).filter((text) =>
       text.includes("<<<IMAGE EVIDENCE"),

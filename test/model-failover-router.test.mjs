@@ -860,6 +860,17 @@ test("a non-streaming turn fails over the same way", async () => {
 
 test("a client that leaves mid-failover does not hang or crash the router", async () => {
   let fallbackStarted = 0;
+  // Resolved the instant the fallback hop reaches the gateway. The abort has to
+  // land *during* that hop, and the only honest way to know the hop is in
+  // flight is to be told by the end that received it. A wall-clock delay only
+  // guesses at it: on a loaded machine the router had not finished the 429 and
+  // reopened against the fallback before the guess expired, so the caller left
+  // before there was a failover to leave, and the run failed on
+  // `fallbackStarted >= 1` roughly one time in five.
+  let announceFallback;
+  const fallbackInFlight = new Promise((resolve) => {
+    announceFallback = resolve;
+  });
   const gw = await gateway(async (request, response) => {
     const body = await bodyJson(request);
     if (body.model === PRIMARY.gatewayModel) {
@@ -872,8 +883,11 @@ test("a client that leaves mid-failover does not hang or crash the router", asyn
       return;
     }
     // The fallback is slow, so the abort lands while the hop is in flight --
-    // the window the failover loop has to notice the caller is gone.
+    // the window the failover loop has to notice the caller is gone. The hold
+    // is far longer than the abort needs, so the abort is inside it whatever
+    // the machine is doing.
     fallbackStarted += 1;
+    announceFallback();
     setTimeout(() => {
       if (response.writableEnded) return;
       response.writeHead(200, { "Content-Type": "text/event-stream" });
@@ -885,6 +899,7 @@ test("a client that leaves mid-failover does not hang or crash the router", asyn
   try {
     await waitFor(`http://127.0.0.1:${routerPort}/health`, child);
     const base = new URL(`${callerBaseUrl(routerPort, CALLER_KEY)}/responses`);
+    let leave;
     const aborted = new Promise((resolve) => {
       const outbound = http.request(
         {
@@ -898,11 +913,23 @@ test("a client that leaves mid-failover does not hang or crash the router", asyn
       );
       outbound.on("error", () => resolve());
       outbound.end(JSON.stringify(TURN_BODY));
-      setTimeout(() => {
+      leave = () => {
         outbound.destroy();
         resolve();
-      }, 800);
+      };
     });
+    // Leave as soon as the fallback hop is on the gateway's floor. The deadline
+    // is only there so a router that never gets that far fails on the assertion
+    // below rather than hanging the run.
+    let deadline;
+    await Promise.race([
+      fallbackInFlight,
+      new Promise((resolve) => {
+        deadline = setTimeout(resolve, 20_000);
+      }),
+    ]);
+    clearTimeout(deadline);
+    leave();
     await aborted;
 
     // The router must still be serving, and a later turn must behave normally.
