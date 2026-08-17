@@ -5479,8 +5479,15 @@ test("a subagent effort reaches child turns and leaves parent turns alone", asyn
     assert.equal(seen[1].effort, "low", "the parent turn was re-tuned by a subagent setting");
     assert.equal(seen[2].effort, "low", "an unconfigured model was altered");
   } finally {
-    router.kill("SIGTERM");
-    gateway.server.close();
+    // The router meters a turn *after* its response head is on the wire, and
+    // `recordUsageEvent` re-creates the state directory (`mkdirSync` with
+    // `recursive`) before appending. A bare `kill` only queues the signal, so
+    // an unawaited router is still appending while `rmSync` walks the same
+    // directory -- it unlinks the children, the router re-creates one, and the
+    // final `rmdir` fails with ENOTEMPTY. Wait for the process to be gone
+    // before removing what it writes into.
+    await stopChild(router);
+    await closeServer(gateway.server);
     rmSync(stateDir, { recursive: true, force: true });
   }
 });
@@ -5573,8 +5580,11 @@ test("a subagent effort overrides the effort Codex nested in the reasoning objec
     );
     assert.equal(seen[1].effort, undefined, "the parent turn grew a flat effort field");
   } finally {
-    router.kill("SIGTERM");
-    gateway.server.close();
+    // See the sibling test above: removing the state directory out from under
+    // a router that has been signalled but not awaited is what produced the
+    // ENOTEMPTY on this directory.
+    await stopChild(router);
+    await closeServer(gateway.server);
     rmSync(stateDir, { recursive: true, force: true });
   }
 });

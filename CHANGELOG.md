@@ -16,6 +16,17 @@
   with the state, and a guard in the same file fails if any test spawns the
   catalog without doing so. If your routed agents are already missing, one
   catalog refresh from the owning checkout restores them.
+- **A forwarder that cannot bind its port now says so.** The four forwarders
+  the service starts — `kimi-oauth`, `api-forwarder`, `grok-oauth`, and
+  `devin-cli` — called `listen` with no `'error'` handler, so a port already in
+  use killed the process with Node's unhandled-`'error'` crash dump: `throw er`
+  and a libuv stack, in a log the four of them share, naming neither the
+  forwarder nor the port. Startup then reported only that *some* forwarder had
+  exited before becoming healthy. Each one now reports the bind failure the way
+  the router already did since #171 — one line naming itself, the address, and
+  the reason — and exits with the router's own listen-failure codes (98 for
+  `EADDRINUSE`, 97 for `EACCES`, 96 otherwise), so one line in the service log
+  classifies the death for a supervisor and a human alike.
 
 - **GPT-5.6 Sol can now run at the 1M context window OpenAI documents for it.**
   The catalog Codex ships declares 272,000 tokens against a documented

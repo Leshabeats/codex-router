@@ -8,6 +8,7 @@ import {
   formatErrorChain,
   httpErrorStatus,
   readRequestBody,
+  reportListenFailure,
   requireInternalAuth,
   writeJson,
 } from "./http-utils.mjs";
@@ -307,6 +308,7 @@ if (isMain) {
   });
 
   applyKeepAliveTimeouts(server);
+  reportListenFailure(server, { label: "devin-cli", host: LISTEN_HOST, port: LISTEN_PORT });
   server.listen(LISTEN_PORT, LISTEN_HOST, () => {
     console.error("[devin-cli] listening");
   });

@@ -50,6 +50,41 @@ export function applyKeepAliveTimeouts(server) {
   return server;
 }
 
+// A `listen` that fails emits `'error'`, and with no handler Node rethrows it
+// from the event loop: the log gets `node:events:487 / throw er; // Unhandled
+// 'error' event` and a libuv stack, with the *label of the process that died
+// nowhere in it. Every forwarder here is spawned by start.mjs with inherited
+// stdio into one shared stream, so an unlabelled crash cannot even be
+// attributed to a forwarder -- a real Windows CI failure (#271's gating test)
+// showed only `EADDRINUSE 127.0.0.1:22624` and left which of the four had
+// died an open question.
+//
+// `src/router.mjs` has carried its own copy of this since #171 for the same
+// reason. This is that treatment, shared, so the forwarders name themselves
+// and the port they wanted. The exit codes match the router's, so one line in
+// the service log classifies the death for a supervisor and a human alike.
+export function reportListenFailure(server, { label, host, port }) {
+  server.on("error", (error) => {
+    if (error?.code === "EADDRINUSE") {
+      console.error(
+        `[${label}] cannot listen: ${host}:${port} is already in use. Another instance or an unrelated process holds it; stop that process, then start the service again.`,
+      );
+      process.exit(98);
+    }
+    if (error?.code === "EACCES") {
+      console.error(`[${label}] cannot listen: permission denied binding ${host}:${port}.`);
+      process.exit(97);
+    }
+    console.error(
+      `[${label}] server error: ${
+        error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+      }${error?.code ? ` (${error.code})` : ""}`,
+    );
+    process.exit(96);
+  });
+  return server;
+}
+
 export async function readRequestBody(request) {
   const chunks = [];
   let total = 0;
