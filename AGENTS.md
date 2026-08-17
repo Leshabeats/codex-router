@@ -10,6 +10,9 @@ These instructions apply when a user asks an agent to install this repository.
   explain that those targets were removed and the router does not have them;
   the opencode provider (the Go subscription and the pay-per-use Zen endpoint)
   remains available as a provider inside both targets.
+- **Cursor is settled in both directions.** It cannot be a target and is not
+  worth having as a provider; see "Cursor was measured and rejected" below
+  before spending an afternoon re-deriving either half.
 - **A target is a client, not a router.** One installation serves all of them:
   one background service, one gateway, one set of provider credentials, one
   provider selection, one set of ports. `MODEL_ROUTER_TARGET` selects which
@@ -1123,6 +1126,59 @@ of them, because two answers to "where does this go" have a silent winner.
    context window, modality set, and effort ladder rather than the conservative
    defaults `curate-models` would guess. An anonymous endpoint answers without a
    credential, so there is no excuse for inferring any of it.
+
+## Cursor was measured and rejected
+
+Both halves of "can we use Cursor?" were built, measured against a signed-in
+account, and answered no. The working implementation is on the closed PR #279
+and the `feat/cursor-cli-provider-main` branch; this section is the result, so
+nobody starts over from the question.
+
+1. **Cursor CLI cannot be a target.** `cursor-agent` has no BYOK and no custom
+   base URL: its `~/.cursor/cli-config.json` reference carries `model`,
+   `permissions`, `sandbox`, and display keys and nothing naming an endpoint.
+   `--endpoint` exists but speaks Cursor's own protocol rather than anything
+   OpenAI-shaped, and Bedrock mode validates the credential against Cursor's
+   backend. The IDE's "Override OpenAI Base URL" is IDE-only and refuses
+   private-network addresses besides. There is no arrangement in which
+   cursor-agent sends traffic to this router.
+2. **As a provider it costs ~22,150 prompt tokens per turn, fixed.**
+   `cursor-agent` is an agent, not an inference endpoint: it prepends its own
+   harness to everything. Two live turns, one asking ~20 tokens and one ~12,
+   billed 22,166 and 22,162 input tokens. The same question to any ordinary
+   provider bills about 20. On a plan denominated in credits tied to API cost
+   that is roughly a thousandfold markup on short prompts, and it does not
+   amortize away until prompts are themselves enormous.
+3. **The flags that would strip that harness are server-gated.** Both exist in
+   the CLI and both are refused by Cursor's backend, not by argument parsing:
+   `--exclude-workspace-context` answers `[invalid_argument] Workspace context
+   exclusion is not allowed for this user, team, or selected model`, and
+   `--system-prompt <file>` answers `[invalid_argument] unknown option
+   '--system-prompt'`. Do not re-test these hoping for a different answer; test
+   whether Cursor has ungated them, which is a different question.
+4. **`cursor-agent` never emits OpenAI `tool_calls`.** It returns prose and its
+   own tool events. Codex dispatches every turn through tool calls, so a Cursor
+   model could not drive one at any price. Cost aside, this alone disqualifies
+   it from the job the router exists to do.
+
+Reopen the question only if Cursor publishes a raw inference endpoint or
+ungates the harness flags. Anything else is the same measurement again.
+
+Three findings from that work generalize to any CLI-backed provider, and cost
+real debugging to obtain:
+
+- A CLI's `--stream-partial-output` may not *replace* its message-level
+  emitter. cursor-agent runs both, so a turn answering "391" emits two
+  `assistant` events each reading "391"; concatenating every one of them
+  streams "391391". Reconcile deltas against an accumulator rather than
+  trusting that one emitter excludes the other.
+- Token usage came back camelCase (`inputTokens`) from the live result while
+  the shipped bundle's source spells it snake_case. Reading only the spelling
+  the source suggests reported every real turn as zero usage, which the router
+  records as a genuinely free turn.
+- Reading a vendor's bundled source narrows the guesswork but does not replace
+  one real request. Every one of these survived a full green suite built on
+  fixtures derived from that source.
 
 ## Local models as a provider
 
