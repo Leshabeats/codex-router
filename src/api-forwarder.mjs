@@ -187,6 +187,34 @@ function coalesceAssistantMessages(messages) {
   return coalesced;
 }
 
+function restoreGlmReasoningContent(messages) {
+  if (!Array.isArray(messages)) return messages;
+  return messages.map((message) => {
+    if (message?.role !== "assistant" || !Array.isArray(message.content)) return message;
+    const reasoning = [];
+    const visible = [];
+    for (const part of message.content) {
+      if (part?.type === "thinking") {
+        const text = typeof part.text === "string" ? part.text : part.thinking;
+        if (typeof text === "string" && text) {
+          reasoning.push(text);
+          continue;
+        }
+      }
+      visible.push(part);
+    }
+    if (!reasoning.length) return message;
+    return {
+      ...message,
+      content: visible.length ? visible : null,
+      reasoning_content:
+        typeof message.reasoning_content === "string" && message.reasoning_content
+          ? message.reasoning_content
+          : reasoning.join("\n"),
+    };
+  });
+}
+
 // Strict chat-completions providers (Console Go / MiniMax / similar) reject any
 // assistant tool_calls message whose matching tool results are incomplete or
 // separated by non-tool traffic. LiteLLM's Responses->chat translation and
@@ -626,7 +654,8 @@ function normalizeBody(buffer, contentType, route) {
       payload.tool_choice = "auto";
     }
   } else if (model.requestProfile === "glm-thinking") {
-    payload.thinking = { type: "enabled" };
+    payload.thinking = { type: "enabled", clear_thinking: false };
+    payload.messages = restoreGlmReasoningContent(payload.messages);
     // Each GLM entry declares exactly the tiers Z.ai documents for it, and the
     // requested effort is clamped onto them. Models whose registry entry offers
     // a single level (GLM-5-Turbo, GLM-4.7) do not support the parameter at

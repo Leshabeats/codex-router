@@ -3339,11 +3339,66 @@ test("API forwarder routes GLM coding-plan models with thinking enabled", async 
       assert.equal(request.headers["chatgpt-account-id"], undefined);
       assert.equal(request.headers["x-codex-installation-id"], undefined);
       assert.equal(request.body.model, upstreamModel);
-      assert.deepEqual(request.body.thinking, { type: "enabled" });
+      assert.deepEqual(request.body.thinking, { type: "enabled", clear_thinking: false });
       assert.equal(request.body.reasoning_effort, expectedEffort);
       assert.equal(request.body.temperature, undefined);
       assert.equal(request.body.top_p, undefined);
     }
+  } finally {
+    await stopChild(forwarder);
+    await closeServer(upstream.server);
+  }
+});
+
+test("API forwarder restores bridged GLM thinking as native reasoning_content", async () => {
+  const upstreamRequests = [];
+  const upstream = await mockServer(async (request, response) => {
+    upstreamRequests.push({ headers: request.headers, body: await bodyJson(request) });
+    json(response, 200, { choices: [] });
+  });
+  const forwarderPort = await openPort();
+  const forwarder = run("api-forwarder.mjs", {
+    CODEX_ROUTER_API_PORT: String(forwarderPort),
+    ZAI_CODING_BASE_URL: `http://127.0.0.1:${upstream.port}`,
+    ZAI_API_KEY: "TEST_ZAI_API_KEY",
+    CODEX_ROUTER_QUIET: "1",
+  });
+
+  try {
+    await waitFor(`http://127.0.0.1:${forwarderPort}/health`, forwarder, {
+      Authorization: `Bearer ${INTERNAL_KEY}`,
+    });
+    const response = await fetch(
+      `http://127.0.0.1:${forwarderPort}/v1/chat/completions`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${INTERNAL_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "zai-coding-glm-5-3",
+          messages: [
+            { role: "user", content: "first" },
+            {
+              role: "assistant",
+              content: [
+                { type: "thinking", text: "reason one" },
+                { type: "thinking", text: "reason two" },
+                { type: "text", text: "visible answer" },
+              ],
+            },
+            { role: "user", content: "follow up" },
+          ],
+        }),
+      },
+    );
+    assert.equal(response.status, 200);
+    const request = upstreamRequests[0].body;
+    const assistant = request.messages[1];
+    assert.equal(assistant.reasoning_content, "reason one\nreason two");
+    assert.deepEqual(assistant.content, [{ type: "text", text: "visible answer" }]);
+    assert.deepEqual(request.thinking, { type: "enabled", clear_thinking: false });
   } finally {
     await stopChild(forwarder);
     await closeServer(upstream.server);
@@ -3398,7 +3453,7 @@ test("API forwarder bills the Z.ai platform on its own endpoint and key", async 
       const request = upstreamRequests.at(-1);
       assert.equal(request.headers.authorization, "Bearer TEST_ZAI_PLATFORM_KEY");
       assert.equal(request.body.model, upstreamModel);
-      assert.deepEqual(request.body.thinking, { type: "enabled" });
+      assert.deepEqual(request.body.thinking, { type: "enabled", clear_thinking: false });
       assert.equal(request.body.reasoning_effort, expectedEffort);
     }
   } finally {
@@ -5699,6 +5754,84 @@ test("reasoning survives the replay onto tool-call and prose assistant turns ali
       if (previous?.role !== "assistant" || current?.role !== "assistant") continue;
       assert.fail("two assistant messages ended up back to back");
     }
+  } finally {
+    await stopChild(router);
+    await closeServer(gateway.server);
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("GLM reasoning stays structurally separate while crossing the Responses bridge", async () => {
+  const gatewayBodies = [];
+  const gateway = await mockServer(async (request, response) => {
+    gatewayBodies.push(await bodyJson(request));
+    json(response, 200, { output: [{ type: "message", role: "assistant", content: "ok" }] });
+  });
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "glm-reasoning-replay-state-"));
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    MODEL_ROUTER_STATE_DIR: stateDir,
+    CODEX_ROUTER_QUIET: "1",
+  });
+  const input = [
+    { type: "message", role: "user", content: [{ type: "input_text", text: "first" }] },
+    {
+      type: "reasoning",
+      id: "rs_glm_tool",
+      summary: [{ type: "summary_text", text: "tool-call reasoning" }],
+      content: null,
+    },
+    { type: "function_call", call_id: "glm-call", name: "lookup_number", arguments: "{}" },
+    { type: "function_call_output", call_id: "glm-call", output: "323" },
+    {
+      type: "reasoning",
+      id: "rs_glm_answer",
+      summary: [{ type: "summary_text", text: "provider-native reasoning" }],
+      content: null,
+    },
+    {
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "visible answer" }],
+    },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "follow up" }] },
+  ];
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const response = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer CODEX_CALLER_SECRET",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ model: "zai-coding/glm-5.3", stream: false, input }),
+    });
+    assert.equal(response.status, 200, await response.text());
+    const forwarded = gatewayBodies[0].input;
+    const callIndex = forwarded.findIndex((item) => item?.type === "function_call");
+    const beforeCall = forwarded[callIndex - 1];
+    assert.equal(beforeCall?.role, "assistant");
+    assert.deepEqual(beforeCall.content, [{ type: "thinking", text: "tool-call reasoning" }]);
+
+    const assistant = forwarded.find(
+      (item) =>
+        item?.type === "message" &&
+        item.role === "assistant" &&
+        Array.isArray(item.content) &&
+        item.content.some((part) => part?.text === "visible answer"),
+    );
+    assert.ok(assistant);
+    const parts = assistant.content;
+    assert.deepEqual(parts[0], { type: "thinking", text: "provider-native reasoning" });
+    assert.deepEqual(parts[1], { type: "output_text", text: "visible answer" });
+    assert.equal(
+      parts.filter((part) => part.type === "output_text").some((part) => /reasoning/.test(part.text)),
+      false,
+      "provider reasoning leaked into visible assistant content",
+    );
   } finally {
     await stopChild(router);
     await closeServer(gateway.server);
