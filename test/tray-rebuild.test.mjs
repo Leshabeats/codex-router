@@ -390,3 +390,69 @@ test("every localized tray literal has a Chinese translation", () => {
   const missing = [...literals].filter((k) => !translated.has(k) && !untranslatable.has(k));
   assert.deepEqual(missing, [], `untranslated tray strings: ${missing.join(" | ")}`);
 });
+
+// Regression for PR #308 review: settings load/defaulting must stay pure so
+// Swift tests can cover missing keys without spinning up RouterStore.
+test("menu bar settings resolve through a pure helper", () => {
+  const source = readFileSync(
+    path.join(root, "apps", "macos", "ModelRouterTray", "Sources", "ModelRouterTrayApp.swift"),
+    "utf8",
+  );
+  assert.match(source, /nonisolated static func resolveMenuBarSettings\(/);
+  const declaration = source.slice(source.indexOf("nonisolated static func resolveMenuBarSettings("));
+  const nextDecl = declaration.search(/\r?\n  (nonisolated static func |init\(\)|func )/);
+  const body = nextDecl > 0 ? declaration.slice(0, nextDecl) : declaration.slice(0, 1200);
+  assert.doesNotMatch(body, /defaults\./);
+  assert.match(source, /\?\? \.indicator/);
+  assert.doesNotMatch(
+    source,
+    /menuBarIconStyle = \.provider/,
+    "missing key must not default to .provider",
+  );
+});
+
+test("menu bar provider marks reuse ProviderIcon instead of a second map", () => {
+  const source = readFileSync(
+    path.join(root, "apps", "macos", "ModelRouterTray", "Sources", "ModelRouterTrayApp.swift"),
+    "utf8",
+  );
+  const viewStart = source.indexOf("private struct MenuBarIconView");
+  assert.ok(viewStart > 0, "MenuBarIconView is still in ModelRouterTrayApp.swift");
+  const view = source.slice(viewStart, source.indexOf("private struct StatusItemLabel"));
+  assert.match(view, /ProviderIcon\(providerID:[^\n]*showsHelp: false\)/);
+  assert.doesNotMatch(view, /private var assetName:/);
+  assert.doesNotMatch(view, /NSImage\(contentsOfFile:/);
+});
+
+test("the status item keeps a reserved width in both menu-bar modes", () => {
+  const source = readFileSync(
+    path.join(root, "apps", "macos", "ModelRouterTray", "Sources", "ModelRouterTrayApp.swift"),
+    "utf8",
+  );
+  assert.match(source, /static let iconOnlyWidth: CGFloat = 24/);
+  assert.match(
+    source,
+    /\.frame\(width: MenuBarLayoutMetrics\.statusItemWidth\(displayMode: store\.menuBarDisplayMode\)/,
+  );
+  assert.doesNotMatch(
+    source,
+    /\.frame\(width: store\.menuBarShowModelName \? Self\.reservedWidth : nil/,
+  );
+  assert.doesNotMatch(source, /\.frame\(minWidth: 18\)/);
+});
+
+test("a custom menu-bar image is copied into Application Support", () => {
+  const source = readFileSync(
+    path.join(root, "apps", "macos", "ModelRouterTray", "Sources", "ModelRouterTrayApp.swift"),
+    "utf8",
+  );
+  assert.match(source, /nonisolated static func persistCustomMenuBarIcon\(/);
+  assert.match(source, /menu-bar-icon\./);
+  assert.match(source, /nonisolated static func loadCustomMenuBarIcon\(/);
+  assert.match(source, /nonisolated static func menuBarTooltip\(/);
+  assert.doesNotMatch(
+    source,
+    /store\.setMenuBarCustomIconPath\(url\.path\)/,
+    "the picker must not persist the original user path",
+  );
+});
