@@ -248,6 +248,23 @@ test("follow mode rechecks host presence and drains requests before stopping", (
   assert.match(source, /runServiceCommand\("stop"\)/);
 });
 
+test("idle tray updates are deferred, throttled, and finite", () => {
+  const source = readFileSync(
+    path.join(root, "apps", "macos", "ModelRouterTray", "Sources", "ModelRouterTrayApp.swift"),
+    "utf8",
+  );
+  assert.match(source, /Task \{ @MainActor \[weak self\] in/);
+  assert.match(source, /guard surfacesVisible != next else \{ return \}/);
+  assert.match(source, /nanoseconds: 1_000_000_000/);
+  const statusStart = source.indexOf("private struct StatusBeacon");
+  const operationStart = source.indexOf("private struct OperationPulse");
+  const accentStart = source.indexOf("private struct AccentButtonStyle");
+  assert.ok(statusStart >= 0 && operationStart > statusStart && accentStart > operationStart);
+  assert.doesNotMatch(source.slice(statusStart, operationStart), /\.repeatForever/);
+  assert.doesNotMatch(source.slice(operationStart, accentStart), /\.repeatForever/);
+  assert.match(source.slice(statusStart, accentStart), /\.task\(id:/);
+});
+
 // Every case names its platform explicitly. Letting it default to
 // process.platform made this pass on macOS and fail on Linux and Windows,
 // where the default reads the Tauri paths and never sees the Swift file the

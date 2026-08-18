@@ -91,8 +91,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     surfaceVisibility = store.$surfacesVisible
       .combineLatest(store.$islandMode)
       .sink { [weak self] visible, mode in
-        self?.islandController?.setVisible(visible && mode == .notch)
-        self?.desktopPanelController?.setVisible(visible && mode == .desktop)
+        // Publishing from a refresh can happen while SwiftUI is evaluating the
+        // MenuBarExtra tree. Defer AppKit window/layout work until that render
+        // transaction has finished, otherwise relaunches can recurse through
+        // layoutSubtreeIfNeeded.
+        Task { @MainActor [weak self] in
+          self?.islandController?.setVisible(visible && mode == .notch)
+          self?.desktopPanelController?.setVisible(visible && mode == .desktop)
+        }
       }
     store.retireLoginItem()
     store.startHostAppObservation()
@@ -494,7 +500,9 @@ final class RouterStore: ObservableObject {
     // effectivePresenceMode, not presenceMode: the router pins follow mode to
     // always while a client it cannot watch is talking to it, and a user launch
     // must not undo that.
-    surfacesVisible = pinnedByUser || effectivePresenceMode == .always || hostAppRunning
+    let next = pinnedByUser || effectivePresenceMode == .always || hostAppRunning
+    guard surfacesVisible != next else { return }
+    surfacesVisible = next
   }
 
   // Opening Model Router from Finder, Spotlight, Launchpad, or the Dock has to
@@ -1029,7 +1037,10 @@ final class RouterStore: ObservableObject {
     while !Task.isCancelled {
       await refreshActivity()
       do {
-        try await Task.sleep(nanoseconds: 350_000_000)
+        // Activity is status UI, not a frame clock. A 350ms loop kept waking
+        // SwiftUI and AppKit while the tray was idle; one second is responsive
+        // for a status indicator without turning it into a display link.
+        try await Task.sleep(nanoseconds: 1_000_000_000)
       } catch {
         return
       }
@@ -6568,14 +6579,15 @@ private struct StatusBeacon: View {
         .font(.system(size: 10, weight: .medium))
     }
     .foregroundStyle(state.tint)
-    .onAppear { animate() }
-    .onChange(of: state) { _ in animate() }
+    // A finite, task-backed transition avoids an always-running animation
+    // timeline in an otherwise idle menu-bar process.
+    .task(id: "\(state.rawValue)-\(reduceMotion)") { animate() }
   }
 
   private func animate() {
     breathing = false
     guard state == .generating || state == .starting, !reduceMotion else { return }
-    withAnimation(.easeInOut(duration: 0.72).repeatForever(autoreverses: true)) {
+    withAnimation(.easeInOut(duration: 0.72)) {
       breathing = true
     }
   }
@@ -6598,9 +6610,12 @@ private struct OperationPulse: View {
         .frame(width: 6, height: 6)
     }
     .frame(width: 14, height: 14)
-    .onAppear {
+    // Pulse once when the operation view appears. The old repeatForever kept a
+    // display-list animation alive for every open tray, even when no layout or
+    // data was changing.
+    .task(id: reduceMotion) {
       guard !reduceMotion else { return }
-      withAnimation(.easeOut(duration: 0.9).repeatForever(autoreverses: false)) {
+      withAnimation(.easeOut(duration: 0.9)) {
         pulsing = true
       }
     }
