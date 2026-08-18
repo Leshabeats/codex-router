@@ -10,7 +10,9 @@ const statePath = path.join(stateDir, "dsh-web-state.json");
 process.env.MODEL_ROUTER_DSH_WEB_STATE = statePath;
 const fakeBinDir = mkdtempSync(path.join(os.tmpdir(), "dsh-web-bin-"));
 const fakeDsh = path.join(fakeBinDir, "dsh");
-writeFileSync(fakeDsh, "#!/bin/sh\nexec sleep 5\n", "utf8");
+// Do not `exec`: processStartIdentity keys on `ps comm`, and exec would
+// let start record `sh`/`dsh` while stop sees `sleep`.
+writeFileSync(fakeDsh, "#!/bin/sh\nsleep 30\n", "utf8");
 chmodSync(fakeDsh, 0o755);
 process.env.PATH = `${fakeBinDir}${path.delimiter}${process.env.PATH || ""}`;
 
@@ -55,11 +57,19 @@ test(
       if (probes === 1) throw new Error("connect ECONNREFUSED");
       return { status: 200 };
     };
-    const started = await startDshWeb({ fetchImpl, timeoutMs: 1_000 });
+    const identity = (pid) => {
+      try {
+        process.kill(pid, 0);
+        return "dsh-web-test-identity";
+      } catch {
+        return undefined;
+      }
+    };
+    const started = await startDshWeb({ fetchImpl, timeoutMs: 1_000, identity });
     assert.equal(started.startedNow, true);
     assert.equal(started.managed, true);
     assert.equal(JSON.parse(readFileSync(statePath, "utf8")).managed, true);
-    const stopped = await stopDshWeb({ timeoutMs: 1_000 });
+    const stopped = await stopDshWeb({ timeoutMs: 1_000, identity });
     assert.equal(stopped.stopped, true);
     rmSync(fakeBinDir, { recursive: true, force: true });
   },
