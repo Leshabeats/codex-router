@@ -30,8 +30,11 @@
       "inputModalities": [
         "text"
       ],
+      "searchTool": {
+        "mode": "standalone"
+      },
       "requestProfile": "glm-thinking",
-      "compHash": "zai-coding-glm-5-3-v1"
+      "compHash": "zai-coding-glm-5-3-v2"
     }
   ]
 }

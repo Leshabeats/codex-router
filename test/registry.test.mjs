@@ -420,6 +420,7 @@ test("provider registry exposes configured API and OAuth model families", () => 
     "deepseek/deepseek-v4-flash",
     "opencode-go/deepseek-v4-flash",
     "xiaomi-mimo/mimo-v2.5",
+    "zai-coding/glm-5.3",
   ]);
   for (const model of MODELS) {
     if (["grok-oauth/grok-4.5", "grok-oauth/grok-4.6"].includes(model.slug) || standaloneSearchSlugs.has(model.slug)) continue;
@@ -524,6 +525,11 @@ test("DeepSeek V4 Flash routes opt in to Codex standalone web search", () => {
   ]) {
     assert.deepEqual(MODEL_BY_SLUG.get(slug)?.searchTool, { mode: "standalone" }, slug);
   }
+});
+
+test("GLM-5.3 Coding Plan opts in to standalone web search", () => {
+  const model = MODEL_BY_SLUG.get("zai-coding/glm-5.3");
+  assert.deepEqual(model?.searchTool, { mode: "standalone" });
 });
 
 test("Meta models opt out of the apply_patch custom tool", () => {
