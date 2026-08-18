@@ -33,6 +33,7 @@
         "image"
       ],
       "requestProfile": "xai-reasoning",
+      "supportsReasoningSummaries": true,
       "supportsImageDetailOriginal": true,
       "compHash": "grok-api-grok-4-5-v2"
     }

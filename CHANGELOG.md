@@ -2,13 +2,65 @@
 
 ## Unreleased
 
-- **Grok OAuth retries a progress-only stop once, without holding the first
-  byte.** Attempt 1 streams live. If the client offered tools and the turn
+- **A Codex Stop hook continues grok-oauth mid-task stops once.** After a
+  tool result, a short status sentence with no follow-up tool call used to
+  hand control back. `hooks/codex-stop-grok-oauth.mjs` is a user-level Stop
+  hook: it blocks only when `model` is a `grok-oauth/*` slug, the transcript
+  shows a tool result then a short status, and `stop_hook_active` is false.
+  Native GPT slugs fall through with `{ continue: true }`. Cap is one
+  automatic continue. `CODEX_GROK_OAUTH_STOP_HOOK=0` disables it.
+
+- **The routed-model skill says a text-only turn ends the task.** Custom
+  models often emit a status sentence after a tool result and call nothing;
+  Codex then hands control back. The `codex-router` skill now states that
+  contract and tells the model to call the next tool in the same turn when
+  work remains. This is instruction, not a protocol fix — the Grok OAuth
+  after-tool retry still covers a model that ignores it.
+
+- **Grok OAuth no longer accepts uncertified prose after a tool result as a
+  successful completion.** The
+  progress-only retry used to classify only on visible-text length and
+  output tokens. After a successful tool, a cheap status sentence ("The
+  figures are ready.", 95 tokens) never retried, and a reasoning-heavy
+  one-liner was nudged with "if you are already done, stop" — so the model
+  restated the status and the turn looked finished. The last non-system
+  message being a tool result is now the signal, independent of language,
+  phrasing, or answer length: a no-tool turn is held and retried once. The
+  repair must call exactly one function: either a client tool or the router's
+  private final-answer tool. The private tool is converted back to ordinary
+  assistant text and never reaches Codex.
+  An empty, progress-only, or failed repair becomes an explicit 502 instead
+  of a clean `stop`, so Codex cannot record it as a silent success. A
+  one-line verdict after a user message still gets the no-tool branch
+  first, so a finished Q&A cannot be talked into a call the client would
+  run.
+
+- **Grok progress-repair usage separates context from billed spend.** Codex
+  now receives the selected repair attempt's prompt count instead of the sum
+  of both attempts, preventing a roughly 150k context from appearing as 300k.
+  The aggregate provider cost is retained separately as billed input/output
+  tokens in the local usage ledger.
+
+- **Grok and DeepSeek advertise Codex reasoning summaries.** The catalog now
+  opts the official Grok and DeepSeek thinking models into
+  `supports_reasoning_summaries`, so Codex can show their thinking while a
+  turn is in flight and collapse it afterwards — the same surface native GPT
+  uses. Grok OAuth was dropping xAI's `reasoning_summary_text` /
+  `reasoning_text` deltas on the Chat Completions hop; those now land as
+  `reasoning_content` so LiteLLM can put them back on the Responses reasoning
+  channel. DeepSeek already emitted `reasoning_content`; it only needed the
+  catalog flag. `deepseek-chat` stays off because it is the non-thinking
+  alias.
+
+- **Grok OAuth retries a progress-only stop once on the user-message path,
+  without holding the first byte.** Attempt 1 streams live. If the client offered tools and the turn
   ends with short visible text, no tool calls, and enough output tokens to be
   reasoning-heavy, the forwarder retries once with a trailing user nudge and
   *appends* only the retry's tool-call deltas plus `finish_reason:
   "tool_calls"` onto the same open stream. The first answer is kept when the
-  retry also has no tools. Both attempts are summed into `usage` with
+  retry also has no tools. This paragraph describes turns following a user
+  message; post-tool turns use the stricter certified repair above. Both
+  attempts on this older path are summed into `usage` with
   `progress_only_retried: true`; that marker is what `acceptedInputTokens`
   excludes, not a bare transport `retries` count. The retry log is not gated
   on `MODEL_ROUTER_QUIET`. Set `CODEX_ROUTER_GROK_PROGRESS_ONLY_RETRY=0` to

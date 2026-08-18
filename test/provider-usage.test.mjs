@@ -67,6 +67,32 @@ test("aggregates tokens and calls independently for each provider", () => {
   assert.equal(snapshot.scope, "local-router");
 });
 
+test("uses billed retry totals without changing the selected response usage", () => {
+  const now = Date.parse("2026-07-21T18:00:00Z");
+  const snapshot = aggregateProviderUsage(
+    [
+      {
+        meteringVersion: 1,
+        at: "2026-07-21T12:00:00Z",
+        provider: "grok-oauth",
+        model: "grok-oauth/grok-4.6",
+        status: 200,
+        inputTokens: 151_000,
+        outputTokens: 90,
+        totalTokens: 151_090,
+        billedInputTokens: 301_000,
+        billedOutputTokens: 270,
+        progressOnlyRetried: true,
+      },
+    ],
+    { days: 7, now },
+  );
+  const grok = snapshot.providers.find((provider) => provider.id === "grok-oauth");
+  assert.equal(grok.inputTokens, 301_000);
+  assert.equal(grok.outputTokens, 270);
+  assert.equal(grok.totalTokens, 301_270);
+});
+
 test("breaks provider usage down by model, heaviest first", () => {
   const now = Date.parse("2026-07-21T18:00:00Z");
   const snapshot = aggregateProviderUsage(

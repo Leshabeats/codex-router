@@ -80,8 +80,10 @@ export function recordUsageEvent({
   // separately as time-to-first-token.
   firstTokenMs,
   inputTokens,
+  billedInputTokens,
   cachedInputTokens,
   outputTokens,
+  billedOutputTokens,
   totalTokens,
   retries,
   // True when the upstream stream died after its 200 head was already
@@ -98,9 +100,10 @@ export function recordUsageEvent({
   // cover both attempts, because both were sent and both were billed. This
   // marker is what says the reported spend belongs to two attempts at one turn.
   emptyCompletionRetried,
-  // True when the Grok OAuth forwarder retried a progress-only stop and summed
-  // both attempts into this event. Distinct from transport `retries`, which do
-  // not double the token counts.
+  // True when the Grok OAuth forwarder retried a progress-only stop. New rows
+  // keep the selected attempt in the ordinary token fields and the aggregate
+  // provider spend in billedInputTokens / billedOutputTokens. Historical rows
+  // summed both attempts into the ordinary fields.
   progressOnlyRetried,
   // True when the turn was empty and the router could not repair it, because
   // the attempt had already been relayed: the upstream proved it was generating
@@ -174,11 +177,17 @@ export function recordUsageEvent({
     ...(safeTokenCount(inputTokens) !== undefined
       ? { inputTokens: safeTokenCount(inputTokens) }
       : {}),
+    ...(safeTokenCount(billedInputTokens) !== undefined
+      ? { billedInputTokens: safeTokenCount(billedInputTokens) }
+      : {}),
     ...(safeTokenCount(cachedInputTokens) !== undefined
       ? { cachedInputTokens: safeTokenCount(cachedInputTokens) }
       : {}),
     ...(safeTokenCount(outputTokens) !== undefined
       ? { outputTokens: safeTokenCount(outputTokens) }
+      : {}),
+    ...(safeTokenCount(billedOutputTokens) !== undefined
+      ? { billedOutputTokens: safeTokenCount(billedOutputTokens) }
       : {}),
     ...(safeTokenCount(totalTokens) !== undefined
       ? { totalTokens: safeTokenCount(totalTokens) }
@@ -362,8 +371,10 @@ export function recentUsageEvents({ sinceMs = 24 * 60 * 60 * 1000, limit = 1_000
       )
       .map((event) => {
         const inputTokens = safeTokenCount(event.inputTokens);
+        const billedInputTokens = safeTokenCount(event.billedInputTokens);
         const cachedInputTokens = safeTokenCount(event.cachedInputTokens);
         const outputTokens = safeTokenCount(event.outputTokens);
+        const billedOutputTokens = safeTokenCount(event.billedOutputTokens);
         const totalTokens = safeTokenCount(event.totalTokens);
         const retries = safeRetryCount(event.retries);
         const estimatedInputTokens = safeTokenCount(event.estimatedInputTokens);
@@ -403,8 +414,10 @@ export function recentUsageEvents({ sinceMs = 24 * 60 * 60 * 1000, limit = 1_000
             : {}),
           ...(retries !== undefined ? { retries } : {}),
           ...(inputTokens !== undefined ? { inputTokens } : {}),
+          ...(billedInputTokens !== undefined ? { billedInputTokens } : {}),
           ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),
           ...(outputTokens !== undefined ? { outputTokens } : {}),
+          ...(billedOutputTokens !== undefined ? { billedOutputTokens } : {}),
           ...(totalTokens !== undefined ? { totalTokens } : {}),
           ...(estimatedInputTokens !== undefined ? { estimatedInputTokens } : {}),
           ...(toolResultsAged ? { toolResultsAged } : {}),

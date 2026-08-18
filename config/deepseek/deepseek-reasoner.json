@@ -7,7 +7,8 @@
       "upstreamModel": "deepseek-reasoner",
       "provider": "deepseek",
       "listed": false,
-      "requestProfile": "deepseek-thinking"
+      "requestProfile": "deepseek-thinking",
+      "supportsReasoningSummaries": true
     }
   ]
 }

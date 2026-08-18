@@ -33,6 +33,7 @@
         "image"
       ],
       "requestProfile": "xai-reasoning",
+      "supportsReasoningSummaries": true,
       "searchTool": {
         "mode": "hosted"
       },

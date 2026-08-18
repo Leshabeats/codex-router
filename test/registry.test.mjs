@@ -496,6 +496,17 @@ test("provider registry exposes configured API and OAuth model families", () => 
   assert.equal(grok46.defaultEffort, "high");
   assert.deepEqual(grok46.inputModalities, ["text", "image"]);
   for (const slug of [
+    "grok-oauth/grok-4.6",
+    "grok-oauth/grok-4.5",
+    "grok-api/grok-4.5",
+    "deepseek/deepseek-v4-flash",
+    "deepseek/deepseek-v4-pro",
+    "deepseek/deepseek-reasoner",
+  ]) {
+    assert.equal(MODEL_BY_SLUG.get(slug).supportsReasoningSummaries, true);
+  }
+  assert.equal(MODEL_BY_SLUG.get("deepseek/deepseek-chat").supportsReasoningSummaries, undefined);
+  for (const slug of [
     "deepseek/deepseek-v4-flash",
     "deepseek/deepseek-v4-pro",
   ]) {

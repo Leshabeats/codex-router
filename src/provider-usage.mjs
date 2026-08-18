@@ -84,12 +84,15 @@ export function aggregateProviderUsage(events, { days = 90, now = Date.now() } =
     ) continue;
     provider.requests += 1;
     if (event.status >= 200 && event.status < 400) provider.successfulRequests += 1;
-    const inputTokens = nonnegative(event.inputTokens);
-    const outputTokens = nonnegative(event.outputTokens);
+    const selectedOutputTokens = nonnegative(event.outputTokens);
+    const inputTokens = nonnegative(event.billedInputTokens ?? event.inputTokens);
+    const outputTokens = nonnegative(event.billedOutputTokens ?? event.outputTokens);
     const totalTokens = nonnegative(
-      event.totalTokens ?? (event.inputTokens !== undefined || event.outputTokens !== undefined
+      event.billedInputTokens !== undefined || event.billedOutputTokens !== undefined
         ? inputTokens + outputTokens
-        : 0),
+        : event.totalTokens ?? (event.inputTokens !== undefined || event.outputTokens !== undefined
+          ? inputTokens + outputTokens
+          : 0),
     );
     if (
       event.totalTokens !== undefined ||
@@ -159,15 +162,17 @@ export function aggregateProviderUsage(events, { days = 90, now = Date.now() } =
     // near the end, so thousands of tokens appear to arrive in milliseconds.
     // No served model streams anywhere near this fast, so treat it as a broken
     // sample rather than a record-breaking one.
-    const impossibleRate = (outputTokens * 1_000) / generationDurationMs > MAX_PLAUSIBLE_TOKENS_PER_SECOND;
+    const impossibleRate =
+      (selectedOutputTokens * 1_000) / generationDurationMs >
+      MAX_PLAUSIBLE_TOKENS_PER_SECOND;
     if (
       measurable &&
-      outputTokens > 0 &&
+      selectedOutputTokens > 0 &&
       firstTokenMs !== undefined &&
       generationDurationMs > 0 &&
       !impossibleRate
     ) {
-      model.speedSamples.push({ outputTokens, generationDurationMs });
+      model.speedSamples.push({ outputTokens: selectedOutputTokens, generationDurationMs });
       // Keep the displayed rate current instead of averaging the model's
       // entire 90-day usage history. Twenty replies smooth one-off bursts
       // without letting old sessions dominate the result.

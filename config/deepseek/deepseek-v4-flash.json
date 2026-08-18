@@ -34,6 +34,7 @@
         "mode": "standalone"
       },
       "requestProfile": "deepseek-thinking",
+      "supportsReasoningSummaries": true,
       "compHash": "deepseek-v4-flash-v2"
     }
   ]
