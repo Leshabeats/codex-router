@@ -527,8 +527,9 @@ test("DeepSeek V4 Flash routes opt in to Codex standalone web search", () => {
   }
 });
 
-test("GLM-5.3 Coding Plan opts in to standalone web search", () => {
+test("GLM-5.3 Coding Plan opts in to the GPT-5.6 behavior template and standalone web search", () => {
   const model = MODEL_BY_SLUG.get("zai-coding/glm-5.3");
+  assert.equal(model?.behaviorTemplate, "gpt-5.6-sol");
   assert.deepEqual(model?.searchTool, { mode: "standalone" });
 });
 

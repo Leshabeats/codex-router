@@ -152,6 +152,27 @@ test("routed models rewrite GPT identity text to the external model name", () =>
   assert.equal(model.multi_agent_version, "v2");
 });
 
+test("routed models can borrow native behavior instructions without inheriting capabilities", () => {
+  const behaviorTemplate = {
+    ...template,
+    slug: "gpt-5.6-sol",
+    base_instructions: "You are Codex, an agent based on GPT-5. SOL_BEHAVIOR",
+    model_messages: {
+      instructions_template: "You are Codex, an agent based on GPT-5. SOL_TEMPLATE {{ personality }}",
+      instructions_variables: { personality_default: "" },
+    },
+    tool_mode: "code_mode_only",
+    use_responses_lite: true,
+  };
+  const model = routedModel(template, { ...grok, behaviorTemplate: "gpt-5.6-sol" }, behaviorTemplate);
+
+  assert.match(model.base_instructions, /based on Grok 4\.5/);
+  assert.match(model.base_instructions, /SOL_BEHAVIOR/);
+  assert.match(model.model_messages.instructions_template, /SOL_TEMPLATE/);
+  assert.equal(model.tool_mode, undefined);
+  assert.equal(model.use_responses_lite, false);
+});
+
 test("routed models are native v2 spawn-agent model overrides", () => {
   const model = routedModel(template, grok);
   assert.equal(model.visibility, "list");
@@ -331,6 +352,30 @@ test("merged catalog preserves native GPT identity while rewriting routed models
   assert.equal(bySlug.get("gpt-5.5").supports_reasoning_summaries, false);
   assert.match(bySlug.get("grok-oauth/grok-4.5").base_instructions, /based on Grok 4\.5/);
   assert.doesNotMatch(bySlug.get("grok-oauth/grok-4.5").base_instructions, /GPT-5/);
+});
+
+test("merged catalog resolves a routed behavior template without inheriting its capabilities", () => {
+  const sol = {
+    ...template,
+    slug: "gpt-5.6-sol",
+    base_instructions: "You are Codex, an agent based on GPT-5. SOL_BEHAVIOR",
+    model_messages: {
+      instructions_template: "You are Codex, an agent based on GPT-5. SOL_TEMPLATE {{ personality }}",
+      instructions_variables: { personality_default: "" },
+    },
+    tool_mode: "code_mode_only",
+    use_responses_lite: true,
+  };
+  const merged = buildMergedCatalog(
+    { models: [template, sol] },
+    [{ ...grok, behaviorTemplate: "gpt-5.6-sol" }],
+  );
+  const routed = merged.find((model) => model.slug === grok.slug);
+
+  assert.match(routed.base_instructions, /SOL_BEHAVIOR/);
+  assert.match(routed.model_messages.instructions_template, /SOL_TEMPLATE/);
+  assert.equal(routed.tool_mode, undefined);
+  assert.equal(routed.use_responses_lite, false);
 });
 
 test("merged catalog preserves an explicit native reasoning summary capability", () => {

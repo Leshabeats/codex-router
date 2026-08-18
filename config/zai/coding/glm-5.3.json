@@ -33,6 +33,7 @@
       "searchTool": {
         "mode": "standalone"
       },
+      "behaviorTemplate": "gpt-5.6-sol",
       "requestProfile": "glm-thinking",
       "compHash": "zai-coding-glm-5-3-v2"
     }

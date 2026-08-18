@@ -498,9 +498,11 @@ function normalizeNativeModel(model) {
   };
 }
 
-export function routedModel(template, model) {
+export function routedModel(template, model, behaviorTemplate = template) {
   const next = {
     ...template,
+    base_instructions: behaviorTemplate.base_instructions,
+    model_messages: behaviorTemplate.model_messages,
     slug: model.slug,
     display_name: model.displayName,
     description: model.description,
@@ -713,6 +715,11 @@ export function promoteNativeMultiAgent(models, settings, hidden = new Set()) {
   });
 }
 
+function behaviorTemplateFor(nativeModels, model, fallback) {
+  if (!model.behaviorTemplate) return fallback;
+  return nativeModels.find((candidate) => candidate.slug === model.behaviorTemplate) || fallback;
+}
+
 export function buildMergedCatalog(native, routedModelsList, { includeNative = true } = {}) {
   const template =
     native.models.find((model) => model.slug === "gpt-5.5") ||
@@ -727,7 +734,8 @@ export function buildMergedCatalog(native, routedModelsList, { includeNative = t
       : [],
   );
   for (const model of routedModelsList) {
-    models.set(model.slug, routedModel(template, model));
+    const behaviorTemplate = behaviorTemplateFor(native.models, model, template);
+    models.set(model.slug, routedModel(template, model, behaviorTemplate));
   }
   return sortCatalogModels(models.values());
 }
@@ -755,7 +763,11 @@ export function buildLoginFreeCatalog(native, routedModelsList) {
   );
   const models = [
     ...assignments.map(({ nativeModel, model }) => ({
-      ...routedModel(nativeModel, model),
+      ...routedModel(
+        nativeModel,
+        model,
+        behaviorTemplateFor(native.models, model, nativeModel),
+      ),
       slug: nativeModel.slug,
       priority: nativeModel.priority,
     })),

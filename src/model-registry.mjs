@@ -482,6 +482,12 @@ function modelProblem(model, providers, slugs, gatewayModels) {
   }
   const endpoint = endpointProblem(model, provider);
   if (endpoint) return endpoint;
+  if (
+    model.behaviorTemplate !== undefined &&
+    (typeof model.behaviorTemplate !== "string" || !model.behaviorTemplate.trim())
+  ) {
+    return `model ${model.slug} has an invalid behaviorTemplate`;
+  }
   if (model.requestProfile !== undefined && typeof model.requestProfile !== "string") {
     return `model ${model.slug} has an invalid requestProfile`;
   }
