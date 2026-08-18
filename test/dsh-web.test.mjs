@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -8,8 +8,13 @@ const stateDir = mkdtempSync(path.join(os.tmpdir(), "dsh-web-test-"));
 process.env.CODEX_ROUTER_STATE_DIR = stateDir;
 const statePath = path.join(stateDir, "dsh-web-state.json");
 process.env.MODEL_ROUTER_DSH_WEB_STATE = statePath;
+const fakeBinDir = mkdtempSync(path.join(os.tmpdir(), "dsh-web-bin-"));
+const fakeDsh = path.join(fakeBinDir, "dsh");
+writeFileSync(fakeDsh, "#!/bin/sh\nexec sleep 5\n", "utf8");
+chmodSync(fakeDsh, 0o755);
+process.env.PATH = `${fakeBinDir}${path.delimiter}${process.env.PATH || ""}`;
 
-const { DSH_WEB_PORT, dshWebState, dshWebUrl, probeDshWeb, stopDshWeb } = await import(
+const { DSH_WEB_PORT, dshWebState, dshWebUrl, probeDshWeb, startDshWeb, stopDshWeb } = await import(
   "../src/dsh-web.mjs"
 );
 
@@ -39,6 +44,26 @@ test("any HTTP answer counts as served, and a refusal does not", async () => {
   assert.equal(down.reachable, false);
   assert.match(down.error, /ECONNREFUSED/);
 });
+
+test(
+  "Start creates the private state directory before launching the harness",
+  { skip: process.platform === "win32" },
+  async () => {
+    let probes = 0;
+    const fetchImpl = async () => {
+      probes += 1;
+      if (probes === 1) throw new Error("connect ECONNREFUSED");
+      return { status: 200 };
+    };
+    const started = await startDshWeb({ fetchImpl, timeoutMs: 1_000 });
+    assert.equal(started.startedNow, true);
+    assert.equal(started.managed, true);
+    assert.equal(JSON.parse(readFileSync(statePath, "utf8")).managed, true);
+    const stopped = await stopDshWeb({ timeoutMs: 1_000 });
+    assert.equal(stopped.stopped, true);
+    rmSync(fakeBinDir, { recursive: true, force: true });
+  },
+);
 
 test("a server this router did not start is reported but not owned", async () => {
   // No state file at all: somebody's `dsh web` in a terminal.
