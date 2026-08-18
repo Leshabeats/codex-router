@@ -698,9 +698,8 @@ async function zaiCodingAccount(fetchImpl) {
   return account;
 }
 
-// The credits route is the one the official Command Code CLI polls; it is
-// not in the public docs, so any failure degrades to the Studio link and
-// observed router traffic instead of an error state.
+// The credits route is not in the public docs, so any failure degrades to the
+// Studio link and observed router traffic instead of an error state.
 async function commandCodeAccount(fetchImpl) {
   const provider = PROVIDERS.get("commandcode");
   const credential = resolveProviderCredential(provider);

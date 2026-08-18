@@ -1169,10 +1169,9 @@ final class RouterStore: ObservableObject {
     focusUsageProvider(providerID)
   }
 
-  // One click covers the whole route into a provider: install the official CLI
-  // when it is missing, then go straight into its browser sign-in. Stopping
-  // after the install left a row that looked finished but still had no
-  // credential, and made connecting a two-click ritual for no reason.
+  // One click covers the whole route into an OAuth provider: install the
+  // official CLI when it is missing, then run its sign-in flow. Stopping after
+  // the install left a row that looked finished but still had no credential.
   // install-cli is a no-op when the CLI is already present, so an unknown
   // state costs a lookup rather than a wrong branch.
   func connectProvider(_ provider: String) async {
@@ -1221,8 +1220,8 @@ final class RouterStore: ObservableObject {
     }
   }
 
-  // The control plane already drops the provider from the Codex selection when
-  // the key file is deleted; this only makes that selection live.
+  // The control plane drops the provider from the Codex selection when a
+  // managed key is deleted. This only makes that selection live in the tray.
   func removeProviderKey(_ provider: String) async {
     let label = providerSetup[provider]?.credentialLabel ?? "API key"
     await performProviderOperation(
@@ -2846,13 +2845,6 @@ struct ProviderSetupState: Decodable, Identifiable, Equatable {
   let configured: Bool
   let cliInstalled: Bool?
   let action: String
-  // An API provider whose official CLI mints its key through a browser
-  // sign-in (Command Code) keeps `kind == "api"` and the key field, and adds
-  // these: `signIn` marks the second route, `signedIn` says the key in play
-  // came from that session, and `signInAction` is that route's next step.
-  let signIn: Bool?
-  let signedIn: Bool?
-  let signInAction: String?
   let credentialLabel: String?
   // Set when connecting successfully still leaves the account unable to use
   // the API, because its plan does not include one. Shown before the buttons
@@ -5639,25 +5631,15 @@ private struct ProviderSetupRow: View {
     }
     if setup.configured {
       let visibility = provider.enabled ? routerLocalized("Available in Codex") : routerLocalized("Hidden from Codex")
-      return setup.signedIn == true
-        ? (RouterLanguage.isSimplifiedChinese ? "已登录 · \(visibility)" : "Signed in · \(visibility)")
-        : (RouterLanguage.isSimplifiedChinese ? "就绪 · \(visibility)" : "Ready · \(visibility)")
+      return RouterLanguage.isSimplifiedChinese ? "就绪 · \(visibility)" : "Ready · \(visibility)"
     }
     switch setup.action {
     case "install": return routerLocalized("Official CLI required")
     case "login": return routerLocalized("Sign in with the official CLI")
     case "add-key":
-      return offersSignIn ? routerLocalized("Sign in or paste an API key") : "\(credentialLabel) \(routerLocalized("required"))"
+      return "\(credentialLabel) \(routerLocalized("required"))"
     default: return routerLocalized("Setup required")
     }
-  }
-
-  private var offersSignIn: Bool { setup?.signIn == true }
-
-  // Names both halves when both will run, so one click never does more than
-  // the label promised.
-  private var signInTitle: String {
-    setup?.signInAction == "install" ? routerLocalized("Install & Sign In") : routerLocalized("Sign In")
   }
 
   @ViewBuilder
@@ -5687,21 +5669,6 @@ private struct ProviderSetupRow: View {
             .help(routerLocalized("Reconnect OAuth"))
             .disabled(controlsDisabled)
           }
-        }
-        // A key that came from the CLI sign-in can only be renewed by signing
-        // in again, so the row keeps that route reachable after connecting.
-        if offersSignIn {
-          Button(action: { onConnect() }) {
-            Image(systemName: "arrow.triangle.2.circlepath")
-              .font(.system(size: 10, weight: .semibold))
-              .frame(width: 20, height: 20)
-          }
-          .buttonStyle(.plain)
-          .foregroundStyle(routerAccent)
-          .help(routerLocalized(setup?.signInAction == "install"
-            ? "Install the official CLI and sign in"
-            : "Sign in again with the official CLI"))
-          .disabled(controlsDisabled)
         }
         if setup?.kind == "api" {
           Button(action: { toggleKeyField() }) {
@@ -5741,19 +5708,10 @@ private struct ProviderSetupRow: View {
       }
     } else {
       HStack(spacing: 10) {
-        // Two ways in, both first-class: the browser sign-in the CLI drives,
-        // and the Studio key someone may already hold.
-        if offersSignIn {
-          Button(signInTitle) { onConnect() }
-            .buttonStyle(.plain)
-            .font(.system(size: 10, weight: .medium))
-            .foregroundStyle(routerAccent)
-            .disabled(controlsDisabled)
-        }
         Button(actionTitle) { performAction() }
           .buttonStyle(.plain)
           .font(.system(size: 10, weight: .medium))
-          .foregroundStyle(offersSignIn ? routerMuted : routerAccent)
+          .foregroundStyle(routerAccent)
           .disabled(controlsDisabled || setup == nil)
       }
     }

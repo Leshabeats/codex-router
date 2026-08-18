@@ -11,10 +11,6 @@ import {
 } from "node:fs";
 import path from "node:path";
 
-import {
-  cliSessionDescriptor,
-  readCliSessionCredential,
-} from "./cli-session-credential.mjs";
 import { discoveryDisabled } from "./discovery-mode.mjs";
 import { protectPrivateFile } from "./file-security.mjs";
 import { LEGACY_STATE_DIRS, STATE_DIR, TARGET } from "./paths.mjs";
@@ -66,9 +62,9 @@ export function credentialPaths(provider) {
 //
 // So the spawn is memoized, and only the spawn. Scope is the point: the router
 // **never writes a Keychain item** -- `writeProviderCredential` below writes a
-// protected file in the state directory, `kimi login` and `grok login` write
-// their own OAuth files, and `command-code login` writes its own session file.
-// All three of those stay live on every call, and files are checked *before*
+// protected file in the state directory, while `kimi login` and `grok login`
+// write their own OAuth files. Both stay live on every call, and files are
+// checked *before*
 // the Keychain, so a key the operator adds through any documented path is
 // visible immediately. What can go stale is only a key some other tool put in
 // the login keychain behind the router's back, which nothing in this repository
@@ -199,27 +195,15 @@ export function resolveProviderCredential(providerOrId, options = {}) {
     const credential = resolvedCredential(provider, keychain.value, keychain.source, true);
     if (credential) return credential;
   }
-  // The provider CLI's own sign-in comes last: a key the user deliberately
-  // stored here, or exported into the environment, stays in charge, and the
-  // session only fills the gap for someone who never pasted one.
-  const session = readCliSessionCredential(provider);
-  return session
-    ? resolvedCredential(provider, session.value, session.label, true)
-    : undefined;
+  return undefined;
 }
 
-// Providers that support a CLI sign-in have two equally valid setup paths, and
-// naming only the key one would hide the OAuth flow from every surface that
-// prints this sentence (doctor, discovery errors, the enable gate).
 export function credentialSetupHint(provider) {
   if (provider.authMode === "anonymous") return "No key needed; free models are rate limited by the provider.";
   if (provider.authMode === "per-model") return "No key needed here; each model names its own endpoint.";
   if (provider.keyless) return "No key needed; it runs on this machine.";
   const keyCommand = targetCli(`provider-key ${provider.id} set`);
-  const session = cliSessionDescriptor(provider);
-  return session
-    ? `Run \`${session.loginCommand}\`, or run ${keyCommand}`
-    : `Run ${keyCommand}`;
+  return `Run ${keyCommand}`;
 }
 
 export function credentialLabel(provider) {

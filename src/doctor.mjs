@@ -42,7 +42,6 @@ import {
   skillPackStatus,
   skillRequiredFields,
 } from "./skills-install.mjs";
-import { cliSessionDescriptor } from "./cli-session-credential.mjs";
 import { discoveryDisabled } from "./discovery-mode.mjs";
 import { credentialLabel, credentialStatus } from "./provider-credentials.mjs";
 import { providerNeedsCuration } from "./provider-onboarding.mjs";
@@ -822,7 +821,6 @@ for (const provider of PROVIDERS.values()) {
   if (provider.kind !== "openai-compatible") continue;
   if (credentialDiscoveryOff) continue;
   const status = credentialStatus(provider, { persistent: true });
-  const session = cliSessionDescriptor(provider);
   const credentialType = credentialLabel(provider);
   const credentialNoun = credentialType === "API key" ? "key" : credentialType.toLowerCase();
   // A keyless provider has no key to name, so calling its row a "key" and
@@ -846,9 +844,7 @@ for (const provider of PROVIDERS.values()) {
         ? provider.anonymousNote || "No key needed; only the provider's free models are available."
       : provider.authMode === "per-model"
         ? "Each model here names its own endpoint; a model that needs a key reports it on its own row."
-      : session
-        ? `Run ${session.loginCommand}, or ./bin/provider-key ${provider.id} set.`
-        : `Run ./bin/provider-key ${provider.id} set.`,
+      : `Run ./bin/provider-key ${provider.id} set.`,
   );
   // A credential that resolves says nothing about whether the account's plan
   // may use the API. Only warn once the provider is actually selected, so the

@@ -24,7 +24,6 @@ import {
   SOURCE_ROOT,
   SUPPORT_DIR,
 } from "./paths.mjs";
-import { readCliSessionCredential } from "./cli-session-credential.mjs";
 import {
   credentialPaths,
   credentialStatus,
@@ -100,14 +99,6 @@ function knownLocalSecrets() {
     if (!existsSync(target)) continue;
     const value = readFileSync(target, "utf8").trim();
     if (value) values.add(value);
-  }
-  // A key that arrived from a provider CLI's sign-in is just as sensitive as
-  // one stored here, and it lives in a file this bundle never reads, so it
-  // has to join the redaction set explicitly.
-  for (const provider of PROVIDERS.values()) {
-    if (provider.kind !== "openai-compatible") continue;
-    const session = readCliSessionCredential(provider);
-    if (session?.value) values.add(session.value);
   }
   return [...values].filter((value) => value.length >= 8);
 }

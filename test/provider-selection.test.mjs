@@ -15,12 +15,6 @@ const { PROVIDERS } = await import("../src/model-registry.mjs");
 // real keys exported, and stays correct as providers are added.
 for (const provider of PROVIDERS.values()) {
   for (const name of provider.credential?.environment || []) delete process.env[name];
-  // A CLI sign-in is an external credential too: a developer who has really
-  // run `command-code login` must not turn "nothing is configured yet" false.
-  const session = provider.credential?.cliSession;
-  if (session?.homeEnv) {
-    process.env[session.homeEnv] = path.join(testRoot, "cli-sessions", provider.id);
-  }
 }
 
 const { writeProviderCredential } = await import("../src/provider-credentials.mjs");
