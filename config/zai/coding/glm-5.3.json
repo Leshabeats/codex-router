@@ -33,6 +33,7 @@
       "searchTool": {
         "mode": "standalone"
       },
+      "instructionOverlay": "efficient-agentic",
       "requestProfile": "glm-thinking",
       "compHash": "zai-coding-glm-5-3-v2"
     }

@@ -527,8 +527,9 @@ test("DeepSeek V4 Flash routes opt in to Codex standalone web search", () => {
   }
 });
 
-test("GLM-5.3 Coding Plan opts in to standalone web search", () => {
+test("GLM-5.3 Coding Plan opts in to concise routed execution and standalone web search", () => {
   const model = MODEL_BY_SLUG.get("zai-coding/glm-5.3");
+  assert.equal(model?.instructionOverlay, "efficient-agentic");
   assert.deepEqual(model?.searchTool, { mode: "standalone" });
 });
 
@@ -692,6 +693,32 @@ test("curated upgrade prompts point at listed generational successors", () => {
     MODEL_BY_SLUG.get("opencode-go-messages/minimax-m2.7").upgradeTo.model,
     "opencode-go-messages/minimax-m3",
   );
+});
+
+test("instruction overlays must name a shipped overlay", async () => {
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const path = (await import("node:path")).default;
+  const { spawnSync } = await import("node:child_process");
+  const dir = mkdtempSync(path.join(tmpdir(), "registry-overlay-test-"));
+  try {
+    const registry = readRegistryDocument("config");
+    registry.models = [
+      { ...registry.models[0], instructionOverlay: "no-such-overlay" },
+      ...registry.models.slice(1),
+    ];
+    const registryPath = path.join(dir, "providers.json");
+    writeFileSync(registryPath, JSON.stringify(registry));
+    const result = spawnSync(
+      process.execPath,
+      ["-e", "import('./src/model-registry.mjs').catch((e)=>{console.error(e.message);process.exit(1);})"],
+      { encoding: "utf8", env: { ...process.env, MODEL_ROUTER_REGISTRY: registryPath } },
+    );
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /invalid instructionOverlay/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // The router's vision bridge is what gives a text-only model images, so the

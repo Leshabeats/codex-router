@@ -152,6 +152,19 @@ test("routed models rewrite GPT identity text to the external model name", () =>
   assert.equal(model.multi_agent_version, "v2");
 });
 
+test("routed models can opt into a concise execution overlay", () => {
+  const model = routedModel(template, {
+    ...grok,
+    instructionOverlay: "efficient-agentic",
+  });
+  const plain = routedModel(template, grok);
+
+  assert.match(model.base_instructions, /Routed execution discipline/);
+  assert.match(model.base_instructions, /without narrating each routine tool step/);
+  assert.match(model.model_messages.instructions_template, /Routed execution discipline/);
+  assert.doesNotMatch(plain.base_instructions, /Routed execution discipline/);
+});
+
 test("routed models are native v2 spawn-agent model overrides", () => {
   const model = routedModel(template, grok);
   assert.equal(model.visibility, "list");

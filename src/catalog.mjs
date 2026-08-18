@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 
 import { protectPrivateFile } from "./file-security.mjs";
 import { isManagedCallerBaseUrl } from "./caller-auth.mjs";
+import { applyInstructionOverlay } from "./instruction-overlays.mjs";
 import {
   ANNOUNCED_MODELS_PATH,
   CONFIG_PATH,
@@ -587,10 +588,19 @@ export function routedModel(template, model) {
     next.experimental_supported_tools = [...model.experimentalSupportedTools];
   }
   if (typeof next.base_instructions === "string") {
-    next.base_instructions = rewriteIdentity(next.base_instructions, model);
+    next.base_instructions = applyInstructionOverlay(
+      rewriteIdentity(next.base_instructions, model),
+      model.instructionOverlay,
+    );
   }
   if (next.model_messages) {
     next.model_messages = rewriteModelMessages(next.model_messages, model);
+    if (typeof next.model_messages?.instructions_template === "string") {
+      next.model_messages.instructions_template = applyInstructionOverlay(
+        next.model_messages.instructions_template,
+        model.instructionOverlay,
+      );
+    }
   }
   return next;
 }
