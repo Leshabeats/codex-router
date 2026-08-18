@@ -121,6 +121,7 @@ export const SKILL_OWNERSHIP_PATH = path.join(STATE_DIR, "managed-skills.json");
 export const MIGRATIONS_DIR = path.join(STATE_DIR, "migrations");
 export const SUPPORT_DIR = path.join(STATE_DIR, "support");
 export const LOG_PATH = path.join(STATE_DIR, "router.log");
+export const SERVICE_PROCESS_STATE_PATH = path.join(STATE_DIR, "service-process.json");
 export const BACKUP_PATH = path.join(CODEX_HOME, "config.toml.pre-codex-router");
 export const SERVICE_LABEL = "io.github.codex-router";
 export const LEGACY_SERVICE_LABEL = "io.github.kimi-codex-router";

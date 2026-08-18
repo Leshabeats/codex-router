@@ -23,6 +23,7 @@ import { spawnableCommand } from "./spawnable-command.mjs";
 import { ensureOllamaHeadless } from "./ollama-runtime.mjs";
 import { venvRuntimeProblem } from "./venv-runtime.mjs";
 import { dependencyRepairHint } from "./dependency-repair.mjs";
+import { clearServiceProcessState, writeServiceProcessState } from "./service-process.mjs";
 
 const dependencyFix = dependencyRepairHint();
 
@@ -348,7 +349,17 @@ async function main() {
 }
 
 let exitCode = 0;
+let serviceProcessRecorded = false;
 try {
+  // Task Scheduler can report its wscript host as stopped while the detached
+  // cmd/node descendants still own every router port. Record the verified
+  // start.mjs identity so the Windows service manager can terminate that tree
+  // before it launches a replacement. Other platforms keep their native
+  // supervisor semantics and do not need this marker.
+  if (process.platform === "win32") {
+    writeServiceProcessState();
+    serviceProcessRecorded = true;
+  }
   exitCode = await main();
 } catch (error) {
   if (!shuttingDown) {
@@ -359,5 +370,13 @@ try {
 } finally {
   stopChildren();
   await Promise.all(children.map((child) => waitForExit(child, "child")));
+  if (serviceProcessRecorded) {
+    try {
+      clearServiceProcessState();
+    } catch {
+      // A stale record is harmless after the root and its children are gone;
+      // the next Windows stop re-validates identity before it can signal one.
+    }
+  }
 }
 process.exit(exitCode);

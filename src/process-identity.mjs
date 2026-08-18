@@ -33,6 +33,41 @@ export function processStartIdentity(
   }
 }
 
+// Return the command line for a live process. A start time and executable are
+// enough to reject PID reuse, but they do not prove that a Node process belongs
+// to this checkout. The Windows service uses this extra identity before it
+// recursively terminates the router tree.
+export function processCommandLine(
+  pid,
+  { spawn = spawnSync, platform = process.platform } = {},
+) {
+  if (!Number.isSafeInteger(pid) || pid < 1) return undefined;
+  try {
+    if (platform === "win32") {
+      const scripts = [
+        `$p = Get-CimInstance Win32_Process -Filter \"ProcessId = ${pid}\" -ErrorAction Stop; [Console]::Out.Write($p.CommandLine)`,
+        `$p = Get-WmiObject Win32_Process -Filter \"ProcessId = ${pid}\" -ErrorAction Stop; [Console]::Out.Write($p.CommandLine)`,
+      ];
+      for (const script of scripts) {
+        const result = spawn(
+          "powershell.exe",
+          ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+          { encoding: "utf8", windowsHide: true },
+        );
+        const value = String(result.stdout || "").trim();
+        if (result.status === 0 && value) return value;
+      }
+      return undefined;
+    }
+    const result = spawn("ps", ["-p", String(pid), "-o", "args="], {
+      encoding: "utf8",
+    });
+    return result.status === 0 ? String(result.stdout || "").trim() || undefined : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // True when the recorded state still describes a live process this router
 // started. Everything that stops or signals a managed process goes through
 // this, so a server somebody else is running is never touched.

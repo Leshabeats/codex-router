@@ -16,6 +16,11 @@ import {
   STATE_DIR,
   TARGET,
 } from "./paths.mjs";
+import {
+  clearServiceProcessState,
+  readServiceProcessState,
+  serviceProcessOwns,
+} from "./service-process.mjs";
 
 const effectivePlatform = process.env.CODEX_ROUTER_SERVICE_PLATFORM || process.platform;
 const command = process.argv[2] || "status";
@@ -195,6 +200,12 @@ const TASK_STOP_POLL_MS = 250;
 // Every state query has to return for the deadline above to mean anything, so a
 // wedged PowerShell is capped rather than allowed to hang the install outright.
 const TASK_STATE_TIMEOUT_MS = 15_000;
+// Task Scheduler can report Ready before the detached cmd/node descendants
+// have gone away. Give the verified tree and its ports their own bounded wait
+// after task state changes, so restart never races the old listener.
+const SERVICE_TREE_STOP_TIMEOUT_MS = 15_000;
+const SERVICE_TREE_STOP_POLL_MS = 250;
+const SERVICE_TREE_COMMAND_TIMEOUT_MS = 2_000;
 
 function sleep(milliseconds) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
@@ -211,15 +222,86 @@ function waitForTaskToStop() {
   }
 }
 
+function servicePorts(state) {
+  const ports = state?.ports && typeof state.ports === "object" ? state.ports : PORTS;
+  return [...new Set(Object.values(ports).filter((port) => Number.isSafeInteger(port) && port > 0))];
+}
+
+// `taskkill /T /F` is the ownership boundary. This netstat check is only a
+// final readiness guard: if an unrelated process owns one of the configured
+// ports it is never killed, and restart waits until the normal readiness check
+// can report the conflict instead of claiming the old tree was stopped.
+function managedPortStillListening(state) {
+  try {
+    const output = execFileSync("netstat.exe", ["-ano", "-p", "tcp"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: SERVICE_TREE_COMMAND_TIMEOUT_MS,
+      windowsHide: true,
+    });
+    const ports = new Set(servicePorts(state).map((port) => `:${port}`));
+    return String(output)
+      .split(/\r?\n/)
+      .some((line) => {
+        const fields = line.trim().split(/\s+/);
+        const local = String(fields[1] || "");
+        const colon = local.lastIndexOf(":");
+        const suffix = colon >= 0 ? local.slice(colon) : local;
+        return fields[0] === "TCP" && fields[3] === "LISTENING" && ports.has(suffix);
+      });
+  } catch {
+    // A missing/blocked netstat cannot prove a listener is present. The
+    // identity-checked process tree is still terminated below, and the normal
+    // health probe remains the final readiness check.
+    return false;
+  }
+}
+
+function stopOwnedServiceTree() {
+  const state = readServiceProcessState();
+  if (!state || state.pid === process.pid || !serviceProcessOwns(state, { platform: effectivePlatform })) {
+    return;
+  }
+  try {
+    execFileSync("taskkill.exe", ["/PID", String(state.pid), "/T", "/F"], {
+      encoding: "utf8",
+      stdio: ["ignore", "ignore", "ignore"],
+      timeout: SERVICE_TREE_COMMAND_TIMEOUT_MS,
+      windowsHide: true,
+    });
+  } catch {
+    // A process that already exited is the desired state. If taskkill failed
+    // for another reason, the bounded wait below leaves the record intact so a
+    // later stop can try the same verified identity again.
+  }
+  const deadline = Date.now() + SERVICE_TREE_STOP_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const alive = serviceProcessOwns(state, { platform: effectivePlatform });
+    const listening = managedPortStillListening(state);
+    if (!alive && !listening) {
+      clearServiceProcessState();
+      return;
+    }
+    sleep(SERVICE_TREE_STOP_POLL_MS);
+  }
+  if (
+    !serviceProcessOwns(state, { platform: effectivePlatform }) &&
+    !managedPortStillListening(state)
+  ) {
+    clearServiceProcessState();
+  }
+}
+
 function endTask() {
   try {
     schtasks(["/End", "/TN", taskName], { quiet: true });
   } catch {
-    // The task may not exist, or may not be running; either way there is no
-    // instance left to wait for.
-    return;
+    // The task may not exist, or may not be running. An orphaned router root
+    // can still be recorded even in that case, so continue to the ownership
+    // cleanup rather than returning early.
   }
   waitForTaskToStop();
+  stopOwnedServiceTree();
 }
 
 // Only a task that still exists can be started. `Register-ScheduledTask -Force`
