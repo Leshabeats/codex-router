@@ -165,6 +165,33 @@ test("routed models can opt into a concise execution overlay", () => {
   assert.doesNotMatch(plain.base_instructions, /Routed execution discipline/);
 });
 
+test("efficient routed execution keeps persistent tool output bounded", () => {
+  const model = routedModel(template, { ...grok, instructionOverlay: "efficient-agentic" });
+  assert.match(model.base_instructions, /minimum sufficient tool output/i);
+  assert.match(model.base_instructions, /large file/i);
+  assert.match(model.base_instructions, /bounded sections/i);
+});
+
+test("efficient routed execution keeps secret-bearing CLI output out of history", () => {
+  const model = routedModel(template, { ...grok, instructionOverlay: "efficient-agentic" });
+  assert.match(model.base_instructions, /credentials/i);
+  assert.match(model.base_instructions, /capture.*output/i);
+  assert.match(model.base_instructions, /safe fields/i);
+});
+
+test("efficient routed execution preflights unfamiliar command and test APIs", () => {
+  const model = routedModel(template, { ...grok, instructionOverlay: "efficient-agentic" });
+  assert.match(model.base_instructions, /unfamiliar.*CLI.*test API/i);
+  assert.match(model.base_instructions, /help.*signatures.*documentation/i);
+});
+
+test("efficient routed execution avoids fragile Windows nested quoting", () => {
+  const model = routedModel(template, { ...grok, instructionOverlay: "efficient-agentic" });
+  assert.match(model.base_instructions, /Windows/i);
+  assert.match(model.base_instructions, /PowerShell.*SQL.*JSON/i);
+  assert.match(model.base_instructions, /here-string.*temporary script/i);
+});
+
 test("routed models are native v2 spawn-agent model overrides", () => {
   const model = routedModel(template, grok);
   assert.equal(model.visibility, "list");
