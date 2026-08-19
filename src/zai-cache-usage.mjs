@@ -2,14 +2,24 @@ import { Transform } from "node:stream";
 
 const LINE_FEED = 0x0a;
 
-// Z.ai reports cache reads in usage.prompt_tokens_details.cached_tokens. The
-// generic LiteLLM streaming bridge can lose that nested detail before its
-// Chat-Completions -> Responses conversion, while its Usage compatibility
-// layer explicitly recognizes prompt_cache_hit_tokens. Mirror only an
-// authoritative provider count; never infer a hit or turn missing data into 0.
+// Z.ai reports authoritative prompt/cache usage on the same terminal chunk as
+// finish_reason. LiteLLM 1.95/1.96 loses usage details on that choice-bearing
+// shape, but preserves the standard OpenAI usage-only terminal chunk. Normalize
+// the provider stream before it reaches LiteLLM and mirror cached_tokens into
+// the compatibility field LiteLLM already understands. Never infer usage.
 function cachedTokens(payload) {
   const value = payload?.usage?.prompt_tokens_details?.cached_tokens;
   return Number.isInteger(value) && value >= 0 ? value : undefined;
+}
+
+function usageObject(payload) {
+  return payload?.usage && typeof payload.usage === "object" && !Array.isArray(payload.usage)
+    ? payload.usage
+    : undefined;
+}
+
+function choiceBearingUsage(payload) {
+  return Array.isArray(payload?.choices) && payload.choices.length > 0 && usageObject(payload);
 }
 
 export class ZaiCacheUsageCompatTransform extends Transform {
@@ -53,10 +63,28 @@ export class ZaiCacheUsageCompatTransform extends Transform {
     } catch {
       return line;
     }
+
+    const usage = usageObject(payload);
+    if (usage === undefined) return line;
     const cached = cachedTokens(payload);
-    if (cached === undefined || payload?.usage?.prompt_cache_hit_tokens !== undefined) return line;
-    payload.usage.prompt_cache_hit_tokens = cached;
-    return Buffer.from(`data: ${JSON.stringify(payload)}${terminator}`, "utf8");
+    let changed = false;
+    if (cached !== undefined && usage.prompt_cache_hit_tokens === undefined) {
+      usage.prompt_cache_hit_tokens = cached;
+      changed = true;
+    }
+
+    if (!choiceBearingUsage(payload)) {
+      return changed ? Buffer.from(`data: ${JSON.stringify(payload)}${terminator}`, "utf8") : line;
+    }
+
+    const terminal = { ...payload };
+    delete terminal.usage;
+    const usageOnly = { ...payload, choices: [], usage };
+    const separator = terminator || "\n";
+    return Buffer.from(
+      `data: ${JSON.stringify(terminal)}${separator}${separator}data: ${JSON.stringify(usageOnly)}${terminator}`,
+      "utf8",
+    );
   }
 }
 

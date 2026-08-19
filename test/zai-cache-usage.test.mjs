@@ -39,3 +39,34 @@ test("non-usage and malformed SSE lines pass through byte-for-byte", async () =>
   const input = 'event: message\r\ndata: {not-json}\r\ndata: [DONE]\r\n';
   assert.equal(await transformed([input]), input);
 });
+
+
+test("Z.ai choice-bearing terminal usage is normalized to a usage-only chunk", async () => {
+  const terminal = {
+    id: "chatcmpl-cache",
+    model: "glm-5.3",
+    choices: [{ index: 0, delta: { content: "" }, finish_reason: "stop" }],
+    usage: {
+      prompt_tokens: 1200,
+      completion_tokens: 8,
+      total_tokens: 1208,
+      prompt_tokens_details: { cached_tokens: 800 },
+    },
+  };
+  const output = await transformed([
+    `data: ${JSON.stringify(terminal)}\n\ndata: [DONE]\n\n`,
+  ]);
+  const payloads = output
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("data: {") && line.includes('"id"'))
+    .map((line) => JSON.parse(line.slice(5).trim()));
+
+  assert.equal(payloads.length, 2);
+  assert.deepEqual(payloads[0].choices, terminal.choices);
+  assert.equal(payloads[0].usage, undefined);
+  assert.deepEqual(payloads[1].choices, []);
+  assert.equal(payloads[1].usage.prompt_tokens, 1200);
+  assert.equal(payloads[1].usage.completion_tokens, 8);
+  assert.equal(payloads[1].usage.prompt_tokens_details.cached_tokens, 800);
+  assert.equal(payloads[1].usage.prompt_cache_hit_tokens, 800);
+});

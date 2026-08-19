@@ -3350,7 +3350,7 @@ test("API forwarder routes GLM coding-plan models with thinking enabled", async 
   }
 });
 
-test("API forwarder preserves Z.ai cached-token telemetry across the LiteLLM bridge", async () => {
+test("API forwarder preserves Z.ai cached-token telemetry before the LiteLLM bridge", async () => {
   const upstream = await mockServer(async (request, response) => {
     await bodyJson(request);
     response.writeHead(200, { "Content-Type": "text/event-stream" });

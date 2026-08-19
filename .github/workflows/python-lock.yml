@@ -27,6 +27,9 @@ name: Python lock
       - "install.ps1"
       - "src/install-plan.mjs"
       - "scripts/verify-python-lock.py"
+      - "scripts/verify-zai-litellm-usage.mjs"
+      - "src/api-forwarder.mjs"
+      - "src/zai-cache-usage.mjs"
       - ".github/workflows/python-lock.yml"
   pull_request:
     paths:
@@ -36,6 +39,9 @@ name: Python lock
       - "install.ps1"
       - "src/install-plan.mjs"
       - "scripts/verify-python-lock.py"
+      - "scripts/verify-zai-litellm-usage.mjs"
+      - "src/api-forwarder.mjs"
+      - "src/zai-cache-usage.mjs"
       - ".github/workflows/python-lock.yml"
   # The lock is static but PyPI is not: a yanked file, or a pip that changes
   # how it selects one, breaks an unchanged lock. The paths filter above would
@@ -249,3 +255,13 @@ jobs:
             set -- "$@" --requirement "$requirement"
           done < declared-requirements.txt
           "$venv_python" scripts/verify-python-lock.py --venv .venv "$@"
+
+      - name: Verify Z.ai streaming usage survives LiteLLM
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = Windows ]; then
+            venv_python=.venv/Scripts/python.exe
+          else
+            venv_python=.venv/bin/python
+          fi
+          node scripts/verify-zai-litellm-usage.mjs "$venv_python"
