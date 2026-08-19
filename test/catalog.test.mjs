@@ -981,3 +981,30 @@ test("a bridged text-only model advertises image input, and only through the bri
   // Advertising image input is not a claim about detail handling.
   assert.equal(entry.supports_image_detail_original, false);
 });
+
+
+test("efficient routed execution closes a RED behavior area before switching", () => {
+  const model = routedModel(template, { ...grok, instructionOverlay: "efficient-agentic" });
+  assert.match(model.base_instructions, /RED.*suite.*green.*blocker/i);
+});
+
+test("efficient routed execution invalidates contradicted debugging hypotheses", () => {
+  const model = routedModel(template, { ...grok, instructionOverlay: "efficient-agentic" });
+  assert.match(model.base_instructions, /runtime evidence.*contradict.*hypothesis/i);
+  assert.match(model.base_instructions, /re-?trace.*production.*call path/i);
+});
+
+test("efficient routed execution stops patching after two failed hypotheses", () => {
+  const model = routedModel(template, { ...grok, instructionOverlay: "efficient-agentic" });
+  assert.match(model.base_instructions, /two.*failed hypotheses.*production call path/i);
+});
+
+test("efficient routed execution bounds large reads and defers future-stage research", () => {
+  const model = routedModel(template, { ...grok, instructionOverlay: "efficient-agentic" });
+  assert.match(model.base_instructions, /32 KiB|400 lines/i);
+  assert.match(model.base_instructions, /defer.*research.*stage.*consume/i);
+});
+test("efficient routed execution grounds unfamiliar fixtures in canonical contracts", () => {
+  const model = routedModel(template, { ...grok, instructionOverlay: "efficient-agentic" });
+  assert.match(model.base_instructions, /fixture.*canonical.*schema.*type.*known-good/i);
+});
