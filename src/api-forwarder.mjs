@@ -254,8 +254,10 @@ function ensureToolResultsForCalls(messages) {
 // place of a real reasoning signature to skip thought-signature validation.
 const GEMINI_THOUGHT_SIGNATURE_SENTINEL = "skip_thought_signature_validator";
 
-function isGeminiProvider(provider) {
-  return provider?.id === "gemini-api" || provider?.ownedBy === "google";
+function isGeminiProvider(provider, model) {
+  if (provider?.id === "gemini-api" || provider?.ownedBy === "google") return true;
+  const target = String(model?.upstreamModel || model?.gatewayModel || model?.model || "").toLowerCase();
+  return target.includes("gemini");
 }
 
 // Both Command Code entries -- the chat-completions catalog and the Messages
@@ -335,10 +337,10 @@ function trimTrailingModelTurns(messages) {
   return trimmed;
 }
 
-function sanitizeChatToolHistory(messages, provider) {
+function sanitizeChatToolHistory(messages, provider, model) {
   if (!Array.isArray(messages)) return messages;
   const repaired = ensureToolResultsForCalls(coalesceAssistantMessages(messages));
-  if (isGeminiProvider(provider)) {
+  if (isGeminiProvider(provider, model)) {
     const geminiClean = ensureGeminiThoughtSignatures(sanitizeGeminiImageContent(repaired));
     return trimTrailingModelTurns(geminiClean);
   }
@@ -532,7 +534,7 @@ function normalizeBody(buffer, contentType, route) {
     payload.tools = stripSearchContentTypes(payload.tools);
   }
   if (Array.isArray(payload.messages)) {
-    payload.messages = sanitizeChatToolHistory(payload.messages, provider);
+    payload.messages = sanitizeChatToolHistory(payload.messages, provider, model);
   }
   if (provider.authProfile === "github-copilot") {
     // This is native ChatGPT account metadata, not an upstream scheduling
