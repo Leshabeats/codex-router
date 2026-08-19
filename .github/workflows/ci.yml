@@ -211,7 +211,7 @@ jobs:
           set -euo pipefail
           app="./release/linux-unpacked/codex-router-control-center"
           log="${RUNNER_TEMP}/control-center-linux.log"
-          "$app" >"$log" 2>&1 &
+          "$app" --no-sandbox >"$log" 2>&1 &
           pid=$!
           trap 'kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
           sleep 8
