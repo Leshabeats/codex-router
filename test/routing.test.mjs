@@ -3350,6 +3350,61 @@ test("API forwarder routes GLM coding-plan models with thinking enabled", async 
   }
 });
 
+test("API forwarder preserves Z.ai cached-token telemetry across the LiteLLM bridge", async () => {
+  const upstream = await mockServer(async (request, response) => {
+    await bodyJson(request);
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    response.end(
+      `data: ${JSON.stringify({
+        id: "chatcmpl-cache",
+        choices: [{ index: 0, delta: { content: "ok" }, finish_reason: "stop" }],
+        usage: {
+          prompt_tokens: 1200,
+          completion_tokens: 8,
+          total_tokens: 1208,
+          prompt_tokens_details: { cached_tokens: 800 },
+        },
+      })}\n\ndata: [DONE]\n\n`,
+    );
+  });
+  const forwarderPort = await openPort();
+  const forwarder = run("api-forwarder.mjs", {
+    CODEX_ROUTER_API_PORT: String(forwarderPort),
+    ZAI_CODING_BASE_URL: `http://127.0.0.1:${upstream.port}`,
+    ZAI_API_KEY: "TEST_ZAI_API_KEY",
+    CODEX_ROUTER_QUIET: "1",
+  });
+
+  try {
+    await waitFor(`http://127.0.0.1:${forwarderPort}/health`, forwarder, {
+      Authorization: `Bearer ${INTERNAL_KEY}`,
+    });
+    const response = await fetch(`http://127.0.0.1:${forwarderPort}/v1/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${INTERNAL_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "zai-coding-glm-5-3",
+        stream: true,
+        messages: [{ role: "user", content: "test" }],
+      }),
+    });
+    assert.equal(response.status, 200);
+    const data = (await response.text())
+      .split(/\r?\n/)
+      .find((line) => line.startsWith("data: {") && line.includes('"usage"'));
+    assert.ok(data);
+    const chunk = JSON.parse(data.slice(5).trim());
+    assert.equal(chunk.usage.prompt_tokens_details.cached_tokens, 800);
+    assert.equal(chunk.usage.prompt_cache_hit_tokens, 800);
+  } finally {
+    await stopChild(forwarder);
+    await closeServer(upstream.server);
+  }
+});
+
 test("API forwarder bills the Z.ai platform on its own endpoint and key", async () => {
   const upstreamRequests = [];
   const upstream = await mockServer(async (request, response) => {

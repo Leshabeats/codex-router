@@ -42,6 +42,7 @@ import {
 import { relayCommandCodeGenerate } from "./commandcode-relay.mjs";
 import { VERSION } from "./version.mjs";
 import { installStableFetchTransport } from "./fetch-transport.mjs";
+import { zaiCacheUsageTransform } from "./zai-cache-usage.mjs";
 
 installStableFetchTransport();
 
@@ -1022,7 +1023,12 @@ async function handleRequest(request, response) {
   if (commandCode?.recheck && upstream.ok) {
     recordCommandCodeRoute(commandCode.id, credential.value, { providerApi: true });
   }
-  await pipeResponse(upstream, response);
+  await pipeResponse(
+    upstream,
+    response,
+    undefined,
+    zaiCacheUsageTransform(normalized.provider.id, upstream.headers.get("content-type")),
+  );
   recordUpstreamLimits(normalized, upstream);
   if (!QUIET) {
     console.error(
