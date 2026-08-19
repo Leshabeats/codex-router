@@ -1982,6 +1982,19 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
   // entirely. Merge each reasoning run into the assistant message of the turn
   // it belongs to so the translation carries it there.
   carryReasoningThroughInput(input);
+
+  // Gemini / strict providers reject requests ending with a model turn.
+  // Pop trailing assistant messages, reasoning, or trailing subagent outputs from input.
+  if (route.gatewayModel.includes("gemini") || route.upstreamModel?.includes("gemini")) {
+    while (
+      input.length > 0 &&
+      (input[input.length - 1]?.role === "assistant" ||
+       input[input.length - 1]?.type === "reasoning" ||
+       (input[input.length - 1]?.type === "message" && input[input.length - 1]?.role === "assistant"))
+    ) {
+      input.pop();
+    }
+  }
   const provider = providerForModel(route);
   const chatCompletionsProvider = provider?.protocol !== "openai-responses";
   let tools = payload.tools;
