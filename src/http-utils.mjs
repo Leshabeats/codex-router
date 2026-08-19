@@ -4,6 +4,177 @@ import { pipeline } from "node:stream/promises";
 import { secretEqual } from "./caller-auth.mjs";
 import { TARGET } from "./paths.mjs";
 
+// Some Responses -> Chat Completions bridges (LiteLLM's, notably) emit one
+// assistant message per Responses item, so a stored turn of
+// `function_call`, assistant commentary `message`, `function_call_output`
+// arrives here as `assistant(tool_calls)`, `assistant(text)`, `tool`.
+// Strict chat-completions providers (Kimi K3 among them) reject that: a
+// message carrying tool_calls must be followed immediately by its tool
+// messages. Folding alone is not enough when the calling message holds
+// several tool_calls whose results are split by another calling message --
+// which the router's own subagent closer produces when it splices an
+// interrupt_agent call into the model's wait_agent message. In that shape
+// the first results answer only the leading calls; the trailing calls must
+// move down next to their own results. This pass does both: fold intervening
+// assistant text into the calling message, then re-seat any tool_calls whose
+// results are not adjacent. Messages are only ever split or merged, never
+// reordered, so the conversation's reading order is preserved.
+export function foldInterveningAssistantMessages(messages) {
+  if (!Array.isArray(messages)) return;
+  // Pass 1: merge assistant text that sits between a calling message and its
+  // results into the calling message.
+  for (let index = 0; index < messages.length; index += 1) {
+    const callingMessage = messages[index];
+    const callIds = new Set(
+      Array.isArray(callingMessage?.tool_calls)
+        ? callingMessage.tool_calls.map((call) => call?.id).filter(Boolean)
+        : [],
+    );
+    if (callingMessage?.role !== "assistant" || callIds.size === 0) continue;
+    let cursor = index + 1;
+    const intervening = [];
+    while (
+      messages[cursor]?.role === "assistant" &&
+      !Array.isArray(messages[cursor]?.tool_calls)
+    ) {
+      intervening.push(messages[cursor]);
+      cursor += 1;
+    }
+    if (intervening.length === 0) continue;
+    const followingIds = new Set();
+    while (messages[cursor]?.role === "tool") {
+      if (messages[cursor]?.tool_call_id) followingIds.add(messages[cursor].tool_call_id);
+      cursor += 1;
+    }
+    if (![...callIds].every((id) => followingIds.has(id))) continue;
+    const text = [callingMessage, ...intervening]
+      .flatMap((message) => {
+        if (typeof message.content === "string") return [message.content];
+        if (!Array.isArray(message.content)) return [];
+        return message.content
+          .filter((part) => part?.type === "text" && typeof part.text === "string")
+          .map((part) => part.text);
+      })
+      .filter((value) => value.trim());
+    if (text.length) callingMessage.content = text.join("\n");
+    messages.splice(index + 1, intervening.length);
+  }
+  // Pass 2: re-seat tool_calls whose results are not immediately after their
+  // message. Each contiguous run of tool messages is claimed by the nearest
+  // preceding calling message; calls a run cannot answer move to a new
+  // assistant message inserted directly in front of their own results.
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (message?.role !== "assistant" || !Array.isArray(message.tool_calls)) {
+      continue;
+    }
+    // The tool run directly after this message is only answerable by this
+    // message when no other calling message sits in between. If one does,
+    // the run belongs to that nearer message and every call here is an
+    // orphan to be re-seated.
+    const next = messages[index + 1];
+    const nearerCaller =
+      next?.role === "assistant" && Array.isArray(next.tool_calls) && next.tool_calls.length > 0;
+    const runIds = new Set();
+    if (!nearerCaller) {
+      let cursor = index + 1;
+      while (messages[cursor]?.role === "tool") {
+        if (messages[cursor].tool_call_id) runIds.add(messages[cursor].tool_call_id);
+        cursor += 1;
+      }
+    }
+    const keep = [];
+    const orphans = [];
+    for (const call of message.tool_calls) {
+      // A call with no usable id can never be paired with a result, so it must
+      // never be treated as an orphan: `undefined === undefined` would match
+      // any tool message that also lacks a tool_call_id, the call would be
+      // "re-seated" in front of it, and the very next turn of the outer loop
+      // would find the same unmatched call again -- splicing forever and
+      // growing the array without bound. Leave such calls where they are.
+      if (!call?.id) {
+        keep.push(call);
+        continue;
+      }
+      (runIds.has(call.id) ? keep : orphans).push(call);
+    }
+    if (orphans.length === 0) continue;
+    // A later calling message owns the intervening results, so each orphan's
+    // results live further down. Split the message: the leading calls stay,
+    // the orphans move to a new message directly in front of their results.
+    const reseatable = [];
+    for (const orphan of orphans) {
+      const resultIndex = messages.findIndex(
+        (candidate, at) =>
+          at > index &&
+          candidate?.role === "tool" &&
+          // Require a usable id on the result too, so a tool message missing
+          // its tool_call_id can never be claimed by an unrelated call.
+          Boolean(candidate.tool_call_id) &&
+          candidate.tool_call_id === orphan.id,
+      );
+      if (resultIndex === -1) {
+        // No result anywhere: leave the call in place. Dropping it would
+        // rewrite history the provider may legitimately answer.
+        keep.push(orphan);
+      } else {
+        reseatable.push({ orphan, resultIndex });
+      }
+    }
+    if (reseatable.length === 0) continue;
+    // When every call moved away, the key must go rather than hold an empty
+    // array: strict providers reject `tool_calls: []` exactly as they reject a
+    // call with no adjacent result, so leaving it turns one malformed payload
+    // into another. Without the key the message is a plain assistant turn.
+    if (keep.length) {
+      message.tool_calls = keep;
+    } else {
+      delete message.tool_calls;
+    }
+    // Insert from the bottom up so earlier result indexes stay valid.
+    reseatable.sort((a, b) => b.resultIndex - a.resultIndex);
+    for (const { orphan, resultIndex } of reseatable) {
+      messages.splice(resultIndex, 0, {
+        role: "assistant",
+        content: null,
+        tool_calls: [orphan],
+      });
+    }
+    // Dropping the key can leave a husk: a bridged `function_call` item
+    // carries no text, so a message whose every call moved away becomes
+    // `{role:"assistant",content:null}` -- no content and no calls, which
+    // several strict providers reject as an empty message. It says nothing
+    // the conversation needs, so remove it. The insertions above all landed
+    // after `index`, so the husk is still sitting at `index`; step the cursor
+    // back one so the loop does not skip whatever slides into its place.
+    if (isEmptyAssistantHusk(message)) {
+      messages.splice(index, 1);
+      index -= 1;
+    }
+  }
+}
+
+// hasUsableContent() — true when a message still carries something worth
+// sending: any non-blank string, or any structured content part at all
+// (an image part has no text but must not be discarded).
+function hasUsableContent(message) {
+  const { content } = message;
+  if (typeof content === "string") return content.trim().length > 0;
+  if (Array.isArray(content)) return content.length > 0;
+  return content !== null && content !== undefined;
+}
+
+// isEmptyAssistantHusk() — true for an assistant message left with no content,
+// no tool_calls, and no other field a provider might act on. The extra-key
+// check keeps messages carrying `name`, `refusal`, `reasoning_content` and
+// similar, so this never silently drops data it does not understand.
+function isEmptyAssistantHusk(message) {
+  if (message?.role !== "assistant") return false;
+  if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) return false;
+  if (hasUsableContent(message)) return false;
+  return Object.keys(message).every((key) => key === "role" || key === "content");
+}
+
 export const MAX_BODY_BYTES = Number(
   process.env.MODEL_ROUTER_MAX_BODY_BYTES ||
     (TARGET === "codex"
