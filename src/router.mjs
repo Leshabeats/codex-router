@@ -1990,6 +1990,8 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
       input.length > 0 &&
       (input[input.length - 1]?.role === "assistant" ||
        input[input.length - 1]?.type === "reasoning" ||
+       input[input.length - 1]?.type === "function_call" ||
+       input[input.length - 1]?.type === "custom_tool_call" ||
        (input[input.length - 1]?.type === "message" && input[input.length - 1]?.role === "assistant"))
     ) {
       input.pop();
