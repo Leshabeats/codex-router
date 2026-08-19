@@ -153,6 +153,13 @@ test("completed local downloads disappear when the model is no longer installed"
   );
   const active = { tag: "gemma4:12b", status: "downloading", percent: 42 };
   assert.deepEqual(visibleLocalDownload({ models: [], download: active }), active);
+  assert.equal(
+    visibleLocalDownload({
+      models: [],
+      download: { tag: "gemma4:12b", status: "cancelled", detail: "Download cancelled" },
+    }),
+    null,
+  );
 });
 
 test("active model speed prefers its provider and matches qualified slugs", () => {

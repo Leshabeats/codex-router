@@ -532,6 +532,11 @@ export function localModelsSnapshot({
   }
   for (const family of families.values()) family.variants.sort();
   let download = readLocalDownload();
+  // Cancellation leaves a tombstone in the protected state file
+  // so a worker that is still unwinding cannot resurrect its progress. It is
+  // not an operation anymore, though: every client should clear its status
+  // card as soon as the cancel command succeeds.
+  if (download?.status === "cancelled") download = null;
   // Older uninstall workers recorded an error when Ollama had already
   // removed the weights but the optional Codex catalog refresh failed.  The
   // inventory is authoritative here: do not keep showing a red "removal

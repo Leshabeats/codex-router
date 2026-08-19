@@ -2,15 +2,101 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { removeLocalModel } from "./local-models.mjs";
+import {
+  isLocalModelEnabled,
+  LOCAL_MODELS_STATE_PATH,
+  setLocalModelEnabled,
+} from "./local-models.mjs";
 import {
   readLocalDownload,
   writeLocalDownload,
 } from "./local-download.mjs";
 import { normalizeLocalModelTag } from "./local-model-ref.mjs";
+import { ollamaCommand } from "./ollama-runtime.mjs";
+import {
+  aggregateRollbackError,
+  applyModelOverlayPublication,
+  captureModelOverlayFiles,
+  restoreModelOverlayFiles,
+  restorePublishedModelOverlay,
+  transactModelOverlayMutation,
+} from "./model-overlay-publication.mjs";
+import { PROVIDER_SELECTION_PATH } from "./paths.mjs";
+import { USER_MODELS_PATH } from "./user-models.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
 const REPO_ROOT = path.resolve(path.dirname(SELF), "..");
+
+export function removeLocalModelFromDisk(
+  tag,
+  {
+    spawn = spawnSync,
+    command = ollamaCommand() || "ollama",
+  } = {},
+) {
+  const result = spawn(command, ["rm", tag], { encoding: "utf8" });
+  if (result?.error) throw result.error;
+  if (result?.status !== 0) {
+    const detail = String(result?.stderr || "").trim();
+    throw new Error(`\`ollama rm ${tag}\` failed${detail ? `: ${detail}` : "."}`);
+  }
+  return tag;
+}
+
+export async function uninstallLocalModelTransaction(
+  tag,
+  {
+    enabled = isLocalModelEnabled,
+    disable = (model) => setLocalModelEnabled(model, false),
+    remove = removeLocalModelFromDisk,
+    capture = () => captureModelOverlayFiles([
+      LOCAL_MODELS_STATE_PATH,
+      USER_MODELS_PATH,
+      PROVIDER_SELECTION_PATH,
+    ]),
+    restoreFiles = restoreModelOverlayFiles,
+    applyPublication = applyModelOverlayPublication,
+    restartService,
+    cancelled = () => false,
+  } = {},
+) {
+  const wasEnabled = enabled(tag);
+  const snapshots = capture();
+  const restore = () => restoreFiles(snapshots);
+  await transactModelOverlayMutation({
+    mutate: () => disable(tag),
+    restore,
+    restart: wasEnabled,
+    applyPublication,
+    restartService,
+  });
+  if (cancelled()) {
+    await restorePublishedModelOverlay({
+      restore,
+      restart: wasEnabled,
+      applyPublication,
+      restartService,
+    });
+    return { cancelled: true, removed: false, wasEnabled };
+  }
+
+  try {
+    remove(tag);
+  } catch (operationError) {
+    try {
+      await restorePublishedModelOverlay({
+        restore,
+        restart: wasEnabled,
+        applyPublication,
+        restartService,
+      });
+    } catch (rollbackError) {
+      throw aggregateRollbackError(operationError, rollbackError);
+    }
+    throw operationError;
+  }
+  return { cancelled: false, removed: true, wasEnabled };
+}
 
 async function main() {
   const tag = normalizeLocalModelTag(process.argv[2]);
@@ -23,7 +109,7 @@ async function main() {
     kind: "uninstall",
     tag,
     status: "uninstalling",
-    detail: "Removing model from Ollama",
+    detail: "Withdrawing model route before removal",
     percent: 0,
     startedAt,
     updatedAt: startedAt,
@@ -32,8 +118,10 @@ async function main() {
   });
 
   try {
-    removeLocalModel(tag, { confirmed: true });
-    if (readLocalDownload()?.status === "cancelled") return;
+    const removal = await uninstallLocalModelTransaction(tag, {
+      cancelled: () => readLocalDownload()?.status === "cancelled",
+    });
+    if (removal.cancelled) return;
 
     const finalized = spawnSync(
       process.execPath,
@@ -77,13 +165,12 @@ async function main() {
       startedAt,
       updatedAt: Date.now(),
       controllerPid: null,
-      workerPid: process.pid,
+      workerPid: null,
       ...(catalogError ? { catalogError } : {}),
       ...(restartError ? { restartError } : {}),
       error: undefined,
     });
   } catch (error) {
-    if (readLocalDownload()?.status === "cancelled") return;
     writeLocalDownload({
       ...readLocalDownload(),
       version: 1,

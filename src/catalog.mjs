@@ -46,6 +46,7 @@ import {
   readNativeCatalogSource,
 } from "./native-catalog-source.mjs";
 import { discoveryDisabled } from "./discovery-mode.mjs";
+import { withCatalogPublicationLock } from "./catalog-publication-lock.mjs";
 
 const refresh = process.argv.includes("--refresh-native");
 
@@ -930,7 +931,10 @@ function main() {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    main();
+    // The lock begins before the first ownership or mutable-state read and is
+    // released only after probes and the coupled catalog-file transaction are
+    // complete. Every app/CLI/autonomous caller executes this same entrypoint.
+    await withCatalogPublicationLock(main);
   } catch (error) {
     // Ownership conflicts are an operator mistake with a specific remedy, so
     // print the guidance rather than a stack trace.

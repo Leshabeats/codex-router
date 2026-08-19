@@ -23,8 +23,10 @@ The tray shows a persistent status card immediately—checking fit, preparing
 Ollama, pulling layers, and then ready or failed—so a long download never looks
 like a dead click.
 While a pull or removal is active, that card includes **Cancel**. Cancellation
-stops the exact detached worker (including its child process on Windows), keeps
-the cancelled result visible, and leaves the model in its last completed state.
+stops the exact detached worker (including its child process on Windows), clears
+the operation card, and leaves the model in its last completed state. The
+router keeps a private cancellation marker so a worker that is still unwinding
+cannot resurrect its progress.
 Repeated clicks or concurrent commands reuse the existing operation; they do
 not start a second Ollama pull or removal.
 
@@ -119,4 +121,3 @@ Checking a model uses one canonical tag. `devstral` and `devstral:latest` are
 the same weights, so checking or unchecking through either spelling affects the
 same entry, and selection files written by older versions are normalized on the
 next write.
-

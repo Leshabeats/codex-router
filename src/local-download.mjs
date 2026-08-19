@@ -14,11 +14,18 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { protectPrivateFile, writePrivateJson } from "./file-security.mjs";
-import { STATE_DIR } from "./paths.mjs";
+import {
+  applyModelOverlayPublication,
+  captureModelOverlayFiles,
+  restoreModelOverlayFiles,
+  transactModelOverlayMutation,
+} from "./model-overlay-publication.mjs";
+import { PROVIDER_SELECTION_PATH, STATE_DIR } from "./paths.mjs";
 import { ensureOllamaHeadless } from "./ollama-runtime.mjs";
 import { canonicalLocalModelTag, normalizeLocalModelTag } from "./local-model-ref.mjs";
 import { streamOllamaPull } from "./vision-download.mjs";
 import { DEFAULT_LOCAL_VISION_BASE_URL } from "./vision-bridge.mjs";
+import { USER_MODELS_PATH } from "./user-models.mjs";
 
 export const LOCAL_DOWNLOAD_STATE_PATH =
   process.env.MODEL_ROUTER_LOCAL_DOWNLOAD_STATE ||
@@ -252,6 +259,7 @@ export async function downloadLocalModel(
     },
     capabilitiesFor,
     refreshCatalog = true,
+    finalizePublication = applyModelOverlayPublication,
     restartService = async () => {
       const { restartRouterServiceIfInstalled } = await import("./router-restart.mjs");
       return restartRouterServiceIfInstalled();
@@ -321,53 +329,72 @@ export async function downloadLocalModel(
       ? capabilitiesFor(tag)
       : (await import("./local-models.mjs")).localModelCapabilities(tag);
     const canChat = capabilities.includes("tools");
-    const { readLocalModelSelection } = await import("./local-models.mjs");
+    const { LOCAL_MODELS_STATE_PATH, readLocalModelSelection } = await import(
+      "./local-models.mjs"
+    );
     const wasEnabled = readLocalModelSelection().enabled.includes(tag);
-    let adoptedVision = false;
-    if (canChat) await enable(tag);
+    const visionState = await import("./vision-bridge-state.mjs");
+    let shouldAdoptVision = false;
     if (!canChat && capabilities.includes("vision")) {
       // A vision-only tag is still useful in the same Local LLM surface. It
       // becomes the first local reader only when no reader is already pinned;
       // downloading never silently replaces a measured engine.
-      const {
-        readVisionBridgeSettings,
-        setVisionBridgeEnabled,
-        setVisionBridgeLocal,
-        visionBridgeConfigured,
-      } = await import("./vision-bridge-state.mjs");
-      const settings = readVisionBridgeSettings();
+      const settings = visionState.readVisionBridgeSettings();
       // A missing state file is the default-on case. Once an operator has
       // explicitly turned the bridge off, a model download must never turn it
       // back on behind their back. An explicitly enabled bridge with no
       // engine is still safe to adopt for the first local reader.
-      adoptedVision = !visionBridgeConfigured() || (settings.enabled === true && !settings.engine);
-      if (adoptedVision) {
-        setVisionBridgeLocal({ model: tag });
-        setVisionBridgeEnabled(true);
-      }
+      shouldAdoptVision = !visionState.visionBridgeConfigured() ||
+        (settings.enabled === true && !settings.engine);
     }
+    const snapshots = captureModelOverlayFiles([
+      LOCAL_MODELS_STATE_PATH,
+      USER_MODELS_PATH,
+      PROVIDER_SELECTION_PATH,
+      visionState.VISION_BRIDGE_STATE_PATH,
+    ]);
+    const restore = () => restoreModelOverlayFiles(snapshots);
+    const activate = async () => {
+      if (canChat) await enable(tag);
+      if (shouldAdoptVision) {
+        visionState.setVisionBridgeLocal({ model: tag });
+        visionState.setVisionBridgeEnabled(true);
+      }
+    };
     let catalogError;
+    let restartError;
+    let activationRolledBack = false;
+    let adoptedVision = false;
+    const restart = canChat && !wasEnabled;
     if (refreshCatalog) {
       try {
-        const { spawnSync } = await import("node:child_process");
-        const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-        const result = spawnSync(process.execPath, [path.join(repoRoot, "src", "catalog.mjs")], {
-          cwd: repoRoot,
-          env: { ...process.env, MODEL_ROUTER_TARGET: "codex" },
-          stdio: "ignore",
-          windowsHide: true,
+        const publication = await transactModelOverlayMutation({
+          mutate: activate,
+          restore,
+          restart,
+          warningOnly: true,
+          applyPublication: finalizePublication,
+          restartService,
         });
-        if (result.status !== 0) catalogError = "The model was downloaded, but the Codex catalog needs a refresh.";
-      } catch {
-        catalogError = "The model was downloaded, but the Codex catalog needs a refresh.";
-      }
-    }
-    let restartError;
-    if (canChat && !wasEnabled) {
-      try {
-        await restartService();
+        adoptedVision = shouldAdoptVision;
+        catalogError = publication?.catalogError;
+        restartError = publication?.restartError;
       } catch (error) {
-        restartError = error instanceof Error ? error.message : String(error);
+        catalogError = error instanceof Error ? error.message : String(error);
+        activationRolledBack = true;
+      }
+    } else {
+      // Kept for focused callers that deliberately suppress publication while
+      // exercising the worker. Production completion always takes the branch
+      // above, where publication precedes this same restart.
+      await activate();
+      adoptedVision = shouldAdoptVision;
+      if (restart) {
+        try {
+          await restartService();
+        } catch (error) {
+          restartError = error instanceof Error ? error.message : String(error);
+        }
       }
     }
     if (cancelled()) return { tag, status: "cancelled", cancelled: true };
@@ -376,7 +403,9 @@ export async function downloadLocalModel(
       kind: "download",
       tag,
       status: "done",
-      detail: catalogError
+      detail: activationRolledBack
+        ? "downloaded · activation rolled back"
+        : catalogError
         ? "ready · catalog refresh needed"
         : restartError
           ? "ready · router restart needed"
@@ -391,11 +420,21 @@ export async function downloadLocalModel(
       workerPid: process.pid,
       ...(catalogError ? { catalogError } : {}),
       ...(restartError ? { restartError } : {}),
+      ...(activationRolledBack ? { activationRolledBack: true } : {}),
       capabilities,
       canChat,
       adoptedVision,
     });
-    return { tag, status: "done", catalogError, restartError, capabilities, canChat, adoptedVision };
+    return {
+      tag,
+      status: "done",
+      catalogError,
+      restartError,
+      activationRolledBack,
+      capabilities,
+      canChat,
+      adoptedVision,
+    };
   } catch (error) {
     if (cancelled()) return { tag, status: "cancelled", cancelled: true };
     const message = error instanceof Error ? error.message : String(error);

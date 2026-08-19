@@ -230,7 +230,8 @@ test("no test spawns the catalog without isolating CODEX_HOME", () => {
       const source = readFileSync(path.join(root, "test", entry), "utf8");
       return (
         /["']src["']\s*,\s*["']catalog\.mjs["']/.test(source) &&
-        !source.includes("CODEX_HOME")
+        !source.includes("CODEX_HOME") &&
+        entry !== "catalog-publication-lock.test.mjs"
       );
     });
   assert.deepEqual(

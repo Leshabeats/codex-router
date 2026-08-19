@@ -5,15 +5,26 @@ import { fileURLToPath } from "node:url";
 
 import { pickerCommandArgs } from "./control-args.mjs";
 import { promoteNativeMultiAgent } from "./catalog.mjs";
+import {
+  applyModelOverlayPublication,
+  captureModelOverlayFiles,
+  restoreModelOverlayFiles,
+  transactModelOverlayMutation,
+} from "./model-overlay-publication.mjs";
 import { withNativeContextVariants } from "./native-context-variants.mjs";
 // The publish marker lives under the shared state directory, which does not
 // vary by target, so reading it here does not disturb the per-target probes
 // below that re-import paths with their own MODEL_ROUTER_TARGET.
-import { DSH_CATALOG_PATH, GEMINI_CATALOG_PATH } from "./paths.mjs";
+import {
+  DSH_CATALOG_PATH,
+  GEMINI_CATALOG_PATH,
+  PROVIDER_SELECTION_PATH,
+} from "./paths.mjs";
 // Same reasoning: presence is a property of the shared plane, not of a target,
 // so the overview can resolve it statically without perturbing those probes.
 import { presenceSnapshot } from "./presence-state.mjs";
 import { harnessSnapshotWithWeb } from "./dsh-install.mjs";
+import { USER_MODELS_PATH } from "./user-models.mjs";
 
 // Cross-target control plane for a tray/UI (e.g. the planned pane fork). It
 // reads which registry models are enabled per target and toggles them. Toggling
@@ -768,21 +779,7 @@ function runDoctor(args) {
   process.stdout.write(`${JSON.stringify({ ok: true })}\n`);
 }
 
-function refreshModelSettingsCatalog({ routes = false } = {}) {
-  // The catalog decides what Codex offers; the gateway config decides what it
-  // can route. A change that adds or removes models has to write both, or the
-  // picker advertises a model whose request has nowhere to go -- the exact
-  // drift doctor's "Catalog matches gateway routes" check exists to catch.
-  if (routes) {
-    const rendered = spawnSync(
-      process.execPath,
-      ["-e", "import('./src/litellm-config.mjs').then((m) => m.writeLiteLlmConfig())"],
-      { cwd: REPO_ROOT, env: { ...process.env, MODEL_ROUTER_TARGET: "codex" }, stdio: "ignore" },
-    );
-    if (rendered.status !== 0) {
-      throw new Error("The gateway routing config could not be refreshed.");
-    }
-  }
+function refreshModelSettingsCatalog() {
   const result = spawnSync(
     process.execPath,
     [path.join(REPO_ROOT, "src", "catalog.mjs")],
@@ -812,18 +809,19 @@ async function restartRouterForLocalRoutes() {
 }
 
 async function finalizeLocalModelPublication() {
-  const warnings = {};
-  try {
-    refreshModelSettingsCatalog({ routes: true });
-  } catch (error) {
-    warnings.catalogError = error instanceof Error ? error.message : String(error);
-  }
-  try {
-    await restartRouterForLocalRoutes();
-  } catch (error) {
-    warnings.restartError = error instanceof Error ? error.message : String(error);
-  }
-  return warnings;
+  return applyModelOverlayPublication({
+    warningOnly: true,
+    restart: true,
+    restartService: restartRouterForLocalRoutes,
+  });
+}
+
+function modelOverlayRollback(files) {
+  const snapshots = captureModelOverlayFiles(files);
+  return {
+    snapshots,
+    restore: () => restoreModelOverlayFiles(snapshots),
+  };
 }
 
 // What this model says it supports, read from the merged catalog Codex reads
@@ -1204,6 +1202,7 @@ async function handleVisionBridge(action, value, extra) {
     setVisionBridgeEngine,
     setVisionBridgeLocal,
     visionBridgeSnapshot,
+    VISION_BRIDGE_STATE_PATH,
     VISION_EFFORT_LEVELS,
   } = await import("./vision-bridge-state.mjs");
   const {
@@ -1272,35 +1271,63 @@ async function handleVisionBridge(action, value, extra) {
     if (!ollamaAvailable()) {
       throw new Error(`Ollama is not installed. ${ollamaInstallMessage()}`);
     }
-    const { readVisionDownload, writeVisionDownload } = await import(
-      "./vision-download.mjs"
-    );
-    const active = readVisionDownload();
-    if (active?.status === "downloading" && active.tag !== tag) {
-      throw new Error(`${active.tag} is already downloading (${active.percent || 0}%).`);
+    const {
+      activeVisionDownloadResult,
+      claimVisionDownloadStart,
+      readVisionDownload,
+      writeVisionDownload,
+    } = await import("./vision-download.mjs");
+    const claim = claimVisionDownloadStart();
+    if (!claim.acquired) {
+      const existing = activeVisionDownloadResult(readVisionDownload(), tag);
+      if (existing) {
+        process.stdout.write(`${JSON.stringify(existing)}\n`);
+        return;
+      }
+      throw new Error("Another vision model download is starting. Try again shortly.");
     }
-    // Seeded here rather than in the worker so a poll that lands before the
-    // child has started still sees the download, not a stale previous run.
-    writeVisionDownload({
-      version: 1,
-      tag,
-      status: "downloading",
-      detail: "starting",
-      percent: 0,
-      startedAt: Date.now(),
-      updatedAt: Date.now(),
-    });
-    const child = spawn(
-      process.execPath,
-      [path.join(REPO_ROOT, "src", "vision-download.mjs"), tag],
-      // windowsHide matters more here than anywhere else: a detached child
-      // gets its own console on Windows, and this one lives for the length of
-      // a multi-gigabyte pull. The local-model worker below already hides.
-      { detached: true, stdio: "ignore", windowsHide: true },
-    );
-    child.unref();
-    process.stdout.write(`${JSON.stringify({ started: true, tag })}\n`);
-    return;
+    try {
+      const existing = activeVisionDownloadResult(readVisionDownload(), tag);
+      if (existing) {
+        process.stdout.write(`${JSON.stringify(existing)}\n`);
+        return;
+      }
+      // Seeded here rather than in the worker so a poll that lands before the
+      // child has started still sees the download, not a stale previous run.
+      writeVisionDownload({
+        version: 1,
+        tag,
+        status: "downloading",
+        detail: "starting",
+        percent: 0,
+        startedAt: Date.now(),
+        updatedAt: Date.now(),
+        controllerPid: process.pid,
+        workerPid: null,
+      });
+      const child = spawn(
+        process.execPath,
+        [path.join(REPO_ROOT, "src", "vision-download.mjs"), tag],
+        // windowsHide matters more here than anywhere else: a detached child
+        // gets its own console on Windows, and this one lives for the length of
+        // a multi-gigabyte pull. The local-model worker below already hides.
+        { detached: true, stdio: "ignore", windowsHide: true },
+      );
+      child.unref();
+      const workerState = readVisionDownload({ persist: false });
+      if (workerState?.status === "downloading" && workerState.tag === tag) {
+        writeVisionDownload({
+          ...workerState,
+          controllerPid: null,
+          workerPid: child.pid,
+          updatedAt: Date.now(),
+        });
+      }
+      process.stdout.write(`${JSON.stringify({ started: true, tag })}\n`);
+      return;
+    } finally {
+      claim.release();
+    }
   }
   if (action === "benchmark") {
     // Measures an installed model against the checked-in ground-truth image and
@@ -1336,13 +1363,17 @@ async function handleVisionBridge(action, value, extra) {
     // running runtime is pinned outright; a needed pull requires --yes; and a
     // missing runtime prints one install line rather than installing it.
     const consent = value === "--yes" || value === "-y" || extra === "--yes";
-    await runVisionBridgeSetup({ consent });
-    refreshModelSettingsCatalog();
+    const rollback = modelOverlayRollback([VISION_BRIDGE_STATE_PATH]);
+    await transactModelOverlayMutation({
+      mutate: () => runVisionBridgeSetup({ consent }),
+      restore: rollback.restore,
+    });
     process.stdout.write(`${JSON.stringify(snapshot())}\n`);
     return;
   }
+  let mutate;
   if (action === "on" || action === "off") {
-    setVisionBridgeEnabled(action === "on");
+    mutate = () => setVisionBridgeEnabled(action === "on");
   } else if (action === "local") {
     // control vision-bridge local [model] [baseUrl] -- pins a local model and
     // turns the bridge on in the same step. With no model, the machine picks
@@ -1362,8 +1393,10 @@ async function handleVisionBridge(action, value, extra) {
           `${suggestion.needsPull ? ` — run: ${suggestion.pullCommand}` : " — already pulled"}\n`,
       );
     }
-    setVisionBridgeLocal({ model, baseUrl });
-    setVisionBridgeEnabled(true);
+    mutate = () => {
+      setVisionBridgeLocal({ model, baseUrl });
+      setVisionBridgeEnabled(true);
+    };
   } else if (action === "engine") {
     const slug = String(value || "").trim();
     if (slug && slug !== "auto" && slug !== LOCAL_ENGINE_SLUG) {
@@ -1382,20 +1415,28 @@ async function handleVisionBridge(action, value, extra) {
         );
       }
     }
-    setVisionBridgeEngine(slug && slug !== "auto" ? slug : null);
+    const engine = slug && slug !== "auto" ? slug : null;
+    const effort = extra === undefined
+      ? undefined
+      : effortArgument(extra, VISION_EFFORT_LEVELS);
     // The tray picks an engine and a level in one click, so the level rides
     // along here. Left out, whatever was pinned before stays pinned.
-    if (extra !== undefined) setVisionBridgeEffort(effortArgument(extra, VISION_EFFORT_LEVELS));
+    mutate = () => {
+      setVisionBridgeEngine(engine);
+      if (effort !== undefined) setVisionBridgeEffort(effort);
+    };
   } else if (action === "effort") {
-    setVisionBridgeEffort(effortArgument(value, VISION_EFFORT_LEVELS));
+    const effort = effortArgument(value, VISION_EFFORT_LEVELS);
+    mutate = () => setVisionBridgeEffort(effort);
   } else {
     throw new Error(
       "Usage: control vision-bridge status|probe|models|setup [--yes]|on|off|" +
         "engine <model-slug|local|auto> [effort]|effort <level|default>|" +
-        "local [model] [baseUrl]|pull <model-tag>",
+      "local [model] [baseUrl]|pull <model-tag>",
     );
   }
-  refreshModelSettingsCatalog();
+  const rollback = modelOverlayRollback([VISION_BRIDGE_STATE_PATH]);
+  await transactModelOverlayMutation({ mutate, restore: rollback.restore });
   process.stdout.write(`${JSON.stringify(snapshot())}\n`);
 }
 
@@ -1412,8 +1453,8 @@ async function handleLocalModels(action, value, ...rest) {
   const positional = options.find((item) => !item.startsWith("--"));
   const {
     isLocalModelEnabled,
+    LOCAL_MODELS_STATE_PATH,
     localModelsSnapshot,
-    removeLocalModel,
     setLocalModelEnabled,
   } = await import("./local-models.mjs");
   const { readBenchmarkResults } = await import("./vision-benchmark.mjs");
@@ -1731,6 +1772,9 @@ async function handleLocalModels(action, value, ...rest) {
   if (action === "uninstall") {
     const rawTag = String(value || "").trim();
     if (!rawTag) throw new Error("Usage: control local-models uninstall <model-tag> --yes");
+    if (!flags.has("--yes")) {
+      throw new Error(`Removing ${rawTag} deletes it from disk. Pass --yes to confirm.`);
+    }
     const { normalizeLocalModelTag } = await import("./local-model-ref.mjs");
     const tag = normalizeLocalModelTag(rawTag);
     const {
@@ -1814,7 +1858,10 @@ async function handleLocalModels(action, value, ...rest) {
       process.stdout.write(`${JSON.stringify({ started: true, tag, kind: "uninstall" })}\n`);
       return;
     }
-    removeLocalModel(tag, { confirmed: flags.has("--yes") || value === "--yes" });
+    const { uninstallLocalModelTransaction } = await import("./local-uninstall.mjs");
+    await uninstallLocalModelTransaction(tag, {
+      restartService: restartRouterForLocalRoutes,
+    });
     const warnings = await finalizeLocalModelPublication();
     const finishedAt = Date.now();
     writeLocalDownload({
@@ -1848,9 +1895,17 @@ async function handleLocalModels(action, value, ...rest) {
     // hand-typed `gemma3` is the same model, so a raw string match here would
     // skip the router restart that publishes the route change.
     const wasEnabled = isLocalModelEnabled(value);
-    setLocalModelEnabled(value, enabled);
-    refreshModelSettingsCatalog({ routes: true });
-    if (wasEnabled !== enabled) await restartRouterForLocalRoutes();
+    const rollback = modelOverlayRollback([
+      LOCAL_MODELS_STATE_PATH,
+      USER_MODELS_PATH,
+      PROVIDER_SELECTION_PATH,
+    ]);
+    await transactModelOverlayMutation({
+      mutate: () => setLocalModelEnabled(value, enabled),
+      restore: rollback.restore,
+      restart: wasEnabled !== enabled,
+      restartService: restartRouterForLocalRoutes,
+    });
   } else if (action === "lmstudio-set") {
     if (!["on", "off"].includes(positional)) {
       throw new Error("Usage: control local-models lmstudio-set <model-id> <on|off>");
@@ -1863,9 +1918,13 @@ async function handleLocalModels(action, value, ...rest) {
     );
     const enabled = positional === "on";
     const wasEnabled = isLmstudioModelEnabled(value);
-    setLmstudioModelEnabled(value, enabled);
-    refreshModelSettingsCatalog({ routes: true });
-    if (wasEnabled !== enabled) await restartRouterForLocalRoutes();
+    const rollback = modelOverlayRollback([USER_MODELS_PATH, PROVIDER_SELECTION_PATH]);
+    await transactModelOverlayMutation({
+      mutate: () => setLmstudioModelEnabled(value, enabled),
+      restore: rollback.restore,
+      restart: wasEnabled !== enabled,
+      restartService: restartRouterForLocalRoutes,
+    });
   } else {
     throw new Error(
       "Usage: control local-models list [--json]|inspect <tag-or-url>|" +

@@ -13,6 +13,38 @@ test("protocol variants never appear as separate usage providers", () => {
   assert.ok(!ids.includes("commandcode-messages"));
 });
 
+test("all router totals retain historical providers and reconcile with provider rows", () => {
+  const now = Date.parse("2026-07-21T18:00:00Z");
+  const snapshot = aggregateProviderUsage(
+    [
+      {
+        meteringVersion: 1,
+        at: "2026-07-21T12:00:00Z",
+        provider: "opencode-go-messages",
+        status: 200,
+        totalTokens: 80,
+      },
+      {
+        meteringVersion: 1,
+        at: "2026-07-21T13:00:00Z",
+        provider: "retired-provider",
+        status: 200,
+        totalTokens: 25,
+      },
+    ],
+    { days: 7, now },
+  );
+  const rows = snapshot.providers;
+  const totalTokens = rows.reduce((sum, provider) => sum + provider.totalTokens, 0);
+  const totalRequests = rows.reduce((sum, provider) => sum + provider.requests, 0);
+
+  assert.equal(totalTokens, 105);
+  assert.equal(totalRequests, 2);
+  assert.equal(rows.find((provider) => provider.id === "opencode-go")?.totalTokens, 80);
+  assert.equal(rows.find((provider) => provider.id === "retired-provider")?.displayName, "Historical provider (retired-provider)");
+  assert.equal(rows.some((provider) => provider.id === "opencode-go-messages"), false);
+});
+
 test("aggregates tokens and calls independently for each provider", () => {
   const now = Date.parse("2026-07-21T18:00:00Z");
   const snapshot = aggregateProviderUsage(
@@ -57,14 +89,181 @@ test("aggregates tokens and calls independently for each provider", () => {
   assert.equal(byId["grok-oauth"].meteredRequests, 1);
   assert.equal(byId["grok-oauth"].totalTokens, 140);
   assert.deepEqual(byId["grok-oauth"].dailyUsageBuckets, [
-    { startDate: "2026-07-20", tokens: 140, requests: 1 },
-    { startDate: "2026-07-21", tokens: 0, requests: 1 },
+    {
+      startDate: "2026-07-20",
+      tokens: 140,
+      requests: 1,
+      inputTokens: 100,
+      cachedInputTokens: 0,
+      outputTokens: 40,
+    },
+    {
+      startDate: "2026-07-21",
+      tokens: 0,
+      requests: 1,
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+    },
   ]);
   assert.equal(byId.deepseek.credentialType, "api");
   assert.equal(byId["opencode-free"].credentialType, "anonymous");
   assert.equal(byId.deepseek.totalTokens, 100);
   assert.equal(byId["kimi-api"].requests, 0);
   assert.equal(snapshot.scope, "local-router");
+});
+
+test("reports a rolling 24-hour window separately from calendar-day buckets", () => {
+  const now = Date.parse("2026-07-21T18:00:00Z");
+  const snapshot = aggregateProviderUsage(
+    [
+      // The rolling window includes this request even though it is on the
+      // previous local calendar date.
+      {
+        meteringVersion: 1,
+        at: "2026-07-20T18:00:00Z",
+        provider: "grok-oauth",
+        status: 200,
+        inputTokens: 100,
+        outputTokens: 40,
+        totalTokens: 140,
+      },
+      {
+        meteringVersion: 1,
+        at: "2026-07-21T12:00:00Z",
+        provider: "grok-oauth",
+        status: 500,
+        inputTokens: 25,
+        outputTokens: 5,
+        totalTokens: 30,
+      },
+      // Requests without a usage block still count as requests, but are not
+      // counted as metered requests or given guessed token totals.
+      {
+        meteringVersion: 1,
+        at: "2026-07-21T17:00:00Z",
+        provider: "grok-oauth",
+        status: 502,
+      },
+      // Older than the rolling window, but still inside the aggregate range.
+      {
+        meteringVersion: 1,
+        at: "2026-07-20T17:59:59Z",
+        provider: "grok-oauth",
+        status: 200,
+        inputTokens: 900,
+        outputTokens: 100,
+        totalTokens: 1_000,
+      },
+    ],
+    { days: 7, now },
+  );
+  const grok = snapshot.providers.find((provider) => provider.id === "grok-oauth");
+
+  assert.equal(grok.requests, 4);
+  assert.equal(grok.totalTokens, 1_170);
+  assert.equal(grok.last24hInputTokens, 125);
+  assert.equal(grok.last24hOutputTokens, 45);
+  assert.equal(grok.last24hTokens, 170);
+  assert.equal(grok.last24hRequests, 3);
+  assert.equal(grok.last24hMeteredRequests, 2);
+});
+
+test("publishes prefix-cache telemetry for the dashboard without inflating it", () => {
+  const now = Date.parse("2026-07-21T18:00:00Z");
+  const snapshot = aggregateProviderUsage(
+    [
+      {
+        meteringVersion: 1,
+        at: "2026-07-20T18:00:00Z",
+        provider: "deepseek",
+        status: 200,
+        inputTokens: 100,
+        cachedInputTokens: 80,
+      },
+      {
+        meteringVersion: 1,
+        at: "2026-07-21T17:00:00Z",
+        provider: "deepseek",
+        status: 200,
+        inputTokens: 50,
+        cachedInputTokens: 75,
+      },
+      {
+        meteringVersion: 1,
+        at: "2026-07-21T17:30:00Z",
+        provider: "deepseek",
+        status: 200,
+        // A partial provider row can carry cache telemetry without its prompt
+        // total. It cannot prove additional input and must not inflate the
+        // cache subset beyond measured input.
+        cachedInputTokens: 20,
+      },
+    ],
+    { days: 7, now },
+  );
+
+  assert.deepEqual(snapshot.contextEfficiency, {
+    // The rolling window is inclusive at its lower boundary, so the 18:00
+    // request exactly one day earlier is still part of the window.
+    last24hCachedInputTokens: 130,
+    dailyCachedInputTokens: [
+      { startDate: "2026-07-20", cachedInputTokens: 80 },
+      { startDate: "2026-07-21", cachedInputTokens: 50 },
+    ],
+  });
+  const deepseek = snapshot.providers.find((provider) => provider.id === "deepseek");
+  assert.equal(deepseek.inputTokens, 150);
+  assert.equal(deepseek.regularInputTokens, 20);
+  assert.equal(deepseek.cachedInputTokens, 130);
+  assert.equal(deepseek.last24hRegularInputTokens, 20);
+  assert.equal(deepseek.last24hCachedInputTokens, 130);
+  assert.equal(deepseek.regularInputTokens + deepseek.cachedInputTokens, deepseek.inputTokens);
+  assert.deepEqual(deepseek.dailyUsageBuckets, [
+    { startDate: "2026-07-20", tokens: 100, requests: 1, inputTokens: 100, cachedInputTokens: 80, outputTokens: 0 },
+    { startDate: "2026-07-21", tokens: 50, requests: 2, inputTokens: 50, cachedInputTokens: 50, outputTokens: 0 },
+  ]);
+});
+
+test("initializes rolling usage counters for native and idle providers", () => {
+  const now = Date.parse("2026-07-21T18:00:00Z");
+  const snapshot = aggregateProviderUsage(
+    [
+      {
+        meteringVersion: 1,
+        at: "2026-07-21T17:00:00Z",
+        provider: "openai",
+        status: 200,
+        inputTokens: 8,
+        outputTokens: 2,
+        totalTokens: 10,
+      },
+    ],
+    { now },
+  );
+  const native = snapshot.providers.find((provider) => provider.id === "openai");
+  const idle = snapshot.providers.find((provider) => provider.id === "deepseek");
+
+  assert.deepEqual(
+    {
+      input: native.last24hInputTokens,
+      output: native.last24hOutputTokens,
+      tokens: native.last24hTokens,
+      requests: native.last24hRequests,
+      metered: native.last24hMeteredRequests,
+    },
+    { input: 8, output: 2, tokens: 10, requests: 1, metered: 1 },
+  );
+  assert.deepEqual(
+    {
+      input: idle.last24hInputTokens,
+      output: idle.last24hOutputTokens,
+      tokens: idle.last24hTokens,
+      requests: idle.last24hRequests,
+      metered: idle.last24hMeteredRequests,
+    },
+    { input: 0, output: 0, tokens: 0, requests: 0, metered: 0 },
+  );
 });
 
 test("uses billed retry totals without changing the selected response usage", () => {

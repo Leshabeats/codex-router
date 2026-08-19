@@ -1,7 +1,7 @@
 import { PROVIDERS } from "./model-registry.mjs";
 import { providerAccountUsageSnapshot } from "./provider-account-usage.mjs";
-import { readProviderSelection } from "./provider-selection.mjs";
-import { recentUsageEvents } from "./usage-events.mjs";
+import { canonicalProviderId, readProviderSelection } from "./provider-selection.mjs";
+import { allUsageEvents } from "./usage-events.mjs";
 
 function dateKey(value) {
   const date = new Date(value);
@@ -14,6 +14,7 @@ function dateKey(value) {
 // Fastest published serving rates are a few hundred tokens per second; this
 // is set well above them so a genuinely fast model is never discarded.
 const MAX_PLAUSIBLE_TOKENS_PER_SECOND = 500;
+const ROLLING_24H_MS = 24 * 60 * 60 * 1_000;
 
 function nonnegative(value) {
   const number = Number(value);
@@ -23,6 +24,14 @@ function nonnegative(value) {
 function optionalNonnegative(value) {
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? Math.round(number) : undefined;
+}
+
+function hasMeteredUsage(event) {
+  return event?.totalTokens !== undefined
+    || event?.inputTokens !== undefined
+    || event?.outputTokens !== undefined
+    || event?.billedInputTokens !== undefined
+    || event?.billedOutputTokens !== undefined;
 }
 
 // Routed slugs are provider-qualified (`kimi-oauth/k3`); native ones are bare
@@ -42,46 +51,82 @@ const NATIVE_OPENAI = {
   kind: "oauth",
 };
 
+function providerUsageRecord(provider) {
+  return {
+    id: provider.id,
+    displayName: provider.displayName,
+    credentialType: provider.kind === "oauth"
+      ? "oauth"
+      : provider.authMode === "anonymous"
+        ? "anonymous"
+        : provider.authMode === "per-model"
+          ? "per-model"
+          : "api",
+    scope: "local-router",
+    requests: 0,
+    successfulRequests: 0,
+    meteredRequests: 0,
+    inputTokens: 0,
+    regularInputTokens: 0,
+    cachedInputTokens: 0,
+    outputTokens: 0,
+    totalTokens: 0,
+    last24hInputTokens: 0,
+    last24hRegularInputTokens: 0,
+    last24hCachedInputTokens: 0,
+    last24hOutputTokens: 0,
+    last24hTokens: 0,
+    last24hRequests: 0,
+    last24hMeteredRequests: 0,
+    daily: new Map(),
+    models: new Map(),
+  };
+}
+
 export function aggregateProviderUsage(events, { days = 90, now = Date.now() } = {}) {
   const cutoff = now - days * 24 * 60 * 60 * 1_000;
+  const rolling24hCutoff = now - ROLLING_24H_MS;
+  // Prefix-cache telemetry is orthogonal to provider totals: a cache hit is
+  // still part of the prompt the provider billed, but it is useful on its own
+  // as an indication of how much context was reused. Keep the aggregate here
+  // so the Electron dashboard does not have to reconstruct it from its short
+  // 24-hour probe (which is capped and can omit older rows on a busy install).
+  let cacheTelemetrySeen = false;
+  let last24hCachedInputTokens = 0;
+  const dailyCachedInputTokens = new Map();
   // Protocol variants never appear as usage rows: their events, quota
   // headers, and activity are all folded into the canonical family provider.
   const byProvider = new Map(
     [NATIVE_OPENAI, ...[...PROVIDERS.values()].filter((provider) => !provider.variantOf)].map((provider) => [
       provider.id,
-      {
-        id: provider.id,
-        displayName: provider.displayName,
-        credentialType: provider.kind === "oauth"
-          ? "oauth"
-          : provider.authMode === "anonymous"
-            ? "anonymous"
-            : provider.authMode === "per-model"
-              ? "per-model"
-              : "api",
-        scope: "local-router",
-        requests: 0,
-        successfulRequests: 0,
-        meteredRequests: 0,
-        inputTokens: 0,
-        outputTokens: 0,
-        totalTokens: 0,
-        daily: new Map(),
-        models: new Map(),
-      },
+      providerUsageRecord(provider),
     ]),
   );
 
   for (const event of events) {
     const at = Date.parse(event?.at);
-    const provider = byProvider.get(event?.provider);
-    if (!provider || !Number.isFinite(at) || at < cutoff || at > now) continue;
-    if (
-      event.meteringVersion !== 1 &&
-      event.totalTokens === undefined &&
-      event.inputTokens === undefined &&
-      event.outputTokens === undefined
-    ) continue;
+    if (!Number.isFinite(at) || at < cutoff || at > now) continue;
+    const rawProvider = typeof event?.provider === "string" && event.provider.trim()
+      ? event.provider.trim()
+      : "unknown";
+    const providerId = canonicalProviderId(rawProvider);
+    let provider = byProvider.get(providerId);
+    if (!provider) {
+      // Rows can outlive a registry entry after a provider is removed or
+      // renamed. Keep a clearly marked historical bucket so "All router
+      // traffic" remains an accounting identity instead of silently dropping
+      // the request and its tokens.
+      provider = providerUsageRecord({
+        id: providerId,
+        displayName: providerId === "unknown"
+          ? "Unknown provider"
+          : `Historical provider (${providerId})`,
+        kind: "openai-compatible",
+      });
+      provider.credentialType = "unknown";
+      byProvider.set(providerId, provider);
+    }
+    if (event.meteringVersion !== 1 && !hasMeteredUsage(event)) continue;
     provider.requests += 1;
     if (event.status >= 200 && event.status < 400) provider.successfulRequests += 1;
     const selectedOutputTokens = nonnegative(event.outputTokens);
@@ -94,20 +139,55 @@ export function aggregateProviderUsage(events, { days = 90, now = Date.now() } =
           ? inputTokens + outputTokens
           : 0),
     );
-    if (
-      event.totalTokens !== undefined ||
-      event.inputTokens !== undefined ||
-      event.outputTokens !== undefined
-    ) {
+    if (hasMeteredUsage(event)) {
       provider.meteredRequests += 1;
     }
     provider.inputTokens += inputTokens;
     provider.outputTokens += outputTokens;
     provider.totalTokens += totalTokens;
     const day = dateKey(at);
-    const bucket = provider.daily.get(day) || { startDate: day, tokens: 0, requests: 0 };
+    const cachedInputTokens = optionalNonnegative(event.cachedInputTokens);
+    // Cache hits are a subset of prompt input, not an extra token stream. Keep
+    // the reported input total intact and expose the non-cached remainder as a
+    // separate series for the UI. A partial row that reports cache telemetry
+    // without its prompt total cannot establish how many input tokens were
+    // billed, so never let it inflate cache above measured input.
+    const measuredCached = cachedInputTokens === undefined
+      ? 0
+      : Math.min(cachedInputTokens, inputTokens);
+    const regularInput = Math.max(0, inputTokens - measuredCached);
+    provider.cachedInputTokens += measuredCached;
+    provider.regularInputTokens += regularInput;
+    if (cachedInputTokens !== undefined) {
+      cacheTelemetrySeen = true;
+      if (at >= rolling24hCutoff) last24hCachedInputTokens += measuredCached;
+      const cachedDay = dailyCachedInputTokens.get(day) || 0;
+      dailyCachedInputTokens.set(day, cachedDay + measuredCached);
+    }
+    if (at >= rolling24hCutoff) {
+      provider.last24hInputTokens += inputTokens;
+      provider.last24hRegularInputTokens += regularInput;
+      provider.last24hCachedInputTokens += measuredCached;
+      provider.last24hOutputTokens += outputTokens;
+      provider.last24hTokens += totalTokens;
+      provider.last24hRequests += 1;
+      if (hasMeteredUsage(event)) {
+        provider.last24hMeteredRequests += 1;
+      }
+    }
+    const bucket = provider.daily.get(day) || {
+      startDate: day,
+      tokens: 0,
+      requests: 0,
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+    };
     bucket.tokens += totalTokens;
     bucket.requests += 1;
+    bucket.inputTokens += inputTokens;
+    bucket.cachedInputTokens += measuredCached;
+    bucket.outputTokens += outputTokens;
     provider.daily.set(day, bucket);
 
     const slug = typeof event.model === "string" && event.model ? event.model : "unknown";
@@ -126,11 +206,7 @@ export function aggregateProviderUsage(events, { days = 90, now = Date.now() } =
     };
     model.requests += 1;
     if (event.status >= 200 && event.status < 400) model.successfulRequests += 1;
-    if (
-      event.totalTokens !== undefined ||
-      event.inputTokens !== undefined ||
-      event.outputTokens !== undefined
-    ) {
+    if (hasMeteredUsage(event)) {
       model.meteredRequests += 1;
     }
     model.inputTokens += inputTokens;
@@ -193,6 +269,16 @@ export function aggregateProviderUsage(events, { days = 90, now = Date.now() } =
   return {
     fetchedAt: new Date(now).toISOString(),
     scope: "local-router",
+    ...(cacheTelemetrySeen
+      ? {
+          contextEfficiency: {
+            last24hCachedInputTokens,
+            dailyCachedInputTokens: [...dailyCachedInputTokens.entries()]
+              .sort(([left], [right]) => left.localeCompare(right))
+              .map(([startDate, cachedInputTokens]) => ({ startDate, cachedInputTokens })),
+          },
+        }
+      : {}),
     providers: [...byProvider.values()].map(({ daily, models, ...provider }) => ({
       ...provider,
       dailyUsageBuckets: [...daily.values()].sort((left, right) =>
@@ -235,16 +321,49 @@ export function aggregateProviderUsage(events, { days = 90, now = Date.now() } =
 
 export async function providerUsageSnapshot(options = {}) {
   const days = options.days || 90;
+  const now = options.now ?? Date.now();
+  // The retained view already requires one complete parse. Derive the bounded
+  // rolling view from that sanitized result instead of parsing the same
+  // append-only ledger a second time in this short-lived control process.
+  const retainedEvents = allUsageEvents();
+  const cutoff = now - days * 24 * 60 * 60 * 1_000;
+  const recentEvents = retainedEvents
+    .filter((event) => Date.parse(event.at) >= cutoff)
+    .slice(-100_000);
   const snapshot = aggregateProviderUsage(
-    recentUsageEvents({ sinceMs: days * 24 * 60 * 60 * 1_000, limit: 100_000 }),
-    { ...options, days },
+    recentEvents,
+    { ...options, days, now },
   );
+  // Keep the bounded snapshot for fast rolling/status views, but also expose
+  // the complete append-only ledger so the control center can answer the
+  // user's natural question: "how much has this router burned so far?" This
+  // is deliberately a separate scope; it is not the OpenAI account rollup.
+  const retained = aggregateProviderUsage(retainedEvents, {
+    ...options,
+    days: Number.POSITIVE_INFINITY,
+    now,
+  });
+  let retainedFrom = Number.POSITIVE_INFINITY;
+  let retainedTo = Number.NEGATIVE_INFINITY;
+  for (const event of retainedEvents) {
+    const at = Date.parse(event.at);
+    if (!Number.isFinite(at) || at > now) continue;
+    retainedFrom = Math.min(retainedFrom, at);
+    retainedTo = Math.max(retainedTo, at);
+  }
   const accounts = await providerAccountUsageSnapshot({
     ...options,
     providerIds: readProviderSelection(),
   });
   return {
     ...snapshot,
+    retained: {
+      fetchedAt: retained.fetchedAt,
+      scope: "local-router-retained",
+      from: Number.isFinite(retainedFrom) ? new Date(retainedFrom).toISOString() : null,
+      to: Number.isFinite(retainedTo) ? new Date(retainedTo).toISOString() : null,
+      providers: retained.providers,
+    },
     providers: snapshot.providers.map((provider) => ({
       ...provider,
       // Consumers decode `account` as a required field, so never leave it unset
