@@ -480,6 +480,20 @@ function normalizeNativeForSubstitutedCaller(payload) {
   return payload;
 }
 
+/**
+ * Remove the legacy cache-retention shape that GPT-5.6 rejects.
+ *
+ * Current Codex builds can still emit the old top-level field on a later turn.
+ * Omitting it keeps implicit prompt caching active. A caller that already uses
+ * `prompt_cache_options` passes through unchanged.
+ */
+function normalizeNativePromptCacheCompatibility(payload) {
+  if (/^gpt-5\.6(?:-|$)/.test(String(payload.model || ""))) {
+    delete payload.prompt_cache_retention;
+  }
+  return payload;
+}
+
 function routedHeaders() {
   return {
     Authorization: `Bearer ${INTERNAL_KEY}`,
@@ -2464,6 +2478,7 @@ async function handleResponses(request, response, requestUrl) {
       // the log still name the model the picker showed.
       const variantBase = nativeContextVariantBase(native.model);
       if (variantBase) native.model = variantBase;
+      normalizeNativePromptCacheCompatibility(native);
       if (Array.isArray(payload.input)) {
         native.input = normalizeNativeInput(payload.input);
         // Native turns leave here as stateless full conversations (the

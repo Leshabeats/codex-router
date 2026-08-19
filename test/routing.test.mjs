@@ -654,6 +654,8 @@ test("router preserves native auth and isolates every external route", async () 
           model: "gpt-5.6-sol",
           input: "native test",
           previous_response_id: "remove-me",
+          prompt_cache_retention: "24h",
+          prompt_cache_options: { ttl: "30m" },
           client_metadata: { workspace: "caller-owned" },
         }),
       ),
@@ -695,6 +697,8 @@ test("router preserves native auth and isolates every external route", async () 
     assert.equal(nativeRequests[0].url, "/backend-api/codex/responses");
     assert.doesNotMatch(nativeRequests[0].url, /PROVIDER_QUERY_SECRET/);
     assert.equal(nativeRequests[0].body.previous_response_id, undefined);
+    assert.equal(nativeRequests[0].body.prompt_cache_retention, undefined);
+    assert.deepEqual(nativeRequests[0].body.prompt_cache_options, { ttl: "30m" });
     // Native OpenAI traffic owns client_metadata; only routed traffic drops it.
     assert.deepEqual(nativeRequests[0].body.client_metadata, { workspace: "caller-owned" });
     for (const request of routedRequests) {
