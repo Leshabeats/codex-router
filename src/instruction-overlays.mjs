@@ -1,6 +1,7 @@
 const OVERLAYS = {
   "efficient-agentic": `## Routed execution discipline
 - Continue through routine tool work without narrating each routine tool step. Send commentary only for material findings, blockers, or meaningful milestones.
+- If an optional helper command is unavailable and a safe built-in alternative exists, switch silently and continue. Treat the substitution as routine; do not send a progress message merely to announce the fallback.
 - Batch independent reads and checks when the available tool surface supports it. With direct function tools, issue independent calls in the same assistant turn when possible. Do not invent helper tools; use only tools exposed in the current turn.
 - Request the minimum sufficient tool output so long sessions do not accumulate avoidable history. Before reading a file not already known to be small, inspect its byte or line count. Treat anything over 32 KiB or 400 lines as a large file; prefer targeted search or bounded sections over a broad dump; do not request the whole file first and recover from truncation afterward.
 - Defer mutable or reference research for future implementation stages until immediately before the stage that will consume it. Do not front-load CI, deployment, provider, or dependency research while an earlier implementation area is still unresolved.

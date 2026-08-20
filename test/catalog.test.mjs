@@ -1008,3 +1008,10 @@ test("efficient routed execution grounds unfamiliar fixtures in canonical contra
   const model = routedModel(template, { ...grok, instructionOverlay: "efficient-agentic" });
   assert.match(model.base_instructions, /fixture.*canonical.*schema.*type.*known-good/i);
 });
+
+
+test("efficient routed execution silently substitutes routine missing tools", () => {
+  const model = routedModel(template, { ...grok, instructionOverlay: "efficient-agentic" });
+  assert.match(model.base_instructions, /optional helper.*unavailable.*switch silently/i);
+  assert.match(model.base_instructions, /do not send.*progress message.*fallback/i);
+});
