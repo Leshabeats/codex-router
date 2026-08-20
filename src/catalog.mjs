@@ -490,9 +490,18 @@ function rewriteModelMessages(messages, model) {
   return next;
 }
 
+const NATIVE_PARALLEL_TOOL_CALL_COMPAT = new Map([["gpt-5.2", true]]);
+
 function normalizeNativeModel(model) {
+  const supportsParallelToolCalls =
+    typeof model.supports_parallel_tool_calls === "boolean"
+      ? model.supports_parallel_tool_calls
+      : NATIVE_PARALLEL_TOOL_CALL_COMPAT.get(String(model.slug));
   return {
     ...model,
+    ...(typeof supportsParallelToolCalls === "boolean"
+      ? { supports_parallel_tool_calls: supportsParallelToolCalls }
+      : {}),
     supports_reasoning_summaries:
       typeof model.supports_reasoning_summaries === "boolean"
         ? model.supports_reasoning_summaries

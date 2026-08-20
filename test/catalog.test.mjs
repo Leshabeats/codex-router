@@ -411,6 +411,13 @@ test("merged catalog preserves native GPT identity while rewriting routed models
   assert.doesNotMatch(bySlug.get("grok-oauth/grok-4.5").base_instructions, /GPT-5/);
 });
 
+test("native gpt-5.2 stays parseable by older Codex catalog readers", () => {
+  const native52 = { ...template, slug: "gpt-5.2" };
+  delete native52.supports_parallel_tool_calls;
+  const merged = buildMergedCatalog({ models: [native52] }, []);
+  assert.equal(merged[0].supports_parallel_tool_calls, true);
+});
+
 test("merged catalog resolves a routed behavior template without inheriting its capabilities", () => {
   const sol = {
     ...template,
