@@ -380,7 +380,7 @@ test("toggle rejects an unknown provider", () => {
 test("set-apply keeps provider mutation, publication, and rollback in one transaction", () => {
   const source = readFileSync(path.join(root, "src", "control.mjs"), "utf8");
   const atomic = source.match(
-    /async function runSetApply[\s\S]*?\n}\n\nasync function printAccountUsage/,
+    /async function runSetApply[\s\S]*?\r?\n}\r?\n\r?\nasync function printAccountUsage/,
   )?.[0];
   assert.ok(atomic, "atomic set/apply helper should be readable");
   assert.match(atomic, /transactModelOverlayMutation\(\{/);
