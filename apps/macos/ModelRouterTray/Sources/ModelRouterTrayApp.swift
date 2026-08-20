@@ -1370,12 +1370,11 @@ final class RouterStore: ObservableObject {
       successMessage: "\(label) saved. Restart Codex to refresh its model picker."
     ) {
       _ = try await runControl(arguments: ["credential", provider], stdin: secret)
-      try await updateProviderSelection(provider, enabled: true)
     }
   }
 
-  // The control plane drops the provider from the Codex selection when a
-  // managed key is deleted. This only makes that selection live in the tray.
+  // The credential command removes the key, disables the provider, and publishes
+  // the resulting selection under one model-overlay lock.
   func removeProviderKey(_ provider: String) async {
     let label = providerSetup[provider]?.credentialLabel ?? "API key"
     await performProviderOperation(
@@ -1383,7 +1382,6 @@ final class RouterStore: ObservableObject {
       successMessage: "\(label) removed. Restart Codex to refresh its model picker."
     ) {
       _ = try await runControl(arguments: ["credential", provider, "--remove"])
-      _ = try? await runControl(arguments: ["apply", "--targets", "codex", "--activate"])
     }
   }
 
@@ -2016,19 +2014,12 @@ final class RouterStore: ObservableObject {
   }
 
   private func updateProviderSelection(_ provider: String, enabled: Bool) async throws {
-    let wasEnabled = snapshot.targets["codex"]?.enabledProviders.contains(provider) == true
     _ = try await runControl(
-      arguments: ["set", provider, enabled ? "on" : "off", "--targets", "codex"]
+      arguments: [
+        "set-apply", provider, enabled ? "on" : "off",
+        "--targets", "codex", "--activate",
+      ]
     )
-    do {
-      _ = try await runControl(arguments: ["apply", "--targets", "codex", "--activate"])
-    } catch {
-      _ = try? await runControl(
-        arguments: ["set", provider, wasEnabled ? "on" : "off", "--targets", "codex"]
-      )
-      _ = try? await runControl(arguments: ["apply", "--targets", "codex", "--activate"])
-      throw error
-    }
   }
 
   private func refreshActivity() async {

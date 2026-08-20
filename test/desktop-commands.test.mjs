@@ -40,6 +40,11 @@ test("desktop local-model commands use the shared model argument", () => {
 });
 
 test("desktop settings commands preserve the Windows and macOS tray contract", () => {
+  assert.deepEqual(COMMANDS.set_provider_enabled({ provider: "deepseek", enabled: true }), {
+    args: ["set-apply", "deepseek", "on", "--targets", "codex", "--activate"],
+    timeoutMs: 330_000,
+    then: ["--json"],
+  });
   assert.deepEqual(COMMANDS.set_signed_routing({ enabled: true }), {
     args: ["signed-routing", "on"],
     then: ["--json"],
@@ -57,6 +62,20 @@ test("desktop settings commands preserve the Windows and macOS tray contract", (
   });
   assert.deepEqual(COMMANDS.doctor_fix(), {
     args: ["doctor", "--fix", "--json"],
+  });
+});
+
+test("desktop credential commands rely on the control plane's atomic publication", () => {
+  assert.deepEqual(COMMANDS.save_api_key({ provider: "deepseek", apiKey: "test-key" }), {
+    args: ["credential", "deepseek"],
+    stdin: "test-key",
+    timeoutMs: 330_000,
+    then: ["providers", "--json"],
+  });
+  assert.deepEqual(COMMANDS.remove_api_key({ provider: "deepseek" }), {
+    args: ["credential", "deepseek", "--remove"],
+    timeoutMs: 330_000,
+    then: ["providers", "--json"],
   });
 });
 

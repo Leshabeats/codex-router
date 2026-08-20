@@ -532,18 +532,14 @@ function retentionTtlArgument(days) {
 }
 
 async function updateProviderSelection(id, enabled) {
-  const before = new Set((await codexSlice()).enabledProviders || []);
-  try {
-    await runControl(["set", id, enabled ? "on" : "off", "--targets", TARGET]);
-    await runControl(["apply"], { timeoutMs: CATALOG_MUTATION_TIMEOUT_MS });
-    return await snapshot();
-  } catch (error) {
-    try {
-      await runControl(["set", id, before.has(id) ? "on" : "off", "--targets", TARGET]);
-      await runControl(["apply"], { timeoutMs: CATALOG_MUTATION_TIMEOUT_MS });
-    } catch { /* preserve the original failure */ }
-    throw error;
-  }
+  // `set-apply` owns selection, publication, and rollback under one shared
+  // model-overlay lock. Splitting those commands here lets a failed apply
+  // restore a snapshot older than another process's successful toggle.
+  await runControl(
+    ["set-apply", id, enabled ? "on" : "off", "--targets", TARGET],
+    { timeoutMs: CATALOG_MUTATION_TIMEOUT_MS },
+  );
+  return snapshot();
 }
 
 export function registerIpcHandlers({ ipcMain, BrowserWindow, shell, fetchImpl = globalThis.fetch, senderGuard = () => true } = {}) {

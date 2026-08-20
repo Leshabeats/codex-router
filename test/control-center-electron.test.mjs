@@ -519,10 +519,11 @@ test("credential input stays off argv and is delivered over stdin", async () => 
 test("provider writes republish all installed targets and roll selection back on apply failure", async () => {
   const source = await readFile(new URL("../apps/control-center/electron/ipc.mjs", import.meta.url), "utf8");
   assert.match(source, /updateProviderSelection\(id, enabled/);
-  assert.match(source, /runControl\(\["apply"\]/);
-  assert.doesNotMatch(source, /\["apply", "--targets"/);
-  assert.doesNotMatch(source, /\["apply", "--activate"/);
-  assert.match(source, /before\.has\(id\) \? "on" : "off"/);
+  const toggle = source.match(/async function updateProviderSelection[\s\S]*?\n}/)?.[0];
+  assert.ok(toggle, "provider toggle helper should be readable");
+  assert.match(toggle, /\["set-apply", id, enabled \? "on" : "off", "--targets", TARGET\]/);
+  assert.match(toggle, /CATALOG_MUTATION_TIMEOUT_MS/);
+  assert.doesNotMatch(toggle, /\["set"|\["apply"|before\.has/);
   assert.match(source, /runJson\(\["credential", id\], \{[\s\S]{0,80}stdin: credential/);
   const save = source.match(/handleAction\("saveProviderCredential"[\s\S]*?\n  \}\);/)?.[0];
   assert.ok(save, "credential-save handler should be readable");
@@ -541,7 +542,7 @@ test("provider writes republish all installed targets and roll selection back on
 test("catalog-backed mutations outlive the publication-lock wait", async () => {
   const source = await readFile(new URL("../apps/control-center/electron/ipc.mjs", import.meta.url), "utf8");
   assert.match(source, /const CATALOG_MUTATION_TIMEOUT_MS = 330_000/);
-  assert.match(source, /runControl\(\["apply"\], \{ timeoutMs: CATALOG_MUTATION_TIMEOUT_MS \}\)/);
+  assert.match(source, /\["set-apply"[\s\S]{0,180}timeoutMs: CATALOG_MUTATION_TIMEOUT_MS/);
   assert.match(source, /handleAction\("setSubagentMode"[\s\S]{0,280}CATALOG_MUTATION_TIMEOUT_MS/);
   assert.match(source, /handleAction\("setPickerModel"[\s\S]{0,320}CATALOG_MUTATION_TIMEOUT_MS/);
   assert.match(source, /handleAction\("setVisionBridgeEnabled"[\s\S]{0,280}CATALOG_MUTATION_TIMEOUT_MS/);

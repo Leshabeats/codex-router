@@ -416,26 +416,34 @@ async function printOverview(asJson) {
   }
 }
 
+function requestedControlTargets() {
+  const requested = optionValue("--targets");
+  const selected = requested ? requested.split(",").map((value) => value.trim()) : TARGETS;
+  for (const target of selected) {
+    if (!TARGETS.includes(target)) throw new Error(`Unknown target: ${target}`);
+  }
+  return selected;
+}
+
+function setProviderSelectionForTargets(provider, desired, selected) {
+  for (const target of selected) {
+    const result = spawnSync(process.execPath, [SELF, "--probe-set", provider, desired], {
+      env: { ...process.env, MODEL_ROUTER_TARGET: target },
+      encoding: "utf8",
+    });
+    if (result.status !== 0) {
+      throw new Error(`${target}: ${(result.stderr || "").trim() || "toggle failed"}`);
+    }
+  }
+}
+
 async function runSet(provider, desired) {
   // The probe child performs the read/modify/write, so the parent must hold
   // the shared model-overlay lock around the whole fan-out. Otherwise two
   // target-aware CLI invocations can each publish a stale provider selection
   // even though the target files themselves are private and atomic.
-  let selected;
-  await withModelOverlayLock(async () => {
-    const requested = optionValue("--targets");
-    selected = requested ? requested.split(",").map((value) => value.trim()) : TARGETS;
-    for (const target of selected) {
-      if (!TARGETS.includes(target)) throw new Error(`Unknown target: ${target}`);
-      const result = spawnSync(process.execPath, [SELF, "--probe-set", provider, desired], {
-        env: { ...process.env, MODEL_ROUTER_TARGET: target },
-        encoding: "utf8",
-      });
-      if (result.status !== 0) {
-        throw new Error(`${target}: ${(result.stderr || "").trim() || "toggle failed"}`);
-      }
-    }
-  });
+  const selected = requestedControlTargets();
+  await withModelOverlayLock(() => setProviderSelectionForTargets(provider, desired, selected));
   process.stderr.write(
     `Set ${provider} ${desired} for: ${selected.join(", ")}. Run \`bin/control apply\` to make it live.\n`,
   );
@@ -461,47 +469,75 @@ function refreshActiveTarget(target) {
 
 // Active routers read provider selection on each request, so only their picker
 // catalog needs refreshing. The full enable path is reserved for inactive targets.
+async function applyProviderSelectionForTargets(selected, { activate = false } = {}) {
+  const applied = [];
+  const skipped = [];
+  for (const target of selected) {
+    if (!targetIsActive(target) && !activate) {
+      skipped.push(target);
+      continue;
+    }
+    if (targetIsActive(target)) {
+      refreshActiveTarget(target);
+    } else {
+      // `bin/enable` is a POSIX shell script; spawning it on Windows failed
+      // with ENOEXEC and reported it as a plain "apply failed". The shared
+      // helper already knows each platform's checkout entry point and is unit
+      // tested, so this branch is no longer a second untested copy.
+      const { currentCheckoutInstaller } = await import("./update.mjs");
+      const enable = currentCheckoutInstaller(process.platform, target, {
+        posixScript: "enable",
+      });
+      const result = spawnSync(enable.command, enable.args, {
+        cwd: REPO_ROOT,
+        env: { ...process.env, MODEL_ROUTER_TARGET: target },
+        stdio: "inherit",
+      });
+      if (result.status !== 0) throw new Error(`${target}: apply failed`);
+    }
+    applied.push(target);
+  }
+  return { applied, skipped };
+}
+
 async function runApply() {
   // Publication is the second half of the same transaction as the provider
   // selection write. Hold the model lock while the catalog child takes its
   // own inner catalog lock (model -> catalog is the sole lock ordering).
-  let applied;
-  let skipped;
-  await withModelOverlayLock(async () => {
-    const requested = optionValue("--targets");
-    const selected = requested ? requested.split(",").map((value) => value.trim()) : TARGETS;
-    const activate = args.includes("--activate");
-    applied = [];
-    skipped = [];
-    for (const target of selected) {
-      if (!TARGETS.includes(target)) throw new Error(`Unknown target: ${target}`);
-      if (!targetIsActive(target) && !activate) {
-        skipped.push(target);
-        continue;
-      }
-      if (targetIsActive(target)) {
-        refreshActiveTarget(target);
-      } else {
-        // `bin/enable` is a POSIX shell script; spawning it on Windows failed
-        // with ENOEXEC and reported it as a plain "apply failed". The shared
-        // helper already knows each platform's checkout entry point and is unit
-        // tested, so this branch is no longer a second untested copy.
-        const { currentCheckoutInstaller } = await import("./update.mjs");
-        const enable = currentCheckoutInstaller(process.platform, target, {
-          posixScript: "enable",
-        });
-        const result = spawnSync(enable.command, enable.args, {
-          cwd: REPO_ROOT,
-          env: { ...process.env, MODEL_ROUTER_TARGET: target },
-          stdio: "inherit",
-        });
-        if (result.status !== 0) throw new Error(`${target}: apply failed`);
-      }
-      applied.push(target);
-    }
+  const selected = requestedControlTargets();
+  const result = await withModelOverlayLock(() => applyProviderSelectionForTargets(
+    selected,
+    { activate: args.includes("--activate") },
+  ));
+  process.stderr.write(
+    `Applied: ${result.applied.join(", ") || "none"}. ` +
+      `Skipped (not active): ${result.skipped.join(", ") || "none"}.\n`,
+  );
+}
+
+// The Control Center needs a single failure boundary for a provider toggle.
+// Holding one model-overlay transaction across both operations prevents a
+// failed publication from restoring a snapshot taken before another process's
+// successful selection change. Rollback restores the selection and republishes
+// it before the lock is released.
+async function runSetApply(provider, desired) {
+  const selected = requestedControlTargets();
+  const activate = args.includes("--activate");
+  let publication;
+  await transactModelOverlayMutation({
+    files: [PROVIDER_SELECTION_PATH],
+    mutate: () => setProviderSelectionForTargets(provider, desired, selected),
+    // Selection belongs to the shared router plane. Republish every installed
+    // client even when the initiating UI named only its own target.
+    applyPublication: async () => {
+      publication = await applyProviderSelectionForTargets(TARGETS, { activate });
+      return publication;
+    },
   });
   process.stderr.write(
-    `Applied: ${applied.join(", ") || "none"}. Skipped (not active): ${skipped.join(", ") || "none"}.\n`,
+    `Set ${provider} ${desired} for: ${selected.join(", ")}. ` +
+      `Applied: ${publication.applied.join(", ") || "none"}. ` +
+      `Skipped (not active): ${publication.skipped.join(", ") || "none"}.\n`,
   );
 }
 
@@ -2207,6 +2243,11 @@ if (args.includes("--probe")) {
 } else if (args[0] === "set") {
   if (!args[1] || !args[2]) throw new Error("Usage: control set <provider> <on|off> [--targets ...]");
   await runSet(args[1], args[2]);
+} else if (args[0] === "set-apply") {
+  if (!args[1] || !args[2]) {
+    throw new Error("Usage: control set-apply <provider> <on|off> [--targets ...] [--activate]");
+  }
+  await runSetApply(args[1], args[2]);
 } else if (args[0] === "apply") {
   await runApply();
 } else if (args[0] === "account") {
