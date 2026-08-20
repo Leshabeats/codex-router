@@ -411,6 +411,13 @@ test("merged catalog preserves native GPT identity while rewriting routed models
   assert.doesNotMatch(bySlug.get("grok-oauth/grok-4.5").base_instructions, /GPT-5/);
 });
 
+test("native gpt-5.2 stays parseable by older Codex catalog readers", () => {
+  const native52 = { ...template, slug: "gpt-5.2" };
+  delete native52.supports_parallel_tool_calls;
+  const merged = buildMergedCatalog({ models: [native52] }, []);
+  assert.equal(merged[0].supports_parallel_tool_calls, true);
+});
+
 test("merged catalog resolves a routed behavior template without inheriting its capabilities", () => {
   const sol = {
     ...template,
@@ -947,6 +954,20 @@ test("native listed models follow the local subagent opt-in", () => {
   assert.equal(promoted[1].multi_agent_version, "v2");
   // Hidden native entries are never advertised as spawn targets.
   assert.equal(promoted[2].multi_agent_version, "v1");
+});
+
+test("native context variants are never advertised as subagent models", () => {
+  const native = [
+    { slug: "gpt-5.6-sol", visibility: "list", multi_agent_version: "v2" },
+    { slug: "gpt-5.6-sol-1m", visibility: "list", multi_agent_version: "v2" },
+  ];
+  const promoted = promoteNativeMultiAgent(native, {
+    mode: "all",
+    enabled: ["gpt-5.6-sol-1m"],
+    disabled: [],
+  });
+  assert.equal(promoted[0].multi_agent_version, "v2");
+  assert.equal(promoted[1].multi_agent_version, "v1");
 });
 
 test("native promotion honours disabled models and picker-hidden slugs", () => {

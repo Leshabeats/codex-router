@@ -490,9 +490,18 @@ function rewriteModelMessages(messages, model) {
   return next;
 }
 
+const NATIVE_PARALLEL_TOOL_CALL_COMPAT = new Map([["gpt-5.2", true]]);
+
 function normalizeNativeModel(model) {
+  const supportsParallelToolCalls =
+    typeof model.supports_parallel_tool_calls === "boolean"
+      ? model.supports_parallel_tool_calls
+      : NATIVE_PARALLEL_TOOL_CALL_COMPAT.get(String(model.slug));
   return {
     ...model,
+    ...(typeof supportsParallelToolCalls === "boolean"
+      ? { supports_parallel_tool_calls: supportsParallelToolCalls }
+      : {}),
     supports_reasoning_summaries:
       typeof model.supports_reasoning_summaries === "boolean"
         ? model.supports_reasoning_summaries
@@ -733,6 +742,12 @@ export function promoteNativeMultiAgent(models, settings, hidden = new Set()) {
   const disabled = new Set(settings.disabled || []);
   return models.map((model) => {
     const slug = String(model.slug);
+    // Extended-context aliases are manual parent-model choices, not distinct
+    // child-agent backends. Keep them out of spawn_agent model overrides so
+    // delegated work uses the base model's default context window.
+    if (NATIVE_CONTEXT_VARIANT_SLUGS.includes(slug)) {
+      return { ...model, multi_agent_version: "v1" };
+    }
     if (model.visibility !== "list") return model;
     if (hidden.has(slug) || disabled.has(slug)) return model;
     if (NATIVE_V2_BACKEND_SLUGS.has(slug)) {
@@ -845,10 +860,9 @@ function main() {
   const loginFree = loginFreeConfigured();
   const native = {
     ...captured,
-    // Variants join before the multi-agent pass so a switched-off one is
-    // demoted exactly like every other hidden model, and a switched-on one
-    // inherits its base model's verified backend version rather than a
-    // separate claim about the same upstream.
+    // Variants join before the multi-agent pass so the extended-context alias
+    // can remain manually selectable while being forced parent-only; delegated
+    // work must use the base model's default context window.
     models: promoteNativeMultiAgent(
       withNativeContextVariants(captured.models, { enabled: !loginFree }),
       multiAgentSettings,

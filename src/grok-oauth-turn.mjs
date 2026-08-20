@@ -223,7 +223,7 @@ export function mergeMappedUsage(first, second) {
 
 const TOOL_ITEM_TYPES = new Set(["function_call", "custom_tool_call"]);
 
-export function createTurnState() {
+export function createTurnState({ toolNameMapper = (name) => name } = {}) {
   return {
     contentText: "",
     reasoningText: "",
@@ -231,6 +231,7 @@ export function createTurnState() {
     toolByItemId: new Map(),
     usage: undefined,
     deltas: [],
+    toolNameMapper,
   };
 }
 
@@ -305,7 +306,7 @@ function ensureToolCall(state, item, itemId, { complete = false } = {}) {
     entry = {
       id: item.call_id || item.id || key,
       type: "function",
-      function: { name: item.name || "", arguments: args },
+      function: { name: state.toolNameMapper(item.name || ""), arguments: args },
     };
     state.toolCalls.push(entry);
     if (key) state.toolByItemId.set(key, entry);
@@ -320,7 +321,7 @@ function ensureToolCall(state, item, itemId, { complete = false } = {}) {
       ],
     });
   } else {
-    if (item.name) entry.function.name = item.name;
+    if (item.name) entry.function.name = state.toolNameMapper(item.name);
     const args = toolArguments(item);
     if (args) entry.function.arguments = args;
   }

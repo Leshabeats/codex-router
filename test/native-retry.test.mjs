@@ -584,3 +584,121 @@ test("an image generation is never retried, however retryable the failure looks"
     rmSync(stateDir, { recursive: true, force: true });
   }
 });
+
+function cancelNativeTurnAfterMarker(port, body, marker) {
+  const base = new URL(`${routerBase(port)}/responses`);
+  return new Promise((resolve) => {
+    const request = http.request(
+      {
+        host: "127.0.0.1",
+        port,
+        path: base.pathname,
+        method: "POST",
+        headers: { Authorization: "Bearer caller", "Content-Type": "application/json" },
+      },
+      (response) => {
+        let received = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => {
+          received += chunk;
+          if (received.includes(marker)) {
+            request.destroy();
+            resolve(received);
+          }
+        });
+      },
+    );
+    request.once("error", () => resolve(""));
+    request.end(JSON.stringify(body));
+  });
+}
+
+test("a native terminal tool response stays successful when the client closes after completion", async () => {
+  const native = await mockServer(async (_request, response) => {
+    // Native ChatGPT Responses can arrive as SSE without a content-type. The
+    // router's prefix detector must still observe the terminal event.
+    response.writeHead(200);
+    response.write(
+      [
+        "event: response.output_item.done",
+        `data: ${JSON.stringify({
+          type: "response.output_item.done",
+          item: {
+            type: "function_call",
+            name: "shell",
+            call_id: "call_terminal",
+            arguments: "{}",
+          },
+        })}`,
+        "",
+        "event: response.completed",
+        `data: ${JSON.stringify({
+          type: "response.completed",
+          response: {
+            id: "resp_terminal",
+            output: [],
+            usage: { input_tokens: 40, output_tokens: 4, total_tokens: 44 },
+          },
+        })}`,
+        "",
+        "",
+      ].join("\n"),
+    );
+    // Codex is allowed to stop reading once response.completed arrives. Keep
+    // the upstream open so the client close wins the race with upstream EOF.
+  });
+  const stateDir = stateDirectory();
+  const routerPort = await openPort();
+  const router = startRouter({ nativePort: native.port, routerPort, stateDir, retries: 0 });
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const received = await cancelNativeTurnAfterMarker(
+      routerPort,
+      { model: "gpt-5.6-sol", input: "use a tool", stream: true },
+      '"type":"response.completed"',
+    );
+    assert.match(received, /call_terminal/);
+
+    await waitUntil(() => usageEvents(stateDir).length > 0, "no usage event was recorded");
+    const event = usageEvents(stateDir).at(-1);
+    assert.equal(event.provider, "openai");
+    assert.equal(event.status, 200);
+    assert.equal(event.inputTokens, 40);
+    assert.equal(event.outputTokens, 4);
+  } finally {
+    await stopChild(router);
+    await closeServer(native.server);
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("a native client close before a terminal response still meters zero", async () => {
+  const native = await mockServer(async (_request, response) => {
+    response.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8" });
+    response.write(
+      'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"partial"}\n\n',
+    );
+  });
+  const stateDir = stateDirectory();
+  const routerPort = await openPort();
+  const router = startRouter({ nativePort: native.port, routerPort, stateDir, retries: 0 });
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    await cancelNativeTurnAfterMarker(
+      routerPort,
+      { model: "gpt-5.6-sol", input: "cancel me", stream: true },
+      "partial",
+    );
+
+    await waitUntil(() => usageEvents(stateDir).length > 0, "no usage event was recorded");
+    const event = usageEvents(stateDir).at(-1);
+    assert.equal(event.provider, "openai");
+    assert.equal(event.status, 0);
+  } finally {
+    await stopChild(router);
+    await closeServer(native.server);
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});

@@ -320,6 +320,7 @@ export class ResponseUsageTransform extends Transform {
   // first token appears, and counting that silence as generation is what makes
   // a fast model read as slow. See #192.
   #firstTokenAt;
+  #completedResponseObserved = false;
 
   // `estimatedInputTokens` arrives only on routed requests large enough that a
   // reported zero cannot be true. Without it this transform observes and
@@ -520,6 +521,7 @@ export class ResponseUsageTransform extends Transform {
 
   #observe(payload) {
     this.#noteFirstToken(payload);
+    if (payload?.type === "response.completed") this.#completedResponseObserved = true;
     const usage = tokenUsageFromPayload(payload);
     if (usage) this.#usage = usage;
   }
@@ -547,5 +549,9 @@ export class ResponseUsageTransform extends Transform {
   // response never streamed one (a non-streaming reply, or an error).
   firstTokenAt() {
     return this.#firstTokenAt;
+  }
+
+  completedResponseObserved() {
+    return this.#completedResponseObserved;
   }
 }
