@@ -956,6 +956,20 @@ test("native listed models follow the local subagent opt-in", () => {
   assert.equal(promoted[2].multi_agent_version, "v1");
 });
 
+test("native context variants are never advertised as subagent models", () => {
+  const native = [
+    { slug: "gpt-5.6-sol", visibility: "list", multi_agent_version: "v2" },
+    { slug: "gpt-5.6-sol-1m", visibility: "list", multi_agent_version: "v2" },
+  ];
+  const promoted = promoteNativeMultiAgent(native, {
+    mode: "all",
+    enabled: ["gpt-5.6-sol-1m"],
+    disabled: [],
+  });
+  assert.equal(promoted[0].multi_agent_version, "v2");
+  assert.equal(promoted[1].multi_agent_version, "v1");
+});
+
 test("native promotion honours disabled models and picker-hidden slugs", () => {
   const native = [
     { slug: "gpt-5.6-luna", visibility: "list", multi_agent_version: "v1" },
