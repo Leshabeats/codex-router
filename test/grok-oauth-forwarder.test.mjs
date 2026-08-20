@@ -95,15 +95,18 @@ test("translates Chat Completions to Grok Responses and back (text + tools)", as
     res.writeHead(200, { "Content-Type": "text/event-stream" });
     // Hosted search tools are always present; only emit client function-call
     // events when the request includes a client function tool.
-    const hasClientFunction = Array.isArray(captured.tools)
-      && captured.tools.some((tool) => tool.type === "function");
-    if (hasClientFunction) {
+    const clientFunction = Array.isArray(captured.tools)
+      ? captured.tools.find((tool) => tool.type === "function")
+      : undefined;
+    if (clientFunction) {
+      const argumentsJson = clientFunction.name === "inspect_image"
+        ? '{"path":"C:\\\\image.jpg"}'
+        : '{"city":"SF"}';
       res.end(
         sse([
-          { type: "response.output_item.added", item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "get_weather" } },
-          { type: "response.function_call_arguments.delta", item_id: "fc_1", delta: '{"city":' },
-          { type: "response.function_call_arguments.delta", item_id: "fc_1", delta: '"SF"}' },
-          { type: "response.output_item.done", item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "get_weather", arguments: '{"city":"SF"}' } },
+          { type: "response.output_item.added", item: { type: "function_call", id: "fc_1", call_id: "call_1", name: clientFunction.name } },
+          { type: "response.function_call_arguments.delta", item_id: "fc_1", delta: argumentsJson },
+          { type: "response.output_item.done", item: { type: "function_call", id: "fc_1", call_id: "call_1", name: clientFunction.name, arguments: argumentsJson } },
           { type: "response.completed", response: { usage: { input_tokens: 10, output_tokens: 8 } } },
         ]),
       );
@@ -238,6 +241,29 @@ test("translates Chat Completions to Grok Responses and back (text + tools)", as
     assert.deepEqual(
       captured.tools.filter((tool) => tool.type !== "function"),
       [{ type: "web_search" }, { type: "x_search" }],
+    );
+
+    // Grok 4.6 receives the provider-selectable alias, while Codex gets its
+    // native tool name back from the streamed function-call response.
+    const imageResp = await fetch(`${base}/v1/chat/completions`, {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({
+        model: "grok-4.6",
+        messages: [{ role: "user", content: "inspect the image" }],
+        tools: [
+          { type: "function", function: { name: "view_image", parameters: { type: "object" } } },
+        ],
+        stream: false,
+      }),
+    });
+    const imageTool = await imageResp.json();
+    assert.equal(captured.tools[0].name, "inspect_image");
+    assert.equal(imageTool.choices[0].finish_reason, "tool_calls");
+    assert.equal(imageTool.choices[0].message.tool_calls[0].function.name, "view_image");
+    assert.equal(
+      imageTool.choices[0].message.tool_calls[0].function.arguments,
+      '{"path":"C:\\\\image.jpg"}',
     );
   } finally {
     await stop(child);
@@ -390,6 +416,71 @@ test("toResponsesRequest sends each duplicated tool name upstream once", () => {
   });
   const fileWrites = request.tools.filter((tool) => tool.name === "file_write");
   assert.equal(fileWrites.length, 1);
+});
+
+test("toResponsesRequest aliases view_image only at the Grok boundary", () => {
+  const request = toResponsesRequest({
+    model: "grok-4.6",
+    messages: [
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          {
+            id: "call_image",
+            type: "function",
+            function: { name: "view_image", arguments: '{"path":"C:\\\\image.jpg"}' },
+          },
+        ],
+      },
+    ],
+    tools: [
+      {
+        type: "function",
+        function: {
+          name: "view_image",
+          description: "View a local image.",
+          parameters: { type: "object", properties: { path: { type: "string" } } },
+        },
+      },
+    ],
+    tool_choice: { type: "function", function: { name: "view_image" } },
+  });
+
+  assert.equal(request.tools.find((tool) => tool.type === "function").name, "inspect_image");
+  assert.equal(request.input[0].name, "inspect_image");
+  assert.equal(request.tool_choice.function.name, "inspect_image");
+});
+
+test("toResponsesRequest does not alias view_image over a real inspect_image", () => {
+  const request = toResponsesRequest({
+    model: "grok-4.6",
+    messages: [{ role: "user", content: "inspect it" }],
+    tools: [
+      { type: "function", function: { name: "view_image", parameters: { type: "object" } } },
+      { type: "function", function: { name: "inspect_image", parameters: { type: "object" } } },
+    ],
+  });
+
+  const names = request.tools
+    .filter((tool) => tool.type === "function")
+    .map((tool) => tool.name);
+  assert.deepEqual(names, ["view_image", "inspect_image"]);
+});
+
+test("toResponsesRequest leaves view_image unchanged for other Grok models", () => {
+  const request = toResponsesRequest({
+    model: "grok-4.5",
+    messages: [{ role: "user", content: "inspect it" }],
+    tools: [
+      { type: "function", function: { name: "view_image", parameters: { type: "object" } } },
+    ],
+  });
+
+  assert.equal(
+    request.tools.find((tool) => tool.type === "function").name,
+    "view_image",
+  );
 });
 
 test("toResponsesRequest always includes hosted search tools when enabled", () => {

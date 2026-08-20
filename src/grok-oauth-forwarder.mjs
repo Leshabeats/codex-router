@@ -20,6 +20,11 @@ import { ensureFreshGrokOAuthToken } from "./grok-oauth-session.mjs";
 import { grokOAuthStatus } from "./grok-oauth-status.mjs";
 import { normalizeSchemaLiterals, objectRootToolSchema } from "./tool-schema-root.mjs";
 import {
+  shouldAliasViewImageForGrok,
+  toolNameForCodex,
+  toolNameForGrok,
+} from "./grok-oauth-tool-alias.mjs";
+import {
   applyResponsesEvent,
   classifyAfterToolRepair,
   createTurnState,
@@ -306,6 +311,7 @@ function normalizeToolOutputForGrok(content) {
 export function toResponsesRequest(chat, options = {}) {
   const input = [];
   let instructions;
+  const viewImageAlias = shouldAliasViewImageForGrok(chat);
   for (const message of chat.messages || []) {
     const role = message.role;
     if (role === "system" || role === "developer") {
@@ -326,7 +332,7 @@ export function toResponsesRequest(chat, options = {}) {
         input.push({
           type: "function_call",
           call_id: call.id,
-          name: call.function?.name,
+          name: toolNameForGrok(call.function?.name, { viewImageAlias }),
           arguments: call.function?.arguments || "{}",
         });
       }
@@ -345,7 +351,7 @@ export function toResponsesRequest(chat, options = {}) {
         .filter((tool) => tool?.type === "function" && tool.function?.name)
         .map((tool) => ({
           type: "function",
-          name: tool.function.name,
+          name: toolNameForGrok(tool.function.name, { viewImageAlias }),
           description: tool.function.description,
           // xAI 400s the whole request over a union-rooted parameter schema,
           // which Codex's own `automation_update` app tool ships. It rejects
@@ -366,7 +372,20 @@ export function toResponsesRequest(chat, options = {}) {
   });
   if (tools.length) {
     request.tools = tools;
-    if (chat.tool_choice) request.tool_choice = chat.tool_choice;
+    if (chat.tool_choice) {
+      request.tool_choice =
+        typeof chat.tool_choice === "object" && chat.tool_choice.function?.name
+          ? {
+              ...chat.tool_choice,
+              function: {
+                ...chat.tool_choice.function,
+                name: toolNameForGrok(chat.tool_choice.function.name, {
+                  viewImageAlias,
+                }),
+              },
+            }
+          : chat.tool_choice;
+    }
   }
   return request;
 }
@@ -476,6 +495,7 @@ async function handleChatCompletions(request, response) {
   const wantsStream = chat.stream === true;
   const model = typeof chat.model === "string" ? chat.model : "";
   const hostedSearchEnabled = hostedSearchEnabledFor(model);
+  const viewImageAlias = shouldAliasViewImageForGrok(chat);
   const responsesRequest = toResponsesRequest(chat, { hostedSearchEnabled });
   const holdOptions = {
     maxText: PROGRESS_ONLY_MAX_TEXT,
@@ -547,7 +567,9 @@ async function handleChatCompletions(request, response) {
 
   const id = `chatcmpl-${randomUUID()}`;
   const created = Math.floor(Date.now() / 1_000);
-  const turnState = createTurnState();
+  const turnState = createTurnState({
+    toolNameMapper: (name) => toolNameForCodex(name, { viewImageAlias }),
+  });
   let emittedDeltaCount = 0;
   let streamStarted = false;
 
@@ -618,7 +640,9 @@ async function handleChatCompletions(request, response) {
         };
       }
     } else if (secondUpstream?.body) {
-      const secondState = createTurnState();
+      const secondState = createTurnState({
+        toolNameMapper: (name) => toolNameForCodex(name, { viewImageAlias }),
+      });
       await consumeResponsesStream(secondUpstream.body, (event) => {
         applyResponsesEvent(secondState, event);
       });
