@@ -1,4 +1,6 @@
-import { Agent, setGlobalDispatcher } from "undici";
+import { Agent, EnvHttpProxyAgent, setGlobalDispatcher } from "undici";
+
+import { environmentHttpProxyConfigured } from "./proxy-environment.mjs";
 
 // Node 26's bundled fetch negotiates HTTP/2 by default. A live router process
 // observed its pooled session remain destroyed after ERR_HTTP2_INVALID_SESSION,
@@ -8,9 +10,14 @@ import { Agent, setGlobalDispatcher } from "undici";
 // state while retaining keep-alive connection reuse.
 export function installStableFetchTransport({
   AgentClass = Agent,
+  EnvHttpProxyAgentClass = EnvHttpProxyAgent,
   setDispatcher = setGlobalDispatcher,
+  environment = process.env,
 } = {}) {
-  const dispatcher = new AgentClass({ allowH2: false });
+  const DispatcherClass = environmentHttpProxyConfigured(environment)
+    ? EnvHttpProxyAgentClass
+    : AgentClass;
+  const dispatcher = new DispatcherClass({ allowH2: false });
   setDispatcher(dispatcher);
   return dispatcher;
 }

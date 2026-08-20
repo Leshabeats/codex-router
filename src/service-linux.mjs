@@ -20,6 +20,7 @@ import {
   TARGET,
   TARGET_DISPLAY_NAME,
 } from "./paths.mjs";
+import { serviceProxyEnvironment } from "./proxy-environment.mjs";
 
 const effectivePlatform = process.env.CODEX_ROUTER_SERVICE_PLATFORM || process.platform;
 const command = process.argv[2] || "status";
@@ -64,6 +65,7 @@ function unit() {
     CODEX_ROUTER_OAUTH_PORT: String(PORTS.oauth),
     CODEX_ROUTER_PORT: String(PORTS.router),
     CODEX_ROUTER_API_PORT: String(PORTS.api),
+    ...serviceProxyEnvironment(),
     ...(process.env.KIMI_CODE_HOME ? { KIMI_CODE_HOME: process.env.KIMI_CODE_HOME } : {}),
     ...(process.env.CODEX_ROUTER_SOURCE_ROOT
       ? { CODEX_ROUTER_SOURCE_ROOT: SOURCE_ROOT }
@@ -108,8 +110,10 @@ function writeUnit() {
   mkdirSync(path.dirname(unitPath), { recursive: true, mode: 0o700 });
   mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
   const temporary = `${unitPath}.tmp.${process.pid}`;
-  writeFileSync(temporary, unit(), { encoding: "utf8", mode: 0o644 });
-  chmodSync(temporary, 0o644);
+  // Proxy URLs may carry credentials, so the generated unit is private just
+  // like the state it launches with.
+  writeFileSync(temporary, unit(), { encoding: "utf8", mode: 0o600 });
+  chmodSync(temporary, 0o600);
   renameSync(temporary, unitPath);
 }
 

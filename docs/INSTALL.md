@@ -178,6 +178,20 @@ foreground commands but is not copied into launchd, systemd, or Task Scheduler.
 Use `provider-key ... set` so the per-user background service has persistent,
 protected access.
 
+## Outbound proxy
+
+The router honors `http_proxy`, `https_proxy`, and `no_proxy`, including their
+uppercase forms. Set them before running setup or install; the generated
+per-user background service preserves the values so a service started outside
+the login shell uses the same proxy. Include `localhost`, `127.0.0.1`, and
+`::1` in `no_proxy` because the router's own processes communicate over
+loopback.
+
+`all_proxy` / `ALL_PROXY` is also preserved for child processes that support
+it, but the router's Undici transport requires `http_proxy` or `https_proxy` to
+enable proxy routing. After changing these variables, rerun install to refresh
+the background service definition.
+
 ## Installer transaction
 
 Setup performs these operations in order:
