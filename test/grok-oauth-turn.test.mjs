@@ -6,6 +6,7 @@ import {
   classifyAfterToolRepair,
   collectResponsesEvents,
   createTurnState,
+  finalizeTurn,
   isProgressOnlyStop,
   lastClientMessageWasToolResult,
   mergeMappedUsage,
@@ -38,6 +39,25 @@ test("collectResponsesEvents keeps a function_call that only appears in output_i
   assert.equal(turn.toolCalls[0].function.name, "exec_command");
   assert.equal(turn.toolCalls[0].function.arguments, '{"cmd":"dir"}');
   assert.equal(turn.deltas[0].tool_calls[0].function.arguments, '{"cmd":"dir"}');
+});
+
+test("createTurnState can restore a provider-facing tool alias", () => {
+  const state = createTurnState({
+    toolNameMapper: (name) => (name === "inspect_image" ? "view_image" : name),
+  });
+  applyResponsesEvent(state, {
+    type: "response.output_item.done",
+    item: {
+      type: "function_call",
+      id: "fc_image",
+      call_id: "call_image",
+      name: "inspect_image",
+      arguments: '{"path":"C:\\\\image.jpg"}',
+    },
+  });
+  const turn = finalizeTurn(state);
+  assert.equal(turn.toolCalls[0].function.name, "view_image");
+  assert.equal(turn.deltas[0].tool_calls[0].function.name, "view_image");
 });
 
 test("finalizeTurn backfills streamed arguments when added is followed by done without deltas", () => {

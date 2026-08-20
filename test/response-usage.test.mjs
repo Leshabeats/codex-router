@@ -118,6 +118,8 @@ test("captures final SSE usage without changing streamed bytes", async () => {
     outputTokens: 8,
     totalTokens: 29,
   });
+  assert.equal(transform.completedResponseObserved(), true);
+  assert.equal(typeof transform.firstTokenAt(), "number");
 });
 
 test("captures JSON usage without changing the response", async () => {

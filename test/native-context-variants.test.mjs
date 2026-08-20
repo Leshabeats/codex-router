@@ -9,7 +9,6 @@ import { fileURLToPath } from "node:url";
 import { zstdDecompressSync } from "node:zlib";
 
 import { callerBaseUrl } from "../src/caller-auth.mjs";
-import { buildLoginFreeCatalog, buildMergedCatalog } from "../src/catalog.mjs";
 import {
   NATIVE_CONTEXT_VARIANTS,
   NATIVE_CONTEXT_VARIANT_SLUGS,
@@ -24,6 +23,7 @@ const CALLER_KEY = "test-router-caller-capability-with-sufficient-length";
 
 const pickerStateDir = mkdtempSync(path.join(os.tmpdir(), "context-variant-picker-"));
 process.env.MODEL_ROUTER_MODEL_PICKER_STATE = path.join(pickerStateDir, "model-picker.json");
+const { buildLoginFreeCatalog, buildMergedCatalog } = await import("../src/catalog.mjs");
 const {
   MODEL_PICKER_STATE_PATH,
   readHiddenModels,

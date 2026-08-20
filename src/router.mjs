@@ -2282,6 +2282,7 @@ async function handleResponses(request, response, requestUrl) {
   let requestedModel = "";
   let route;
   let upstreamRetries;
+  let upstreamStatus;
   let upstreamLatencyMs;
   let firstTokenMs;
   let usageTransform;
@@ -2570,6 +2571,7 @@ async function handleResponses(request, response, requestUrl) {
       },
     );
     upstreamRetries = retries;
+    upstreamStatus = upstream.status;
     // Time until the upstream chain answered the request. Everything before
     // this is router-side work (body read, normalization, flattening, vision
     // bridge) plus the upstream's own time to produce response headers. For a
@@ -2618,6 +2620,7 @@ async function handleResponses(request, response, requestUrl) {
           });
           adoptRoute(moved.route, moved.built);
           upstream = moved.upstream;
+          upstreamStatus = upstream.status;
           failedBodyText = undefined;
         }
       }
@@ -2735,8 +2738,11 @@ async function handleResponses(request, response, requestUrl) {
     // goes away, but `pipeResponse` can resolve before that event fires: the
     // response socket is already destroyed at that point. Read the state
     // directly as well so a cancel that races the close event still meters 0.
+    const nativeCompletedBeforeClose =
+      !route && usageTransform?.completedResponseObserved() === true;
     const clientWalkedAway =
-      clientGone || (response.destroyed && !response.writableFinished);
+      (clientGone || (response.destroyed && !response.writableFinished)) &&
+      !nativeCompletedBeforeClose;
     finalStatus = clientWalkedAway ? 0 : upstream.status;
     emptyCompletion = emptyCompletionGuard?.isEmpty() === true && !clientWalkedAway;
     // The guard releases long turns at its byte/time budget without a verdict.
@@ -2955,6 +2961,37 @@ async function handleResponses(request, response, requestUrl) {
         usageTransform.substitutedInputTokens(),
         retryUsageTransform?.substitutedInputTokens(),
       );
+      const firstTokenAt = usageTransform.firstTokenAt?.();
+      if (firstTokenAt !== undefined) firstTokenMs = firstTokenAt - startedAt;
+    }
+    // Codex may close a native stream immediately after response.completed.
+    // That is a successful terminal turn, not a canceled generation.
+    if (!route && clientGone && usageTransform?.completedResponseObserved() === true) {
+      finalStatus = upstreamStatus ?? response.statusCode;
+      activityStatus = finalStatus;
+      if (!usageRecorded) {
+        recordUsageEvent({
+          model: requestedModel,
+          provider: "openai",
+          status: finalStatus,
+          durationMs: Date.now() - startedAt,
+          responseStartMs: upstreamLatencyMs,
+          firstTokenMs,
+          ...usage,
+          estimatedInputTokens,
+          ...toolResultAging,
+          retries: (upstreamRetries || 0) + (usage?.retries || 0) || undefined,
+        });
+        usageRecorded = true;
+      }
+      if (!QUIET) {
+        console.error(
+          `[codex-router] model=${requestedModel || "unknown"} provider=openai status=${finalStatus}${
+            upstreamRetries ? ` retries=${upstreamRetries}` : ""
+          }`,
+        );
+      }
+      return;
     }
     // A client that walked away (canceled generation, closed stream) is not
     // a router failure; only surface errors the router or upstream produced.
