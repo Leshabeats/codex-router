@@ -21,6 +21,8 @@ import {
   readServiceProcessState,
   serviceProcessOwns,
 } from "./service-process.mjs";
+import { protectPrivateFile } from "./file-security.mjs";
+import { serviceProxyEnvironment } from "./proxy-environment.mjs";
 
 const effectivePlatform = process.env.CODEX_ROUTER_SERVICE_PLATFORM || process.platform;
 const command = process.argv[2] || "status";
@@ -58,6 +60,7 @@ function wrapper() {
     CODEX_ROUTER_OAUTH_PORT: String(PORTS.oauth),
     CODEX_ROUTER_PORT: String(PORTS.router),
     CODEX_ROUTER_API_PORT: String(PORTS.api),
+    ...serviceProxyEnvironment(),
     // The LiteLLM gateway is a Python process. Force UTF-8 output so its
     // startup banner and logs do not crash on Windows systems whose default
     // ANSI/OEM code page is not UTF-8 (e.g. Russian cp1251), where Python
@@ -66,7 +69,7 @@ function wrapper() {
     PYTHONUTF8: "1",
     ...(process.env.KIMI_CODE_HOME ? { KIMI_CODE_HOME: process.env.KIMI_CODE_HOME } : {}),
   };
-  return `@echo off\r\n${Object.entries(variables)
+  return `@echo off\r\nsetlocal DisableDelayedExpansion\r\n${Object.entries(variables)
     .map(([key, value]) => `set "${key}=${cmdEscape(value)}"`)
     .join("\r\n")}\r\n"${cmdEscape(process.execPath)}" "${cmdEscape(start)}" >> "${cmdEscape(LOG_PATH)}" 2>&1\r\n`;
 }
@@ -112,10 +115,24 @@ function schtasks(args, options = {}) {
 
 function writeAtomic(target, contents) {
   const temporary = `${target}.tmp.${process.pid}`;
-  writeFileSync(temporary, contents);
-  // renameSync replaces an existing destination on Windows, so reinstalling
-  // over an older launcher pair is a plain overwrite rather than a conflict.
-  renameSync(temporary, target);
+  try {
+    writeFileSync(temporary, contents, { mode: 0o600 });
+    // Proxy URLs may contain credentials. Protect both the temporary file and
+    // the replaced launcher so Windows does not leave the secret readable via
+    // inherited ACLs (POSIX mode bits are kept in step for deterministic tests).
+    protectPrivateFile(temporary);
+    // renameSync replaces an existing destination on Windows, so reinstalling
+    // over an older launcher pair is a plain overwrite rather than a conflict.
+    renameSync(temporary, target);
+    protectPrivateFile(target);
+  } catch (error) {
+    try {
+      unlinkSync(temporary);
+    } catch {
+      // Best effort cleanup; preserve the original write/ACL error.
+    }
+    throw error;
+  }
 }
 
 function writeLaunchers() {

@@ -629,27 +629,20 @@ async fn save_api_key(
             &["credential", &provider],
             Some(api_key.as_bytes()),
         )?;
-        update_provider_selection(&router, &provider, true)?;
         run_control_json(&router, &["providers", "--json"], None)
     })
     .await
     .map_err(|_| "The credential operation did not finish.".to_string())?
 }
 
-// The control plane already drops the provider from the Codex selection when a
-// key file is deleted, so this only has to make that selection live.
+// The credential command removes the key, disables the provider, and publishes
+// the resulting selection under one model-overlay lock.
 #[tauri::command]
 async fn remove_api_key(state: State<'_, RouterState>, provider: String) -> Result<Value, String> {
     validate_provider_kind(&provider, ProviderKind::Api)?;
     let router = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let removal = run_control_json(&router, &["credential", &provider, "--remove"], None)?;
-        let _ = run_control(
-            &router,
-            &["apply", "--targets", "codex", "--activate"],
-            None,
-        );
-        Ok(removal)
+        run_control_json(&router, &["credential", &provider, "--remove"], None)
     })
     .await
     .map_err(|_| "The credential removal did not finish.".to_string())?
@@ -941,29 +934,19 @@ fn update_provider_selection(
     provider: &str,
     enabled: bool,
 ) -> Result<(), String> {
-    let overview = run_control_json(state, &["--json"], None)?;
-    let was_enabled = overview
-        .pointer("/targets/codex/enabledProviders")
-        .and_then(Value::as_array)
-        .map(|providers| providers.iter().any(|item| item.as_str() == Some(provider)))
-        .unwrap_or(false);
     let desired = if enabled { "on" } else { "off" };
     run_control(
         state,
-        &["set", provider, desired, "--targets", "codex"],
+        &[
+            "set-apply",
+            provider,
+            desired,
+            "--targets",
+            "codex",
+            "--activate",
+        ],
         None,
     )?;
-
-    if let Err(error) = run_control(state, &["apply", "--targets", "codex", "--activate"], None) {
-        let previous = if was_enabled { "on" } else { "off" };
-        let _ = run_control(
-            state,
-            &["set", provider, previous, "--targets", "codex"],
-            None,
-        );
-        let _ = run_control(state, &["apply", "--targets", "codex", "--activate"], None);
-        return Err(error);
-    }
     Ok(())
 }
 

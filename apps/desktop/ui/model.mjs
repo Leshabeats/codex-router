@@ -204,6 +204,10 @@ export function sevenDayTokens(source, today = new Date()) {
 export function visibleLocalDownload(localModels = {}) {
   const download = localModels?.download;
   if (!download) return null;
+  // A cancelled pull is a terminal tombstone used by the worker to avoid
+  // resurrecting progress after SIGTERM. It is not user-visible work; Cancel
+  // should remove the operation card rather than leave a stale result behind.
+  if (download.status === "cancelled") return null;
   if (download.status !== "done" || !download.tag) return download;
   const installed = new Set((localModels.models || []).map((model) => model.tag));
   // A completed removal normally disappears once its row is gone. Keep a

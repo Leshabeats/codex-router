@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
+import { instructionOverlayExists } from "./instruction-overlays.mjs";
 import { SOURCE_ROOT } from "./paths.mjs";
 import { readUserModels } from "./user-models.mjs";
 
@@ -482,8 +483,23 @@ function modelProblem(model, providers, slugs, gatewayModels) {
   }
   const endpoint = endpointProblem(model, provider);
   if (endpoint) return endpoint;
+  if (
+    model.behaviorTemplate !== undefined &&
+    (typeof model.behaviorTemplate !== "string" || !model.behaviorTemplate.trim())
+  ) {
+    return `model ${model.slug} has an invalid behaviorTemplate`;
+  }
+  if (model.instructionOverlay !== undefined && !instructionOverlayExists(model.instructionOverlay)) {
+    return `model ${model.slug} has an invalid instructionOverlay`;
+  }
   if (model.requestProfile !== undefined && typeof model.requestProfile !== "string") {
     return `model ${model.slug} has an invalid requestProfile`;
+  }
+  if (
+    model.requiresTrailingUserTurn !== undefined &&
+    typeof model.requiresTrailingUserTurn !== "boolean"
+  ) {
+    return `model ${model.slug} has an invalid requiresTrailingUserTurn flag`;
   }
   if (
     model.multiAgentVersion !== undefined &&

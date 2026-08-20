@@ -155,3 +155,161 @@ jobs:
             apps/desktop/src-tauri/target/release/codex-router-desktop.exe
           if-no-files-found: error
           retention-days: 14
+
+  control-center:
+    name: Electron control center (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Linux
+            os: ubuntu-latest
+            builder_flag: --linux
+            artifact_path: apps/control-center/release/codex-router-control-center-linux.tar.gz
+          - platform: macOS
+            os: macos-latest
+            builder_flag: --mac --arm64 --x64
+            artifact_path: |
+              apps/control-center/release/*.dmg
+              apps/control-center/release/*.zip
+          - platform: Windows
+            os: windows-latest
+            builder_flag: --win
+            artifact_path: apps/control-center/release/*.exe
+    runs-on: ${{ matrix.os }}
+    env:
+      # Pull-request artifacts are deliberately unsigned. Production releases
+      # must use the platform signing and notarization credentials instead.
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    defaults:
+      run:
+        working-directory: apps/control-center
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: apps/control-center/package-lock.json
+      - name: Install Electron dependencies
+        run: npm ci
+      - name: Check Electron sources
+        run: npm run check
+      - name: Test Electron integration
+        run: npm test
+      - name: Build the renderer
+        run: npm run build
+      - name: Package the native beta
+        run: npx --no-install electron-builder ${{ matrix.builder_flag }}
+      - name: Smoke the packaged Linux app
+        if: runner.os == 'Linux'
+        env:
+          CODEX_ROUTER_SOURCE_ROOT: ${{ github.workspace }}
+        shell: bash
+        run: |
+          xvfb-run --auto-servernum bash -s <<'SMOKE'
+          set -euo pipefail
+          app="./release/linux-unpacked/codex-router-control-center"
+          log="${RUNNER_TEMP}/control-center-linux.log"
+          "$app" --no-sandbox >"$log" 2>&1 &
+          pid=$!
+          trap 'kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
+          sleep 8
+          if ! kill -0 "$pid" 2>/dev/null; then
+            status=0
+            wait "$pid" || status=$?
+            cat "$log"
+            echo "Packaged Linux app exited early with status $status." >&2
+            exit 1
+          fi
+          kill -TERM "$pid"
+          for _ in {1..40}; do
+            if ! kill -0 "$pid" 2>/dev/null; then
+              wait "$pid" || true
+              trap - EXIT
+              exit 0
+            fi
+            sleep 0.25
+          done
+          cat "$log"
+          echo "Packaged Linux app did not stop after SIGTERM." >&2
+          exit 1
+          SMOKE
+      - name: Smoke the packaged macOS app
+        if: runner.os == 'macOS'
+        env:
+          CODEX_ROUTER_SOURCE_ROOT: ${{ github.workspace }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="./release/mac-arm64/Codex Router.app/Contents/MacOS/Codex Router"
+          log="${RUNNER_TEMP}/control-center-macos.log"
+          "$app" >"$log" 2>&1 &
+          pid=$!
+          trap 'kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
+          sleep 8
+          if ! kill -0 "$pid" 2>/dev/null; then
+            status=0
+            wait "$pid" || status=$?
+            cat "$log"
+            echo "Packaged macOS app exited early with status $status." >&2
+            exit 1
+          fi
+          kill -TERM "$pid"
+          for _ in {1..40}; do
+            if ! kill -0 "$pid" 2>/dev/null; then
+              wait "$pid" || true
+              trap - EXIT
+              exit 0
+            fi
+            sleep 0.25
+          done
+          cat "$log"
+          echo "Packaged macOS app did not stop after SIGTERM." >&2
+          exit 1
+      - name: Smoke the packaged Windows app
+        if: runner.os == 'Windows'
+        env:
+          CODEX_ROUTER_SOURCE_ROOT: ${{ github.workspace }}
+        shell: pwsh
+        run: |
+          $stdout = Join-Path $env:RUNNER_TEMP "control-center-windows.log"
+          $stderr = Join-Path $env:RUNNER_TEMP "control-center-windows-error.log"
+          $process = Start-Process ".\release\win-unpacked\Codex Router.exe" `
+            -PassThru `
+            -RedirectStandardOutput $stdout `
+            -RedirectStandardError $stderr
+          try {
+            Start-Sleep -Seconds 8
+            $process.Refresh()
+            if ($process.HasExited) {
+              Get-Content $stdout, $stderr -ErrorAction SilentlyContinue
+              throw "Packaged Windows app exited early with status $($process.ExitCode)."
+            }
+            if (-not $process.CloseMainWindow()) {
+              throw "Packaged Windows app did not expose a window to close."
+            }
+            if (-not $process.WaitForExit(10000)) {
+              throw "Packaged Windows app did not stop after its window was closed."
+            }
+            if ($process.ExitCode -ne 0) {
+              Get-Content $stdout, $stderr -ErrorAction SilentlyContinue
+              throw "Packaged Windows app stopped with status $($process.ExitCode)."
+            }
+          } finally {
+            if (-not $process.HasExited) {
+              Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+              $process.WaitForExit()
+            }
+          }
+      - name: Preserve Linux executable permissions
+        if: runner.os == 'Linux'
+        working-directory: apps/control-center/release
+        run: tar -czf codex-router-control-center-linux.tar.gz -- *.AppImage
+      - name: Publish the unsigned beta package
+        uses: actions/upload-artifact@v7
+        with:
+          name: codex-router-control-center-${{ matrix.platform }}-${{ github.sha }}
+          path: ${{ matrix.artifact_path }}
+          if-no-files-found: error
+          retention-days: 14

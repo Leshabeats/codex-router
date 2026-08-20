@@ -58,6 +58,13 @@ const QUOTA_BODY = JSON.stringify({
   },
 });
 
+const FREE_USAGE_BODY = JSON.stringify({
+  error: {
+    type: "FreeUsageLimitError",
+    message: "Rate limit exceeded",
+  },
+});
+
 const BAD_KEY_BODY = JSON.stringify({
   error: { message: "Incorrect API key provided.", type: "invalid_request_error", code: "401" },
 });
@@ -306,6 +313,67 @@ test("a turn whose provider is out of usage is served by the next model", async 
     assert.match(child.testErrors(), /failover model=deepseek\/deepseek-v4-pro/);
     assert.match(child.testErrors(), /reason=out_of_usage/);
     assert.match(child.testErrors(), /-> zai-api\/glm-5\.2 outcome=200/);
+  } finally {
+    await stopChild(child);
+    await closeServer(gw.server);
+  }
+});
+
+test("the router fails over OpenCode FreeUsageLimitError without leaking the original error", async () => {
+  const seen = [];
+  const gw = await gateway(async (request, response) => {
+    const body = await bodyJson(request);
+    seen.push(body);
+    if (body.model === PRIMARY.gatewayModel) {
+      const payload = Buffer.from(FREE_USAGE_BODY, "utf8");
+      response.writeHead(429, {
+        "Content-Type": "application/json",
+        "Content-Length": String(payload.length),
+      });
+      response.end(payload);
+      return;
+    }
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    response.end(contentSse("free-limit-fallback"));
+  });
+  const routerPort = await openPort();
+  const child = run(routerEnv(gw.port, routerPort));
+  try {
+    await waitFor(`http://127.0.0.1:${routerPort}/health`, child);
+    const result = await readRouted(routerPort, TURN_BODY);
+    assert.deepEqual(seen.map((body) => body.model), [PRIMARY.gatewayModel, FALLBACK.gatewayModel]);
+    assert.equal(result.status, 200);
+    assert.match(result.body, /answered-by-free-limit-fallback/);
+    assert.doesNotMatch(result.body, /FreeUsageLimitError|Rate limit exceeded/);
+    assert.match(child.testErrors(), /failover model=deepseek\/deepseek-v4-pro/);
+    const events = await waitForUsageEvents(child.stateDir, 2, child);
+    assert.equal(events.find((event) => event.model === PRIMARY.slug).status, 429);
+    assert.equal(events.find((event) => event.model === FALLBACK.slug).status, 200);
+  } finally {
+    await stopChild(child);
+    await closeServer(gw.server);
+  }
+});
+
+test("translates an OpenCode FreeUsageLimitError when no fallback is eligible", async () => {
+  const gw = await gateway(async (_request, response) => {
+    const payload = Buffer.from(FREE_USAGE_BODY, "utf8");
+    response.writeHead(429, {
+      "Content-Type": "application/json",
+      "Content-Length": String(payload.length),
+    });
+    response.end(payload);
+  });
+  const routerPort = await openPort();
+  const child = run(routerEnv(gw.port, routerPort), { chain: ["gone/removed-model"] });
+  try {
+    await waitFor(`http://127.0.0.1:${routerPort}/health`, child);
+    const result = await readRouted(routerPort, TURN_BODY);
+    assert.equal(result.status, 429);
+    const translated = JSON.parse(result.body);
+    assert.equal(translated.error.type, "billing_error");
+    assert.match(translated.error.message, /run out of usage/i);
+    assert.doesNotMatch(result.body, /FreeUsageLimitError/);
   } finally {
     await stopChild(child);
     await closeServer(gw.server);

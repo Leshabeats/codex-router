@@ -3,6 +3,7 @@ import Combine
 import Foundation
 import ServiceManagement
 import SwiftUI
+import UniformTypeIdentifiers
 
 // Keep the existing material/background treatment, but use stronger text and
 // semantic accents so the compact tray remains readable over it.
@@ -160,6 +161,13 @@ final class RouterStore: ObservableObject {
   @Published private(set) var harnessMessage: String?
   @Published private(set) var harnessSucceeded = false
   @Published private(set) var islandMode: IslandMode
+  @Published private(set) var menuBarDisplayMode: TrayMenuBarDisplayMode
+  @Published private(set) var menuBarShowModelName: Bool
+  @Published private(set) var menuBarIconStyle: TrayMenuBarIconStyle
+  @Published private(set) var menuBarPresetIcon: String
+  @Published private(set) var menuBarCustomIconPath: String?
+  @Published private(set) var menuBarCustomIconImage: NSImage?
+  @Published private(set) var menuBarCustomIconMissing = false
   // Publishing the language makes every view re-render on change, so the
   // panel switches in place instead of waiting for the next relaunch.
   @Published private(set) var language: TrayLanguage = RouterLanguage.selection
@@ -186,6 +194,11 @@ final class RouterStore: ObservableObject {
   private let defaults = UserDefaults.standard
   private let islandVisibilityKey = "ModelRouterTray.islandVisible"
   private let islandModeKey = "ModelRouterTray.islandMode"
+  private let menuBarDisplayModeKey = "ModelRouterTray.menuBarDisplayMode"
+  private let menuBarShowModelNameKey = "ModelRouterTray.menuBarShowModelName"
+  private let menuBarIconStyleKey = "ModelRouterTray.menuBarIconStyle"
+  private let menuBarPresetIconKey = "ModelRouterTray.menuBarPresetIcon"
+  private let menuBarCustomIconPathKey = "ModelRouterTray.menuBarCustomIconPath"
   // Named for the retired login item because `update` still reads this default
   // to locate a tray installed outside the standard paths.
   private let loginItemBundlePathKey = "ModelRouterTray.loginItemBundlePath"
@@ -283,6 +296,84 @@ final class RouterStore: ObservableObject {
     return hasLaunchedBefore ? .notch : .off
   }
 
+  // Missing keys keep the look that shipped before custom icons: standard
+  // width, model name on, activity dot. An explicit Settings choice always
+  // wins; garbage raw values fall through the same way island mode does.
+  nonisolated static func resolveMenuBarSettings(
+    storedDisplayMode: String?,
+    storedShowModelName: Bool?,
+    storedIconStyle: String?,
+    storedPresetIcon: String?,
+    storedCustomIconPath: String?
+  ) -> MenuBarSettings {
+    let custom = storedCustomIconPath.flatMap { $0.isEmpty ? nil : $0 }
+    let preset = storedPresetIcon.flatMap { $0.isEmpty ? nil : $0 } ?? "cpu"
+    return MenuBarSettings(
+      displayMode: storedDisplayMode.flatMap(TrayMenuBarDisplayMode.init(rawValue:)) ?? .standard,
+      showModelName: storedShowModelName ?? true,
+      iconStyle: storedIconStyle.flatMap(TrayMenuBarIconStyle.init(rawValue:)) ?? .indicator,
+      presetIcon: preset,
+      customIconPath: custom
+    )
+  }
+
+  nonisolated static let customMenuBarIconMaxBytes = 5 * 1024 * 1024
+
+  nonisolated static func persistCustomMenuBarIcon(
+    from source: URL,
+    into applicationSupportDirectory: URL,
+    fileManager: FileManager = .default,
+    maxBytes: Int = RouterStore.customMenuBarIconMaxBytes
+  ) throws -> URL {
+    let size = (try fileManager.attributesOfItem(atPath: source.path)[.size] as? NSNumber)?.intValue ?? 0
+    if size > maxBytes {
+      throw MenuBarCustomIconError.tooLarge
+    }
+    let dir = applicationSupportDirectory.appendingPathComponent("ModelRouterTray", isDirectory: true)
+    try fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
+    let ext = source.pathExtension.isEmpty ? "png" : source.pathExtension.lowercased()
+    let dest = dir.appendingPathComponent("menu-bar-icon.\(ext)")
+    let staging = dir.appendingPathComponent("menu-bar-icon.\(UUID().uuidString).tmp")
+    do {
+      try fileManager.copyItem(at: source, to: staging)
+      if fileManager.fileExists(atPath: dest.path) {
+        _ = try fileManager.replaceItemAt(dest, withItemAt: staging)
+      } else {
+        try fileManager.moveItem(at: staging, to: dest)
+      }
+    } catch {
+      try? fileManager.removeItem(at: staging)
+      throw error
+    }
+    if let leftovers = try? fileManager.contentsOfDirectory(
+      at: dir,
+      includingPropertiesForKeys: nil
+    ) {
+      for leftover in leftovers
+      where leftover.lastPathComponent.hasPrefix("menu-bar-icon.")
+        && leftover.lastPathComponent != dest.lastPathComponent
+      {
+        try? fileManager.removeItem(at: leftover)
+      }
+    }
+    return dest
+  }
+
+  nonisolated static func loadCustomMenuBarIcon(path: String?) -> (image: NSImage?, missing: Bool) {
+    guard let path, !path.isEmpty else { return (nil, false) }
+    if let image = NSImage(contentsOfFile: path) {
+      return (image, false)
+    }
+    return (nil, true)
+  }
+
+  nonisolated static func menuBarTooltip(provider: String, state: String, usage: String?) -> String {
+    if let usage {
+      return routerFormat("Codex Router · %@ (%@) · %@", provider, state, usage)
+    }
+    return routerFormat("Codex Router · %@ (%@)", provider, state)
+  }
+
   init() {
     selectedUsageProviderID = "openai"
     // retireLoginItem records the bundle path on every bundled launch and runs
@@ -308,6 +399,22 @@ final class RouterStore: ObservableObject {
     } else {
       presenceMode = .always
     }
+
+    let resolvedMenuBar = Self.resolveMenuBarSettings(
+      storedDisplayMode: defaults.string(forKey: menuBarDisplayModeKey),
+      storedShowModelName: defaults.object(forKey: menuBarShowModelNameKey) == nil
+        ? nil
+        : defaults.bool(forKey: menuBarShowModelNameKey),
+      storedIconStyle: defaults.string(forKey: menuBarIconStyleKey),
+      storedPresetIcon: defaults.string(forKey: menuBarPresetIconKey),
+      storedCustomIconPath: defaults.string(forKey: menuBarCustomIconPathKey)
+    )
+    menuBarDisplayMode = resolvedMenuBar.displayMode
+    menuBarShowModelName = resolvedMenuBar.showModelName
+    menuBarIconStyle = resolvedMenuBar.iconStyle
+    menuBarPresetIcon = resolvedMenuBar.presetIcon
+    menuBarCustomIconPath = resolvedMenuBar.customIconPath
+    reloadCustomMenuBarIcon()
   }
 
   var codexActive: Bool {
@@ -401,6 +508,42 @@ final class RouterStore: ObservableObject {
     // button into a full repair.
     persistPresenceMode(mode)
     reconcileService()
+  }
+
+  func setMenuBarDisplayMode(_ mode: TrayMenuBarDisplayMode) {
+    menuBarDisplayMode = mode
+    defaults.set(mode.rawValue, forKey: menuBarDisplayModeKey)
+  }
+
+  func setMenuBarShowModelName(_ show: Bool) {
+    menuBarShowModelName = show
+    defaults.set(show, forKey: menuBarShowModelNameKey)
+  }
+
+  func setMenuBarIconStyle(_ style: TrayMenuBarIconStyle) {
+    menuBarIconStyle = style
+    defaults.set(style.rawValue, forKey: menuBarIconStyleKey)
+  }
+
+  func setMenuBarPresetIcon(_ icon: String) {
+    menuBarPresetIcon = icon
+    defaults.set(icon, forKey: menuBarPresetIconKey)
+  }
+
+  func setMenuBarCustomIconPath(_ path: String?) {
+    menuBarCustomIconPath = path
+    if let path {
+      defaults.set(path, forKey: menuBarCustomIconPathKey)
+    } else {
+      defaults.removeObject(forKey: menuBarCustomIconPathKey)
+    }
+    reloadCustomMenuBarIcon()
+  }
+
+  private func reloadCustomMenuBarIcon() {
+    let loaded = Self.loadCustomMenuBarIcon(path: menuBarCustomIconPath)
+    menuBarCustomIconImage = loaded.image
+    menuBarCustomIconMissing = loaded.missing
   }
 
   private func refreshHostAppRunning() {
@@ -1227,12 +1370,11 @@ final class RouterStore: ObservableObject {
       successMessage: "\(label) saved. Restart Codex to refresh its model picker."
     ) {
       _ = try await runControl(arguments: ["credential", provider], stdin: secret)
-      try await updateProviderSelection(provider, enabled: true)
     }
   }
 
-  // The control plane drops the provider from the Codex selection when a
-  // managed key is deleted. This only makes that selection live in the tray.
+  // The credential command removes the key, disables the provider, and publishes
+  // the resulting selection under one model-overlay lock.
   func removeProviderKey(_ provider: String) async {
     let label = providerSetup[provider]?.credentialLabel ?? "API key"
     await performProviderOperation(
@@ -1240,7 +1382,6 @@ final class RouterStore: ObservableObject {
       successMessage: "\(label) removed. Restart Codex to refresh its model picker."
     ) {
       _ = try await runControl(arguments: ["credential", provider, "--remove"])
-      _ = try? await runControl(arguments: ["apply", "--targets", "codex", "--activate"])
     }
   }
 
@@ -1873,19 +2014,12 @@ final class RouterStore: ObservableObject {
   }
 
   private func updateProviderSelection(_ provider: String, enabled: Bool) async throws {
-    let wasEnabled = snapshot.targets["codex"]?.enabledProviders.contains(provider) == true
     _ = try await runControl(
-      arguments: ["set", provider, enabled ? "on" : "off", "--targets", "codex"]
+      arguments: [
+        "set-apply", provider, enabled ? "on" : "off",
+        "--targets", "codex", "--activate",
+      ]
     )
-    do {
-      _ = try await runControl(arguments: ["apply", "--targets", "codex", "--activate"])
-    } catch {
-      _ = try? await runControl(
-        arguments: ["set", provider, wasEnabled ? "on" : "off", "--targets", "codex"]
-      )
-      _ = try? await runControl(arguments: ["apply", "--targets", "codex", "--activate"])
-      throw error
-    }
   }
 
   private func refreshActivity() async {
@@ -2824,6 +2958,61 @@ enum IslandMode: String, CaseIterable, Identifiable {
   }
 }
 
+enum TrayMenuBarDisplayMode: String, CaseIterable, Identifiable, Equatable {
+  case standard
+  case iconOnly
+
+  var id: String { rawValue }
+  var label: String {
+    switch self {
+    case .standard: return routerLocalized("Standard")
+    case .iconOnly: return routerLocalized("Icon only")
+    }
+  }
+}
+
+enum TrayMenuBarIconStyle: String, CaseIterable, Identifiable, Equatable {
+  case provider
+  case indicator
+  case preset
+  case custom
+
+  var id: String { rawValue }
+  var label: String {
+    switch self {
+    case .provider: return routerLocalized("Provider icon")
+    case .indicator: return routerLocalized("Activity dot")
+    case .preset: return routerLocalized("Preset icon")
+    case .custom: return routerLocalized("Custom image")
+    }
+  }
+}
+
+enum MenuBarCustomIconError: Error, Equatable {
+  case tooLarge
+}
+
+struct MenuBarSettings: Equatable {
+  var displayMode: TrayMenuBarDisplayMode
+  var showModelName: Bool
+  var iconStyle: TrayMenuBarIconStyle
+  var presetIcon: String
+  var customIconPath: String?
+}
+
+enum MenuBarLayoutMetrics {
+  static let standardReservedWidth: CGFloat = 180
+  static let iconOnlyWidth: CGFloat = 24
+
+  nonisolated static func statusItemWidth(displayMode: TrayMenuBarDisplayMode) -> CGFloat {
+    displayMode == .iconOnly ? iconOnlyWidth : standardReservedWidth
+  }
+
+  nonisolated static func showsActivityBadge(iconStyle: TrayMenuBarIconStyle, isIdle: Bool) -> Bool {
+    iconStyle != .indicator && !isIdle
+  }
+}
+
 struct DesktopQuotaRow: Identifiable {
   let id: String
   let providerID: String
@@ -2864,52 +3053,130 @@ struct ProviderSetupState: Decodable, Identifiable, Equatable {
   let anonymousNote: String?
 }
 
-private struct StatusItemLabel: View {
+private struct MenuBarIconView: View {
   @ObservedObject var store: RouterStore
-  @State private var pulsing = false
-  private static let reservedWidth: CGFloat = 180
+  var size: CGFloat = 13
 
   var body: some View {
-    HStack(spacing: 5) {
+    switch store.menuBarIconStyle {
+    case .provider:
+      ProviderIcon(providerID: providerID, size: size, showsHelp: false)
+    case .indicator:
       Circle()
         .fill(store.activityState.tint)
         .frame(width: 6, height: 6)
-        // Opening a menu bar app gives the user nothing to look at, so the
-        // status dot answers instead. SwiftUI offers no supported way to open a
-        // MenuBarExtra window programmatically -- the usual trick reaches into
-        // the private NSStatusItem behind it -- and a dot that visibly reacts is
-        // worth more than a private API that breaks on the next macOS release.
-        .scaleEffect(pulsing ? 2.1 : 1)
-        .opacity(pulsing ? 0.55 : 1)
-        .animation(.easeOut(duration: 0.45), value: pulsing)
-        .onChange(of: store.attentionPulse) { _ in
-          pulsing = true
-          Task {
-            try? await Task.sleep(for: .milliseconds(450))
-            pulsing = false
-          }
-        }
-      Text(store.hasConcurrentActivity ? store.activitySummaryLabel : store.selectedUsageProvider.shortName)
-        .font(.system(size: 11, weight: .medium, design: .rounded))
-        .lineLimit(1)
-        .truncationMode(.tail)
-      if store.hasConcurrentActivity {
-        Text(store.compactActivityProvidersLabel)
-          .font(.system(size: 10, weight: .medium, design: .rounded))
+    case .preset:
+      Image(systemName: store.menuBarPresetIcon)
+        .font(.system(size: size, weight: .medium))
+        .foregroundStyle(store.activityState == .idle ? Color.primary : store.activityState.tint)
+        .frame(width: size, height: size)
+    case .custom:
+      if let customImage = store.menuBarCustomIconImage {
+        Image(nsImage: customImage)
+          .resizable()
+          .interpolation(.high)
+          .scaledToFit()
+          .frame(width: size, height: size)
+      } else {
+        Image(systemName: "cpu")
+          .font(.system(size: size, weight: .medium))
           .foregroundStyle(routerMuted)
-          .lineLimit(1)
-          .truncationMode(.tail)
-      } else if let usage = store.selectedUsageText {
-        Text(usage)
-          .font(.system(size: 10, weight: .medium, design: .monospaced))
-          .foregroundStyle(routerMuted)
-          .lineLimit(1)
-          .truncationMode(.tail)
+          .frame(width: size, height: size)
       }
     }
-    // Keep the NSStatusItem anchor stable while activity text changes.
-    .frame(width: Self.reservedWidth, alignment: .leading)
-    .clipped()
+  }
+
+  private var providerID: String {
+    store.hasConcurrentActivity
+      ? (store.activeRequests.first?.provider ?? store.selectedUsageProviderID)
+      : store.selectedUsageProviderID
+  }
+}
+
+private struct StatusItemLabel: View {
+  @ObservedObject var store: RouterStore
+  @State private var pulsing = false
+
+  var body: some View {
+    if store.menuBarDisplayMode == .iconOnly {
+      HStack(spacing: 4) {
+        MenuBarIconView(store: store, size: 14)
+          .scaleEffect(pulsing ? 1.4 : 1)
+          .animation(.easeOut(duration: 0.45), value: pulsing)
+        if MenuBarLayoutMetrics.showsActivityBadge(
+          iconStyle: store.menuBarIconStyle,
+          isIdle: store.activityState == .idle
+        ) {
+          Circle()
+            .fill(store.activityState.tint)
+            .frame(width: 5, height: 5)
+        }
+      }
+      .frame(width: MenuBarLayoutMetrics.statusItemWidth(displayMode: store.menuBarDisplayMode), height: 22)
+      .clipped()
+      .contentShape(Rectangle())
+      .help(tooltipText)
+      .onChange(of: store.attentionPulse) { _ in
+        pulsing = true
+        Task {
+          try? await Task.sleep(for: .milliseconds(450))
+          pulsing = false
+        }
+      }
+    } else {
+      HStack(spacing: 5) {
+        if store.menuBarIconStyle == .indicator {
+          Circle()
+            .fill(store.activityState.tint)
+            .frame(width: 6, height: 6)
+            .scaleEffect(pulsing ? 2.1 : 1)
+            .opacity(pulsing ? 0.55 : 1)
+            .animation(.easeOut(duration: 0.45), value: pulsing)
+        } else {
+          MenuBarIconView(store: store, size: 13)
+            .scaleEffect(pulsing ? 1.4 : 1)
+            .animation(.easeOut(duration: 0.45), value: pulsing)
+        }
+        if store.menuBarShowModelName {
+          Text(store.hasConcurrentActivity ? store.activitySummaryLabel : store.selectedUsageProvider.shortName)
+            .font(.system(size: 11, weight: .medium, design: .rounded))
+            .lineLimit(1)
+            .truncationMode(.tail)
+        }
+        if store.hasConcurrentActivity {
+          Text(store.compactActivityProvidersLabel)
+            .font(.system(size: 10, weight: .medium, design: .rounded))
+            .foregroundStyle(routerMuted)
+            .lineLimit(1)
+            .truncationMode(.tail)
+        } else if let usage = store.selectedUsageText {
+          Text(usage)
+            .font(.system(size: 10, weight: .medium, design: .monospaced))
+            .foregroundStyle(routerMuted)
+            .lineLimit(1)
+            .truncationMode(.tail)
+        }
+      }
+      .frame(width: MenuBarLayoutMetrics.statusItemWidth(displayMode: store.menuBarDisplayMode), alignment: .leading)
+      .clipped()
+      .help(tooltipText)
+      .onChange(of: store.attentionPulse) { _ in
+        pulsing = true
+        Task {
+          try? await Task.sleep(for: .milliseconds(450))
+          pulsing = false
+        }
+      }
+    }
+  }
+
+  private var tooltipText: String {
+    let provider = store.activeRequests.isEmpty ? store.selectedUsageProvider.displayName : store.compactActivityProvidersLabel
+    return RouterStore.menuBarTooltip(
+      provider: provider,
+      state: store.activityState.label,
+      usage: store.selectedUsageText
+    )
   }
 }
 
@@ -3432,6 +3699,137 @@ private struct TrayView: View {
       .id(store.language)
     }
     .padding(.vertical, 2)
+    HStack(spacing: 12) {
+      VStack(alignment: .leading, spacing: 3) {
+        Text(routerLocalized("Menu bar mode"))
+          .font(.system(size: 12, weight: .medium))
+        Text(store.menuBarDisplayMode == .iconOnly
+          ? routerLocalized("Compact icon only, no model name text")
+          : routerLocalized("Show icon, model name, and usage"))
+          .font(.system(size: 10))
+          .foregroundStyle(routerMuted)
+      }
+      Spacer()
+      Picker("", selection: Binding(
+        get: { store.menuBarDisplayMode },
+        set: { store.setMenuBarDisplayMode($0) }
+      )) {
+        ForEach(TrayMenuBarDisplayMode.allCases) { mode in
+          Text(mode.label).tag(mode)
+        }
+      }
+      .pickerStyle(.segmented)
+      .labelsHidden()
+      .frame(width: 168)
+      .id(store.language)
+    }
+    .padding(.vertical, 2)
+
+    if store.menuBarDisplayMode == .standard {
+      settingRow(
+        title: routerLocalized("Show model name"),
+        detail: store.menuBarShowModelName
+          ? routerLocalized("Current model or provider is visible in menu bar")
+          : routerLocalized("Hide model name text in menu bar"),
+        isOn: Binding(
+          get: { store.menuBarShowModelName },
+          set: { store.setMenuBarShowModelName($0) }
+        )
+      )
+    }
+
+    HStack(spacing: 12) {
+      VStack(alignment: .leading, spacing: 3) {
+        Text(routerLocalized("Menu bar icon"))
+          .font(.system(size: 12, weight: .medium))
+        Text(routerLocalized("Choose the icon displayed in the menu bar"))
+          .font(.system(size: 10))
+          .foregroundStyle(routerMuted)
+      }
+      Spacer()
+      Picker("", selection: Binding(
+        get: { store.menuBarIconStyle },
+        set: { store.setMenuBarIconStyle($0) }
+      )) {
+        ForEach(TrayMenuBarIconStyle.allCases) { style in
+          Text(style.label).tag(style)
+        }
+      }
+      .pickerStyle(.menu)
+      .labelsHidden()
+      .frame(width: 168)
+      .id(store.language)
+    }
+    .padding(.vertical, 2)
+
+    if store.menuBarIconStyle == .preset {
+      HStack(spacing: 8) {
+        Text(routerLocalized("Preset icon"))
+          .font(.system(size: 11, weight: .medium))
+          .foregroundStyle(routerMuted)
+        Spacer()
+        ForEach(["cpu", "brain", "sparkles", "terminal", "bolt.horizontal.circle", "network"], id: \.self) { symbol in
+          Button {
+            store.setMenuBarPresetIcon(symbol)
+          } label: {
+            Image(systemName: symbol)
+              .font(.system(size: 12, weight: .medium))
+              .frame(width: 24, height: 24)
+              .background(
+                store.menuBarPresetIcon == symbol ? routerAccent.opacity(0.18) : Color.primary.opacity(0.04),
+                in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+              )
+              .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                  .stroke(store.menuBarPresetIcon == symbol ? routerAccent : Color.clear, lineWidth: 1)
+              )
+          }
+          .buttonStyle(.plain)
+        }
+      }
+      .padding(.vertical, 2)
+    }
+
+    if store.menuBarIconStyle == .custom {
+      HStack(spacing: 10) {
+        if store.menuBarCustomIconMissing {
+          Text(routerLocalized("Custom image missing"))
+            .font(.system(size: 10))
+            .foregroundStyle(routerMuted)
+            .lineLimit(1)
+          Spacer()
+          Button(routerLocalized("Clear")) {
+            store.setMenuBarCustomIconPath(nil)
+          }
+          .buttonStyle(.borderless)
+          .font(.system(size: 10))
+        } else if let path = store.menuBarCustomIconPath, !path.isEmpty {
+          Text(URL(fileURLWithPath: path).lastPathComponent)
+            .font(.system(size: 10, design: .monospaced))
+            .foregroundStyle(routerMuted)
+            .lineLimit(1)
+            .truncationMode(.middle)
+          Spacer()
+          Button(routerLocalized("Clear")) {
+            store.setMenuBarCustomIconPath(nil)
+          }
+          .buttonStyle(.borderless)
+          .font(.system(size: 10))
+        } else {
+          Text(routerLocalized("No custom image selected"))
+            .font(.system(size: 10))
+            .foregroundStyle(routerMuted)
+          Spacer()
+        }
+        Button(routerLocalized("Choose Image…")) {
+          chooseCustomIconImage()
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+      }
+      .padding(.vertical, 2)
+    }
+
     HStack(spacing: 12) {
       VStack(alignment: .leading, spacing: 3) {
         Text(routerLocalized("Language"))
@@ -5235,6 +5633,34 @@ private struct TrayView: View {
         .disabled(isDisabled)
     }
     .padding(.vertical, 1)
+  }
+
+  private func chooseCustomIconImage() {
+    let panel = NSOpenPanel()
+    panel.allowedContentTypes = [.png, .jpeg, .svg, .icns, .tiff]
+    panel.allowsMultipleSelection = false
+    panel.canChooseDirectories = false
+    panel.canChooseFiles = true
+    panel.prompt = routerLocalized("Select")
+    if panel.runModal() == .OK, let url = panel.url {
+      guard
+        let support = FileManager.default.urls(
+          for: .applicationSupportDirectory,
+          in: .userDomainMask
+        ).first
+      else { return }
+      do {
+        let dest = try RouterStore.persistCustomMenuBarIcon(from: url, into: support)
+        let loaded = RouterStore.loadCustomMenuBarIcon(path: dest.path)
+        guard loaded.image != nil else {
+          try? FileManager.default.removeItem(at: dest)
+          return
+        }
+        store.setMenuBarCustomIconPath(dest.path)
+      } catch {
+        return
+      }
+    }
   }
 
   // Offered whether or not the harness is installed: the same button installs

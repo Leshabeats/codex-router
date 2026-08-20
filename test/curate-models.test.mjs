@@ -14,7 +14,14 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 // coverage of any kind.
 const savedArgv = [...process.argv];
 process.argv = [process.argv[0], "curate-models.mjs", "gemini-api"];
-const { curatedSizing, parseEfforts, parseRequestProfile, planCuration, renderRows } =
+const {
+  curatedSizing,
+  mergeCurationIntoCurrent,
+  parseEfforts,
+  parseRequestProfile,
+  planCuration,
+  renderRows,
+} =
   await import("../src/curate-models.mjs");
 process.argv = savedArgv;
 process.exitCode = 0;
@@ -23,6 +30,27 @@ const curated = (upstreamModel, metadata = {}) => ({
   upstreamModel,
   provider: "fireworks",
   ...metadata,
+});
+
+test("curation merges current unrelated providers and rejects stale same-provider edits", () => {
+  const mine = curated("accounts/fireworks/models/kimi-k3");
+  const other = { ...curated("openrouter/other"), provider: "openrouter" };
+  const replacement = curated("accounts/fireworks/models/deepseek-v4-flash");
+  assert.deepEqual(
+    mergeCurationIntoCurrent([mine, other], {
+      providerId: "fireworks",
+      expectedMine: [mine],
+      nextMine: [replacement],
+    }),
+    [other, replacement],
+  );
+  assert.throws(
+    () => mergeCurationIntoCurrent(
+      [replacement, other],
+      { providerId: "fireworks", expectedMine: [mine], nextMine: [replacement] },
+    ),
+    /changed while this command was running/,
+  );
 });
 
 test("an additive model run keeps unrelated curated metadata", () => {

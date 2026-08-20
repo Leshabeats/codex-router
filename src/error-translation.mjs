@@ -104,7 +104,10 @@ function isPlanEntitlement(detail) {
 }
 
 function isOutOfUsage(detail, errorType) {
-  if (typeof errorType === "string" && /quota|billing|resource_exhausted/i.test(errorType)) {
+  if (
+    typeof errorType === "string" &&
+    /quota|billing|resource_exhausted|freeusagelimiterror/i.test(errorType)
+  ) {
     return true;
   }
   return QUOTA_PATTERNS.some((pattern) => pattern.test(detail));

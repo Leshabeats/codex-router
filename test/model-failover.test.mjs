@@ -51,6 +51,20 @@ test("classifyRoutedFailure swaps on exhausted usage across provider dialects", 
   }
 });
 
+test("classifyRoutedFailure swaps on OpenCode FreeUsageLimitError", () => {
+  const verdict = classifyRoutedFailure({
+    status: 429,
+    bodyText: JSON.stringify({
+      error: {
+        type: "FreeUsageLimitError",
+        message: "Rate limit exceeded",
+      },
+    }),
+    now: NOW,
+  });
+  assert.deepEqual(verdict, { swap: true, reason: "out_of_usage" });
+});
+
 test("classifyRoutedFailure swaps on 402 whatever the body says", () => {
   const verdict = classifyRoutedFailure({ status: 402, bodyText: "{}", now: NOW });
   assert.deepEqual(verdict, { swap: true, reason: "out_of_usage" });

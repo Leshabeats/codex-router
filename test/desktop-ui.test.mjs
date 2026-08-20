@@ -153,6 +153,13 @@ test("completed local downloads disappear when the model is no longer installed"
   );
   const active = { tag: "gemma4:12b", status: "downloading", percent: 42 };
   assert.deepEqual(visibleLocalDownload({ models: [], download: active }), active);
+  assert.equal(
+    visibleLocalDownload({
+      models: [],
+      download: { tag: "gemma4:12b", status: "cancelled", detail: "Download cancelled" },
+    }),
+    null,
+  );
 });
 
 test("active model speed prefers its provider and matches qualified slugs", () => {
@@ -220,6 +227,44 @@ test("the macOS tray tool-result-aging switch mirrors the same off default", () 
   );
   assert.match(source, /toolResultAging\?\.enabled \?\? false/);
   assert.doesNotMatch(source, /toolResultAging\?\.enabled \?\? true/);
+});
+
+test("native tray provider toggles use the atomic selection command", () => {
+  const rust = readFileSync(
+    path.join(root, "apps", "desktop", "src-tauri", "src", "main.rs"),
+    "utf8",
+  ).match(/fn update_provider_selection\([\s\S]*?\r?\n}\r?\n\r?\nfn run_control_json/)?.[0];
+  const swift = readFileSync(
+    path.join(root, "apps", "macos", "ModelRouterTray", "Sources", "ModelRouterTrayApp.swift"),
+    "utf8",
+  ).match(/private func updateProviderSelection[\s\S]*?\r?\n  }\r?\n\r?\n  private func refreshActivity/)?.[0];
+  assert.ok(rust, "Tauri provider-toggle helper should be readable");
+  assert.ok(swift, "macOS provider-toggle helper should be readable");
+  for (const source of [rust, swift]) {
+    assert.match(source, /["\[]set-apply/);
+    assert.match(source, /--activate/);
+    assert.doesNotMatch(source, /was_enabled|wasEnabled|["\[]apply["\]]/);
+  }
+});
+
+test("native credential actions do not race atomic selection publication", () => {
+  const rust = readFileSync(
+    path.join(root, "apps", "desktop", "src-tauri", "src", "main.rs"),
+    "utf8",
+  );
+  const swift = readFileSync(
+    path.join(root, "apps", "macos", "ModelRouterTray", "Sources", "ModelRouterTrayApp.swift"),
+    "utf8",
+  );
+  const rustSave = rust.match(/async fn save_api_key[\s\S]*?\r?\n}\r?\n\r?\n\/\//)?.[0];
+  const rustRemove = rust.match(/async fn remove_api_key[\s\S]*?\r?\n}\r?\n\r?\n#\[tauri::command\]/)?.[0];
+  const swiftSave = swift.match(/func saveProviderKey[\s\S]*?\r?\n  }\r?\n\r?\n  \/\//)?.[0];
+  const swiftRemove = swift.match(/func removeProviderKey[\s\S]*?\r?\n  }\r?\n\r?\n  func dailyTokens/)?.[0];
+  for (const [name, source] of Object.entries({ rustSave, rustRemove, swiftSave, swiftRemove })) {
+    assert.ok(source, `${name} should be readable`);
+    assert.match(source, /credential/);
+    assert.doesNotMatch(source, /update_provider_selection|updateProviderSelection|["\[]apply["\]]/);
+  }
 });
 
 // The disabled set is derived from data-command, so a control that drives a

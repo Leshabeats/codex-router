@@ -10,9 +10,15 @@ process.env.CODEX_ROUTER_STATE_DIR = stateDir;
 
 const {
   VISION_DOWNLOAD_STATE_PATH,
+  VISION_DOWNLOAD_HEARTBEAT_TIMEOUT_MS,
+  activeVisionDownloadResult,
+  claimVisionDownloadStart,
   createProgressTracker,
+  finalizeVisionDownload,
   parseNdjsonLines,
   readVisionDownload,
+  reconcileVisionDownload,
+  shouldAdoptDownloadedVisionModel,
   streamOllamaPull,
   writeVisionDownload,
 } = await import("../src/vision-download.mjs");
@@ -34,6 +40,75 @@ test("progress sums every layer so it only moves forward", () => {
   assert.equal(tracker.update({ digest: "a", completed: 100, total: 100 }), 100);
   // Status-only events carry no totals and report nothing.
   assert.equal(tracker.update({ status: "verifying sha256 digest" }), undefined);
+});
+
+test("same-tag vision pulls are idempotent and different active tags are refused", () => {
+  const active = {
+    status: "downloading",
+    tag: "qwen2.5vl:3b",
+    percent: 42,
+  };
+  assert.deepEqual(activeVisionDownloadResult(active, "qwen2.5vl:3b"), {
+    started: false,
+    existing: true,
+    tag: "qwen2.5vl:3b",
+    percent: 42,
+  });
+  assert.throws(
+    () => activeVisionDownloadResult(active, "moondream:latest"),
+    /qwen2\.5vl:3b is already downloading \(42%\)/,
+  );
+  assert.equal(activeVisionDownloadResult({ status: "done" }, "qwen2.5vl:3b"), null);
+});
+
+test("vision pull controllers cannot both seed and spawn a worker", () => {
+  const claimPath = path.join(stateDir, "vision-start.claim");
+  const first = claimVisionDownloadStart({ claimPath, now: () => 10_000 });
+  assert.equal(first.acquired, true);
+  const second = claimVisionDownloadStart({ claimPath, now: () => 10_001 });
+  assert.equal(second.acquired, false);
+  first.release();
+  const third = claimVisionDownloadStart({ claimPath, now: () => 10_002 });
+  assert.equal(third.acquired, true);
+  third.release();
+});
+
+test("dead or stale vision workers become interrupted so a pull can retry", () => {
+  const active = {
+    version: 1,
+    tag: "qwen2.5vl:3b",
+    status: "downloading",
+    percent: 42,
+    workerPid: 321,
+    updatedAt: 10_000,
+  };
+  const alive = reconcileVisionDownload(active, {
+    now: 10_001,
+    kill: () => {},
+    persist: false,
+  });
+  assert.equal(alive, active);
+
+  const dead = reconcileVisionDownload(active, {
+    now: 10_001,
+    kill: () => {
+      const error = new Error("not running");
+      error.code = "ESRCH";
+      throw error;
+    },
+    persist: false,
+  });
+  assert.equal(dead.status, "error");
+  assert.equal(dead.detail, "interrupted");
+  assert.equal(dead.workerPid, null);
+
+  const stale = reconcileVisionDownload(active, {
+    now: 10_000 + VISION_DOWNLOAD_HEARTBEAT_TIMEOUT_MS + 1,
+    kill: () => {},
+    persist: false,
+  });
+  assert.equal(stale.status, "error");
+  assert.match(stale.error, /Retry the download/);
 });
 
 test("ndjson parsing keeps a partial trailing line for the next chunk", () => {
@@ -106,9 +181,54 @@ test("the /v1 inference prefix is stripped for the daemon API", async () => {
   assert.equal(seenUrl, "http://127.0.0.1:11434/api/pull");
 });
 
+test("a completed pull never re-enables a bridge explicitly switched off", async () => {
+  const events = [];
+  const result = await finalizeVisionDownload("qwen2.5vl:3b", {
+    readSettings: () => ({ enabled: false, engine: null }),
+    configured: () => true,
+    setLocal: () => assert.fail("an explicit off choice must not be replaced"),
+    setEnabled: () => assert.fail("an explicit off choice must not be re-enabled"),
+    finalizePublication: async (options) => {
+      events.push("publish");
+      assert.equal(options.warningOnly, true);
+      return { warnings: {} };
+    },
+  });
+
+  assert.equal(shouldAdoptDownloadedVisionModel({ enabled: false, engine: null }, true), false);
+  assert.deepEqual(result, { adopt: false });
+  assert.deepEqual(events, ["publish"]);
+});
+
+test("a first-run vision pull adopts only after download", async () => {
+  const events = [];
+  const result = await finalizeVisionDownload("qwen2.5vl:3b", {
+    // The default has an engine, but no state file means nobody chose it. A
+    // completed local pull is the first explicit setup and may become local.
+    readSettings: () => ({ enabled: true, engine: "default-vision" }),
+    configured: () => false,
+    setLocal: ({ model }) => events.push(`local:${model}`),
+    setEnabled: (enabled) => events.push(`enabled:${enabled}`),
+    finalizePublication: async (options) => {
+      events.push("publish");
+      assert.equal(options.warningOnly, true);
+      return { warnings: {} };
+    },
+  });
+
+  assert.deepEqual(events, ["local:qwen2.5vl:3b", "enabled:true", "publish"]);
+  assert.deepEqual(result, { adopt: true });
+});
+
 test("download state round-trips through protected state", () => {
   assert.equal(readVisionDownload(), null);
-  writeVisionDownload({ version: 1, tag: "moondream", status: "downloading", percent: 12 });
+  writeVisionDownload({
+    version: 1,
+    tag: "moondream",
+    status: "downloading",
+    percent: 12,
+    updatedAt: Date.now(),
+  });
   assert.equal(readVisionDownload().percent, 12);
   assert.ok(VISION_DOWNLOAD_STATE_PATH.startsWith(stateDir));
 });
