@@ -170,6 +170,13 @@ test("reports a rolling 24-hour window separately from calendar-day buckets", ()
 });
 
 test("publishes prefix-cache telemetry for the dashboard without inflating it", () => {
+  const localDateKey = (value) => {
+    const date = new Date(value);
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  };
   const now = Date.parse("2026-07-21T18:00:00Z");
   const snapshot = aggregateProviderUsage(
     [
@@ -208,8 +215,8 @@ test("publishes prefix-cache telemetry for the dashboard without inflating it", 
     // request exactly one day earlier is still part of the window.
     last24hCachedInputTokens: 130,
     dailyCachedInputTokens: [
-      { startDate: "2026-07-20", cachedInputTokens: 80 },
-      { startDate: "2026-07-21", cachedInputTokens: 50 },
+      { startDate: localDateKey("2026-07-20T18:00:00Z"), cachedInputTokens: 80 },
+      { startDate: localDateKey("2026-07-21T17:00:00Z"), cachedInputTokens: 50 },
     ],
   });
   const deepseek = snapshot.providers.find((provider) => provider.id === "deepseek");
@@ -220,8 +227,8 @@ test("publishes prefix-cache telemetry for the dashboard without inflating it", 
   assert.equal(deepseek.last24hCachedInputTokens, 130);
   assert.equal(deepseek.regularInputTokens + deepseek.cachedInputTokens, deepseek.inputTokens);
   assert.deepEqual(deepseek.dailyUsageBuckets, [
-    { startDate: "2026-07-20", tokens: 100, requests: 1, inputTokens: 100, cachedInputTokens: 80, outputTokens: 0 },
-    { startDate: "2026-07-21", tokens: 50, requests: 2, inputTokens: 50, cachedInputTokens: 50, outputTokens: 0 },
+    { startDate: localDateKey("2026-07-20T18:00:00Z"), tokens: 100, requests: 1, inputTokens: 100, cachedInputTokens: 80, outputTokens: 0 },
+    { startDate: localDateKey("2026-07-21T17:00:00Z"), tokens: 50, requests: 2, inputTokens: 50, cachedInputTokens: 50, outputTokens: 0 },
   ]);
 });
 
