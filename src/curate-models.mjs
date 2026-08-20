@@ -9,10 +9,12 @@ import { confirm, promptLine } from "./setup-shared.mjs";
 import { toggleSelection } from "./setup-ui.mjs";
 import {
   DEFAULT_CONTEXT_WINDOW,
+  USER_MODELS_PATH,
   readUserModels,
   userModelEntry,
   writeUserModels,
 } from "./user-models.mjs";
+import { transactModelOverlayMutation } from "./model-overlay-publication.mjs";
 
 // Interactive curation: list the provider's live models that are not part of
 // the checked-in registry, let the user toggle the ones they want, and persist
@@ -124,6 +126,28 @@ export function planCuration({ mine, chosen, removals, interactive }) {
   };
 }
 
+// Apply a prompt/discovery result to the document observed at commit time.
+// Unrelated providers are merged from that current document; replacing the
+// whole array from the pre-prompt read would lose a concurrent curation. The
+// same provider is intentionally compare-and-swap: its current entries may
+// contain a newer user's edit that this run cannot safely reconcile.
+export function mergeCurationIntoCurrent(
+  current,
+  { providerId, expectedMine, nextMine },
+) {
+  const models = Array.isArray(current) ? current : [];
+  const currentMine = models.filter((model) => model.provider === providerId);
+  if (JSON.stringify(currentMine) !== JSON.stringify(expectedMine)) {
+    throw new Error(
+      `Curated ${providerId} models changed while this command was running; review them and retry.`,
+    );
+  }
+  return [
+    ...models.filter((model) => model.provider !== providerId),
+    ...nextMine,
+  ];
+}
+
 export function parseEfforts(raw) {
   const efforts = raw.split(",").map((value) => value.trim().toLowerCase()).filter(Boolean);
   for (const effort of efforts) {
@@ -225,7 +249,6 @@ async function main() {
   for (const warning of USER_MODEL_WARNINGS) console.error(warning);
   const existing = readUserModels();
   const mine = existing.filter((model) => model.provider === providerId);
-  const others = existing.filter((model) => model.provider !== providerId);
   const curated = new Set(mine.map((model) => model.upstreamModel));
   if (modelsOption !== undefined && removeOption !== undefined) {
     throw new Error("Use --models to add models or --remove to prune them, not both.");
@@ -359,24 +382,47 @@ async function main() {
       });
     }),
   ];
-  const target = writeUserModels([...others, ...nextMine]);
+  let target;
   const added = nextMine.filter((model) => !curated.has(model.upstreamModel)).length;
   const removed = mine.length - (nextMine.length - added);
+
+  const wantsApply =
+    !noApply && (
+      apply ||
+      confirm("Apply now? This rebuilds gateway routes and restarts the background service.")
+    );
+  await transactModelOverlayMutation({
+    files: [USER_MODELS_PATH],
+    mutate: () => {
+      // Discovery and prompts intentionally happen before the lock, but the
+      // document merge cannot: another provider's curation may have landed
+      // while this command was waiting. Re-read both sides under the lock and
+      // merge current unrelated entries. A same-provider edit is ambiguous
+      // (the user's choices were based on an older list), so fail closed rather
+      // than overwrite it with a stale interactive result.
+      const current = readUserModels();
+      target = writeUserModels(mergeCurationIntoCurrent(current, {
+        providerId,
+        expectedMine: mine,
+        nextMine,
+      }));
+    },
+    applyPublication: async () => {
+      if (!wantsApply) return {};
+      applyInstall();
+      return {};
+    },
+  });
   process.stdout.write(
     `Saved ${nextMine.length} curated ${provider.displayName} model${
       nextMine.length === 1 ? "" : "s"
     } (${added} added, ${removed} removed) to ${target}.\n`,
   );
-
   if (noApply) {
     process.stdout.write("Run ./bin/install to regenerate routes and the picker catalog.\n");
     return;
   }
-  const wantsApply =
-    apply ||
-    confirm("Apply now? This rebuilds gateway routes and restarts the background service.");
   if (wantsApply) {
-    applyInstall();
     process.stdout.write("Curated models are live. Fully quit and reopen the app to refresh its picker.\n");
   } else {
     process.stdout.write("Run ./bin/install to regenerate routes and the picker catalog.\n");

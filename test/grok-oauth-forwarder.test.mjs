@@ -449,6 +449,124 @@ test("hostedSearchEnabledFor covers the checked-in Grok OAuth model", () => {
   assert.equal(hostedSearchEnabledFor("grok-4.6"), true);
 });
 
+test("toResponsesRequest preserves structured image tool outputs", () => {
+  function toolOutput(content) {
+    const request = toResponsesRequest(
+      {
+        model: "grok-4.6",
+        messages: [
+          {
+            role: "assistant",
+            content: "",
+            tool_calls: [
+              {
+                id: "call_1",
+                type: "function",
+                function: { name: "view_image", arguments: "{}" },
+              },
+            ],
+          },
+          {
+            role: "tool",
+            tool_call_id: "call_1",
+            content,
+          },
+        ],
+      },
+      { hostedSearchEnabled: false },
+    );
+
+    return request.input.find(
+      (item) => item.type === "function_call_output",
+    ).output;
+  }
+
+  // Existing string tool outputs remain unchanged.
+  assert.equal(toolOutput("plain text result"), "plain text result");
+
+  // Structured non-image outputs keep the existing JSON-string behavior.
+  assert.equal(
+    toolOutput([{ type: "text", text: "hello" }]),
+    JSON.stringify([{ type: "text", text: "hello" }]),
+  );
+
+  // Native Codex image tool results remain multimodal and preserve detail.
+  assert.deepEqual(
+    toolOutput([
+      {
+        type: "input_image",
+        image_url: "data:image/jpeg;base64,/9j/AA==",
+        detail: "original",
+      },
+    ]),
+    [
+      {
+        type: "input_image",
+        image_url: "data:image/jpeg;base64,/9j/AA==",
+        detail: "original",
+      },
+    ],
+  );
+
+  // Mixed multimodal output preserves the original part ordering.
+  assert.deepEqual(
+    toolOutput([
+      {
+        type: "input_image",
+        image_url: "data:image/jpeg;base64,/9j/AA==",
+        detail: "original",
+      },
+      { type: "text", text: "between images" },
+      {
+        type: "input_image",
+        image_url: "data:image/png;base64,iVBORw0KGgo=",
+        detail: "high",
+      },
+    ]),
+    [
+      {
+        type: "input_image",
+        image_url: "data:image/jpeg;base64,/9j/AA==",
+        detail: "original",
+      },
+      { type: "input_text", text: "between images" },
+      {
+        type: "input_image",
+        image_url: "data:image/png;base64,iVBORw0KGgo=",
+        detail: "high",
+      },
+    ],
+  );
+
+  // Some tool transports label image data as generic octet-stream.
+  // Recover a usable image MIME type from the encoded file signature.
+  for (const [mime, base64] of [
+    ["image/jpeg", "/9j/AA=="],
+    ["image/png", "iVBORw0KGgo="],
+    ["image/gif", "R0lGODlh"],
+    ["image/webp", "UklGRgAAAABXRUJQ"],
+  ]) {
+    assert.deepEqual(
+      toolOutput([
+        {
+          type: "image_url",
+          image_url: {
+            url: `data:application/octet-stream;base64,${base64}`,
+            detail: "low",
+          },
+        },
+      ]),
+      [
+        {
+          type: "input_image",
+          image_url: `data:${mime};base64,${base64}`,
+          detail: "low",
+        },
+      ],
+    );
+  }
+});
+
 test("toResponsesRequest preserves the client's image detail level", () => {
   const request = toResponsesRequest({
     model: "grok-4.5",

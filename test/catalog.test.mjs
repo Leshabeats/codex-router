@@ -152,6 +152,84 @@ test("routed models rewrite GPT identity text to the external model name", () =>
   assert.equal(model.multi_agent_version, "v2");
 });
 
+test("routed models can borrow native behavior instructions without inheriting capabilities", () => {
+  const behaviorTemplate = {
+    ...template,
+    slug: "gpt-5.6-sol",
+    base_instructions: "You are Codex, an agent based on GPT-5. SOL_BEHAVIOR",
+    model_messages: {
+      instructions_template: "You are Codex, an agent based on GPT-5. SOL_TEMPLATE {{ personality }}",
+      instructions_variables: { personality_default: "" },
+    },
+    tool_mode: "code_mode_only",
+    use_responses_lite: true,
+  };
+  const model = routedModel(template, { ...grok, behaviorTemplate: "gpt-5.6-sol" }, behaviorTemplate);
+
+  assert.match(model.base_instructions, /based on Grok 4\.5/);
+  assert.match(model.base_instructions, /SOL_BEHAVIOR/);
+  assert.match(model.model_messages.instructions_template, /SOL_TEMPLATE/);
+  assert.equal(model.tool_mode, undefined);
+  assert.equal(model.use_responses_lite, false);
+});
+
+test("routed behavior identity rewriting consumes versioned native GPT names", () => {
+  const behaviorTemplate = {
+    ...template,
+    base_instructions: "You are Codex, an agent based on GPT-5.6-Sol.",
+    model_messages: {
+      instructions_template: "You are Codex, an agent based on GPT-5.6-Sol.",
+    },
+  };
+  const model = routedModel(template, grok, behaviorTemplate);
+
+  assert.match(model.base_instructions, /based on Grok 4\.5\./);
+  assert.doesNotMatch(model.base_instructions, /GPT-5/);
+  assert.doesNotMatch(model.base_instructions, /Grok 4\.5\.6-Sol/);
+  assert.match(model.model_messages.instructions_template, /based on Grok 4\.5\./);
+  assert.doesNotMatch(model.model_messages.instructions_template, /GPT-5/);
+});
+
+test("routed models can opt into a concise execution overlay", () => {
+  const model = routedModel(template, {
+    ...grok,
+    instructionOverlay: "efficient-agentic",
+  });
+  const plain = routedModel(template, grok);
+
+  assert.match(model.base_instructions, /Routed execution discipline/);
+  assert.match(model.base_instructions, /without narrating each routine tool step/);
+  assert.match(model.model_messages.instructions_template, /Routed execution discipline/);
+  assert.doesNotMatch(plain.base_instructions, /Routed execution discipline/);
+});
+
+test("efficient routed execution keeps persistent tool output bounded", () => {
+  const model = routedModel(template, { ...grok, instructionOverlay: "efficient-agentic" });
+  assert.match(model.base_instructions, /minimum sufficient tool output/i);
+  assert.match(model.base_instructions, /large file/i);
+  assert.match(model.base_instructions, /bounded sections/i);
+});
+
+test("efficient routed execution keeps secret-bearing CLI output out of history", () => {
+  const model = routedModel(template, { ...grok, instructionOverlay: "efficient-agentic" });
+  assert.match(model.base_instructions, /credentials/i);
+  assert.match(model.base_instructions, /capture.*output/i);
+  assert.match(model.base_instructions, /safe fields/i);
+});
+
+test("efficient routed execution preflights unfamiliar command and test APIs", () => {
+  const model = routedModel(template, { ...grok, instructionOverlay: "efficient-agentic" });
+  assert.match(model.base_instructions, /unfamiliar.*CLI.*test API/i);
+  assert.match(model.base_instructions, /help.*signatures.*documentation/i);
+});
+
+test("efficient routed execution avoids fragile Windows nested quoting", () => {
+  const model = routedModel(template, { ...grok, instructionOverlay: "efficient-agentic" });
+  assert.match(model.base_instructions, /Windows/i);
+  assert.match(model.base_instructions, /PowerShell.*SQL.*JSON/i);
+  assert.match(model.base_instructions, /here-string.*temporary script/i);
+});
+
 test("routed models are native v2 spawn-agent model overrides", () => {
   const model = routedModel(template, grok);
   assert.equal(model.visibility, "list");
@@ -331,6 +409,64 @@ test("merged catalog preserves native GPT identity while rewriting routed models
   assert.equal(bySlug.get("gpt-5.5").supports_reasoning_summaries, false);
   assert.match(bySlug.get("grok-oauth/grok-4.5").base_instructions, /based on Grok 4\.5/);
   assert.doesNotMatch(bySlug.get("grok-oauth/grok-4.5").base_instructions, /GPT-5/);
+});
+
+test("merged catalog resolves a routed behavior template without inheriting its capabilities", () => {
+  const sol = {
+    ...template,
+    slug: "gpt-5.6-sol",
+    base_instructions: "You are Codex, an agent based on GPT-5. SOL_BEHAVIOR",
+    model_messages: {
+      instructions_template: "You are Codex, an agent based on GPT-5. SOL_TEMPLATE {{ personality }}",
+      instructions_variables: { personality_default: "" },
+    },
+    tool_mode: "code_mode_only",
+    use_responses_lite: true,
+  };
+  const merged = buildMergedCatalog(
+    { models: [template, sol] },
+    [{ ...grok, behaviorTemplate: "gpt-5.6-sol" }],
+  );
+  const routed = merged.find((model) => model.slug === grok.slug);
+
+  assert.match(routed.base_instructions, /SOL_BEHAVIOR/);
+  assert.match(routed.model_messages.instructions_template, /SOL_TEMPLATE/);
+  assert.equal(routed.tool_mode, undefined);
+  assert.equal(routed.use_responses_lite, false);
+});
+
+test("merged catalog derives a missing behavior base instruction from its template", () => {
+  const sol = {
+    slug: "gpt-5.6-sol",
+    model_messages: {
+      instructions_template: "You are Codex, an agent based on GPT-5.6-Sol.",
+    },
+  };
+  const merged = buildMergedCatalog(
+    { models: [template, sol] },
+    [{ ...grok, behaviorTemplate: "gpt-5.6-sol" }],
+  );
+  const routed = merged.find((model) => model.slug === grok.slug);
+
+  assert.match(routed.base_instructions, /based on Grok 4\.5\./);
+  assert.doesNotMatch(routed.base_instructions, /GPT-5/);
+});
+
+test("merged catalog does not inherit native tool mode from a fallback template", () => {
+  const sol = {
+    ...template,
+    slug: "gpt-5.6-sol",
+    tool_mode: "code_mode_only",
+    use_responses_lite: true,
+  };
+  const merged = buildMergedCatalog(
+    { models: [sol] },
+    [{ ...grok, behaviorTemplate: "gpt-5.6-sol" }],
+  );
+  const routed = merged.find((model) => model.slug === grok.slug);
+
+  assert.equal(routed.tool_mode, undefined);
+  assert.equal(routed.use_responses_lite, false);
 });
 
 test("merged catalog preserves an explicit native reasoning summary capability", () => {
@@ -940,4 +1076,38 @@ test("a bridged text-only model advertises image input, and only through the bri
   assert.equal(entry.visionBridgeEngine, undefined);
   // Advertising image input is not a claim about detail handling.
   assert.equal(entry.supports_image_detail_original, false);
+});
+
+
+test("efficient routed execution closes a RED behavior area before switching", () => {
+  const model = routedModel(template, { ...grok, instructionOverlay: "efficient-agentic" });
+  assert.match(model.base_instructions, /RED.*suite.*green.*blocker/i);
+});
+
+test("efficient routed execution invalidates contradicted debugging hypotheses", () => {
+  const model = routedModel(template, { ...grok, instructionOverlay: "efficient-agentic" });
+  assert.match(model.base_instructions, /runtime evidence.*contradict.*hypothesis/i);
+  assert.match(model.base_instructions, /re-?trace.*production.*call path/i);
+});
+
+test("efficient routed execution stops patching after two failed hypotheses", () => {
+  const model = routedModel(template, { ...grok, instructionOverlay: "efficient-agentic" });
+  assert.match(model.base_instructions, /two.*failed hypotheses.*production call path/i);
+});
+
+test("efficient routed execution bounds large reads and defers future-stage research", () => {
+  const model = routedModel(template, { ...grok, instructionOverlay: "efficient-agentic" });
+  assert.match(model.base_instructions, /32 KiB|400 lines/i);
+  assert.match(model.base_instructions, /defer.*research.*stage.*consume/i);
+});
+test("efficient routed execution grounds unfamiliar fixtures in canonical contracts", () => {
+  const model = routedModel(template, { ...grok, instructionOverlay: "efficient-agentic" });
+  assert.match(model.base_instructions, /fixture.*canonical.*schema.*type.*known-good/i);
+});
+
+
+test("efficient routed execution silently substitutes routine missing tools", () => {
+  const model = routedModel(template, { ...grok, instructionOverlay: "efficient-agentic" });
+  assert.match(model.base_instructions, /optional helper.*unavailable.*switch silently/i);
+  assert.match(model.base_instructions, /do not send.*progress message.*fallback/i);
 });

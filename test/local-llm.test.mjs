@@ -367,6 +367,16 @@ test("active local downloads and removals can be cancelled without a second work
     detail: "Download cancelled",
     updatedAt: 6_000,
   });
+  assert.equal(
+    localModelsSnapshot({
+      inventory: [],
+      running: [],
+      selection: { enabled: [] },
+      capabilities: {},
+      agentChecks: {},
+    }).download,
+    null,
+  );
 });
 
 test("a removed model with a failed catalog refresh stays a completed removal", () => {

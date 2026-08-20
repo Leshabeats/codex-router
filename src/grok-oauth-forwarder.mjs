@@ -191,6 +191,117 @@ export function mergeHostedSearchTools(clientTools = [], { enabled = true } = {}
   return [...functions, ...hosted];
 }
 
+function normalizeToolImageUrl(url) {
+  if (typeof url !== "string") return url;
+
+  const prefix = "data:application/octet-stream;base64,";
+  if (!url.startsWith(prefix)) return url;
+
+  const base64 = url.slice(prefix.length);
+  let bytes;
+  try {
+    bytes = Buffer.from(base64.slice(0, 64), "base64");
+  } catch {
+    return url;
+  }
+
+  let mime;
+  if (
+    bytes.length >= 3 &&
+    bytes[0] === 0xff &&
+    bytes[1] === 0xd8 &&
+    bytes[2] === 0xff
+  ) {
+    mime = "image/jpeg";
+  } else if (
+    bytes.length >= 8 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47
+  ) {
+    mime = "image/png";
+  } else if (
+    bytes.length >= 6 &&
+    bytes.toString("ascii", 0, 3) === "GIF"
+  ) {
+    mime = "image/gif";
+  } else if (
+    bytes.length >= 12 &&
+    bytes.toString("ascii", 0, 4) === "RIFF" &&
+    bytes.toString("ascii", 8, 12) === "WEBP"
+  ) {
+    mime = "image/webp";
+  } else {
+    return url;
+  }
+
+  return `data:${mime};base64,${base64}`;
+}
+
+function normalizeToolOutputForGrok(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return JSON.stringify(content ?? "");
+
+  // Only image-bearing output becomes a Responses content-item array. Other
+  // structured tool results keep the existing JSON-text behavior.
+  const parts = [];
+  let hasImage = false;
+
+  for (const part of content) {
+    if (!part || typeof part !== "object") continue;
+
+    if (
+      ["text", "input_text", "output_text"].includes(part.type) &&
+      typeof part.text === "string" &&
+      part.text
+    ) {
+      parts.push({ type: "input_text", text: part.text });
+      continue;
+    }
+
+    let imageUrl;
+    let detail;
+
+    if (part.type === "input_image") {
+      imageUrl = part.image_url;
+      if (typeof part.detail === "string") detail = part.detail;
+    } else if (part.type === "image_url") {
+      imageUrl =
+        typeof part.image_url === "string"
+          ? part.image_url
+          : part.image_url?.url;
+
+      if (typeof part.detail === "string") {
+        detail = part.detail;
+      } else if (
+        part.image_url &&
+        typeof part.image_url !== "string" &&
+        typeof part.image_url.detail === "string"
+      ) {
+        detail = part.image_url.detail;
+      }
+    }
+
+    if (typeof imageUrl === "string" && imageUrl) {
+      hasImage = true;
+
+      const normalizedImage = {
+        type: "input_image",
+        image_url: normalizeToolImageUrl(imageUrl),
+      };
+
+      if (typeof detail === "string" && detail) {
+        normalizedImage.detail = detail;
+      }
+
+      parts.push(normalizedImage);
+    }
+  }
+
+  return hasImage ? parts : JSON.stringify(content ?? "");
+}
+
 // Chat Completions request -> Codex Responses request.
 export function toResponsesRequest(chat, options = {}) {
   const input = [];
@@ -204,10 +315,7 @@ export function toResponsesRequest(chat, options = {}) {
       input.push({
         type: "function_call_output",
         call_id: message.tool_call_id,
-        output:
-          typeof message.content === "string"
-            ? message.content
-            : JSON.stringify(message.content ?? ""),
+        output: normalizeToolOutputForGrok(message.content),
       });
     } else if (role === "assistant" && Array.isArray(message.tool_calls)) {
       const text = contentToText(message.content);

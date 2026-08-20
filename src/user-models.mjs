@@ -36,6 +36,7 @@ const METADATA_FIELDS = new Set([
   "defaultReasoningSummary",
   "availabilityNux",
   "upgradeTo",
+  "requiresTrailingUserTurn",
 ]);
 
 function gatewaySafe(value) {

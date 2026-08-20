@@ -1,19 +1,30 @@
 import assert from "node:assert/strict";
+import http from "node:http";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { getGlobalDispatcher, setGlobalDispatcher } from "undici";
 
 import { installStableFetchTransport } from "../src/fetch-transport.mjs";
 
 const SRC_DIR = fileURLToPath(new URL("../src", import.meta.url));
 
-test("the router disables HTTP/2 on its process-wide fetch dispatcher", () => {
+function installFakeTransport(environment, execArgv = []) {
   const created = [];
   const installed = [];
 
   class FakeAgent {
     constructor(options) {
+      this.kind = "direct";
+      this.options = options;
+      created.push(this);
+    }
+  }
+
+  class FakeEnvHttpProxyAgent {
+    constructor(options) {
+      this.kind = "environment-proxy";
       this.options = options;
       created.push(this);
     }
@@ -21,15 +32,143 @@ test("the router disables HTTP/2 on its process-wide fetch dispatcher", () => {
 
   const dispatcher = installStableFetchTransport({
     AgentClass: FakeAgent,
+    EnvHttpProxyAgentClass: FakeEnvHttpProxyAgent,
+    environment,
+    execArgv,
     setDispatcher(value) {
       installed.push(value);
     },
   });
 
+  return { created, dispatcher, installed };
+}
+
+test("the router disables HTTP/2 on its process-wide fetch dispatcher", () => {
+  const { created, dispatcher, installed } = installFakeTransport({});
+
   assert.equal(created.length, 1);
+  assert.equal(dispatcher.kind, "direct");
   assert.deepEqual(created[0].options, { allowH2: false });
   assert.equal(dispatcher, created[0]);
   assert.deepEqual(installed, [dispatcher]);
+});
+
+test("the router uses the environment proxy dispatcher only with explicit opt-in", () => {
+  for (const environment of [
+    { NODE_USE_ENV_PROXY: "1", http_proxy: "http://proxy.example:8080" },
+    { NODE_USE_ENV_PROXY: "1", HTTP_PROXY: "http://proxy.example:8080" },
+    { NODE_USE_ENV_PROXY: "1", https_proxy: "http://proxy.example:8080" },
+    { NODE_USE_ENV_PROXY: "1", HTTPS_PROXY: "http://proxy.example:8080", NO_PROXY: "localhost" },
+  ]) {
+    const { created, dispatcher } = installFakeTransport(environment);
+
+    assert.equal(created.length, 1);
+    assert.equal(dispatcher.kind, "environment-proxy");
+    assert.equal(dispatcher, created[0]);
+    assert.deepEqual(dispatcher.options, { allowH2: false });
+  }
+});
+
+test("proxy variables alone do not opt the router into proxying", () => {
+  const { created, dispatcher } = installFakeTransport({
+    HTTP_PROXY: "http://proxy.example:8080",
+    HTTPS_PROXY: "http://secure-proxy.example:8443",
+  });
+
+  assert.equal(created.length, 1);
+  assert.equal(dispatcher.kind, "direct");
+  assert.deepEqual(dispatcher.options, { allowH2: false });
+});
+
+test("the router accepts the NODE_OPTIONS and command-line opt-in forms", () => {
+  for (const [environment, execArgv] of [
+    [{ NODE_OPTIONS: "--use-env-proxy", HTTP_PROXY: "http://proxy.example:8080" }, []],
+    [{ HTTP_PROXY: "http://proxy.example:8080" }, ["--use-env-proxy"]],
+  ]) {
+    const { created, dispatcher } = installFakeTransport(environment, execArgv);
+    assert.equal(created.length, 1);
+    assert.equal(dispatcher.kind, "environment-proxy");
+    assert.deepEqual(dispatcher.options, { allowH2: false });
+  }
+});
+
+test("NO_PROXY or ALL_PROXY alone keeps the lower-overhead direct agent", () => {
+  for (const environment of [
+    { NO_PROXY: "localhost,127.0.0.1" },
+    { ALL_PROXY: "socks5://proxy.example:1080" },
+    // EnvHttpProxyAgent ignores uppercase HTTP_PROXY when lowercase is present,
+    // even when the lowercase value deliberately disables it.
+    { http_proxy: "", HTTP_PROXY: "http://proxy.example:8080" },
+  ]) {
+    const { created, dispatcher } = installFakeTransport(environment);
+
+    assert.equal(created.length, 1);
+    assert.equal(dispatcher.kind, "direct");
+    assert.equal(dispatcher, created[0]);
+    assert.deepEqual(dispatcher.options, { allowH2: false });
+  }
+});
+
+test("the installed transport proxies requests and honors NO_PROXY", async () => {
+  const proxyEnvironmentNames = [
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "NODE_USE_ENV_PROXY",
+  ];
+  const originalEnvironment = Object.fromEntries(
+    proxyEnvironmentNames.map((name) => [name, process.env[name]]),
+  );
+  const originalDispatcher = getGlobalDispatcher();
+  let proxiedRequests = 0;
+  let directRequests = 0;
+  const target = http.createServer((_request, response) => {
+    directRequests += 1;
+    response.end("direct");
+  });
+  const proxy = http.createServer((_request, response) => {
+    proxiedRequests += 1;
+    response.end("proxied");
+  });
+  const listen = (server) =>
+    new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => resolve(server.address().port));
+    });
+  const close = (server) => new Promise((resolve) => server.close(resolve));
+
+  let dispatcher;
+  try {
+    const [targetPort, proxyPort] = await Promise.all([listen(target), listen(proxy)]);
+    for (const name of proxyEnvironmentNames) delete process.env[name];
+    process.env.NODE_USE_ENV_PROXY = "1";
+    process.env.HTTP_PROXY = `http://127.0.0.1:${proxyPort}`;
+
+    dispatcher = installStableFetchTransport();
+    let response = await fetch(`http://127.0.0.1:${targetPort}/through-proxy`);
+    assert.equal(await response.text(), "proxied");
+    assert.equal(proxiedRequests, 1);
+    assert.equal(directRequests, 0);
+
+    process.env.NO_PROXY = "127.0.0.1";
+    response = await fetch(`http://127.0.0.1:${targetPort}/bypass-proxy`);
+    assert.equal(await response.text(), "direct");
+    assert.equal(proxiedRequests, 1);
+    assert.equal(directRequests, 1);
+  } finally {
+    setGlobalDispatcher(originalDispatcher);
+    await dispatcher?.close();
+    await Promise.all([close(target), close(proxy)]);
+    for (const [name, value] of Object.entries(originalEnvironment)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
 });
 
 // The service is four long-lived processes, and setGlobalDispatcher only

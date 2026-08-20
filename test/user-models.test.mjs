@@ -31,6 +31,7 @@ test("userModelEntry fills conservative picker metadata", () => {
   assert.ok(entry.autoCompact >= 1 && entry.autoCompact <= entry.contextWindow);
   assert.deepEqual(entry.inputModalities, ["text"]);
   assert.equal(entry.compHash, "ollama-cloud-gpt-oss-120b-user-v1");
+  assert.equal(entry.requiresTrailingUserTurn, undefined);
   assert.ok(entry.displayName.includes("gpt-oss:120b"));
   assert.ok(entry.description.length > 0);
 });
@@ -51,6 +52,7 @@ test("curation metadata can set sizing and the effort ladder", () => {
       ],
       defaultEffort: "medium",
       serviceTiers: [{ id: "priority", name: "Fast" }],
+      requiresTrailingUserTurn: true,
     },
   });
   assert.equal(entry.contextWindow, 262144);
@@ -58,6 +60,7 @@ test("curation metadata can set sizing and the effort ladder", () => {
   assert.equal(entry.reasoningLevels.length, 3);
   assert.equal(entry.defaultEffort, "medium");
   assert.deepEqual(entry.serviceTiers, [{ id: "priority", name: "Fast" }]);
+  assert.equal(entry.requiresTrailingUserTurn, true);
 });
 
 test("curation metadata can expose provider-verified reasoning summaries", () => {
@@ -153,6 +156,11 @@ test("registry merges valid user models and skips collisions", async () => {
       ...userModelEntry({ providerId: "deepseek", upstreamId: "deepseek-bad-detail", priority: 107 }),
       supportsImageDetailOriginal: "yes",
     },
+    // Destructive trailing-turn handling is an explicit boolean capability.
+    {
+      ...userModelEntry({ providerId: "deepseek", upstreamId: "deepseek-bad-trailing-turn", priority: 111 }),
+      requiresTrailingUserTurn: "yes",
+    },
     // Reasoning-summary capability fields must agree. A valid enum on its own
     // must not make the catalog claim summaries for a model that does not
     // explicitly support them.
@@ -187,6 +195,7 @@ test("registry merges valid user models and skips collisions", async () => {
   assert.ok(!slugs.includes("deepseek/deepseek-bad-search"));
   assert.ok(slugs.includes("deepseek/deepseek-standalone-search"));
   assert.ok(!slugs.includes("deepseek/deepseek-bad-detail"));
+  assert.ok(!slugs.includes("deepseek/deepseek-bad-trailing-turn"));
   assert.ok(!slugs.includes("deepseek/deepseek-summary-without-support"));
   assert.ok(!slugs.includes("deepseek/deepseek-invalid-summary-support"));
   assert.ok(!slugs.includes("deepseek/deepseek-bad-upgrade"));

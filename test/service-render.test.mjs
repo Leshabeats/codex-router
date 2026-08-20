@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -109,6 +110,104 @@ test("background service definitions render for macOS, Linux, and Windows", () =
     rmSync(testRoot, { recursive: true, force: true });
   }
 });
+
+test("background services preserve the installer's proxy environment", () => {
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-service-proxy-"));
+  const proxyEnvironment = {
+    http_proxy: "http://proxy.example:8080",
+    HTTPS_PROXY: "http://secure-proxy.example:8443",
+    all_proxy: "socks5://proxy.example:1080",
+    NO_PROXY: "localhost,127.0.0.1,::1",
+    NODE_USE_ENV_PROXY: "1",
+  };
+  try {
+    const launchd = serviceCommand(
+      "service-macos.mjs",
+      "darwin",
+      testRoot,
+      "render",
+      "codex",
+      root,
+      proxyEnvironment,
+    );
+    const systemd = serviceCommand(
+      "service-linux.mjs",
+      "linux",
+      testRoot,
+      "render",
+      "codex",
+      root,
+      proxyEnvironment,
+    );
+    const windows = serviceCommand(
+      "service-windows.mjs",
+      "win32",
+      testRoot,
+      "render",
+      "codex",
+      root,
+      proxyEnvironment,
+    );
+
+    for (const [name, value] of Object.entries(proxyEnvironment)) {
+      assert.ok(
+        launchd.includes(
+          `<key>${launchdXml(name)}</key>\n    <string>${launchdXml(value)}</string>`,
+        ),
+        `launchd did not preserve ${name}`,
+      );
+      assert.ok(
+        systemd.includes(`Environment=${systemdQuoted(`${name}=${value}`)}`),
+        `systemd did not preserve ${name}`,
+      );
+      assert.ok(
+        windows.includes(`set "${name}=${value}"`),
+        `Task Scheduler wrapper did not preserve ${name}`,
+      );
+    }
+  } finally {
+    rmSync(testRoot, { recursive: true, force: true });
+  }
+});
+
+test(
+  "the generated systemd unit stays owner-only when it stores proxy settings",
+  { skip: process.platform === "win32" },
+  () => {
+    const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-service-mode-"));
+    const stubDir = path.join(testRoot, "bin");
+    mkdirSync(stubDir, { recursive: true });
+    const systemctl = path.join(stubDir, "systemctl");
+    writeFileSync(systemctl, "#!/bin/sh\nexit 0\n", "utf8");
+    chmodSync(systemctl, 0o755);
+    try {
+      serviceCommand(
+        "service-linux.mjs",
+        "linux",
+        testRoot,
+        "install",
+        "codex",
+        root,
+        {
+          PATH: `${stubDir}${path.delimiter}${process.env.PATH || ""}`,
+          HTTPS_PROXY: "http://user:secret@proxy.example:8443",
+        },
+      );
+
+      const unitPath = path.join(
+        testRoot,
+        "xdg config",
+        "systemd",
+        "user",
+        "codex-router.service",
+      );
+      assert.equal(statSync(unitPath).mode & 0o777, 0o600);
+      assert.match(readFileSync(unitPath, "utf8"), /HTTPS_PROXY=/);
+    } finally {
+      rmSync(testRoot, { recursive: true, force: true });
+    }
+  },
+);
 
 test("packaged services preserve wrapper and PATH values with service-safe quoting", () => {
   const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-packaged-service-"));
@@ -358,6 +457,8 @@ test(
       assert.equal(run("install").installed, true);
       assert.equal(existsSync(wrapperPath), true);
       assert.equal(existsSync(launcherPath), true);
+      assert.equal(statSync(wrapperPath).mode & 0o777, 0o600);
+      assert.equal(statSync(launcherPath).mode & 0o777, 0o600);
 
       const bytes = readFileSync(launcherPath);
       // wscript.exe falls back to the ANSI code page without this byte order

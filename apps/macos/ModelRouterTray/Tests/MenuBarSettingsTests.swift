@@ -1,0 +1,177 @@
+import Foundation
+import Testing
+
+@testable import ModelRouterTray
+
+@Suite("Menu bar settings", .serialized)
+struct MenuBarSettingsTests {
+  @Test("a missing key keeps the shipped activity-dot look")
+  func missingKeysKeepShippedLook() {
+    let settings = RouterStore.resolveMenuBarSettings(
+      storedDisplayMode: nil,
+      storedShowModelName: nil,
+      storedIconStyle: nil,
+      storedPresetIcon: nil,
+      storedCustomIconPath: nil
+    )
+    #expect(settings.displayMode == .standard)
+    #expect(settings.showModelName == true)
+    #expect(settings.iconStyle == .indicator)
+    #expect(settings.presetIcon == "cpu")
+    #expect(settings.customIconPath == nil)
+  }
+
+  @Test("an explicit choice always wins", arguments: ["provider", "indicator", "preset", "custom"])
+  func explicitIconStyleWins(raw: String) {
+    let expected = TrayMenuBarIconStyle(rawValue: raw)
+    let settings = RouterStore.resolveMenuBarSettings(
+      storedDisplayMode: "iconOnly",
+      storedShowModelName: false,
+      storedIconStyle: raw,
+      storedPresetIcon: "sparkles",
+      storedCustomIconPath: "/tmp/icon.png"
+    )
+    #expect(settings.iconStyle == expected)
+    #expect(settings.displayMode == .iconOnly)
+    #expect(settings.showModelName == false)
+    #expect(settings.presetIcon == "sparkles")
+    #expect(settings.customIconPath == "/tmp/icon.png")
+  }
+
+  @Test("an unreadable stored value falls through rather than crashing")
+  func unknownStoredValuesFallThrough() {
+    let settings = RouterStore.resolveMenuBarSettings(
+      storedDisplayMode: "sideways",
+      storedShowModelName: nil,
+      storedIconStyle: "rainbow",
+      storedPresetIcon: nil,
+      storedCustomIconPath: ""
+    )
+    #expect(settings.displayMode == .standard)
+    #expect(settings.iconStyle == .indicator)
+    #expect(settings.presetIcon == "cpu")
+    #expect(settings.customIconPath == nil)
+  }
+
+  @Test("standard mode keeps a reserved width even when the name is hidden")
+  func standardWidthIsReserved() {
+    #expect(MenuBarLayoutMetrics.statusItemWidth(displayMode: .standard) == 180)
+    #expect(MenuBarLayoutMetrics.statusItemWidth(displayMode: .iconOnly) == 24)
+  }
+
+  @Test("the activity badge is not a second dot on the indicator style")
+  func indicatorHasNoSideBadge() {
+    #expect(MenuBarLayoutMetrics.showsActivityBadge(iconStyle: .indicator, isIdle: false) == false)
+    #expect(MenuBarLayoutMetrics.showsActivityBadge(iconStyle: .provider, isIdle: false) == true)
+    #expect(MenuBarLayoutMetrics.showsActivityBadge(iconStyle: .provider, isIdle: true) == false)
+  }
+
+  @Test("choosing a custom image copies it into Application Support")
+  func persistCopiesIntoApplicationSupport() throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("menubar-icon-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let sourceDir = root.appendingPathComponent("src", isDirectory: true)
+    let support = root.appendingPathComponent("support", isDirectory: true)
+    try FileManager.default.createDirectory(at: sourceDir, withIntermediateDirectories: true)
+    let source = sourceDir.appendingPathComponent("picked.png")
+    try Data([0x89, 0x50, 0x4E, 0x47]).write(to: source)
+
+    let dest = try RouterStore.persistCustomMenuBarIcon(from: source, into: support)
+    #expect(dest.lastPathComponent == "menu-bar-icon.png")
+    #expect(FileManager.default.fileExists(atPath: dest.path))
+    #expect(dest.path.contains("ModelRouterTray"))
+  }
+
+  @Test("a failed persist leaves the previous copy in place")
+  func persistFailureKeepsPreviousCopy() throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("menubar-icon-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let sourceDir = root.appendingPathComponent("src", isDirectory: true)
+    let support = root.appendingPathComponent("support", isDirectory: true)
+    try FileManager.default.createDirectory(at: sourceDir, withIntermediateDirectories: true)
+    let first = sourceDir.appendingPathComponent("first.png")
+    try Data([0x89, 0x50, 0x4E, 0x47, 0x01]).write(to: first)
+    let dest = try RouterStore.persistCustomMenuBarIcon(from: first, into: support)
+    let before = try Data(contentsOf: dest)
+
+    let missing = sourceDir.appendingPathComponent("gone.jpg")
+    #expect(throws: (any Error).self) {
+      try RouterStore.persistCustomMenuBarIcon(from: missing, into: support)
+    }
+    #expect(FileManager.default.fileExists(atPath: dest.path))
+    #expect(try Data(contentsOf: dest) == before)
+  }
+
+  @Test("replacing a custom image drops the previous extension only after success")
+  func persistReplacesPreviousExtension() throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("menubar-icon-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let sourceDir = root.appendingPathComponent("src", isDirectory: true)
+    let support = root.appendingPathComponent("support", isDirectory: true)
+    try FileManager.default.createDirectory(at: sourceDir, withIntermediateDirectories: true)
+    let png = sourceDir.appendingPathComponent("first.png")
+    let jpg = sourceDir.appendingPathComponent("second.jpg")
+    try Data([0x89, 0x50, 0x4E, 0x47]).write(to: png)
+    try Data([0xFF, 0xD8, 0xFF]).write(to: jpg)
+
+    let first = try RouterStore.persistCustomMenuBarIcon(from: png, into: support)
+    let second = try RouterStore.persistCustomMenuBarIcon(from: jpg, into: support)
+    #expect(second.lastPathComponent == "menu-bar-icon.jpg")
+    #expect(FileManager.default.fileExists(atPath: second.path))
+    #expect(!FileManager.default.fileExists(atPath: first.path))
+  }
+
+  @Test("an oversized custom image is rejected")
+  func persistRejectsOversizedImage() throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("menubar-icon-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let sourceDir = root.appendingPathComponent("src", isDirectory: true)
+    try FileManager.default.createDirectory(at: sourceDir, withIntermediateDirectories: true)
+    let source = sourceDir.appendingPathComponent("huge.png")
+    try Data(repeating: 0x41, count: 32).write(to: source)
+    #expect(throws: MenuBarCustomIconError.tooLarge) {
+      try RouterStore.persistCustomMenuBarIcon(
+        from: source,
+        into: root.appendingPathComponent("support"),
+        maxBytes: 16
+      )
+    }
+  }
+
+  @Test("a missing custom file is reported instead of looking selected")
+  func missingCustomFileIsFlagged() {
+    let loaded = RouterStore.loadCustomMenuBarIcon(path: "/definitely/missing/menu-bar-icon.png")
+    #expect(loaded.image == nil)
+    #expect(loaded.missing == true)
+
+    let empty = RouterStore.loadCustomMenuBarIcon(path: nil)
+    #expect(empty.image == nil)
+    #expect(empty.missing == false)
+  }
+
+  @Test("the tooltip format keeps its specifiers")
+  func tooltipUsesLocalizedFormat() {
+    let original = RouterLanguage.selection
+    defer { RouterLanguage.setSelection(original) }
+
+    RouterLanguage.setSelection(.english)
+    #expect(
+      RouterStore.menuBarTooltip(provider: "Grok", state: "Idle", usage: "45% left")
+        == "Codex Router · Grok (Idle) · 45% left"
+    )
+    #expect(
+      RouterStore.menuBarTooltip(provider: "Grok", state: "Idle", usage: nil)
+        == "Codex Router · Grok (Idle)"
+    )
+
+    RouterLanguage.setSelection(.chinese)
+    #expect(
+      RouterStore.menuBarTooltip(provider: "Grok", state: "空闲", usage: "剩余 45%")
+        == "Codex Router · Grok (空闲) · 剩余 45%"
+    )
+  }
+}

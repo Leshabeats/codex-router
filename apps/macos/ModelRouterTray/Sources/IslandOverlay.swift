@@ -942,9 +942,10 @@ private struct IslandUsageLineChart: View {
 struct ProviderIcon: View {
   let providerID: String
   let size: CGFloat
+  var showsHelp: Bool = true
 
   var body: some View {
-    Group {
+    let mark = Group {
       if let providerImage {
         Image(nsImage: providerImage)
           .resizable()
@@ -957,8 +958,13 @@ struct ProviderIcon: View {
       }
     }
     .frame(width: size, height: size)
-    .help(providerName)
     .accessibilityLabel(providerName)
+
+    if showsHelp {
+      mark.help(providerName)
+    } else {
+      mark
+    }
   }
 
   private var providerImage: NSImage? {

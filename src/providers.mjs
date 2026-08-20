@@ -19,6 +19,7 @@ import {
   targetPickerName,
   targetRestartHint,
 } from "./target-integration.mjs";
+import { withModelOverlayLock } from "./model-overlay-lock.mjs";
 
 // One entry per OAuth vendor keeps adding a provider a registry-plus-map
 // change instead of another branch in a nested conditional.
@@ -51,7 +52,7 @@ function list() {
     }));
 }
 
-function main() {
+async function main() {
   const command = process.argv[2] || "list";
   const providerId = process.argv[3];
   if (command === "list") {
@@ -80,10 +81,14 @@ function main() {
       : keySetup;
     throw new Error(`${provider.displayName} is not configured; ${setup} first.`);
   }
-  const providers = command === "enable"
-    ? enableProvider(providerId)
-    : disableProvider(providerId);
-  const refreshed = refreshTargetPickerIfInstalled();
+  let providers;
+  let refreshed;
+  await withModelOverlayLock(async () => {
+    providers = command === "enable"
+      ? enableProvider(providerId)
+      : disableProvider(providerId);
+    refreshed = refreshTargetPickerIfInstalled();
+  });
   // "shown in the model picker" is false for a catalog-only provider with no
   // curated models: enabling it changes nothing the user can see. Say what
   // actually happened, and name the step that makes it true.
@@ -105,10 +110,8 @@ function main() {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  try {
-    main();
-  } catch (error) {
+  main().catch((error) => {
     console.error(error instanceof Error ? error.message : String(error));
-    process.exit(1);
-  }
+    process.exitCode = 1;
+  });
 }

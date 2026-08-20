@@ -5,6 +5,7 @@ import { SOURCE_ROOT } from "./paths.mjs";
 import { stopManagedOllama } from "./ollama-runtime.mjs";
 import { waitForRouterHealth } from "./router-health.mjs";
 import { withServiceOperationLock } from "./service-operation-lock.mjs";
+import { environmentProxyOptedIn } from "./proxy-environment.mjs";
 
 const platform = process.env.CODEX_ROUTER_SERVICE_PLATFORM || process.platform;
 const script = {
@@ -29,10 +30,17 @@ const shutdownCommands = new Set(["stop", "uninstall"]);
 const READINESS_TIMEOUT_MS = 300_000;
 
 async function runServiceCommand() {
+  // The wrapper below is a separate Node process, so a direct
+  // `node --use-env-proxy src/service.mjs ...` invocation would otherwise lose
+  // its CLI-only opt-in before the platform renderer can persist it.
+  const childEnvironment = {
+    ...process.env,
+    ...(environmentProxyOptedIn() ? { NODE_USE_ENV_PROXY: "1" } : {}),
+  };
   const result = spawnSync(
     process.execPath,
     [path.join(SOURCE_ROOT, "src", script), ...process.argv.slice(2)],
-    { stdio: "inherit", env: process.env },
+    { stdio: "inherit", env: childEnvironment },
   );
   if (result.error) throw result.error;
   if (result.status !== 0) return result.status ?? 1;

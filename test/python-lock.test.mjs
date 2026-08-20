@@ -247,3 +247,20 @@ test("the CI gateway verifier starts LiteLLM with the environment start.mjs uses
 function repoFileIn(root, relative) {
   return path.join(root, ...relative.split("/"));
 }
+
+
+test("the Python gateway workflow guards the Z.ai LiteLLM usage bridge", () => {
+  const workflow = readFileSync(repoFile(LOCK_WORKFLOW), "utf8");
+  for (const input of [
+    "src/api-forwarder.mjs",
+    "src/zai-cache-usage.mjs",
+    "scripts/verify-zai-litellm-usage.mjs",
+  ]) {
+    assert.ok(workflow.includes(`"${input}"`), `${LOCK_WORKFLOW} does not run when ${input} changes`);
+  }
+  assert.match(
+    workflow,
+    /node scripts\/verify-zai-litellm-usage\.mjs "\$venv_python"/,
+    "the installed LiteLLM bridge must be exercised after the lock is installed",
+  );
+});

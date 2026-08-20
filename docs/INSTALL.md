@@ -178,6 +178,25 @@ foreground commands but is not copied into launchd, systemd, or Task Scheduler.
 Use `provider-key ... set` so the per-user background service has persistent,
 protected access.
 
+## Outbound proxy
+
+The router follows Node's explicit proxy opt-in. Set
+`NODE_USE_ENV_PROXY=1` together with `http_proxy`, `https_proxy`, and
+`no_proxy` (including their uppercase forms) before running setup or install.
+On Node releases that support the flag, `--use-env-proxy` or
+`NODE_OPTIONS=--use-env-proxy` is equivalent. The generated per-user
+background service preserves the opt-in and values so a service started
+outside the login shell uses the same proxy. Without the opt-in, inherited
+proxy variables remain unused by the router.
+
+Include `localhost`, `127.0.0.1`, and `::1` in `no_proxy` because the router's
+own processes communicate over loopback.
+
+`all_proxy` / `ALL_PROXY` is also preserved for child processes that support
+it, but the router's Undici transport requires `http_proxy` or `https_proxy` to
+enable proxy routing. After changing these variables, rerun install to refresh
+the background service definition.
+
 ## Installer transaction
 
 Setup performs these operations in order:

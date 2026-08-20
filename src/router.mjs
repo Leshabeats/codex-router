@@ -31,6 +31,7 @@ import {
   writeStreamErrorEvent,
 } from "./http-utils.mjs";
 import { EmptyCompletionGuard } from "./empty-completion-guard.mjs";
+import { zaiResponsesCompatTransform } from "./zai-responses-compat.mjs";
 import {
   MERGED_CATALOG_PATH,
   NATIVE_CATALOG_PATH,
@@ -477,6 +478,20 @@ function normalizeNativeForSubstitutedCaller(payload) {
   // Not optional upstream: `store` must be false, and anything else is a 400.
   payload.store = false;
   for (const key of NATIVE_UNSUPPORTED_PARAMS) delete payload[key];
+  return payload;
+}
+
+/**
+ * Remove the legacy cache-retention shape that GPT-5.6 rejects.
+ *
+ * Current Codex builds can still emit the old top-level field on a later turn.
+ * Omitting it keeps implicit prompt caching active. A caller that already uses
+ * `prompt_cache_options` passes through unchanged.
+ */
+function normalizeNativePromptCacheCompatibility(payload) {
+  if (/^gpt-5\.6(?:-|$)/.test(String(payload.model || ""))) {
+    delete payload.prompt_cache_retention;
+  }
   return payload;
 }
 
@@ -1229,7 +1244,7 @@ async function readVisionEvidence({ url, engine, nativeCall, effort, question, k
 // *next* request for a reasoning_content it had never been given. A subagent
 // always ends that way, which is why spawning one failed every time and an
 // ordinary tool loop did not (#256).
-function carryReasoningThroughInput(input) {
+function carryReasoningThroughInput(input, { nativeThinking = false } = {}) {
   if (!Array.isArray(input) || input.length < 2) return;
   for (let index = 0; index < input.length - 1; index += 1) {
     if (input[index]?.type !== "reasoning") continue;
@@ -1251,7 +1266,7 @@ function carryReasoningThroughInput(input) {
     // length for every other pass over it.
     if (text && next) {
       if (next.type === "function_call" || next.type === "custom_tool_call") {
-        input[end - 1] = assistantTextItem(text);
+        input[end - 1] = assistantTextItem(text, nativeThinking);
       } else if (next.type === "message" && next.role === "assistant") {
         // Merged into the assistant message rather than inserted in front of
         // it. A separate message would put two assistant turns back to back,
@@ -1259,26 +1274,38 @@ function carryReasoningThroughInput(input) {
         // and the tool-call branch above ends up merged anyway, because
         // LiteLLM folds a following function_call into the assistant message
         // it already emitted.
-        input[end] = mergeAssistantText(next, text);
+        input[end] = mergeAssistantText(next, text, nativeThinking);
       }
     }
     index = end - 1;
   }
 }
 
-function assistantTextItem(text) {
+// A trailing model turn is a destructive rewrite: it discards part of the
+// caller's conversation. Only Google's own provider gets that behavior from
+// identity. Resellers and custom endpoints must opt in per model after their
+// endpoint has proved that it rejects a prefilled model turn.
+function requiresTrailingUserTurn(route) {
+  const provider = providerForModel(route);
+  if (provider?.id === "gemini-api" || provider?.ownedBy?.toLowerCase?.() === "google") {
+    return true;
+  }
+  return route?.requiresTrailingUserTurn === true;
+}
+
+function assistantTextItem(text, nativeThinking = false) {
   return {
     type: "message",
     role: "assistant",
-    content: [{ type: "output_text", text }],
+    content: [{ type: nativeThinking ? "thinking" : "output_text", text }],
   };
 }
 
 // The reasoning goes in front of the answer it produced. `content` is an array
 // of parts on everything Codex stores, but a bare string is equally legal on
 // the Responses API, so both shapes are handled rather than assumed away.
-function mergeAssistantText(item, text) {
-  const part = { type: "output_text", text };
+function mergeAssistantText(item, text, nativeThinking = false) {
+  const part = { type: nativeThinking ? "thinking" : "output_text", text };
   if (typeof item.content === "string") {
     return {
       ...item,
@@ -1977,13 +2004,31 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
   // -- a turn that still reaches the provider, and still reads as a 200,
   // having quietly replaced the prompt with its own letters.
   const input = Array.isArray(bridged) ? [...bridged] : bridged;
-  // DeepSeek thinking mode requires the assistant's reasoning to be replayed,
-  // but LiteLLM's Responses->chat translation drops `reasoning` input items
-  // entirely. Merge each reasoning run into the assistant message of the turn
-  // it belongs to so the translation carries it there.
-  carryReasoningThroughInput(input);
   const provider = providerForModel(route);
   const chatCompletionsProvider = provider?.protocol !== "openai-responses";
+  // Thinking chat providers need the assistant's reasoning replayed, but
+  // LiteLLM drops Responses `reasoning` input items. Generic providers keep
+  // the established visible-content carry used for DeepSeek. GLM's native
+  // preserved-thinking contract needs reasoning kept structurally separate so
+  // the API forwarder can restore it as `reasoning_content` before Z.ai.
+  carryReasoningThroughInput(input, {
+    nativeThinking: chatCompletionsProvider && route.requestProfile === "glm-thinking",
+  });
+  // Models marked requiresTrailingUserTurn reject requests ending with a model
+  // turn. Pop trailing assistant messages, reasoning, or subagent outputs.
+  if (requiresTrailingUserTurn(route)) {
+    while (
+      input.length > 0 &&
+      (input[input.length - 1]?.role === "assistant" ||
+        input[input.length - 1]?.type === "reasoning" ||
+        input[input.length - 1]?.type === "function_call" ||
+        input[input.length - 1]?.type === "custom_tool_call" ||
+        (input[input.length - 1]?.type === "message" &&
+          input[input.length - 1]?.role === "assistant"))
+    ) {
+      input.pop();
+    }
+  }
   let tools = payload.tools;
   // LiteLLM's Responses -> Chat Completions bridge drops namespace tools, which
   // is how the client ships the collaboration runtime, the app toolset
@@ -2464,6 +2509,7 @@ async function handleResponses(request, response, requestUrl) {
       // the log still name the model the picker showed.
       const variantBase = nativeContextVariantBase(native.model);
       if (variantBase) native.model = variantBase;
+      normalizeNativePromptCacheCompatibility(native);
       if (Array.isArray(payload.input)) {
         native.input = normalizeNativeInput(payload.input);
         // Native turns leave here as stateless full conversations (the
@@ -2644,6 +2690,10 @@ async function handleResponses(request, response, requestUrl) {
             : undefined,
       });
       const transforms = [usageObserver];
+      const zaiCompat = route
+        ? zaiResponsesCompatTransform(route.provider, contentType)
+        : undefined;
+      if (zaiCompat) transforms.push(zaiCompat);
       // Restore flattened namespace calls for routed chat-completions providers,
       // and inject missing finished-child interrupts for both routed and native
       // multi-agent parents (San Francisco uses native GPT).

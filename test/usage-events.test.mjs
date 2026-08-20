@@ -59,6 +59,38 @@ test("usage events persist only bounded request metadata in a private file", asy
   }
 });
 
+test("all usage events can include history beyond the recent probe window", async () => {
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "model-router-usage-"));
+  const previousStateDir = process.env.MODEL_ROUTER_STATE_DIR;
+  process.env.MODEL_ROUTER_STATE_DIR = stateDir;
+  try {
+    const usage = await import(`../src/usage-events.mjs?all=${Date.now()}`);
+    const now = Date.now();
+    usage.recordUsageEvent({
+      model: "deepseek/deepseek-v4",
+      provider: "deepseek",
+      status: 200,
+      durationMs: 10,
+      totalTokens: 10,
+      at: now - 2 * 24 * 60 * 60 * 1_000,
+    });
+    usage.recordUsageEvent({
+      model: "deepseek/deepseek-v4",
+      provider: "deepseek",
+      status: 200,
+      durationMs: 10,
+      totalTokens: 20,
+      at: now,
+    });
+    assert.equal(usage.recentUsageEvents({ sinceMs: 24 * 60 * 60 * 1_000 }).length, 1);
+    assert.equal(usage.allUsageEvents().length, 2);
+  } finally {
+    if (previousStateDir === undefined) delete process.env.MODEL_ROUTER_STATE_DIR;
+    else process.env.MODEL_ROUTER_STATE_DIR = previousStateDir;
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
 test("tool-result aging totals aggregate savings across recorded events", async () => {
   const stateDir = mkdtempSync(path.join(os.tmpdir(), "model-router-usage-"));
   const previousStateDir = process.env.MODEL_ROUTER_STATE_DIR;

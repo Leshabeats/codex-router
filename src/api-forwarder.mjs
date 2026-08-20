@@ -42,6 +42,7 @@ import {
 import { relayCommandCodeGenerate } from "./commandcode-relay.mjs";
 import { VERSION } from "./version.mjs";
 import { installStableFetchTransport } from "./fetch-transport.mjs";
+import { zaiCacheUsageTransform } from "./zai-cache-usage.mjs";
 
 installStableFetchTransport();
 
@@ -187,6 +188,45 @@ function coalesceAssistantMessages(messages) {
   return coalesced;
 }
 
+function restoreGlmReasoningContent(messages) {
+  if (!Array.isArray(messages)) return messages;
+  return messages.map((message) => {
+    if (message?.role !== "assistant" || !Array.isArray(message.content)) return message;
+    const reasoning = [];
+    const visible = [];
+    let sawThinking = false;
+    for (const part of message.content) {
+      if (part?.type === "thinking") {
+        // A malformed or signature-only thinking block must never fall through
+        // as ordinary assistant content. LiteLLM normally supplies `text`,
+        // while a few adapters use `thinking`; accept either spelling only
+        // when it is a non-empty string, and drop the block otherwise.
+        sawThinking = true;
+        const text = [part.text, part.thinking].find(
+          (value) => typeof value === "string" && value,
+        );
+        if (typeof text === "string" && text) {
+          reasoning.push(text);
+        }
+        continue;
+      }
+      visible.push(part);
+    }
+    if (!sawThinking) return message;
+    const restored = {
+      ...message,
+      content: visible.length ? visible : null,
+    };
+    if (
+      reasoning.length &&
+      !(typeof message.reasoning_content === "string" && message.reasoning_content)
+    ) {
+      restored.reasoning_content = reasoning.join("\n");
+    }
+    return restored;
+  });
+}
+
 // Strict chat-completions providers (Console Go / MiniMax / similar) reject any
 // assistant tool_calls message whose matching tool results are incomplete or
 // separated by non-tool traffic. LiteLLM's Responses->chat translation and
@@ -254,8 +294,31 @@ function ensureToolResultsForCalls(messages) {
 // place of a real reasoning signature to skip thought-signature validation.
 const GEMINI_THOUGHT_SIGNATURE_SENTINEL = "skip_thought_signature_validator";
 
-function isGeminiProvider(provider) {
-  return provider?.id === "gemini-api" || provider?.ownedBy === "google";
+function isGeminiProvider(provider, model) {
+  if (provider?.id === "gemini-api" || provider?.ownedBy?.toLowerCase?.() === "google") {
+    return true;
+  }
+  return [
+    provider?.id,
+    provider?.ownedBy,
+    model?.provider,
+    model?.slug,
+    model?.upstreamModel,
+    model?.gatewayModel,
+    model?.model,
+  ].some((value) => typeof value === "string" && value.toLowerCase().includes("gemini"));
+}
+
+// A trailing model turn is a destructive rewrite: it discards part of the
+// caller's conversation. Only Google's own provider gets that behavior from
+// identity. Resellers and custom endpoints must opt in per model after their
+// endpoint has proved that it rejects a prefilled model turn.
+function requiresTrailingUserTurn(provider, model) {
+  return (
+    provider?.id === "gemini-api" ||
+    provider?.ownedBy?.toLowerCase?.() === "google" ||
+    model?.requiresTrailingUserTurn === true
+  );
 }
 
 // Both Command Code entries -- the chat-completions catalog and the Messages
@@ -327,12 +390,22 @@ function sanitizeGeminiImageContent(messages) {
   });
 }
 
-function sanitizeChatToolHistory(messages, provider) {
+function trimTrailingModelTurns(messages) {
+  const trimmed = [...messages];
+  while (trimmed.length > 0 && trimmed[trimmed.length - 1]?.role === "assistant") {
+    trimmed.pop();
+  }
+  return trimmed;
+}
+
+function sanitizeChatToolHistory(messages, provider, model) {
   if (!Array.isArray(messages)) return messages;
   const repaired = ensureToolResultsForCalls(coalesceAssistantMessages(messages));
-  return isGeminiProvider(provider)
-    ? ensureGeminiThoughtSignatures(sanitizeGeminiImageContent(repaired))
-    : repaired;
+  let cleaned = repaired;
+  if (isGeminiProvider(provider, model)) {
+    cleaned = ensureGeminiThoughtSignatures(sanitizeGeminiImageContent(repaired));
+  }
+  return requiresTrailingUserTurn(provider, model) ? trimTrailingModelTurns(cleaned) : cleaned;
 }
 
 // The Qwen3.8 chat template counts a turn as one of these three roles. Probing
@@ -522,7 +595,7 @@ function normalizeBody(buffer, contentType, route) {
     payload.tools = stripSearchContentTypes(payload.tools);
   }
   if (Array.isArray(payload.messages)) {
-    payload.messages = sanitizeChatToolHistory(payload.messages, provider);
+    payload.messages = sanitizeChatToolHistory(payload.messages, provider, model);
   }
   if (provider.authProfile === "github-copilot") {
     // This is native ChatGPT account metadata, not an upstream scheduling
@@ -626,7 +699,8 @@ function normalizeBody(buffer, contentType, route) {
       payload.tool_choice = "auto";
     }
   } else if (model.requestProfile === "glm-thinking") {
-    payload.thinking = { type: "enabled" };
+    payload.thinking = { type: "enabled", clear_thinking: false };
+    payload.messages = restoreGlmReasoningContent(payload.messages);
     // Each GLM entry declares exactly the tiers Z.ai documents for it, and the
     // requested effort is clamped onto them. Models whose registry entry offers
     // a single level (GLM-5-Turbo, GLM-4.7) do not support the parameter at
@@ -1022,7 +1096,12 @@ async function handleRequest(request, response) {
   if (commandCode?.recheck && upstream.ok) {
     recordCommandCodeRoute(commandCode.id, credential.value, { providerApi: true });
   }
-  await pipeResponse(upstream, response);
+  await pipeResponse(
+    upstream,
+    response,
+    undefined,
+    zaiCacheUsageTransform(normalized.provider.id, upstream.headers.get("content-type")),
+  );
   recordUpstreamLimits(normalized, upstream);
   if (!QUIET) {
     console.error(

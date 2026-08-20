@@ -1,11 +1,22 @@
 import {
+  chmodSync,
+  closeSync,
   existsSync,
+  mkdirSync,
+  openSync,
   readFileSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
 } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { writePrivateJson } from "./file-security.mjs";
+import { protectPrivateFile, writePrivateJson } from "./file-security.mjs";
+import {
+  applyModelOverlayPublication,
+  transactModelOverlayMutation,
+} from "./model-overlay-publication.mjs";
 import { STATE_DIR } from "./paths.mjs";
 import { DEFAULT_LOCAL_VISION_BASE_URL } from "./vision-bridge.mjs";
 
@@ -17,11 +28,17 @@ export const VISION_DOWNLOAD_STATE_PATH =
   process.env.MODEL_ROUTER_VISION_DOWNLOAD_STATE ||
   path.join(STATE_DIR, "vision-download.json");
 
-export function readVisionDownload() {
+export const VISION_DOWNLOAD_CLAIM_PATH =
+  process.env.MODEL_ROUTER_VISION_DOWNLOAD_CLAIM || `${VISION_DOWNLOAD_STATE_PATH}.claim`;
+
+const VISION_DOWNLOAD_CLAIM_STALE_MS = 30 * 1_000;
+export const VISION_DOWNLOAD_HEARTBEAT_TIMEOUT_MS = 5 * 60 * 1_000;
+
+export function readVisionDownload(options) {
   if (!existsSync(VISION_DOWNLOAD_STATE_PATH)) return null;
   try {
     const parsed = JSON.parse(readFileSync(VISION_DOWNLOAD_STATE_PATH, "utf8"));
-    return parsed?.version === 1 ? parsed : null;
+    return parsed?.version === 1 ? reconcileVisionDownload(parsed, options) : null;
   } catch {
     // A half-written progress file is not worth an error: the next update
     // rewrites it, and a missing one just means "no download in flight".
@@ -32,6 +49,120 @@ export function readVisionDownload() {
 export function writeVisionDownload(state) {
   writePrivateJson(VISION_DOWNLOAD_STATE_PATH, state, { space: 0, directoryMode: 0o700 });
   return state;
+}
+
+function processIsAlive(pid, kill = process.kill) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+export function reconcileVisionDownload(
+  state,
+  {
+    now = Date.now(),
+    kill = process.kill,
+    timeoutMs = VISION_DOWNLOAD_HEARTBEAT_TIMEOUT_MS,
+    persist = true,
+  } = {},
+) {
+  if (!state || state.status !== "downloading") return state;
+  const updatedAt = Number(state.updatedAt || state.startedAt || 0);
+  const heartbeatFresh = Number.isFinite(updatedAt) && now - updatedAt <= timeoutMs;
+  const ownerPid = Number(state.workerPid || state.controllerPid);
+  const ownerAlive = processIsAlive(ownerPid, kill);
+  // Legacy records have no PID. Give a fresh one a single heartbeat window,
+  // but a record whose named controller/worker is dead is retryable at once.
+  if ((ownerPid && ownerAlive && heartbeatFresh) || (!ownerPid && heartbeatFresh)) return state;
+  const interrupted = {
+    ...state,
+    status: "error",
+    detail: "interrupted",
+    error: "The vision model download stopped before completion. Retry the download.",
+    controllerPid: null,
+    workerPid: null,
+    updatedAt: now,
+  };
+  if (persist) writeVisionDownload(interrupted);
+  return interrupted;
+}
+
+// The state write is atomic, but read-then-write is not. Keep the controller's
+// tiny seed-and-spawn section exclusive so two UI clicks cannot start two
+// multi-gigabyte pulls before either one has made its state visible.
+export function claimVisionDownloadStart({
+  claimPath = VISION_DOWNLOAD_CLAIM_PATH,
+  now = Date.now,
+} = {}) {
+  const currentNow = typeof now === "function" ? now() : now;
+  const directory = path.dirname(claimPath);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  chmodSync(directory, 0o700);
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let descriptor;
+    const token = `${process.pid}:${currentNow}:${Math.random().toString(36).slice(2)}`;
+    try {
+      descriptor = openSync(claimPath, "wx", 0o600);
+      writeFileSync(
+        descriptor,
+        `${JSON.stringify({ version: 1, pid: process.pid, createdAt: currentNow, token })}\n`,
+        "utf8",
+      );
+      closeSync(descriptor);
+      descriptor = undefined;
+      protectPrivateFile(claimPath);
+      let released = false;
+      return {
+        acquired: true,
+        release() {
+          if (released) return;
+          released = true;
+          try {
+            const owner = JSON.parse(readFileSync(claimPath, "utf8"));
+            if (owner?.token === token) unlinkSync(claimPath);
+          } catch {
+            // A replacement claim belongs to another controller.
+          }
+        },
+      };
+    } catch (error) {
+      if (descriptor !== undefined) {
+        try { closeSync(descriptor); } catch {}
+      }
+      if (error?.code !== "EEXIST") throw error;
+      let fresh = true;
+      try {
+        fresh = currentNow - statSync(claimPath).mtimeMs <= VISION_DOWNLOAD_CLAIM_STALE_MS;
+      } catch {
+        fresh = false;
+      }
+      if (fresh) return { acquired: false };
+      try {
+        unlinkSync(claimPath);
+      } catch (unlinkError) {
+        if (unlinkError?.code !== "ENOENT") return { acquired: false };
+      }
+    }
+  }
+  return { acquired: false };
+}
+
+export function activeVisionDownloadResult(state, tag) {
+  if (state?.status !== "downloading") return null;
+  if (state.tag !== tag) {
+    throw new Error(`${state.tag} is already downloading (${state.percent || 0}%).`);
+  }
+  return {
+    started: false,
+    existing: true,
+    tag,
+    percent: state.percent || 0,
+  };
 }
 
 // Ollama reports progress per layer, so a single layer's completed/total jumps
@@ -115,6 +246,59 @@ export async function streamOllamaPull(
   if (!sawSuccess) throw new Error("The download ended before Ollama confirmed success.");
 }
 
+export function shouldAdoptDownloadedVisionModel(settings, configured) {
+  return !configured || (settings?.enabled === true && !settings?.engine);
+}
+
+// Pulling has already completed by the time this runs. Publication failures
+// therefore become progress-state warnings; they must never rewrite a model
+// that is physically on disk as a failed download.
+export async function finalizeVisionDownload(
+  tag,
+  {
+    readSettings,
+    configured,
+    setLocal,
+    setEnabled,
+    finalizePublication = applyModelOverlayPublication,
+  } = {},
+) {
+  if (!readSettings || !configured || !setLocal || !setEnabled) {
+    const state = await import("./vision-bridge-state.mjs");
+    readSettings ||= state.readVisionBridgeSettings;
+    configured ||= state.visionBridgeConfigured;
+    setLocal ||= state.setVisionBridgeLocal;
+    setEnabled ||= state.setVisionBridgeEnabled;
+  }
+
+  const state = await import("./vision-bridge-state.mjs");
+  let adopt = false;
+  try {
+    await transactModelOverlayMutation({
+      files: [state.VISION_BRIDGE_STATE_PATH],
+      mutate: () => {
+        // The adoption decision belongs inside the same lock as the snapshot:
+        // another bridge choice must not be observed before capture and then
+        // silently overwritten by a stale first-reader decision.
+        adopt = shouldAdoptDownloadedVisionModel(readSettings(), configured());
+        if (adopt) {
+          setLocal({ model: tag });
+          setEnabled(true);
+        }
+      },
+      warningOnly: true,
+      applyPublication: finalizePublication,
+    });
+    return { adopt };
+  } catch (error) {
+    return {
+      adopt: false,
+      activationRolledBack: adopt,
+      catalogError: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 async function main() {
   const tag = process.argv[2];
   if (!tag) throw new Error("A model tag is required.");
@@ -126,6 +310,8 @@ async function main() {
     detail: "starting",
     percent: 0,
     updatedAt: startedAt,
+    controllerPid: null,
+    workerPid: process.pid,
   });
   // Rewriting on every event would rename the file hundreds of times a second
   // for no visible gain; a change of one percent is the smallest a progress
@@ -145,33 +331,38 @@ async function main() {
           detail,
           percent: shown < 0 ? 0 : shown,
           updatedAt: Date.now(),
+          controllerPid: null,
+          workerPid: process.pid,
         });
       },
     });
     // The model only becomes the reader once it is actually on disk, so a
     // failed or cancelled download never repoints the bridge at a missing one.
-    const { readVisionBridgeSettings, setVisionBridgeEnabled, setVisionBridgeLocal } = await import(
-      "./vision-bridge-state.mjs"
-    );
     // Downloading is not choosing. A freshly pulled model is unmeasured, and
     // silently promoting it over a reader that is known to work would swap an
     // accurate transcript for a possibly fabricated one without the operator
     // ever asking. So it becomes the engine only when there is nothing else --
     // the first-run case, where any reader beats none. Otherwise the picker's
     // Use button (and its measured label) makes the call.
-    const settings = readVisionBridgeSettings();
-    const adopt = !settings.enabled || !settings.engine;
-    if (adopt) {
-      setVisionBridgeLocal({ model: tag });
-      setVisionBridgeEnabled(true);
-    }
+    const publication = await finalizeVisionDownload(tag);
+    const { adopt, activationRolledBack, catalogError } = publication;
     writeVisionDownload({
       ...base,
       status: "done",
-      detail: adopt ? "ready" : "downloaded",
+      detail: activationRolledBack
+        ? "downloaded · activation rolled back"
+        : catalogError
+        ? `${adopt ? "ready" : "downloaded"} · catalog refresh needed`
+        : adopt
+          ? "ready"
+          : "downloaded",
       adopted: adopt,
       percent: 100,
       updatedAt: Date.now(),
+      controllerPid: null,
+      workerPid: null,
+      ...(catalogError ? { catalogError } : {}),
+      ...(activationRolledBack ? { activationRolledBack: true } : {}),
     });
   } catch (error) {
     writeVisionDownload({
@@ -181,6 +372,8 @@ async function main() {
       percent: lastPercent < 0 ? 0 : lastPercent,
       error: error instanceof Error ? error.message : String(error),
       updatedAt: Date.now(),
+      controllerPid: null,
+      workerPid: null,
     });
     process.exitCode = 1;
   }

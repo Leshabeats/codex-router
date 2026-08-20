@@ -24,6 +24,7 @@ import { ensureOllamaHeadless } from "./ollama-runtime.mjs";
 import { venvRuntimeProblem } from "./venv-runtime.mjs";
 import { dependencyRepairHint } from "./dependency-repair.mjs";
 import { clearServiceProcessState, writeServiceProcessState } from "./service-process.mjs";
+import { environmentProxyOptedIn } from "./proxy-environment.mjs";
 
 const dependencyFix = dependencyRepairHint();
 
@@ -157,6 +158,11 @@ const commonEnv = {
   // (e.g. cp1252) that raises UnicodeEncodeError and the child never comes up.
   PYTHONIOENCODING: "utf-8",
   PYTHONUTF8: "1",
+  // `--use-env-proxy` is a process argument, not an inherited environment
+  // variable. Preserve its positive decision for the Node forwarders this
+  // process launches; NODE_OPTIONS and NODE_USE_ENV_PROXY already inherit via
+  // process.env.
+  ...(environmentProxyOptedIn() ? { NODE_USE_ENV_PROXY: "1" } : {}),
 };
 
 const children = [];

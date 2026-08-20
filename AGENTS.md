@@ -459,7 +459,30 @@ and every client saw a bare "Connection error" naming nothing.
    rather than the gateway, so a signal reaches the hop and the real process is
    orphaned. That is strictly better than not starting at all, and it is another
    reason the installer produces an `.exe`.
-8. **Do not answer a gateway crash by moving the litellm pin.** The pin is a
+8. **Z.ai choice-bearing terminal usage is normalized before LiteLLM.** LiteLLM
+   1.95/1.96 can discard authoritative usage when an OpenAI-compatible provider
+   puts `finish_reason` and `usage` on the same streaming chunk. Z.ai does that,
+   so `src/zai-cache-usage.mjs` rewrites only that provider shape into the
+   standard usage-only terminal chunk and preserves explicit cached-token
+   details. Do not replace missing usage with estimates at this boundary and do
+   not downgrade LiteLLM to escape the bug; the pin is also a security and
+   wheel-availability floor. `scripts/verify-zai-litellm-usage.mjs` exercises
+   the pinned LiteLLM bridge with synthetic authoritative usage on every Python
+   lock job.
+9. **Z.ai Responses streams need a post-LiteLLM message-envelope repair.**
+   Live GLM-5.3 traffic through LiteLLM 1.96 can finish a reasoning item and
+   then emit `response.output_text.delta` for the assistant message without the
+   required `response.output_item.added` / `response.content_part.added`
+   envelope. The same malformed stream can reuse reasoning's `output_index=0`
+   for the message and close the message with a `reasoning_text` content part.
+   `src/zai-responses-compat.mjs` repairs only that Z.ai event-stream shape
+   after LiteLLM translation: valid streams remain byte-identical, native
+   OpenAI traffic is never attached to the transform, and provider reasoning
+   must never be copied into assistant-visible message content. A real Codex
+   live probe is the regression oracle: no `OutputTextDelta without active
+   item` warnings and the message occupies the next output index after
+   reasoning.
+10. **Do not answer a gateway crash by moving the litellm pin.** The pin is a
    security floor and a wheel-availability decision (see the lock section
    above), any change to it has to be proven by booting the proxy rather than by
    a successful resolve, and a router that survives its gateway is worth having

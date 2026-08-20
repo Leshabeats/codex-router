@@ -45,7 +45,8 @@ and disables its activity-pill switch; router monitoring continues normally.
   If Ollama removal succeeds but the Codex catalog cannot be refreshed, the
   status remains **Model removed** with a catalog-refresh warning rather than
   reporting a false removal failure.
-  Both operations expose a persistent status bar and **Cancel** action. The
+  Both operations expose a persistent status bar while running and a **Cancel**
+  action. Cancelling clears the operation card after the worker is stopped. The
   control plane serializes install/removal claims and returns an existing
   operation for repeated requests, so a double-click cannot launch duplicate
   Ollama workers.
