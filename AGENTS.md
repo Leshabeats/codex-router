@@ -469,7 +469,20 @@ and every client saw a bare "Connection error" naming nothing.
    wheel-availability floor. `scripts/verify-zai-litellm-usage.mjs` exercises
    the pinned LiteLLM bridge with synthetic authoritative usage on every Python
    lock job.
-9. **Do not answer a gateway crash by moving the litellm pin.** The pin is a
+9. **Z.ai Responses streams need a post-LiteLLM message-envelope repair.**
+   Live GLM-5.3 traffic through LiteLLM 1.96 can finish a reasoning item and
+   then emit `response.output_text.delta` for the assistant message without the
+   required `response.output_item.added` / `response.content_part.added`
+   envelope. The same malformed stream can reuse reasoning's `output_index=0`
+   for the message and close the message with a `reasoning_text` content part.
+   `src/zai-responses-compat.mjs` repairs only that Z.ai event-stream shape
+   after LiteLLM translation: valid streams remain byte-identical, native
+   OpenAI traffic is never attached to the transform, and provider reasoning
+   must never be copied into assistant-visible message content. A real Codex
+   live probe is the regression oracle: no `OutputTextDelta without active
+   item` warnings and the message occupies the next output index after
+   reasoning.
+10. **Do not answer a gateway crash by moving the litellm pin.** The pin is a
    security floor and a wheel-availability decision (see the lock section
    above), any change to it has to be proven by booting the proxy rather than by
    a successful resolve, and a router that survives its gateway is worth having
