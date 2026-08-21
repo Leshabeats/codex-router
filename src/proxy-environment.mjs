@@ -43,16 +43,38 @@ export function environmentHttpProxyConfigured(
   return Boolean(httpProxy || httpsProxy);
 }
 
-// An environment that names no proxy variable at all is silent, not a
-// decision. Any explicit mention is the operator speaking and outranks
-// whatever a previous install recorded -- including `NODE_USE_ENV_PROXY=0`,
-// which is how a proxy gets turned back off.
+// Which variables actually name a proxy. `no_proxy` is deliberately absent: it
+// lists hosts to *bypass* and says nothing about which proxy to use, or whether
+// to use one at all.
+const PROXY_ADDRESS_VARIABLES = [
+  "http_proxy",
+  "https_proxy",
+  "all_proxy",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "ALL_PROXY",
+];
+
+// An environment that names no proxy at all is silent, not a decision. Naming
+// one -- or naming `NODE_USE_ENV_PROXY`, including as 0, which is how a proxy
+// gets turned back off -- is the operator speaking and outranks whatever a
+// previous install recorded.
+//
+// A bypass list on its own is not that statement, and treating it as one cost
+// a real installation its proxy: a desktop app launched from the Dock inherits
+// `no_proxy` from the login session and nothing else, so counting that as a
+// decision rewrote the service with the bypass list alone and then recorded
+// that back over the proxy it had been keeping.
+//
+// An empty value is read the same way, for the same reason: a login session
+// that exports `HTTP_PROXY=` has not chosen to stop proxying.
 export function proxyEnvironmentDeclared(
   environment = process.env,
   execArgv = process.execArgv,
 ) {
   if (environmentProxyOptedIn(environment, execArgv)) return true;
-  return PROXY_ENVIRONMENT_VARIABLES.some((name) => environment[name] !== undefined);
+  if (environment.NODE_USE_ENV_PROXY !== undefined) return true;
+  return PROXY_ADDRESS_VARIABLES.some((name) => Boolean(environment[name]));
 }
 
 // The proxy settings the last install committed to the service.

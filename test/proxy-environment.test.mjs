@@ -33,7 +33,9 @@ const PROXIED = Object.freeze({
 test("an environment naming no proxy variable is silent, not a decision", () => {
   assert.equal(proxyEnvironmentDeclared({ PATH: "/usr/bin" }, []), false);
   assert.equal(proxyEnvironmentDeclared({ HTTP_PROXY: "http://p:1" }, []), true);
-  assert.equal(proxyEnvironmentDeclared({ no_proxy: "" }, []), true);
+  // A bypass list is not a proxy declaration, and neither is an empty value.
+  assert.equal(proxyEnvironmentDeclared({ no_proxy: "localhost" }, []), false);
+  assert.equal(proxyEnvironmentDeclared({ HTTP_PROXY: "" }, []), false);
   // Turning the proxy off is still the operator speaking.
   assert.equal(proxyEnvironmentDeclared({ NODE_USE_ENV_PROXY: "0" }, []), true);
   // A command-line opt-in counts even when nothing is exported.
@@ -282,10 +284,11 @@ test("naming the opt-in still decides it, and nothing recorded means nothing inh
       ).NODE_USE_ENV_PROXY,
       "0",
     );
-    // A bypass list alone is not a proxy, so there is nothing to opt into.
-    assert.equal(
-      serviceProxyEnvironment({ NO_PROXY: "localhost" }, { manifestPath: file }).NODE_USE_ENV_PROXY,
-      undefined,
+    // A bypass list alone leaves the environment silent, so the whole recorded
+    // set comes back rather than the bypass list replacing it.
+    assert.deepEqual(
+      serviceProxyEnvironment({ NO_PROXY: "localhost" }, { manifestPath: file }),
+      { ...PROXIED },
     );
   } finally {
     cleanup();
@@ -300,5 +303,25 @@ test("naming the opt-in still decides it, and nothing recorded means nothing inh
     );
   } finally {
     fresh.cleanup();
+  }
+});
+
+test("a login session's bypass list does not wipe the recorded proxy", () => {
+  // The exact environment a Dock-launched desktop app gets: launchd exports
+  // no_proxy and nothing else. Model curation in that app re-runs bin/install,
+  // so counting this as a decision rewrote the service with the bypass list
+  // alone -- and the install then recorded that back over the proxy, losing it
+  // for good. Nothing here names a proxy, so nothing here overrides one.
+  const { file, cleanup } = manifestWith({ proxyEnvironment: { ...PROXIED } });
+  try {
+    assert.deepEqual(
+      serviceProxyEnvironment(
+        { no_proxy: "localhost,127.0.0.1,::1", NO_PROXY: "localhost,127.0.0.1,::1" },
+        { manifestPath: file },
+      ),
+      { ...PROXIED },
+    );
+  } finally {
+    cleanup();
   }
 });
