@@ -10,6 +10,7 @@ import {
   FETCH_CONNECTIONS_PER_ORIGIN,
   fetchDispatcherOptions,
   installStableFetchTransport,
+  loopbackProbeFetch,
 } from "../src/fetch-transport.mjs";
 
 const SRC_DIR = fileURLToPath(new URL("../src", import.meta.url));
@@ -200,5 +201,27 @@ test("every long-lived server process installs the stable transport", () => {
       source.includes("installStableFetchTransport()"),
       `${name} creates a server but never installs the stable fetch transport`,
     );
+  }
+});
+
+test("loopback probes use undici fetch so a separate Agent is accepted", async () => {
+  const server = http.createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ ok: true, service: "gateway" }));
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  try {
+    const port = server.address().port;
+    const response = await loopbackProbeFetch(`http://127.0.0.1:${port}/health/liveliness`, {
+      headers: { Authorization: "Bearer test" },
+      signal: AbortSignal.timeout(2_000),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: true, service: "gateway" });
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
   }
 });

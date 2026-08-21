@@ -101,6 +101,7 @@ test("the router probes through the cache, not around it", () => {
   // goes straight to the network again the probe flood comes back silently.
   assert.match(router, /const healthCache = createHealthCache\(\{\s*staleWhileRevalidate:\s*true\s*\}\)/);
   assert.match(router, /function serviceHealth\(url\)\s*\{\s*return healthCache\(url,/);
+  assert.match(router, /loopbackProbeFetch\(/);
 });
 
 test("stale-while-revalidate returns the last answer without waiting on a slow refresh", async () => {

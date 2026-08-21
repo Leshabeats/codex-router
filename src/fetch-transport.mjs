@@ -1,4 +1,4 @@
-import { Agent, EnvHttpProxyAgent, setGlobalDispatcher } from "undici";
+import { Agent, EnvHttpProxyAgent, fetch as undiciFetch, setGlobalDispatcher } from "undici";
 
 import { environmentHttpProxyConfigured } from "./proxy-environment.mjs";
 import { KEEPALIVE_TIMEOUT_MS } from "./http-utils.mjs";
@@ -48,6 +48,10 @@ export function installStableFetchTransport({
 // that queues behind five SSE POSTs to the same origin is what made the
 // unauthenticated `/health` leaf hang long enough for doctor and the tray
 // to call the router dead.
+//
+// Use undici's own `fetch` with this Agent. Passing an npm-undici dispatcher
+// into Node's builtin `fetch` throws `invalid onRequestStart method`, every
+// probe looks unreachable, and `/health` stays 503 until startup gives up.
 export function createLoopbackProbeDispatcher({
   AgentClass = Agent,
   timeoutMs = 3_000,
@@ -56,9 +60,12 @@ export function createLoopbackProbeDispatcher({
     allowH2: false,
     connections: 8,
     pipelining: 1,
-    connect: { timeout: Math.min(1_000, timeoutMs) },
+    keepAliveTimeout: 10_000,
     headersTimeout: timeoutMs,
     bodyTimeout: timeoutMs,
-    keepAliveTimeout: 10_000,
   });
+}
+
+export function loopbackProbeFetch(url, init = {}, dispatcher = createLoopbackProbeDispatcher()) {
+  return undiciFetch(url, { ...init, dispatcher });
 }

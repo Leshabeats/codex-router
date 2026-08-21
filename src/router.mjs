@@ -120,6 +120,7 @@ import { nativeSessionHeaders } from "./codex-native-session.mjs";
 import {
   createLoopbackProbeDispatcher,
   installStableFetchTransport,
+  loopbackProbeFetch,
 } from "./fetch-transport.mjs";
 
 installStableFetchTransport();
@@ -770,11 +771,14 @@ function serviceHealth(url) {
 
 async function probeService(url) {
   try {
-    const response = await fetch(url, {
-      headers: { Authorization: `Bearer ${INTERNAL_KEY}` },
-      signal: AbortSignal.timeout(3_000),
-      dispatcher: loopbackProbeDispatcher,
-    });
+    const response = await loopbackProbeFetch(
+      url,
+      {
+        headers: { Authorization: `Bearer ${INTERNAL_KEY}` },
+        signal: AbortSignal.timeout(3_000),
+      },
+      loopbackProbeDispatcher,
+    );
     const raw = await response.json().catch(() => undefined);
     const payload = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
     return { ...payload, reachable: response.ok };

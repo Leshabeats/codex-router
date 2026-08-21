@@ -8,10 +8,14 @@
   streaming socket), loopback liveliness probes use a separate dispatcher so
   they cannot queue behind those streams, and `/health` serves the last probe
   result immediately while a slow LiteLLM liveliness check refreshes in the
-  background. The tray was reporting Starting and Codex "waiting for network"
-  with two or three in-flight turns even though the router was still
-  generating. Large request bodies also yield once before `JSON.parse` so a
-  health poll can be answered between them.
+  background. Probe GETs use undici's own `fetch` with that extra Agent:
+  Node's builtin `fetch` rejects an npm-undici dispatcher (`invalid
+  onRequestStart method`), every liveliness check looks dead, and startup
+  then kills a router that answered HTTP 503 for 30s. The tray was reporting
+  Starting and Codex "waiting for network" with two or three in-flight turns
+  even though the router was still generating. Large request bodies also
+  yield once before `JSON.parse` so a health poll can be answered between
+  them.
 
 - **Grok 4.6 can select Codex's native image viewer.** xAI stopped without a
   function call when the tool was named `view_image`, even when selection was
