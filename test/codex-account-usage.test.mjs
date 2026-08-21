@@ -64,6 +64,32 @@ test("clamps malformed percentages and tolerates missing usage", () => {
   assert.deepEqual(value.dailyUsageBuckets, []);
 });
 
+test("preserves optional daily account token breakdowns for the usage graph", () => {
+  const value = normalizeCodexAccountUsage(
+    {},
+    {
+      dailyUsageBuckets: [
+        {
+          startDate: "2026-07-20",
+          tokens: 500,
+          inputTokens: 420.9,
+          cachedInputTokens: 120.8,
+          outputTokens: 79.7,
+        },
+      ],
+    },
+    new Date("2026-07-21T12:00:00.000Z"),
+  );
+
+  assert.deepEqual(value.dailyUsageBuckets, [{
+    startDate: "2026-07-20",
+    tokens: 500,
+    inputTokens: 420,
+    cachedInputTokens: 120,
+    outputTokens: 79,
+  }]);
+});
+
 // The panel used to run its own two-line search for Codex -- an undocumented
 // CODEX_BINARY, a macOS app path, then the bare name "codex". On Windows all
 // three miss, and the bare name resolves to the npm shim Node refuses to

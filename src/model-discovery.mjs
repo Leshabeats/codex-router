@@ -3,6 +3,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  readProviderCatalogCache,
+  writeProviderCatalogCache,
+} from "./model-catalog-cache.mjs";
+import {
   anonymousModelAllowed,
   MODELS,
   PROVIDERS,
@@ -24,7 +28,7 @@ export function modelIds(payload, provider) {
   if (!Array.isArray(data)) throw new Error("The provider returned an invalid model list.");
   const candidates = provider?.authMode === "anonymous"
     ? data.filter((item) => anonymousModelAllowed(provider, item?.id))
-    : provider?.id === "orcarouter"
+    : provider?.id === "orca"
     ? data.filter((item) => {
         // OrcaRouter's catalog also contains image, video, audio, and
         // provider-native-only entries. This provider reaches its upstream
@@ -35,8 +39,12 @@ export function modelIds(payload, provider) {
         // provider-owned naming contract is the narrow exception.
         const id = String(item?.id || "").trim();
         const endpointTypes = item?.supported_endpoint_types;
+        // `orcarouter/free` is a moving meta-router, not a model identity. Keep
+        // it out of local curation so the picker names the concrete free model
+        // that will actually serve the turn.
+        if (id === "orcarouter/free") return false;
         if (Array.isArray(endpointTypes)) return endpointTypes.includes("openai");
-        return id === "orcarouter/free" || id.endsWith("-free");
+        return id.endsWith("-free");
       })
     : provider?.authProfile === "github-copilot"
     ? data.filter((item) =>
@@ -61,12 +69,12 @@ function zeroPrice(value) {
 }
 
 // Free catalog entries are useful only when they are also callable through
-// this provider's supported OpenAI surface. The named router is intentionally
-// included even though it has no price object: its contract is to choose from
-// the current free pool, while concrete free deployments advertise either a
-// zero request price or zero input and output token prices.
+// this provider's supported OpenAI surface. Only concrete model identities are
+// returned; the moving `orcarouter/free` meta-router is deliberately excluded.
+// Concrete free deployments advertise either a `-free` suffix, a zero request
+// price, or zero input and output token prices.
 export function freeModelIds(payload, provider) {
-  if (provider?.id !== "orcarouter") return [];
+  if (provider?.id !== "orca") return [];
   const data = Array.isArray(payload) ? payload : payload?.data;
   if (!Array.isArray(data)) throw new Error("The provider returned an invalid model list.");
   const callable = new Set(modelIds(payload, provider));
@@ -74,7 +82,7 @@ export function freeModelIds(payload, provider) {
     .filter((item) => {
       const id = String(item?.id || "").trim();
       if (!callable.has(id)) return false;
-      if (id === "orcarouter/free" || id.endsWith("-free")) return true;
+      if (id.endsWith("-free")) return true;
       if (zeroPrice(item?.pricing?.request)) return true;
       return zeroPrice(item?.pricing?.prompt) && zeroPrice(item?.pricing?.completion);
     })
@@ -158,7 +166,15 @@ async function providerPayload(provider) {
   return payload;
 }
 
-export async function discoverProviderModels(providerId) {
+/**
+ * List what a provider serves and compare it with the local registry.
+ *
+ * The provider's own list is cached, so opening a provider does not require a
+ * live round trip (or even a reachable network) once it has been seen. Passing
+ * `refresh` re-asks the provider; `cache: false` keeps a run out of the cache
+ * entirely, which is what fixture-driven runs and tests want.
+ */
+export async function discoverProviderModels(providerId, { refresh = false, cache = true } = {}) {
   const provider = PROVIDERS.get(providerId);
   if (!provider) throw new Error(`Unknown provider: ${providerId}`);
   // Discovery asks one endpoint what it serves. A per-model-endpoint provider
@@ -174,9 +190,30 @@ export async function discoverProviderModels(providerId) {
   if (provider.kind !== "openai-compatible") {
     throw new Error(`${provider.displayName} does not expose a supported model-list endpoint.`);
   }
-  const payload = await providerPayload(provider);
-  const discovered = modelIds(payload, provider);
-  const free = freeModelIds(payload, provider);
+  // A fixture is a file the caller handed in, not what the provider serves.
+  // It must never be answered from the stored list and must never become it,
+  // whichever entrypoint asked -- discovery's own CLI or curation's.
+  const usingFixture = option("--fixture") !== undefined;
+  const storeAnswer = cache && !usingFixture;
+  const cached = refresh || !storeAnswer ? undefined : readProviderCatalogCache(providerId);
+  let discovered;
+  let free;
+  let contextLengths;
+  let fetchedAt;
+  if (cached) {
+
+    discovered = cached.discovered;
+    free = cached.free || [];
+    contextLengths = cached.contextLengths || {};
+    fetchedAt = cached.fetchedAt;
+  } else {
+    const payload = await providerPayload(provider);
+    discovered = modelIds(payload, provider);
+    free = freeModelIds(payload, provider);
+    contextLengths = modelContextLengths(payload, provider);
+    fetchedAt = new Date().toISOString();
+    if (storeAnswer) writeProviderCatalogCache(providerId, { discovered, free, contextLengths, fetchedAt });
+  }
   const registered = MODELS
     .filter((model) => model.provider === providerId)
     .map((model) => model.upstreamModel)
@@ -191,15 +228,25 @@ export async function discoverProviderModels(providerId) {
     unavailable: registered.filter((id) => !discoveredSet.has(id)),
     // Sizing the provider published for itself. Curation stores it rather than
     // guessing a window for a model whose catalog entry already names one.
-    contextLengths: modelContextLengths(payload, provider),
-    ...(provider.id === "orcarouter" ? { free } : {}),
+    contextLengths,
+    // Whether this list came from the provider just now or from the last time
+    // it was asked. The surfaces that show it say which, so a stale list is
+    // never mistaken for a live one.
+    cached: Boolean(cached),
+    // A stored list past its trust window is still the only answer available
+    // offline, so it is served rather than withheld -- but it is labelled so
+    // the caller can re-read it in the background instead of showing a list
+    // that silently predates the provider's newer models.
+    stale: Boolean(cached?.stale),
+    fetchedAt,
+    ...(provider.id === "orca" ? { free } : {}),
     note: "Discovery never edits the registry. New models must pass the live compatibility test before they are listed in Codex.",
   };
 }
 
 async function main() {
   if (process.argv.includes("--help")) {
-    process.stdout.write(`Usage: discover-models PROVIDER [--fixture FILE] [--json]
+    process.stdout.write(`Usage: discover-models PROVIDER [--fixture FILE] [--refresh] [--json]
 
 Queries a provider's official /models endpoint and compares it with
 the checked-in config/ registry tree. Credential values are never printed or written.
@@ -208,11 +255,17 @@ the checked-in config/ registry tree. Credential values are never printed or wri
   }
   const providerId = process.argv.slice(2).find((value) => !value.startsWith("--") && value !== option("--fixture"));
   if (!providerId) throw new Error("Pass a provider id, such as anthropic-api, deepseek, grok-api, or kimi-api.");
-  const result = await discoverProviderModels(providerId);
+  const result = await discoverProviderModels(providerId, {
+    refresh: process.argv.includes("--refresh"),
+  });
   if (process.argv.includes("--json")) {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   } else {
-    process.stdout.write(`${result.provider}: ${result.discovered.length} models discovered\n`);
+    process.stdout.write(
+      `${result.provider}: ${result.discovered.length} models ${
+        result.cached ? `from the list cached at ${result.fetchedAt} (--refresh re-asks the provider)` : "discovered"
+      }\n`,
+    );
     process.stdout.write(`Registered: ${result.registered.join(", ") || "none"}\n`);
     process.stdout.write(`New candidates: ${result.unregistered.join(", ") || "none"}\n`);
     process.stdout.write(`Unavailable registered ids: ${result.unavailable.join(", ") || "none"}\n`);

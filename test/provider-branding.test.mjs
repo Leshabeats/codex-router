@@ -28,4 +28,11 @@ test("provider and model-maker branding covers remote and local catalog families
   assert.match(branding, /export function brandForLocalModel/);
   assert.match(local, /brandForLocalModel/);
   assert.match(local, /<BrandLogo brand=\{brandForLocalModel\(model\)\}/);
+  assert.match(sources, /tencent\.com\/tencent-hunyuan-officially-releases-hy3/);
+  assert.match(sources, /tencent-web\/assets\/favicon\/safari-pinned-tab\.svg/);
+  assert.match(sources, /CognitionAI\/devin-extension[^|]+devin-full-color\.png/);
+  assert.match(sources, /ornith-ai\/Ornith-1[^|]+ornith_logo\.png/);
+  assert.doesNotMatch(sources, /avatars\.githubusercontent\.com/);
+  assert.match(branding, /cognition:[^\n]+name: "Devin"/);
+  assert.match(branding, /deepreinforce:[^\n]+name: "Ornith"/);
 });

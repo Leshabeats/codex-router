@@ -16,6 +16,7 @@ import {
   buildLoginFreeCatalog,
   clampModelEfforts,
   codexEffortVocabulary,
+  effectivePickerHiddenModels,
   nativeCatalogIsReusable,
   deriveBaseInstructions,
   mergeNativeCatalogs,
@@ -57,6 +58,21 @@ const grok = {
   compHash: "grok-oauth-grok-4-5-v1",
   multiAgentVersion: "v2",
 };
+
+test("signed-in picker overlay cannot hide Codex native base entries", () => {
+  const hidden = new Set(["gpt-5.6-luna", "gpt-5.6-sol-1m", "grok-oauth/grok-4.5"]);
+  const native = new Set(["gpt-5.6-luna", "gpt-5.6-sol"]);
+  assert.deepEqual(
+    [...effectivePickerHiddenModels(hidden, native)].sort(),
+    ["gpt-5.6-sol-1m", "grok-oauth/grok-4.5"],
+  );
+  // Login-free aliases deliberately reuse native slugs, so the router policy
+  // applies to every entry in that mode.
+  assert.deepEqual(
+    [...effectivePickerHiddenModels(hidden, native, { loginFree: true })].sort(),
+    [...hidden].sort(),
+  );
+});
 
 test("routed catalog is exposed only when the active provider reaches the router", () => {
   // An absent base URL is the first-install case: setup has not written the

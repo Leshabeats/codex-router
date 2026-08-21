@@ -48,7 +48,7 @@ function catalogFixture() {
         supported_endpoint_types: ["openai", "openai-response", "anthropic"],
       },
       {
-        id: "qwen/qwen3.8-27b-free",
+        id: "deepseek/deepseek-v4-flash-free",
         supported_endpoint_types: ["openai", "openai-response"],
         context_length: 65_536,
         pricing: { request: "0.000000" },
@@ -84,14 +84,14 @@ function catalogFixture() {
 }
 
 test("OrcaRouter is a credentialed catalog-only OpenAI provider", () => {
-  const provider = PROVIDERS.get("orcarouter");
+  const provider = PROVIDERS.get("orca");
   assert.equal(provider.displayName, "OrcaRouter");
   assert.equal(provider.baseUrl, "https://api.orcarouter.ai/v1");
   assert.equal(provider.baseUrlEnv, "ORCAROUTER_BASE_URL");
   assert.deepEqual(provider.credential.environment, ["ORCAROUTER_API_KEY"]);
   assert.equal(provider.credential.file, "orcarouter-api-key.secret");
   assert.deepEqual(provider.credential.keychainServices, ["codex-router-orcarouter"]);
-  assert.equal(LISTED_MODELS.some(({ provider: id }) => id === "orcarouter"), false);
+  assert.equal(LISTED_MODELS.some(({ provider: id }) => id === "orca"), false);
 
   const overlay = readFileSync(
     path.join(root, "apps", "macos", "ModelRouterTray", "Sources", "IslandOverlay.swift"),
@@ -99,23 +99,21 @@ test("OrcaRouter is a credentialed catalog-only OpenAI provider", () => {
   );
   assert.match(
     overlay,
-    /\["deepseek", "chutes", "orcarouter"\]\.contains\(provider\)[\s\S]*return "METERED API"/,
+    /\["deepseek", "chutes", "orca"\]\.contains\(provider\)[\s\S]*return "METERED API"/,
   );
 });
 
 test("OrcaRouter discovery keeps callable chat models and identifies the free subset", () => {
-  const provider = PROVIDERS.get("orcarouter");
+  const provider = PROVIDERS.get("orca");
   const payload = catalogFixture();
   assert.deepEqual(modelIds(payload, provider), [
-    "orcarouter/free",
-    "qwen/qwen3.8-27b-free",
+    "deepseek/deepseek-v4-flash-free",
     "vendor/paid",
     "vendor/unspecified-surface-free",
     "vendor/zero-token-price",
   ]);
   assert.deepEqual(freeModelIds(payload, provider), [
-    "orcarouter/free",
-    "qwen/qwen3.8-27b-free",
+    "deepseek/deepseek-v4-flash-free",
     "vendor/unspecified-surface-free",
     "vendor/zero-token-price",
   ]);
@@ -132,10 +130,10 @@ test("a configured OrcaRouter provider enables cleanly and doctor requests curat
       { mode: 0o600 },
     );
     const env = isolatedEnvironment(testRoot);
-    const enabled = runNode(["src/providers.mjs", "enable", "orcarouter"], env);
+    const enabled = runNode(["src/providers.mjs", "enable", "orca"], env);
     assert.equal(enabled.status, 0, enabled.stderr);
     assert.match(enabled.stdout, /OrcaRouter is enabled, but ships no preselected models/);
-    assert.match(enabled.stdout, /curate-models orcarouter/);
+    assert.match(enabled.stdout, /curate-models orca/);
 
     const doctor = runNode(["src/doctor.mjs", "--json"], env);
     assert.equal(doctor.status, 1, doctor.stderr);
@@ -143,7 +141,7 @@ test("a configured OrcaRouter provider enables cleanly and doctor requests curat
     const byName = Object.fromEntries(report.checks.map((check) => [check.name, check]));
     assert.equal(byName["OrcaRouter key"].status, "ok");
     assert.equal(byName["OrcaRouter models"].status, "warn");
-    assert.match(byName["OrcaRouter models"].fix, /curate-models orcarouter/);
+    assert.match(byName["OrcaRouter models"].fix, /curate-models orca/);
   } finally {
     rmSync(testRoot, { recursive: true, force: true });
   }
@@ -157,23 +155,38 @@ test("--free-only additively curates the live free OrcaRouter catalog", () => {
     writeFileSync(fixture, JSON.stringify(catalogFixture()));
     writeFileSync(userModels, JSON.stringify({
       version: 1,
-      models: [{
-        provider: "orcarouter",
-        upstreamModel: "vendor/existing-paid",
-        slug: "orcarouter/vendor-existing-paid",
-        gatewayModel: "orcarouter-vendor-existing-paid",
-        displayName: "vendor/existing-paid (OrcaRouter)",
-        description: "Locally curated OrcaRouter model",
-        contextWindow: 131072,
-        autoCompact: 111411,
-        inputModalities: ["text"],
-        priority: 99,
-        compHash: "orcarouter-vendor-existing-paid-user-v1"
-      }],
+      models: [
+        {
+          provider: "orca",
+          upstreamModel: "orcarouter/free",
+          slug: "orca/orcarouter-free",
+          gatewayModel: "orca-orcarouter-free",
+          displayName: "orcarouter/free (curated)",
+          description: "Legacy moving free meta-router",
+          contextWindow: 131072,
+          autoCompact: 111411,
+          inputModalities: ["text"],
+          priority: 98,
+          compHash: "orca-orcarouter-free-user-v1"
+        },
+        {
+          provider: "orca",
+          upstreamModel: "vendor/existing-paid",
+          slug: "orca/vendor-existing-paid",
+          gatewayModel: "orca-vendor-existing-paid",
+          displayName: "vendor/existing-paid (OrcaRouter)",
+          description: "Locally curated OrcaRouter model",
+          contextWindow: 131072,
+          autoCompact: 111411,
+          inputModalities: ["text"],
+          priority: 99,
+          compHash: "orca-vendor-existing-paid-user-v1"
+        },
+      ],
     }));
     const result = spawnSync(process.execPath, [
       path.join(root, "src", "curate-models.mjs"),
-      "orcarouter",
+      "orca",
       "--fixture",
       fixture,
       "--free-only",
@@ -194,21 +207,24 @@ test("--free-only additively curates the live free OrcaRouter catalog", () => {
       stored.models.map((model) => model.upstreamModel),
       [
         "vendor/existing-paid",
-        "orcarouter/free",
-        "qwen/qwen3.8-27b-free",
+        "deepseek/deepseek-v4-flash-free",
         "vendor/unspecified-surface-free",
         "vendor/zero-token-price",
       ],
     );
-    const qwen = stored.models.find((model) => model.upstreamModel === "qwen/qwen3.8-27b-free");
-    assert.equal(qwen.contextWindow, 65_536);
-    assert.equal(qwen.autoCompact, 55_705);
+    const flash = stored.models.find((model) => model.upstreamModel === "deepseek/deepseek-v4-flash-free");
+    assert.equal(flash.contextWindow, 65_536);
+    assert.equal(flash.autoCompact, 55_705);
+    assert.equal(flash.isFree, true);
+    assert.equal(flash.slug, "orca/deepseek-v4-flash");
+    assert.equal(stored.models.find((model) => model.upstreamModel === "vendor/existing-paid").isFree, undefined);
+    assert.equal(stored.models.some((model) => model.upstreamModel === "orcarouter/free"), false);
 
     const route = runNode([
       "-e",
       "const { MODELS } = await import('./src/model-registry.mjs');" +
         "const { renderLiteLlmConfig } = await import('./src/litellm-config.mjs');" +
-        "const model = MODELS.find((entry) => entry.provider === 'orcarouter' && entry.upstreamModel === 'qwen/qwen3.8-27b-free');" +
+        "const model = MODELS.find((entry) => entry.provider === 'orca' && entry.upstreamModel === 'deepseek/deepseek-v4-flash-free');" +
         "process.stdout.write(JSON.stringify({ model, config: renderLiteLlmConfig() }));",
     ], {
       ...isolatedEnvironment(testRoot),
@@ -216,16 +232,30 @@ test("--free-only additively curates the live free OrcaRouter catalog", () => {
     });
     assert.equal(route.status, 0, route.stderr);
     const rendered = JSON.parse(route.stdout);
-    assert.equal(rendered.model.gatewayModel, "orcarouter-qwen-qwen3-8-27b-free");
+    assert.equal(rendered.model.slug, "orca/deepseek-v4-flash");
+    assert.equal(rendered.model.gatewayModel, "orca-deepseek-v4-flash");
+    assert.equal(rendered.model.upstreamModel, "deepseek/deepseek-v4-flash-free");
+    assert.equal(rendered.model.isFree, true);
     const blockStart = rendered.config.indexOf(
-      'model_name: "orcarouter-qwen-qwen3-8-27b-free"',
+      'model_name: "orca-deepseek-v4-flash"',
     );
     assert.ok(blockStart >= 0);
     const nextBlock = rendered.config.indexOf("model_name:", blockStart + 1);
     const block = rendered.config.slice(blockStart, nextBlock === -1 ? undefined : nextBlock);
-    assert.match(block, /model: "openai\/orcarouter-qwen-qwen3-8-27b-free"/);
+    assert.match(block, /model: "openai\/orca-deepseek-v4-flash"/);
     assert.match(block, /api_base: "os\.environ\/CODEX_ROUTER_API_FORWARD_BASE_URL"/);
     assert.doesNotMatch(block, /ORCAROUTER_API_KEY/);
+
+    const modelsPage = readFileSync(
+      path.join(root, "apps", "control-center", "src", "pages", "ModelsPage.tsx"),
+      "utf8",
+    );
+    assert.match(modelsPage, /model\.isFree \? <Badge tone="success">Free<\/Badge>/);
+    const branding = readFileSync(
+      path.join(root, "apps", "control-center", "src", "provider-branding.tsx"),
+      "utf8",
+    );
+    assert.match(branding, /\\bdeepseek\\b[\s\S]*return BRANDS\.deepseek/);
   } finally {
     rmSync(testRoot, { recursive: true, force: true });
   }

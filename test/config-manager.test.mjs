@@ -415,6 +415,39 @@ test("config manager derives native Voice calls from a custom ChatGPT base URL",
   }
 });
 
+test("an opt-in router default survives rebuilds and restores Codex's prior default", () => {
+  const codexHome = mkdtempSync(path.join(os.tmpdir(), "codex-router-default-model-"));
+  const stateDir = path.join(codexHome, "router-state");
+  const configPath = path.join(codexHome, "config.toml");
+  const defaultStatePath = path.join(stateDir, "codex-default-model.json");
+  writeFileSync(configPath, 'model = "gpt-5.6-luna"\nmodel_provider = "openai"\n', {
+    mode: 0o600,
+  });
+  try {
+    run("enable", codexHome, stateDir);
+    const selected = run(
+      "router-default-set",
+      codexHome,
+      stateDir,
+      ["deepseek/deepseek-v4-flash"],
+    );
+    assert.equal(selected.model, "deepseek/deepseek-v4-flash");
+    assert.equal(selected.router_default_model, "deepseek/deepseek-v4-flash");
+    assert.equal(selected.router_default_managed, true);
+    assert.equal(privateFileIsProtected(defaultStatePath), true);
+
+    const rebuilt = run("enable", codexHome, stateDir);
+    assert.equal(rebuilt.model, "deepseek/deepseek-v4-flash");
+
+    const restored = run("router-default-clear", codexHome, stateDir);
+    assert.equal(restored.model, "gpt-5.6-luna");
+    assert.equal(restored.router_default_model, null);
+    assert.equal(existsSync(defaultStatePath), false);
+  } finally {
+    rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
 test("login-free mode selects the managed provider and restores the previous provider", () => {
   const codexHome = mkdtempSync(path.join(os.tmpdir(), "codex-router-login-free-"));
   const stateDir = path.join(codexHome, "router-state");

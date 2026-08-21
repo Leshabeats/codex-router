@@ -137,6 +137,15 @@ test("Homebrew setup never reconciles package-manager-owned dependencies", () =>
   );
 });
 
+test("POSIX updates republish every installed companion client", () => {
+  const installer = readScript("bin", "install");
+  assert.match(installer, /\$target" != dsh[\s\S]*dsh-models\.json[\s\S]*dsh-config-manager\.mjs install/);
+  assert.match(installer, /\$target" != gemini[\s\S]*gemini-models\.json[\s\S]*gemini-config-manager\.mjs install/);
+  const windows = readScript("install.ps1");
+  assert.match(windows, /\$Target -ne "dsh"[\s\S]*dsh-models\.json[\s\S]*dsh-config-manager\.mjs install/);
+  assert.match(windows, /\$Target -ne "gemini"[\s\S]*gemini-models\.json[\s\S]*gemini-config-manager\.mjs install/);
+});
+
 test("Homebrew force-deps fails early with the package-manager repair command", { skip: !POSIX_SHELL_AVAILABLE }, () => {
   const result = spawnSync("sh", [path.join(root, "bin", "install"), "--force-deps"], {
     encoding: "utf8",
@@ -197,6 +206,54 @@ fi
           calls.join("\n"),
         );
       }
+    } finally {
+      rmSync(testRoot, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "POSIX install finds the runtime a desktop launcher named instead of refusing",
+  { skip: process.platform === "win32" || !POSIX_SHELL_AVAILABLE },
+  () => {
+    // A GUI app, launchd, and systemd all start without the login-shell PATH.
+    // Refusing a routine catalog update as "node is required but was not found
+    // on PATH" while the app is running on that very Node is the failure this
+    // covers: the recorded runtime is honored before the PATH lookup.
+    const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-desktop-path-"));
+    const runtimeDir = path.join(testRoot, "runtime");
+    const callLog = path.join(testRoot, "calls.log");
+    try {
+      mkdirSync(runtimeDir, { recursive: true });
+      for (const name of ["node", "npm"]) {
+        writeFileSync(
+          path.join(runtimeDir, name),
+          `#!/bin/sh
+printf '%s\\n' "${name}" >>"$CODEX_ROUTER_WRAPPER_LOG"
+if [ "\${1:-}" = src/install-plan.mjs ] && [ "\${2:-}" = status ]; then
+  printf 'skip\\n'
+fi
+`,
+          { mode: 0o755 },
+        );
+      }
+      const result = spawnSync(path.join(root, "bin", "install"), ["--prepare-only"], {
+        cwd: root,
+        encoding: "utf8",
+        env: {
+          // Deliberately no runtime on PATH, exactly as a Finder-launched app sees it.
+          PATH: "/usr/bin:/bin",
+          HOME: testRoot,
+          CODEX_HOME: path.join(testRoot, "codex-home"),
+          CODEX_ROUTER_STATE_DIR: path.join(testRoot, "state"),
+          MODEL_ROUTER_STATE_DIR: path.join(testRoot, "state"),
+          CODEX_ROUTER_NODE_BIN: path.join(runtimeDir, "node"),
+          CODEX_ROUTER_WRAPPER_LOG: callLog,
+        },
+      });
+      assert.doesNotMatch(result.stderr, /is required but was not found on PATH/);
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      assert.match(readFileSync(callLog, "utf8"), /node/);
     } finally {
       rmSync(testRoot, { recursive: true, force: true });
     }
@@ -525,4 +582,52 @@ test("uninstall removes the managed skills", () => {
   const uninstallStep = source.indexOf("skills-install.mjs uninstall");
   const serviceStep = source.indexOf("src/service.mjs uninstall");
   assert.ok(serviceStep < uninstallStep, "skills removal must follow the service removal");
+});
+
+// A reinstall over a working router must not be able to leave the machine
+// worse than it found it. `service.mjs install` waits up to 300 s for /health,
+// and a LiteLLM gateway with a large model set can lose that race on a cold
+// start -- retryable, not broken. The rollback used to disable the client
+// config and uninstall the LaunchAgent unconditionally, so that timeout took a
+// working, routed machine and left it unrouted with no service at all.
+test("installer rollback undoes only what the run created", () => {
+  const posix = readFileSync(path.join(root, "bin", "install"), "utf8");
+  const windows = readFileSync(path.join(root, "install.ps1"), "utf8");
+
+  // Both installers must read the pre-existing state before they mutate it.
+  assert.match(posix, /config_was_enabled=/);
+  assert.match(posix, /service_was_installed=/);
+  assert.ok(
+    posix.indexOf("service_was_installed=false") < posix.indexOf("rollback() {"),
+    "POSIX must capture prior state before defining the rollback that reads it",
+  );
+  assert.match(windows, /\$ConfigWasEnabled\s*=/);
+  assert.match(windows, /\$ServiceWasInstalled\s*=/);
+
+  // ...and both teardowns must be gated on it.
+  assert.match(
+    posix,
+    /\[ "\$service_installed" = true \] && \[ "\$service_was_installed" != true \]/,
+  );
+  assert.match(posix, /\[ "\$config_was_enabled" != true \]/);
+  assert.match(windows, /\$ServiceInstalled -and -not \$ServiceWasInstalled/);
+  assert.match(windows, /-not \$ConfigWasEnabled/);
+});
+
+// The manifest names the checkout that owns the generated state, and the
+// desktop app resolves its source root from it. Recording it only after the
+// health wait meant a timeout left the manifest naming the previous owner
+// while the installed service pointed at the new one.
+test("both installers record the manifest before waiting on health", () => {
+  const posix = readFileSync(path.join(root, "bin", "install"), "utf8");
+  const windows = readFileSync(path.join(root, "install.ps1"), "utf8");
+
+  assert.ok(
+    posix.indexOf("install-manifest.mjs record") < posix.indexOf("wait-health.mjs"),
+    "POSIX must record the manifest before the health wait",
+  );
+  assert.ok(
+    windows.indexOf("install-manifest.mjs record") < windows.indexOf("wait-health.mjs"),
+    "Windows must record the manifest before the health wait",
+  );
 });

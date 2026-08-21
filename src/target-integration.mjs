@@ -66,9 +66,9 @@ export function targetRestartHint() {
  * Republishes every *installed* client integration, not only the active target.
  *
  * The router plane is shared: enabling a provider, storing a key, or curating a
- * model changes the routable set for Codex and the harness alike. Refreshing
- * only whichever target the current command happens to run under is how one
- * client ends up advertising a model the other just gained or lost.
+ * model changes the routable set for Codex, the harness, and Gemini alike.
+ * Refreshing only whichever target the current command happens to run under
+ * is how one client ends up advertising a model the other just gained or lost.
  */
 /**
  * Which client integrations are currently published.
@@ -107,7 +107,11 @@ function codexIntegrationInstalled() {
 
 export function refreshTargetPickerIfInstalled() {
   let refreshed = false;
-  if (existsSync(NATIVE_CATALOG_PATH)) {
+  // A managed Codex config is the integration marker. Keep the retained
+  // native capture as a fallback for an uninstall/update transition, but do
+  // not let a missing cache silently make a live Codex install the one client
+  // that misses a shared picker mutation.
+  if (codexIntegrationInstalled() || existsSync(NATIVE_CATALOG_PATH)) {
     run("catalog.mjs");
     refreshed = true;
   }

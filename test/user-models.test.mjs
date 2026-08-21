@@ -36,6 +36,17 @@ test("userModelEntry fills conservative picker metadata", () => {
   assert.ok(entry.description.length > 0);
 });
 
+test("OpenCode's opaque free preview id is presented as Ox Alpha Free", () => {
+  const entry = userModelEntry({
+    providerId: "opencode-free",
+    upstreamId: "x-preview-f-free",
+    priority: 100,
+  });
+  assert.equal(entry.slug, "opencode-free/x-preview-f-free");
+  assert.equal(entry.upstreamModel, "x-preview-f-free");
+  assert.equal(entry.displayName, "Ox Alpha Free");
+});
+
 test("curation metadata can set sizing and the effort ladder", () => {
   const entry = userModelEntry({
     providerId: "deepseek",
@@ -53,6 +64,7 @@ test("curation metadata can set sizing and the effort ladder", () => {
       defaultEffort: "medium",
       serviceTiers: [{ id: "priority", name: "Fast" }],
       requiresTrailingUserTurn: true,
+      isFree: true,
     },
   });
   assert.equal(entry.contextWindow, 262144);
@@ -61,6 +73,7 @@ test("curation metadata can set sizing and the effort ladder", () => {
   assert.equal(entry.defaultEffort, "medium");
   assert.deepEqual(entry.serviceTiers, [{ id: "priority", name: "Fast" }]);
   assert.equal(entry.requiresTrailingUserTurn, true);
+  assert.equal(entry.isFree, true);
 });
 
 test("curation metadata can expose provider-verified reasoning summaries", () => {

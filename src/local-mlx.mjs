@@ -1,10 +1,14 @@
 import { spawn } from "node:child_process";
 import {
   accessSync,
+  chmodSync,
   constants as fsConstants,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
+  rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -21,6 +25,16 @@ export const LMSTUDIO_URL = "http://127.0.0.1:1234/v1";
 export const HF_REPOSITORY = "orcarouter/Qwen3.8-27B-Uncensored-MLX";
 export const MLX_INCLUDE = "4-bit/**";
 export const LOCAL_MLX_DIR = path.join(STATE_DIR, "local-mlx", LOCAL_MLX_ID);
+export const LOCAL_MLX_INSTALLERS = Object.freeze({
+  lms: Object.freeze({
+    unix: "https://lmstudio.ai/install.sh",
+    win32: "https://lmstudio.ai/install.ps1",
+  }),
+  uvx: Object.freeze({
+    unix: "https://astral.sh/uv/install.sh",
+    win32: "https://astral.sh/uv/install.ps1",
+  }),
+});
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -107,7 +121,8 @@ export function missingLmsMessage(platform = process.platform) {
   return (
     "LM Studio's `lms` CLI was not found. Install the official llmster package yourself, " +
     `then retry. Official command: ${command}\n` +
-    "This router does not download or execute that installer for you."
+    "The direct local-mlx CLI does not download or execute that installer; the app's one-click flow can " +
+    "install it only after explicit consent."
   );
 }
 
@@ -115,8 +130,94 @@ export function missingUvxMessage() {
   return (
     "The `uvx` command was not found. Install uv from the official instructions at " +
     "https://docs.astral.sh/uv/getting-started/installation/, then retry. " +
-    "This router does not install system runtimes for you."
+    "The direct local-mlx CLI does not install it; the app's one-click flow can install it " +
+    "only after explicit consent."
   );
+}
+
+function officialInstaller(tool, platform) {
+  const source = LOCAL_MLX_INSTALLERS[tool]?.[platform === "win32" ? "win32" : "unix"];
+  if (!source) throw new Error(`No official installer is defined for ${tool}.`);
+  return source;
+}
+
+async function runOfficialInstaller(tool, {
+  platform = process.platform,
+  fetchImpl = fetch,
+  run = runProcess,
+  signal,
+  tmpdir = os.tmpdir(),
+} = {}) {
+  const source = officialInstaller(tool, platform);
+  signal?.throwIfAborted();
+  const response = await fetchImpl(source, { signal });
+  if (!response.ok) {
+    throw new Error(`The official ${tool} installer could not be downloaded (${response.status}).`);
+  }
+  const script = await response.text();
+  if (!script.trim()) throw new Error(`The official ${tool} installer download was empty.`);
+  const directory = mkdtempSync(path.join(tmpdir, "codex-router-mlx-"));
+  chmodSync(directory, 0o700);
+  const installer = path.join(directory, platform === "win32" ? `${tool}.ps1` : `${tool}.sh`);
+  try {
+    writeFileSync(installer, script, { encoding: "utf8", mode: 0o600 });
+    const command = platform === "win32" ? "powershell.exe" : "/bin/bash";
+    const args = platform === "win32"
+      ? ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", installer]
+      : [installer];
+    await checkedRun(run, command, args, `Installing ${tool} from its official installer`, signal);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+  return { tool, installed: true, source };
+}
+
+export async function ensureLocalMlxPrerequisites({
+  yes = false,
+  platform = process.platform,
+  lmsPath = findLms(),
+  uvxPath = findUvx(),
+  findLmsImpl = findLms,
+  findUvxImpl = findUvx,
+  fetchImpl = fetch,
+  run = runProcess,
+  signal,
+  tmpdir,
+  onPhase = () => {},
+} = {}) {
+  const installed = [];
+  if ((!lmsPath || !uvxPath) && !yes) {
+    throw new Error(
+      "Installing missing local MLX prerequisites changes user software. Pass --yes to confirm.",
+    );
+  }
+  if (!lmsPath) {
+    onPhase("preparing", "Installing the official LM Studio headless runtime", 1);
+    installed.push(await runOfficialInstaller("lms", {
+      platform, fetchImpl, run, signal, tmpdir,
+    }));
+    lmsPath = findLmsImpl({ platform });
+    if (!lmsPath) {
+      throw new Error(
+        "The official LM Studio installer completed, but its lms CLI was not found. " +
+          "Finish any installer prompt, then retry.",
+      );
+    }
+  }
+  if (!uvxPath) {
+    onPhase("preparing", "Installing uv from its official installer", 1);
+    installed.push(await runOfficialInstaller("uvx", {
+      platform, fetchImpl, run, signal, tmpdir,
+    }));
+    uvxPath = findUvxImpl({ platform });
+    if (!uvxPath) {
+      throw new Error(
+        "The official uv installer completed, but uvx was not found. " +
+          "Finish any installer prompt, then retry.",
+      );
+    }
+  }
+  return { lmsPath, uvxPath, installed };
 }
 
 export function runProcess(command, args, options = {}) {
@@ -129,6 +230,15 @@ export function runProcess(command, args, options = {}) {
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
+    const abort = () => {
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // The process may have completed between the signal and this handler.
+      }
+    };
+    if (options.signal?.aborted) abort();
+    else options.signal?.addEventListener("abort", abort, { once: true });
     let stdout = "";
     let stderr = "";
     child.stdout?.setEncoding("utf8");
@@ -140,12 +250,15 @@ export function runProcess(command, args, options = {}) {
       stderr += chunk;
     });
     child.on("error", reject);
-    child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
+    child.on("close", (code) => {
+      options.signal?.removeEventListener("abort", abort);
+      resolve({ code: code ?? 1, stdout, stderr });
+    });
   });
 }
 
-async function checkedRun(run, command, args, label) {
-  const result = await run(command, args, { cwd: REPO_ROOT });
+async function checkedRun(run, command, args, label, signal) {
+  const result = await run(command, args, { cwd: REPO_ROOT, signal });
   if (result?.code !== 0) {
     throw new Error(`${label} failed (exit ${result?.code ?? "unknown"}).`);
   }
@@ -212,6 +325,8 @@ export async function installLocalMlx({
   fetchImpl = fetch,
   sleep = wait,
   probeAttempts = 20,
+  onPhase = () => {},
+  signal,
 } = {}) {
   const identity = huggingFaceIdentity(reference);
   if (!yes) {
@@ -225,9 +340,14 @@ export async function installLocalMlx({
   // and LMS's @quant selector does not reliably address nested repositories.
   // Keep the one supported precision in private router state and load that exact path.
   mkdirSync(modelDir, { recursive: true, mode: 0o700 });
+  chmodSync(modelDir, 0o700);
 
-  await checkedRun(run, lmsPath, ["daemon", "up", "--json"], "Starting llmster");
+  signal?.throwIfAborted();
+  onPhase("preparing", "Starting the local MLX runtime", 2);
+  await checkedRun(run, lmsPath, ["daemon", "up", "--json"], "Starting llmster", signal);
   try {
+    signal?.throwIfAborted();
+    onPhase("downloading", "Downloading the 4-bit MLX weights", 5);
     await checkedRun(
       run,
       uvxPath,
@@ -243,8 +363,10 @@ export async function installLocalMlx({
         modelDir,
       ],
       "Downloading the 4-bit MLX model",
+      signal,
     );
   } catch {
+    signal?.throwIfAborted();
     throw new Error(
       "LM Studio could not download the model. Check that the repository exists and is not gated; " +
         "if Hugging Face authentication is needed, sign in with the official Hugging Face CLI " +
@@ -259,6 +381,8 @@ export async function installLocalMlx({
         "The repository may be absent, gated, or have changed layout.",
     );
   }
+  signal?.throwIfAborted();
+  onPhase("loading", "Loading the 4-bit MLX model", 75);
   await checkedRun(
     run,
     lmsPath,
@@ -274,11 +398,14 @@ export async function installLocalMlx({
       "-y",
     ],
     "Loading the MLX model",
+    signal,
   );
+  signal?.throwIfAborted();
+  onPhase("starting-server", "Starting the loopback model server", 85);
   const serverStart = await run(
     lmsPath,
     ["server", "start", "--port", "1234", "--bind", "127.0.0.1"],
-    { cwd: REPO_ROOT },
+    { cwd: REPO_ROOT, signal },
   );
   if (serverStart?.code !== 0) {
     // `lms server start` can reject a duplicate start even though the exact
@@ -293,7 +420,9 @@ export async function installLocalMlx({
   }
 
   let served = { reachable: false, ids: [] };
+  onPhase("verifying", "Verifying the stable loopback model id", 90);
   for (let attempt = 0; attempt < probeAttempts; attempt += 1) {
+    signal?.throwIfAborted();
     served = await probeLmstudio({ fetchImpl });
     if (served.reachable && served.ids.includes(LOCAL_MLX_ID)) break;
     if (attempt + 1 < probeAttempts) await sleep(500);
@@ -305,11 +434,14 @@ export async function installLocalMlx({
     throw new Error(`LM Studio is reachable but does not serve the required id ${LOCAL_MLX_ID}.`);
   }
 
+  signal?.throwIfAborted();
+  onPhase("publishing", "Publishing the model through Codex Router", 95);
   await checkedRun(
     run,
     path.join(REPO_ROOT, "bin", "control"),
     ["local-models", "lmstudio-set", LOCAL_MLX_ID, "on"],
     "Publishing the LM Studio model to Codex",
+    signal,
   );
   return {
     ok: true,
