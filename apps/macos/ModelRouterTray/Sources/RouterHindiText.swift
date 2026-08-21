@@ -120,6 +120,7 @@ enum RouterHindiText {
     "Subagent choices do not hide models from Codex's picker — use Model picker below for that.": "सबएजेंट विकल्प Codex के पिकर से मॉडल नहीं छिपाते — उसके लिए नीचे मॉडल पिकर का उपयोग करें।",
     "Hidden models stay connected but are not offered by Codex.": "छिपाए गए मॉडल कनेक्टेड रहते हैं, लेकिन Codex द्वारा पेश नहीं किए जाते।",
     "Run models locally through Ollama. Enable an installed model to make it available to Codex.": "Ollama के माध्यम से मॉडल स्थानीय रूप से चलाएँ। इंस्टॉल किए गए मॉडल को Codex के लिए उपलब्ध कराने हेतु उसे सक्षम करें।",
+    "Run local models through Ollama or the curated MLX runtime. Installed models are wired into the same Codex proxy.": "Ollama या चुने गए MLX रनटाइम से स्थानीय मॉडल चलाएँ। इंस्टॉल किए गए मॉडल उसी Codex प्रॉक्सी से जोड़े जाते हैं।",
     "Nothing installed yet. Start with a quick pick or browse the Ollama catalog below.": "अभी कुछ भी इंस्टॉल नहीं है। किसी त्वरित विकल्प से शुरू करें या नीचे Ollama कैटलॉग ब्राउज़ करें।",
     "Install a model": "मॉडल इंस्टॉल करें",
     "Install": "इंस्टॉल करें",

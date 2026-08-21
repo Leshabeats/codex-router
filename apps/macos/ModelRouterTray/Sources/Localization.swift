@@ -252,6 +252,7 @@ enum RouterChineseText {
     "Subagent choices do not hide models from Codex's picker — use Model picker below for that.": "子代理选择不会隐藏 Codex 选择器中的模型；如需隐藏模型，请使用下面的模型选择器。",
     "Hidden models stay connected but are not offered by Codex.": "隐藏的模型仍保持连接，但不会提供给 Codex。",
     "Run models locally through Ollama. Enable an installed model to make it available to Codex.": "通过 Ollama 在本地运行模型。启用已安装的模型即可提供给 Codex。",
+    "Run local models through Ollama or the curated MLX runtime. Installed models are wired into the same Codex proxy.": "通过 Ollama 或精选的 MLX 运行时在本地运行模型。已安装的模型会接入同一个 Codex 代理。",
     "Nothing installed yet. Start with a quick pick or browse the Ollama catalog below.": "尚未安装模型。请选择快速选项，或浏览下面的 Ollama 目录。",
     "Install a model": "安装模型",
     "Install": "安装",
@@ -488,5 +489,26 @@ enum RouterChineseText {
     "Codex Router · %@ (%@) · %@": "Codex Router · %@ (%@) · %@",
     "Codex Router · %@ (%@)": "Codex Router · %@ (%@)",
     "Select": "选择",
+    // Service health panel. The state words are shared with the Control
+    // Center's panel, so they are translated as the same vocabulary: a row is
+    // Ready/Standby/Degraded/Offline and its detail says why.
+    "Service health": "服务健康",
+    "Checking": "检查中",
+    "All clear": "一切正常",
+    "Serving locally": "正在本地提供服务",
+    "Degraded": "降级",
+    "Offline": "离线",
+    "Health endpoint unavailable": "健康检查端点不可用",
+    "Unknown": "未知",
+    "Waiting for health report": "等待健康报告",
+    "Standby": "待命",
+    "Not enabled": "未启用",
+    "Unreachable": "无法连接",
+    "Reachable": "可连接",
+    "External forwarders": "外部转发器",
+    // Composed as "\(effort) \(thinking)", so this follows the effort word.
+    // "思考强度" is the vocabulary already used for effort elsewhere here.
+    "Subagent": "子代理",
+    "thinking": "思考强度",
   ]
 }

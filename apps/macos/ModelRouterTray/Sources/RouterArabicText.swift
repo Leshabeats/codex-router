@@ -120,6 +120,7 @@ enum RouterArabicText {
     "Subagent choices do not hide models from Codex's picker — use Model picker below for that.": "اختيارات الوكلاء الفرعيين لا تخفي النماذج من منتقي Codex — استخدم منتقي النماذج أدناه لذلك.",
     "Hidden models stay connected but are not offered by Codex.": "تبقى النماذج المخفية متصلة لكنها لا تُعرض على Codex.",
     "Run models locally through Ollama. Enable an installed model to make it available to Codex.": "شغّل النماذج محليًا عبر Ollama. فعّل نموذجًا مثبّتًا لإتاحته لـ Codex.",
+    "Run local models through Ollama or the curated MLX runtime. Installed models are wired into the same Codex proxy.": "شغّل النماذج محليًا عبر Ollama أو بيئة MLX المنتقاة. تُوصَل النماذج المثبّتة بوكيل Codex نفسه.",
     "Nothing installed yet. Start with a quick pick or browse the Ollama catalog below.": "لا يوجد شيء مثبّت بعد. ابدأ باختيار سريع أو تصفّح كتالوج Ollama أدناه.",
     "Install a model": "تثبيت نموذج",
     "Install": "تثبيت",

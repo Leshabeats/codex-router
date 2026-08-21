@@ -120,6 +120,7 @@ enum RouterJapaneseText {
     "Subagent choices do not hide models from Codex's picker — use Model picker below for that.": "サブエージェントの選択は Codex のピッカーからモデルを隠しません。非表示にするには下のモデルピッカーを使用してください。",
     "Hidden models stay connected but are not offered by Codex.": "非表示のモデルは接続されたままですが、Codex には提供されません。",
     "Run models locally through Ollama. Enable an installed model to make it available to Codex.": "Ollama を通じてモデルをローカルで実行します。インストール済みのモデルを有効にすると Codex で利用できます。",
+    "Run local models through Ollama or the curated MLX runtime. Installed models are wired into the same Codex proxy.": "Ollama または厳選された MLX ランタイムでローカルモデルを実行します。インストール済みモデルは同じ Codex プロキシに接続されます。",
     "Nothing installed yet. Start with a quick pick or browse the Ollama catalog below.": "まだ何もインストールされていません。クイック選択から始めるか、下の Ollama カタログを参照してください。",
     "Install a model": "モデルをインストール",
     "Install": "インストール",
