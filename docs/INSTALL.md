@@ -108,11 +108,11 @@ API-key providers use hidden prompts:
 ./bin/provider-key zai-coding set
 ./bin/provider-key zai-api set
 ./bin/provider-key github-copilot set
-./bin/provider-key orcarouter set
+./bin/provider-key orca set
 ```
 
 Replace a stored key by running `set` again. Delete one with `remove`, which
-also hides the provider from the model picker:
+also hides the provider from every installed client's model picker:
 
 ```sh
 ./bin/provider-key deepseek remove
@@ -143,7 +143,7 @@ Windows:
 ./codex-router.ps1 provider-key grok-api set
 ./codex-router.ps1 provider-key anthropic-api set
 ./codex-router.ps1 provider-key github-copilot set
-./codex-router.ps1 provider-key orcarouter set
+./codex-router.ps1 provider-key orca set
 ```
 
 Kimi OAuth, Kimi Platform, DeepSeek, xAI, Anthropic, GitHub Copilot, and OrcaRouter are separate account and billing
@@ -151,10 +151,11 @@ systems. Never put a credential in chat, a command argument, shell history,
 the provider registry, or a tracked file.
 
 OrcaRouter is catalog-only: after storing its key, use
-`./bin/curate-models orcarouter` to choose from the account-visible live
-catalog, or `./bin/curate-models orcarouter --free-only --apply` to add its
-current zero-price chat deployments and `orcarouter/free` alias. Free
-inference still requires the key.
+`./bin/curate-models orca` to choose from the account-visible live
+catalog, or `./bin/curate-models orca --free-only --apply` to add its
+current concrete zero-price chat deployments. They appear under OrcaRouter
+with a **Free** badge; the moving `orcarouter/free` meta-router is excluded.
+Free inference still requires the key.
 
 GitHub Copilot requires a fine-grained PAT with the **Copilot Requests**
 permission. After storing it, run `./bin/curate-models github-copilot`; the

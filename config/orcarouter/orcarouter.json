@@ -2,7 +2,7 @@
   "version": 1,
   "providers": [
     {
-      "id": "orcarouter",
+      "id": "orca",
       "displayName": "OrcaRouter",
       "kind": "openai-compatible",
       "ownedBy": "orcarouter",

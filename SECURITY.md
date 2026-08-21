@@ -50,6 +50,7 @@ Router state lives under `$CODEX_HOME/codex-router` by default:
 | `merged-models.json` | Native plus registry model catalog | `600` |
 | `litellm.yaml` | Generated routes with environment references only | `600` |
 | `enabled-providers.json` | Picker visibility, no credential values | `600` |
+| `provider-catalog-cache.json` | Model ids each provider published, no credential values | `600` |
 | `install-manifest.json` | Installed version and rollback metadata | `600` |
 | `migrations/` | Protected config/service rollback snapshots | private |
 | `support/` | Locally generated diagnostic bundles | `600` files |

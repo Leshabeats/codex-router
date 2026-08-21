@@ -119,9 +119,22 @@ API identifier and a 32,768-token context, starts the loopback-only server, and
 publishes `lmstudio/qwen38-27b-uncensored-mlx` to Codex:
 
 ```text
+./bin/control local-models mlx-install --yes   # detached one-click UI path
+./bin/control local-models mlx-status
+./bin/control local-models mlx-cancel
+
 ./bin/model-router codex local-mlx install --yes
 ./bin/local-mlx status
 ```
+
+The native macOS tray and Electron control center expose the detached path as
+an **Install and add to Codex** button. That click is explicit consent to fetch
+and run the official per-user LM Studio/llmster and `uv` installers when either
+prerequisite is missing, download about 15 GB of weights, and publish the
+verified route. Both surfaces poll the same private operation record, show each
+phase, allow cancellation and retry, and refuse to overlap an Ollama model
+mutation. MLX installation is offered only on Apple Silicon Macs; the backend
+enforces the same restriction before it downloads or executes anything.
 
 You can also supply the repository URL explicitly:
 
@@ -134,9 +147,11 @@ The upstream repository contains separate nested `2-bit/`, `4-bit/`, `6-bit/`,
 and `8-bit/` trees. The command deliberately downloads only `4-bit/**` with the
 official Hugging Face CLI run through `uvx`, stores it under the router's private
 state directory, and gives LM Studio that exact directory. It does not use the
-router's universal Python lock and does not install LM Studio, llmster, `uv`, or
-any package manager. If `lms` or `uvx` is missing, it stops with the official
-installation location instead of piping an installer into a shell.
+router's universal Python lock. The direct `bin/local-mlx` CLI expects `lms`
+and `uvx` to exist and stops with their official installation locations when
+they do not. The tray/control-center path may install those two official
+prerequisites only after the operator clicks the consent-bearing install
+button; tokens are never accepted by either UI.
 
 A 27B model at 4-bit is a sensible fit for a 64 GB Apple Silicon machine; the
 weights, runtime, 32K KV cache, Codex prompt, and normal application headroom

@@ -747,6 +747,94 @@ h2 {
   margin-bottom: 8px;
 }
 
+.service-health-card {
+  padding-bottom: 7px;
+}
+
+.service-health-list {
+  display: grid;
+  gap: 0;
+}
+
+.service-health-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 9px;
+  align-items: center;
+  padding: 7px 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.055);
+}
+
+.service-health-row:first-child {
+  border-top: 0;
+}
+
+.service-health-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+}
+
+.service-health-title strong {
+  overflow: hidden;
+  font-size: 9px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.service-health-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--muted);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.045);
+}
+
+.service-health-row[data-state="ready"] .service-health-dot { background: var(--green); }
+.service-health-row[data-state="standby"] .service-health-dot { background: var(--muted); }
+.service-health-row[data-state="degraded"] .service-health-dot { background: var(--amber); }
+.service-health-row[data-state="offline"] .service-health-dot { background: var(--red); }
+
+.service-health-pill {
+  padding: 2px 5px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: 7px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  line-height: 1.15;
+  text-transform: uppercase;
+}
+
+.service-health-row[data-state="ready"] .service-health-pill {
+  border-color: color-mix(in srgb, var(--green) 28%, transparent);
+  color: var(--green);
+}
+
+.service-health-row[data-state="degraded"] .service-health-pill {
+  border-color: color-mix(in srgb, var(--amber) 30%, transparent);
+  color: var(--amber);
+}
+
+.service-health-row[data-state="offline"] .service-health-pill {
+  border-color: color-mix(in srgb, var(--red) 30%, transparent);
+  color: var(--red);
+}
+
+.service-health-detail {
+  grid-column: 1 / -1;
+  margin-left: 13px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 7.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .status-empty {
   margin: 3px 0 1px;
   color: var(--muted);

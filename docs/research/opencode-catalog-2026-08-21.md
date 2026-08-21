@@ -14,7 +14,12 @@ catalog currently exposes these nine IDs through the router's documented
 `big-pickle`, `deepseek-v4-flash-free`, `hy3-free`,
 `laguna-s-2.1-free`, `mimo-v2.5-free`,
 `muse-spark-1.2-contributor-free`, `nemotron-3-ultra-free`,
-`nemotron-3.5-lightning-free`, and `x-preview-f-free`.
+`nemotron-3.5-lightning-free`, and `x-preview-f-free` (documented by OpenCode
+as **Ox Alpha Free**).
+
+Ox Alpha is a stealth model: OpenCode publishes its callable id and display
+name but not its maker. The control center therefore uses the OpenCode provider
+mark instead of guessing a model-company logo from community speculation.
 
 Zen also remains catalog-only because it is pay-as-you-go and its list changes
 without notice. Both catalogs are fetched by `discover-models` / `curate-models`

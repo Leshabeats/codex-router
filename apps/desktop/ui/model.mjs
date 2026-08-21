@@ -234,6 +234,73 @@ export function observedModelSpeed(providerUsage, providerId, modelSlug) {
     : null;
 }
 
+// Keep the tray's health language deliberately small. The router endpoint
+// already tells us which local dependency is reachable; this helper turns
+// that payload into rows the compact status view can scan at a glance.
+export function serviceHealthRows(health) {
+  const degraded = new Set(
+    Array.isArray(health?.degraded) ? health.degraded.map((service) => String(service)) : [],
+  );
+  const hasHealth = Boolean(health && typeof health === "object");
+  const routerKnown = typeof health?.ok === "boolean";
+  const rows = [{
+    id: "router",
+    label: "Router",
+    state: !routerKnown ? "unknown" : health.ok ? "ready" : degraded.size ? "degraded" : "offline",
+    status: !routerKnown ? "Unknown" : health.ok ? "Ready" : degraded.size ? "Degraded" : "Offline",
+    detail: !routerKnown
+      ? "Waiting for health report"
+      : health.ok
+        ? "Serving locally"
+        : degraded.size
+          ? `${degraded.size} ${degraded.size === 1 ? "dependency needs" : "dependencies need"} attention`
+          : "Health endpoint unavailable",
+  }];
+
+  for (const [id, label] of [["gateway", "Gateway"], ["oauth", "OAuth forwarder"], ["api", "API forwarder"]]) {
+    const service = health?.[id];
+    const shouldShow = id === "gateway" || Boolean(service) || degraded.has(id);
+    if (!shouldShow) continue;
+    rows.push({
+      id,
+      label,
+      state: !hasHealth || !service
+        ? degraded.has(id) ? "offline" : "unknown"
+        : service.enabled === false && !degraded.has(id)
+          ? "standby"
+          : service.reachable === false || degraded.has(id)
+            ? "offline"
+            : service.reachable === true ? "ready" : "unknown",
+      status: !hasHealth || !service
+        ? degraded.has(id) ? "Offline" : "Unknown"
+        : service.enabled === false && !degraded.has(id)
+          ? "Standby"
+          : service.reachable === false || degraded.has(id)
+            ? "Offline"
+            : service.reachable === true ? "Ready" : "Unknown",
+      detail: !hasHealth || !service
+        ? degraded.has(id) ? "Unreachable" : "Waiting for health report"
+        : service.enabled === false && !degraded.has(id)
+          ? "Not enabled"
+          : service.reachable === false || degraded.has(id)
+            ? "Unreachable"
+            : service.reachable === true ? "Reachable" : "Waiting for health report",
+    });
+  }
+
+  const forwarders = rows.filter((row) => row.id === "oauth" || row.id === "api");
+  if (!forwarders.length) {
+    rows.push({
+      id: "forwarders",
+      label: "External forwarders",
+      state: hasHealth ? "standby" : "unknown",
+      status: hasHealth ? "Standby" : "Unknown",
+      detail: hasHealth ? "No external forwarders enabled" : "Waiting for health report",
+    });
+  }
+  return rows;
+}
+
 // The router's own browser panel serves this same UI but answers only the
 // reading half of the command table, and says so in platform_info. A surface
 // that advertises nothing -- the Tauri tray, the Electron window -- carries the

@@ -243,8 +243,34 @@ $ConfigDisableCommand = if ($Target -eq "codex") { "disable" } else { "uninstall
 $ConfigEnabled = $false
 $ServiceInstalled = $false
 $AdoptionPending = $false
+$ConfigWasEnabled = $false
+$ServiceWasInstalled = $false
 Push-Location $ScriptDirectory
+
+# What this run found before it changed anything, so the catch block can undo
+# only what this run created. Read after Push-Location: these commands are
+# resolved relative to the checkout.
+function Get-InstallerStateField {
+  param([string[]]$CommandArguments, [string]$Field)
+  try {
+    $raw = (& node @CommandArguments 2>$null | Out-String)
+    if (-not $raw.Trim()) { return $null }
+    return (ConvertFrom-Json $raw).$Field
+  } catch {
+    return $null
+  }
+}
+
 try {
+  # Each manager reports enablement under its own name: the Codex manager
+  # publishes a routing mode, DSH reports whether its route reached the
+  # settings document, Gemini whether its catalog is published.
+  $ConfigWasEnabled = switch ($Target) {
+    "dsh" { (Get-InstallerStateField @($ConfigManager, "status") "routeInstalled") -eq $true }
+    "gemini" { (Get-InstallerStateField @($ConfigManager, "status") "installed") -eq $true }
+    default { (Get-InstallerStateField @($ConfigManager, "status") "mode") -eq "router" }
+  }
+  $ServiceWasInstalled = (Get-InstallerStateField @("src\service.mjs", "status") "installed") -eq $true
   if ($Target -eq "codex") {
     $CodexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME ".codex" }
     New-Item -ItemType Directory -Force -Path $CodexHome | Out-Null
@@ -383,6 +409,7 @@ try {
   # rather than leaving it advertising a stale model list.
   if ($Target -ne "gemini" -and (Test-NonEmptyFile (Join-Path $StateRoot "gemini-models.json"))) {
     & node src/gemini-config-manager.mjs install | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Gemini CLI republish failed." }
   }
   if ($Target -ne "dsh" -and (Test-NonEmptyFile (Join-Path $StateRoot "dsh-models.json"))) {
     & node src/dsh-config-manager.mjs install | Out-Null
@@ -403,10 +430,16 @@ try {
   $ServiceInstalled = $true
   & node src/service.mjs install
   if ($LASTEXITCODE -ne 0) { throw "Background-service installation failed." }
-  & node src/wait-health.mjs
-  if ($LASTEXITCODE -ne 0) { throw "The router did not become healthy." }
+  # Record before the health wait, not after. The manifest is provenance for
+  # the install that just happened -- which checkout owns the state, and the
+  # proxy environment a later repair must restore -- and the service is already
+  # in place. Recording it only after a health check that a cold-starting
+  # gateway can lose left the manifest naming the previous owner while the
+  # running service pointed somewhere else.
   & node src/install-manifest.mjs record | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "Install-manifest recording failed." }
+  & node src/wait-health.mjs
+  if ($LASTEXITCODE -ne 0) { throw "The router did not become healthy." }
   if ($Target -eq "dsh") {
     Write-Host "Published the selected external model routes to DeepSeek Harness. It reloads them on the next request."
   } elseif ($Target -eq "gemini") {
@@ -416,9 +449,17 @@ try {
     Write-Host "Installed the selected external model routes. Fully quit and reopen Codex."
   }
 } catch {
-  if ($ServiceInstalled) { & node src/service.mjs uninstall 2>$null | Out-Null }
+  # Undo only what this run created. The router health wait can time out on a
+  # cold-starting gateway with a large model set -- retryable, not broken -- and
+  # tearing out a service and disabling a client config that were both working
+  # before the run turns that into an unrouted machine.
+  if ($ServiceInstalled -and -not $ServiceWasInstalled) {
+    & node src/service.mjs uninstall 2>$null | Out-Null
+  }
   if ($ConfigEnabled) {
-    & node $ConfigManager $ConfigDisableCommand 2>$null | Out-Null
+    if (-not $ConfigWasEnabled) {
+      & node $ConfigManager $ConfigDisableCommand 2>$null | Out-Null
+    }
   } elseif ($AdoptionPending) {
     & node src/native-catalog-source.mjs clear-pending 2>$null | Out-Null
   }

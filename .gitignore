@@ -16,3 +16,11 @@ apps/desktop/src-tauri/icons/icon.icns
 .electron-shots/
 release/
 generated/
+
+# Electron builder output lands in sibling dirs of release/ during local
+# packaging runs (release-local, release-rebuild, release-rebuild-N). The bare
+# `release/` rule above never covered them, so ~3 GB of compiled app bundles sat
+# untracked-but-unignored -- which is how 180 MB `Codex` binaries reached the
+# object store in the first place.
+release-local/
+release-rebuild*/
