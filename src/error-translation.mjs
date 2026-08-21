@@ -272,7 +272,7 @@ export function translateGatewayError({
         message:
           `${providerName} could not run ${modelName}. ${measured} ` +
           "This is a context-window or tokenizer/template mismatch, not high demand. " +
-          "Start a shorter task or choose a different local model tag.",
+          "Start a shorter task or choose a different model tag.",
         type: "invalid_request_error",
         param: "input",
         code: "context_length_exceeded",
