@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Concurrent Codex turns no longer stall `/health` and the next request.**
+  The process-wide fetch pool now keeps 32 HTTP/1.1 connections per origin
+  (undici's default of 10 filled up once a parent plus subagents each held a
+  streaming socket), loopback liveliness probes use a separate dispatcher so
+  they cannot queue behind those streams, and `/health` serves the last probe
+  result immediately while a slow LiteLLM liveliness check refreshes in the
+  background. The tray was reporting Starting and Codex "waiting for network"
+  with two or three in-flight turns even though the router was still
+  generating. Large request bodies also yield once before `JSON.parse` so a
+  health poll can be answered between them.
+
 - **Grok 4.6 can select Codex's native image viewer.** xAI stopped without a
   function call when the tool was named `view_image`, even when selection was
   required. The Grok OAuth boundary now presents that tool as `inspect_image`

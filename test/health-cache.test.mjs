@@ -99,6 +99,56 @@ test("the router probes through the cache, not around it", () => {
   const router = readFileSync(path.join(root, "src", "router.mjs"), "utf8");
   // healthPayload calls serviceHealth three times per request; if that ever
   // goes straight to the network again the probe flood comes back silently.
-  assert.match(router, /const healthCache = createHealthCache\(\)/);
+  assert.match(router, /const healthCache = createHealthCache\(\{\s*staleWhileRevalidate:\s*true\s*\}\)/);
   assert.match(router, /function serviceHealth\(url\)\s*\{\s*return healthCache\(url,/);
+});
+
+test("stale-while-revalidate returns the last answer without waiting on a slow refresh", async () => {
+  const clock = fixedClock();
+  const cached = createHealthCache({
+    ttlMs: 3_000,
+    now: clock.now,
+    staleWhileRevalidate: true,
+  });
+  let probes = 0;
+  let finishRefresh;
+  const hanging = new Promise((resolve) => {
+    finishRefresh = resolve;
+  });
+  const probe = () => {
+    probes += 1;
+    if (probes === 1) return { reachable: true };
+    return hanging.then(() => ({ reachable: false }));
+  };
+
+  assert.deepEqual(await cached("gateway", probe), { reachable: true });
+  clock.t = 3_000;
+  const started = Date.now();
+  const stale = await cached("gateway", probe);
+  assert.ok(Date.now() - started < 50);
+  assert.deepEqual(stale, { reachable: true });
+  assert.equal(probes, 2);
+  finishRefresh();
+});
+
+test("stale-while-revalidate keeps serving the last answer when the refresh throws", async () => {
+  const clock = fixedClock();
+  const cached = createHealthCache({
+    ttlMs: 3_000,
+    now: clock.now,
+    staleWhileRevalidate: true,
+  });
+  let probes = 0;
+  const probe = () => {
+    probes += 1;
+    if (probes === 1) return { reachable: true };
+    throw new Error("connection refused");
+  };
+
+  assert.deepEqual(await cached("gateway", probe), { reachable: true });
+  clock.t = 3_000;
+  assert.deepEqual(await cached("gateway", probe), { reachable: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(await cached("gateway", probe), { reachable: true });
+  assert.equal(probes, 2);
 });

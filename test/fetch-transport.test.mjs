@@ -6,7 +6,11 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { getGlobalDispatcher, setGlobalDispatcher } from "undici";
 
-import { installStableFetchTransport } from "../src/fetch-transport.mjs";
+import {
+  FETCH_CONNECTIONS_PER_ORIGIN,
+  fetchDispatcherOptions,
+  installStableFetchTransport,
+} from "../src/fetch-transport.mjs";
 
 const SRC_DIR = fileURLToPath(new URL("../src", import.meta.url));
 
@@ -48,7 +52,9 @@ test("the router disables HTTP/2 on its process-wide fetch dispatcher", () => {
 
   assert.equal(created.length, 1);
   assert.equal(dispatcher.kind, "direct");
-  assert.deepEqual(created[0].options, { allowH2: false });
+  assert.deepEqual(created[0].options, fetchDispatcherOptions());
+  assert.equal(created[0].options.allowH2, false);
+  assert.equal(created[0].options.connections, FETCH_CONNECTIONS_PER_ORIGIN);
   assert.equal(dispatcher, created[0]);
   assert.deepEqual(installed, [dispatcher]);
 });
@@ -65,7 +71,7 @@ test("the router uses the environment proxy dispatcher only with explicit opt-in
     assert.equal(created.length, 1);
     assert.equal(dispatcher.kind, "environment-proxy");
     assert.equal(dispatcher, created[0]);
-    assert.deepEqual(dispatcher.options, { allowH2: false });
+    assert.deepEqual(dispatcher.options, fetchDispatcherOptions());
   }
 });
 
@@ -77,7 +83,7 @@ test("proxy variables alone do not opt the router into proxying", () => {
 
   assert.equal(created.length, 1);
   assert.equal(dispatcher.kind, "direct");
-  assert.deepEqual(dispatcher.options, { allowH2: false });
+  assert.deepEqual(dispatcher.options, fetchDispatcherOptions());
 });
 
 test("the router accepts the NODE_OPTIONS and command-line opt-in forms", () => {
@@ -88,7 +94,7 @@ test("the router accepts the NODE_OPTIONS and command-line opt-in forms", () => 
     const { created, dispatcher } = installFakeTransport(environment, execArgv);
     assert.equal(created.length, 1);
     assert.equal(dispatcher.kind, "environment-proxy");
-    assert.deepEqual(dispatcher.options, { allowH2: false });
+    assert.deepEqual(dispatcher.options, fetchDispatcherOptions());
   }
 });
 
@@ -105,7 +111,7 @@ test("NO_PROXY or ALL_PROXY alone keeps the lower-overhead direct agent", () => 
     assert.equal(created.length, 1);
     assert.equal(dispatcher.kind, "direct");
     assert.equal(dispatcher, created[0]);
-    assert.deepEqual(dispatcher.options, { allowH2: false });
+    assert.deepEqual(dispatcher.options, fetchDispatcherOptions());
   }
 });
 

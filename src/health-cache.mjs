@@ -13,24 +13,74 @@ export const DEFAULT_HEALTH_TTL_MS = 3_000;
 export function createHealthCache({
   ttlMs = DEFAULT_HEALTH_TTL_MS,
   now = () => Date.now(),
+  staleWhileRevalidate = false,
 } = {}) {
   const entries = new Map();
 
   return function cachedProbe(key, probe) {
     const existing = entries.get(key);
+    const fresh = Boolean(existing) && now() - existing.at < ttlMs;
     // Concurrent callers share the in-flight promise rather than each starting
     // their own probe, so a burst of polls costs one request, not one each.
-    if (existing && now() - existing.at < ttlMs) return existing.promise;
+    if (fresh) {
+      if (staleWhileRevalidate && existing.lastValue !== undefined) {
+        return Promise.resolve(existing.lastValue);
+      }
+      return existing.promise;
+    }
+    if (existing?.promise && existing.refreshing) {
+      if (staleWhileRevalidate && existing.lastValue !== undefined) {
+        return Promise.resolve(existing.lastValue);
+      }
+      return existing.promise;
+    }
 
     const promise = Promise.resolve()
       .then(probe)
+      .then((value) => {
+        const current = entries.get(key);
+        if (current?.promise === promise) {
+          entries.set(key, {
+            at: now(),
+            promise,
+            lastValue: value,
+            refreshing: false,
+          });
+        }
+        return value;
+      })
       .catch((error) => {
+        const current = entries.get(key);
+        if (staleWhileRevalidate && current?.lastValue !== undefined) {
+          entries.set(key, {
+            ...current,
+            refreshing: false,
+            at: now(),
+          });
+          return current.lastValue;
+        }
         // A thrown probe must not be cached as an answer: drop it so the next
         // caller retries instead of inheriting the failure for the whole TTL.
-        entries.delete(key);
+        if (current?.promise === promise) entries.delete(key);
         throw error;
       });
-    entries.set(key, { at: now(), promise });
+
+    if (staleWhileRevalidate && existing?.lastValue !== undefined) {
+      entries.set(key, {
+        at: now(),
+        promise,
+        lastValue: existing.lastValue,
+        refreshing: true,
+      });
+      return Promise.resolve(existing.lastValue);
+    }
+
+    entries.set(key, {
+      at: now(),
+      promise,
+      lastValue: existing?.lastValue,
+      refreshing: true,
+    });
     return promise;
   };
 }
