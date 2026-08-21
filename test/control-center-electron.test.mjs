@@ -483,17 +483,26 @@ test("providers and models share one keyboard-operable catalog destination", asy
   const app = await readFile(new URL("../apps/control-center/src/App.tsx", import.meta.url), "utf8");
   const hub = await readFile(new URL("../apps/control-center/src/pages/ProvidersModelsPage.tsx", import.meta.url), "utf8");
   const types = await readFile(new URL("../apps/control-center/src/types.ts", import.meta.url), "utf8");
+  const viewType = types.match(/export type ViewId =[\s\S]*?;/)?.[0] || "";
 
   assert.match(app, /case "providers": return <ProvidersModelsPage/);
   assert.doesNotMatch(app, /case "models"/);
-  assert.doesNotMatch(types, /\| "models"/);
+  assert.doesNotMatch(viewType, /\| "models"/);
   assert.match(hub, /role="tablist"/);
   assert.match(hub, /role="tabpanel"/);
   assert.match(hub, /aria-selected=\{section === "providers"\}/);
   assert.match(hub, /aria-selected=\{section === "models"\}/);
   assert.match(hub, /"ArrowLeft", "ArrowRight", "Home", "End"/);
+  assert.match(app, /initialCatalogSection/);
+  assert.match(app, /section=\{catalogSection\}/);
+  assert.match(app, /onSectionChange=\{setCatalogSection\}/);
+  assert.match(app, /if \(nextCatalogSection\) setCatalogSection\(nextCatalogSection\)/);
+  assert.match(app, /stored === "models"/);
   assert.match(hub, /<ProvidersPage \{\.\.\.shared\}/);
   assert.match(hub, /<ModelsPage \{\.\.\.shared\}/);
+  const dashboard = await readFile(new URL("../apps/control-center/src/pages/DashboardPage.tsx", import.meta.url), "utf8");
+  assert.match(dashboard, /onNavigate\("providers", "providers"\)/);
+  assert.match(dashboard, /onNavigate\("providers", "models"\)/);
 });
 
 test("control center focus feedback uses state changes without focus rings", async () => {

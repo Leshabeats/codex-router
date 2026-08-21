@@ -8,6 +8,8 @@ export type ViewId =
   | "status"
   | "providers";
 
+export type CatalogSection = "providers" | "models";
+
 export interface ReasoningLevel {
   effort: string;
   description?: string;

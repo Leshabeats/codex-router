@@ -40,6 +40,7 @@ import {
 } from "./i18n";
 import type {
   AccountUsage,
+  CatalogSection,
   OperationEvent,
   PresenceSnapshot,
   ProviderSetupSnapshot,
@@ -80,10 +81,15 @@ function initialView(): ViewId {
   return NAV_ITEMS.some((item) => item.id === stored) ? stored as ViewId : "dashboard";
 }
 
+function initialCatalogSection(): CatalogSection {
+  return localStorage.getItem(VIEW_KEY) === "models" ? "models" : "providers";
+}
+
 export default function App() {
   const api = window.routerControl;
   const nativeTitlebar = api?.platform === "darwin";
   const [view, setView] = useState<ViewId>(initialView);
+  const [catalogSection, setCatalogSection] = useState<CatalogSection>(initialCatalogSection);
   const [viewHistory, setViewHistory] = useState<ViewId[]>(() => [initialView()]);
   const [historyIndex, setHistoryIndex] = useState(0);
   const [theme, setTheme] = useState<"light" | "dark">(initialTheme);
@@ -273,7 +279,8 @@ export default function App() {
     [language],
   );
   const activeMeta = useMemo(() => navItems.find((item) => item.id === view) ?? navItems[0], [navItems, view]);
-  const navigateTo = useCallback((next: ViewId) => {
+  const navigateTo = useCallback((next: ViewId, nextCatalogSection?: CatalogSection) => {
+    if (nextCatalogSection) setCatalogSection(nextCatalogSection);
     if (next === view) return;
     const nextHistory = [...viewHistory.slice(0, historyIndex + 1), next];
     setViewHistory(nextHistory);
@@ -297,7 +304,7 @@ export default function App() {
       case "dashboard": return <DashboardPage target={target} health={health} account={accountUsage} providerUsage={providerUsage} setup={providers} presence={presence} api={api} refreshing={refreshing} onRefresh={() => void refreshAll()} onNavigate={navigateTo} />;
       case "usage": return <UsagePage target={target} account={accountUsage} providerUsage={providerUsage} api={api} refreshing={refreshing} onRefresh={() => void refreshAll()} />;
       case "status": return <StatusPage {...shared} health={health} account={accountUsage} providerUsage={providerUsage} />;
-      case "providers": return <ProvidersModelsPage {...shared} setup={providers} usage={providerUsage} />;
+      case "providers": return <ProvidersModelsPage {...shared} setup={providers} usage={providerUsage} section={catalogSection} onSectionChange={setCatalogSection} />;
       case "local": return <LocalPage {...shared} />;
       case "harness": return <HarnessPage {...shared} />;
       case "context": return <ContextPage {...shared} />;

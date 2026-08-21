@@ -35,6 +35,7 @@ import type {
   UsageEvent,
   UsageMetric,
   ViewId,
+  CatalogSection,
 } from "../types";
 import "./dashboard.css";
 
@@ -113,7 +114,7 @@ export function DashboardPage({
   api?: RouterControlApi;
   refreshing: boolean;
   onRefresh: () => void;
-  onNavigate: (view: ViewId) => void;
+  onNavigate: (view: ViewId, catalogSection?: CatalogSection) => void;
 }) {
   // Every prop can be undefined on first paint and after a failed refresh, so
   // each tile below separates three cases: still loading, reported-but-absent,
@@ -387,7 +388,7 @@ export function DashboardPage({
             title="Providers"
             description="Credentials on file and routes in use."
             action={(
-              <Button variant="ghost" aria-label="Open Providers" onClick={() => onNavigate("providers")}>
+              <Button variant="ghost" aria-label="Open Providers" onClick={() => onNavigate("providers", "providers")}>
                 <KeyRound aria-hidden size={13} strokeWidth={1.7} />
                 Providers
               </Button>
@@ -429,7 +430,7 @@ export function DashboardPage({
             title="Catalog readiness"
             description="What the model picker and subagents can reach."
             action={(
-              <Button variant="ghost" aria-label="Open Providers and models" onClick={() => onNavigate("providers")}>
+              <Button variant="ghost" aria-label="Open Models" onClick={() => onNavigate("providers", "models")}>
                 <Boxes aria-hidden size={13} strokeWidth={1.7} />
                 Models
               </Button>
