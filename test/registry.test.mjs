@@ -650,6 +650,19 @@ test("the gateway config disables deployment cooldowns", () => {
   assert.equal(new Set(names).size, names.length, "one deployment per model_name");
 });
 
+test("only Z.ai Coding Plan model groups disable LiteLLM rate-limit retries", () => {
+  const rendered = renderLiteLlmConfig();
+  for (const model of MODELS.filter(({ provider }) => provider === "zai-coding")) {
+    assert.match(
+      rendered,
+      new RegExp(`${model.gatewayModel}:\\n\\s+RateLimitErrorRetries: 0`),
+      model.slug,
+    );
+  }
+  assert.doesNotMatch(rendered, /^  retry_policy:/m);
+  assert.doesNotMatch(rendered, /zai-api-glm-5-3:\n\s+RateLimitErrorRetries: 0/);
+});
+
 test("LiteLLM configuration is generated from every registry route", () => {
   const rendered = renderLiteLlmConfig();
   for (const model of MODELS) {

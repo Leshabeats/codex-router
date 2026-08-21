@@ -1149,6 +1149,42 @@ function visionEngineProvider(engine) {
 // refusal again.
 const visionReadsInFlight = new Map();
 
+// A provider can report account quota exhaustion without a trustworthy reset
+// header. Do not invent a provider cooldown in that case, but also do not buy
+// the exact same failed image read again on every rapid follow-up turn. This is
+// deliberately a short, per-read anti-storm backoff rather than a claim about
+// when the provider quota resets. Provider-named reset windows still use the
+// durable cooldown store below.
+const VISION_FAILURE_BACKOFF_MS = 60_000;
+const VISION_FAILURE_CACHE_MAX_ENTRIES = 128;
+const visionFailedReads = new Map();
+
+function visionFailureCacheKey(readKey) {
+  return createHash("sha256").update(readKey).digest("base64url");
+}
+
+function cachedVisionFailure(readKey, now = Date.now()) {
+  const cacheKey = visionFailureCacheKey(readKey);
+  const cached = visionFailedReads.get(cacheKey);
+  if (!cached) return undefined;
+  if (cached.expiresAt > now) return cached.error;
+  visionFailedReads.delete(cacheKey);
+  return undefined;
+}
+
+function rememberVisionFailure(readKey, error, now = Date.now()) {
+  // A reset-bearing 429 is handled by providerCooldown(), which is broader and
+  // more accurate. The negative cache exists only for quota exhaustion where
+  // the provider named no usable reset window.
+  if (error?.failureKind !== "out_of_usage" || error?.cooldownUntil) return;
+  const cacheKey = visionFailureCacheKey(readKey);
+  visionFailedReads.delete(cacheKey);
+  visionFailedReads.set(cacheKey, { error, expiresAt: now + VISION_FAILURE_BACKOFF_MS });
+  while (visionFailedReads.size > VISION_FAILURE_CACHE_MAX_ENTRIES) {
+    visionFailedReads.delete(visionFailedReads.keys().next().value);
+  }
+}
+
 // Codex resends the whole conversation every turn, so the same screenshot
 // arrives again on every follow-up. Without the hash cache a five-turn
 // conversation about one image would buy the same transcript five times.
@@ -1179,6 +1215,8 @@ async function visionEvidenceFor(url, engine, request, effort, question = "", re
   // record of spend, not of calls the router avoided.
   if (cached !== undefined) return cached;
   const readKey = `${key}\u0000${question}`;
+  const failed = cachedVisionFailure(readKey);
+  if (failed) throw failed;
   const running = visionReadsInFlight.get(readKey);
   if (running) return running;
   // Deliberately not tied to the caller's AbortSignal. The read is shared, so
@@ -1190,6 +1228,9 @@ async function visionEvidenceFor(url, engine, request, effort, question = "", re
   visionReadsInFlight.set(readKey, read);
   try {
     return await read;
+  } catch (error) {
+    rememberVisionFailure(readKey, error);
+    throw error;
   } finally {
     visionReadsInFlight.delete(readKey);
   }
@@ -1219,6 +1260,22 @@ async function readVisionEvidence({ url, engine, nativeCall, effort, question, k
     });
     status = 200;
     return evidenceCache.set(key, question, text);
+  } catch (error) {
+    const errorStatus = Number(error?.status);
+    if (Number.isFinite(errorStatus)) status = errorStatus;
+    const reason =
+      error?.failureKind === "out_of_usage"
+        ? "out_of_usage"
+        : errorStatus === 429 && error?.cooldownUntil
+          ? "rate_limited"
+          : undefined;
+    if (reason && error?.cooldownUntil) {
+      recordProviderCooldown(visionEngineProvider(engine), {
+        until: error.cooldownUntil,
+        reason,
+      });
+    }
+    throw error;
   } finally {
     recordUsageEvent({
       model: engine.slug,
@@ -1396,12 +1453,26 @@ async function bridgeVisionInput(input, route, request) {
   }
   const { effort } = settings;
   let fellBack = 0;
+  // A quota exhaustion is account/provider-wide evidence, not a reason to walk
+  // every model slug backed by that same account. Keep this set scoped to the
+  // current bridge call when the provider did not name a reset window; that
+  // avoids duplicate spend without inventing how long the quota will stay
+  // empty. A provider-named window is persisted by readVisionEvidence instead.
+  const exhaustedProviders = new Set();
   // Each engine in turn until one reads the image. The first is the operator's
   // choice and answers nearly always; the rest exist so a lapsed session or a
   // provider outage costs a slower read rather than the whole image.
   const readWithAnyEngine = async (url, question) => {
     let lastError;
     for (const [index, engine] of engines.entries()) {
+      const provider = canonicalProviderId(visionEngineProvider(engine));
+      const cooled = providerCooldown(provider);
+      if (cooled || exhaustedProviders.has(provider)) {
+        lastError ??= new Error(
+          `${engine.displayName || engine.slug} is temporarily unavailable because its provider reported a quota or rate limit`,
+        );
+        continue;
+      }
       // Retry the engine only when there is nothing else to try. Waiting out a
       // 250ms + 1s ladder against an endpoint that is down, when a working
       // engine is sitting right behind it, is how a fallback that works turns
@@ -1421,6 +1492,7 @@ async function bridgeVisionInput(input, route, request) {
         return { text, engineName: engine.displayName || engine.slug };
       } catch (error) {
         lastError = error;
+        if (error?.failureKind === "out_of_usage") exhaustedProviders.add(provider);
       }
     }
     // Every engine refused, so the turn says what the last one said -- the
