@@ -33,6 +33,14 @@ export function renderLiteLlmConfig() {
         `      model: ${yamlString(`ollama_chat/${model.upstreamModel}`)}`,
         `      api_base: ${yamlString(`os.environ/${provider.baseUrlEnv}_ROOT`)}`,
         `      num_ctx: ${LOCAL_NUM_CTX}`,
+        // LiteLLM defaults to two router retries and currently maps Ollama's
+        // deterministic context-window rejection to APIConnectionError. That
+        // makes one prompt hit the local runtime three times before Codex sees
+        // a generic 500. Local inference is already reached over loopback and
+        // Codex owns its own retry policy, so keep the deployment single-shot.
+        // The router translates the specific context rejection into a
+        // non-retryable context_length_exceeded response.
+        "      num_retries: 0",
         "",
       );
       continue;

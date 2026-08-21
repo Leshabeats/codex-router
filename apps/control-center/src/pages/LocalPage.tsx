@@ -1,6 +1,5 @@
 import { useMemo, useState, type FormEvent } from "react";
 import {
-  Box,
   ChevronDown,
   Download,
   Eye,
@@ -24,26 +23,42 @@ import {
   Toggle,
 } from "../components";
 import { compactNumber, formatBytesGb } from "../lib";
-import type { LocalModel, LocalModelsSnapshot, RouterControlApi, RouterTarget, VisionEngine } from "../types";
+import { BrandLogo, brandForLocalModel } from "../provider-branding";
+import type { LocalModel, LocalModelsSnapshot, OperationEvent, RouterControlApi, RouterTarget, VisionEngine } from "../types";
+import { useOptimisticValues, type RunAction } from "../useOptimisticValues";
 import "./local-harness-context.css";
-
-type RunAction = (label: string, action: () => Promise<unknown>) => Promise<void>;
 
 interface LocalPageProps {
   target?: RouterTarget;
   api?: RouterControlApi;
   refreshing: boolean;
+  operation?: OperationEvent | null;
   onRefresh: () => void;
   runAction: RunAction;
 }
 
-export function LocalPage({ target, api, refreshing, onRefresh, runAction }: LocalPageProps) {
+export function LocalPage({ target, api, refreshing, operation, onRefresh, runAction }: LocalPageProps) {
   const [installRef, setInstallRef] = useState("");
   const [forceInstall, setForceInstall] = useState(false);
   const [pendingRemoval, setPendingRemoval] = useState<string | null>(null);
   const [catalogQuery, setCatalogQuery] = useState("");
   const [expandedFamilies, setExpandedFamilies] = useState<Set<string>>(new Set());
   const local = target?.modelSettings?.localModels;
+  const mlx = local?.mlx;
+  const mlxStatus = mlx?.operation?.status || "idle";
+  const mlxActive = ["preparing", "downloading", "loading", "starting-server", "verifying", "publishing"].includes(mlxStatus);
+  const mlxPublished = mlx?.runtime?.published === true;
+  const mlxReady = mlxPublished && mlx?.runtime?.served === true;
+  const mlxSupported = mlx?.host?.supported !== false;
+  const activeAction = operation?.action || "";
+  const ollamaMutationActive = ["downloading", "uninstalling"].includes(local?.download?.status || "") || (
+    operation?.status === "started" && (
+      activeAction === "installLocalModel" ||
+      activeAction === "uninstallLocalModel" ||
+      activeAction.startsWith("Install ") ||
+      activeAction.startsWith("Remove ")
+    )
+  );
   const bridge = target?.modelSettings?.visionBridge;
   const installed = local?.models?.filter((model) => model.installed !== false) ?? [];
   const installedCount = typeof local?.installed === "number"
@@ -54,7 +69,21 @@ export function LocalPage({ target, api, refreshing, onRefresh, runAction }: Loc
   const enabledTags = Array.isArray(local?.enabled)
     ? local.enabled
     : installed.filter((model) => model.enabled === true).map((model) => model.tag);
-  const enabledCount = typeof local?.enabled === "number" ? local.enabled : enabledTags.length;
+  const localEnabledStates = useMemo(() => {
+    const enabled = Array.isArray(local?.enabled) ? new Set(local.enabled) : undefined;
+    return new Map((local?.models ?? [])
+      .filter((model) => model.installed !== false)
+      .map((model) => [model.tag, enabled?.has(model.tag) || model.enabled === true]));
+  }, [local?.enabled, local?.models]);
+  const visionEnabledStates = useMemo(() => new Map([
+    ["vision", bridge?.enabled === true],
+  ]), [bridge?.enabled]);
+  const optimisticLocalModels = useOptimisticValues(localEnabledStates, runAction);
+  const optimisticVision = useOptimisticValues(visionEnabledStates, runAction);
+  const enabledCount = installed.filter((model) => optimisticLocalModels.value(
+    model.tag,
+    enabledTags.includes(model.tag) || model.enabled === true,
+  )).length;
   const localReaders = bridge?.localModels ?? local?.availableVision ?? [];
   const readerDownloadActive = bridge?.download?.status === "downloading";
   const engines: Array<VisionEngine & { group: string }> = [
@@ -96,7 +125,7 @@ export function LocalPage({ target, api, refreshing, onRefresh, runAction }: Loc
       <PageHeader
         eyebrow="On-device inference"
         title="Local"
-        description="Run, install, measure, and expose Ollama models without leaving the control center."
+        description="Run, install, measure, and expose Ollama and curated MLX models without leaving the control center."
         onRefresh={onRefresh}
         refreshing={refreshing}
       />
@@ -105,12 +134,50 @@ export function LocalPage({ target, api, refreshing, onRefresh, runAction }: Loc
         { label: "Runtime", value: local?.runtime?.running ? "Online" : "Offline", detail: local?.runtime?.version ? `Ollama ${local.runtime.version}` : "Ollama" },
         { label: "Installed", value: installedCount, detail: `${enabledCount} in Codex` },
         { label: "Model storage", value: formatBytesGb(local?.totalGb), detail: local?.runtime?.modelsPath || "Location managed by Ollama" },
-        { label: "Image reader", value: bridge?.engine === "local" ? "Local" : bridge?.resolvedEngineName || "Automatic", detail: bridge?.enabled ? "Bridge enabled" : "Bridge disabled" },
+        { label: "Image reader", value: bridge?.engine === "local" ? "Local" : bridge?.resolvedEngineName || "Automatic", detail: optimisticVision.value("vision", bridge?.enabled === true) ? "Bridge enabled" : "Bridge disabled" },
       ]} />
 
       <InlineNotice tone={local?.runtime?.running ? "success" : "warning"} title={local?.runtime?.running ? "Ollama is ready" : "Ollama is not running"}>
         {local?.machine || "Machine capacity has not been measured yet."}
       </InlineNotice>
+
+      <section className="panel-section mlx-install-card">
+        <SectionHeading
+          title="Qwen 3.8 27B · MLX"
+          description="A separate Apple-silicon runtime served through LM Studio and wired into the Codex proxy."
+          action={<Badge tone={mlxReady ? "success" : mlxActive ? "accent" : mlxStatus === "error" ? "danger" : "neutral"}>{mlxReady ? "In Codex" : !mlxSupported ? "Unsupported host" : mlxPublished ? "Repair needed" : mlxActive ? mlxStageLabel(mlxStatus) : mlxStatus === "error" ? "Needs attention" : "Not installed"}</Badge>}
+        />
+        <div className="mlx-install-layout">
+          <div className="mlx-install-copy">
+            <strong>Qwen3.8-27B-Uncensored · 4-bit MLX</strong>
+            <p>One click installs any missing official local-runtime prerequisites, downloads about 15 GB of weights, starts the loopback server, verifies the model, and publishes <code>{mlx?.model?.slug || "lmstudio/qwen38-27b-uncensored-mlx"}</code> to Codex.</p>
+            <div className="mlx-prerequisites" aria-label="MLX prerequisites">
+              <span><i className={mlx?.prerequisites?.lms?.available ? "is-ready" : ""} /> LM Studio CLI {mlx?.prerequisites?.lms?.available ? "ready" : "installed during setup"}</span>
+              <span><i className={mlx?.prerequisites?.uvx?.available ? "is-ready" : ""} /> Hugging Face downloader {mlx?.prerequisites?.uvx?.available ? "ready" : "installed during setup"}</span>
+              <span><i className={mlx?.runtime?.loopbackReachable ? "is-ready" : ""} /> Loopback only</span>
+            </div>
+            {!mlx?.prerequisites?.lms?.available && mlx?.prerequisites?.lms?.installHint ? <small>{mlx.prerequisites.lms.installHint}</small> : null}
+            {!mlx?.prerequisites?.uvx?.available && mlx?.prerequisites?.uvx?.installHint ? <small>{mlx.prerequisites.uvx.installHint}</small> : null}
+          </div>
+          <div className="mlx-install-actions">
+            {mlxActive ? (
+              <Button variant="secondary" disabled={!api} onClick={() => api && void runAction("Cancel Qwen MLX installation", () => api.cancelLocalMlx())}>Cancel</Button>
+            ) : (
+              <Button variant="primary" disabled={!api || mlxReady || !mlxSupported || ollamaMutationActive} onClick={() => api && void runAction("Start Qwen MLX installation", () => api.installLocalMlx())}>
+                <Download aria-hidden size={14} strokeWidth={1.7} /> {mlxReady ? "Installed" : mlxPublished ? "Repair and reconnect" : mlxStatus === "error" || mlxStatus === "cancelled" ? "Retry install" : "Install and add to Codex"}
+              </Button>
+            )}
+            <small>By continuing, you consent to the runtime installation, model download, and local proxy publication.</small>
+          </div>
+        </div>
+        <InlineNotice tone="warning" title="Reduced guardrails; local access only">This uncensored checkpoint intentionally weakens model safeguards. The router binds it to loopback only; treat its output and any generated tool arguments as untrusted.</InlineNotice>
+        {!mlxSupported ? <InlineNotice tone="warning" title="Apple silicon required">{mlx?.host?.reason || "This MLX model can only be installed on a supported Apple-silicon Mac."}</InlineNotice> : null}
+        {ollamaMutationActive && !mlxActive ? <InlineNotice tone="warning" title="Another local-model change is running">Wait for the Ollama download or removal to finish before starting MLX setup.</InlineNotice> : null}
+        {mlxActive ? <DownloadProgress tag={mlxStageLabel(mlxStatus)} percent={mlx?.operation?.percent} detail={mlx?.operation?.detail || "Working in the background"} indeterminate={mlx?.operation?.progressMode === "indeterminate"} /> : null}
+        {mlxStatus === "error" ? <InlineNotice tone="danger" title="MLX installation stopped">{mlx?.operation?.error || mlx?.operation?.detail || "The installer reported an unknown error. Retry or review the prerequisite hints above."}</InlineNotice> : null}
+        {mlxStatus === "cancelled" ? <InlineNotice tone="warning" title="MLX installation cancelled">Downloaded files are kept so a retry can resume without starting over.</InlineNotice> : null}
+        {mlxReady ? <InlineNotice tone="success" title="Ready in Codex">Fully quit and reopen Codex to refresh its model picker, then choose <code>{mlx?.model?.slug || "lmstudio/qwen38-27b-uncensored-mlx"}</code>.</InlineNotice> : null}
+      </section>
 
       <div className="lhc-local-grid">
         <section className="panel-section lhc-local-installed">
@@ -138,9 +205,9 @@ export function LocalPage({ target, api, refreshing, onRefresh, runAction }: Loc
                 <LocalModelRow
                   key={model.tag}
                   model={model}
-                  enabled={enabledTags.includes(model.tag) || model.enabled === true}
+                  enabled={optimisticLocalModels.value(model.tag, enabledTags.includes(model.tag) || model.enabled === true)}
                   disabled={!api}
-                  onToggle={(next) => api && void runAction(`${next ? "Enable" : "Disable"} ${model.tag}`, () => api.setLocalModelEnabled(model.tag, next))}
+                  onToggle={(next) => api && void optimisticLocalModels.mutate(model.tag, next, `${next ? "Enable" : "Disable"} ${model.tag}`, () => api.setLocalModelEnabled(model.tag, next))}
                   onBenchmark={() => api && void runAction(`Benchmark ${model.tag}`, () => api.benchmarkLocalModel(model.tag))}
                   onRemove={() => setPendingRemoval(model.tag)}
                 />
@@ -181,7 +248,7 @@ export function LocalPage({ target, api, refreshing, onRefresh, runAction }: Loc
             <div className="lhc-recommendations">
               {quickPicks.map((model) => (
                 <button key={model.tag} type="button" disabled={model.downloadable === false} onClick={() => setInstallRef(model.tag)}>
-                  <Box aria-hidden size={14} strokeWidth={1.7} />
+                  <BrandLogo brand={brandForLocalModel(model)} size="small" />
                   <span><strong>{model.displayName || model.label || model.tag}</strong><small>{formatBytesGb(model.sizeGb)} · {model.fit || "fit unknown"}</small></span>
                   {model.downloadable === false ? <Badge tone="neutral">Cloud only</Badge> : model.recommended ? <Badge tone="accent">Recommended</Badge> : null}
                 </button>
@@ -210,6 +277,7 @@ export function LocalPage({ target, api, refreshing, onRefresh, runAction }: Loc
                       return next;
                     })}
                   >
+                    <BrandLogo brand={brandForLocalModel(family.models[0])} size="medium" />
                     <div>
                       <strong>{family.displayName}</strong>
                       <small>{family.models.length} tags · {familySummary(family.models)}</small>
@@ -241,7 +309,7 @@ export function LocalPage({ target, api, refreshing, onRefresh, runAction }: Loc
         <div className="lhc-vision-settings">
           <div className="setting-row">
             <div><strong>Read pasted images</strong><small>The selected reader runs only when the target model cannot accept images.</small></div>
-            <Toggle checked={bridge?.enabled === true} disabled={!api || !bridge} label="Enable vision bridge" onChange={(next) => api && void runAction(`${next ? "Enable" : "Disable"} vision bridge`, () => api.setVisionBridgeEnabled(next))} />
+            <Toggle checked={optimisticVision.value("vision", bridge?.enabled === true)} disabled={!api || !bridge} label="Enable vision bridge" onChange={(next) => api && void optimisticVision.mutate("vision", next, `${next ? "Enable" : "Disable"} vision bridge`, () => api.setVisionBridgeEnabled(next))} />
           </div>
           <div className="form-grid">
             <label>
@@ -282,7 +350,7 @@ export function LocalPage({ target, api, refreshing, onRefresh, runAction }: Loc
               return (
                 <article className="reader-card" key={reader.tag}>
                   <header>
-                    <span className="model-glyph"><HardDrive aria-hidden size={14} strokeWidth={1.7} /></span>
+                    <BrandLogo brand={brandForLocalModel(reader)} size="medium" />
                     <div><strong>{reader.label || reader.displayName || reader.tag}</strong><small>{formatBytesGb(reader.sizeGb)} · {reader.accuracy || "untested"}</small></div>
                     {active ? <Badge tone="success">Active</Badge> : reader.recommended ? <Badge tone="accent">Recommended</Badge> : null}
                   </header>
@@ -318,6 +386,18 @@ export function LocalPage({ target, api, refreshing, onRefresh, runAction }: Loc
       </Dialog>
     </div>
   );
+}
+
+function mlxStageLabel(status: string) {
+  switch (status) {
+    case "preparing": return "Preparing";
+    case "downloading": return "Downloading 4-bit weights";
+    case "loading": return "Loading into MLX";
+    case "starting-server": return "Starting loopback server";
+    case "verifying": return "Verifying model";
+    case "publishing": return "Adding to Codex";
+    default: return "MLX setup";
+  }
 }
 
 interface CatalogFamily {
@@ -405,7 +485,7 @@ function CatalogModelRow({ model, onSelect }: { model: LocalModel; onSelect: () 
   const tone = model.downloadable === false ? "neutral" : tooLarge ? "danger" : model.fit === "tight" ? "warning" : "success";
   return (
     <article className="lhc-catalog-model">
-      <Box aria-hidden size={14} strokeWidth={1.7} />
+      <BrandLogo brand={brandForLocalModel(model)} size="small" />
       <div className="lhc-catalog-model-identity">
         <strong>{model.displayName || model.label || model.tag}</strong>
         <small>{model.tag}{model.sizeGb !== undefined ? ` · ${formatBytesGb(model.sizeGb)}` : ""}{model.context ? ` · ${compactNumber(model.context)} context` : ""}</small>
@@ -418,11 +498,11 @@ function CatalogModelRow({ model, onSelect }: { model: LocalModel; onSelect: () 
   );
 }
 
-function DownloadProgress({ tag, percent, detail }: { tag?: string; percent?: number; detail?: string }) {
+function DownloadProgress({ tag, percent, detail, indeterminate = false }: { tag?: string; percent?: number; detail?: string; indeterminate?: boolean }) {
   return (
     <div className="download-progress">
-      <div><strong>{tag || "Local model"}</strong><span>{Math.round(percent || 0)}%</span></div>
-      <progress max="100" value={percent || 0} />
+      <div><strong>{tag || "Local model"}</strong><span>{indeterminate ? "Working…" : `${Math.round(percent || 0)}%`}</span></div>
+      {indeterminate ? <progress max="100" /> : <progress max="100" value={percent || 0} />}
       <small>{detail || "Preparing download"}</small>
     </div>
   );
@@ -437,21 +517,29 @@ function LocalModelRow({ model, enabled, disabled, onToggle, onBenchmark, onRemo
   onRemove: () => void;
 }) {
   const speed = model.observedTokensPerSecond ?? model.speed;
+  const maker = brandForLocalModel(model);
   return (
     <article className="local-model-row">
-      <div className="model-identity">
-        <span className="model-glyph"><HardDrive aria-hidden size={15} strokeWidth={1.7} /></span>
-        <div><strong>{model.displayName || model.label || model.tag}</strong><small>{model.tag}</small></div>
+      <div className="local-model-identity">
+        <BrandLogo brand={maker} size="medium" />
+        <div>
+          <strong>{model.displayName || model.label || model.tag}</strong>
+          <span>{maker.name}</span>
+          <small>{`local/${model.tag}`}</small>
+        </div>
       </div>
       <div className="local-model-facts">
         <span>{formatBytesGb(model.sizeGb)}</span>
         <span>{model.context ? `${compactNumber(model.context)} context` : "Context unreported"}</span>
         <span>{Number.isFinite(Number(speed)) ? `${Number(speed).toFixed(1)} tok/s` : "Speed unmeasured"}</span>
       </div>
-      <div className="row-actions">
+      <div className="local-model-controls">
         <Button variant="ghost" disabled={disabled} onClick={onBenchmark}><Gauge aria-hidden size={14} strokeWidth={1.7} /> Measure</Button>
         <Button variant="ghost" disabled={disabled} aria-label={`Remove ${model.tag}`} onClick={onRemove}><Trash2 aria-hidden size={14} strokeWidth={1.7} /></Button>
-        <Toggle checked={enabled} disabled={disabled} label={`Enable ${model.tag} for Codex`} onChange={onToggle} />
+        <div className="local-model-control">
+          <span>Codex</span>
+          <Toggle checked={enabled} disabled={disabled} label={`Enable ${model.tag} for Codex`} onChange={onToggle} />
+        </div>
       </div>
     </article>
   );

@@ -113,6 +113,53 @@ function isOutOfUsage(detail, errorType) {
   return QUOTA_PATTERNS.some((pattern) => pattern.test(detail));
 }
 
+// Ollama's MLX runner returns this deterministic request-size failure as an
+// HTTP 500, and LiteLLM currently wraps it as APIConnectionError. Left as a
+// server error, Codex retries for minutes and eventually replaces the useful
+// cause with its generic high-demand message. The wording is emitted by
+// Ollama's runner after it has rendered and tokenized the complete chat
+// template, so it is authoritative context evidence even though the status is
+// not.
+const CONTEXT_LENGTH_PATTERNS = [
+  /input length \((\d+) tokens\) exceeds the model's maximum context length \((\d+) tokens\)/i,
+  /input after truncation exceeds (?:the )?maximum context length/i,
+  /maximum context length (?:is|of) (\d+)(?: tokens?)?.{0,80}(?:input|request).{0,40}(\d+)/i,
+  /context[_\s-]length[_\s-]exceeded/i,
+];
+
+export function contextLengthFailure(bodyText) {
+  const detail = extractUpstreamDetail(bodyText);
+  if (!detail) return undefined;
+  for (const pattern of CONTEXT_LENGTH_PATTERNS) {
+    const match = detail.match(pattern);
+    if (!match) continue;
+    if (pattern === CONTEXT_LENGTH_PATTERNS[0]) {
+      return {
+        detail,
+        inputTokens: Number(match[1]),
+        maximumTokens: Number(match[2]),
+      };
+    }
+    if (pattern === CONTEXT_LENGTH_PATTERNS[2]) {
+      return {
+        detail,
+        inputTokens: Number(match[2]),
+        maximumTokens: Number(match[1]),
+      };
+    }
+    return { detail };
+  }
+  return undefined;
+}
+
+// Status is kept separate from the translated body because callers also relay
+// ordinary gateway statuses byte-for-status. Only this deterministic request
+// rejection is corrected from the gateway's 5xx wrapper to the OpenAI-shaped
+// 400 that tells Codex not to retry.
+export function gatewayErrorStatus({ status, bodyText }) {
+  return contextLengthFailure(bodyText) ? 400 : Number(status);
+}
+
 // The same two questions `describeFailure` asks, in the same order, answered for
 // a caller that needs to *act* on the distinction rather than word it. Exported
 // as one function rather than as the two predicates, because the order is the
@@ -214,6 +261,24 @@ export function translateGatewayError({
   retryAfterSeconds,
 }) {
   const detail = extractUpstreamDetail(bodyText);
+  const context = contextLengthFailure(bodyText);
+  if (context) {
+    const measured =
+      Number.isFinite(context.inputTokens) && Number.isFinite(context.maximumTokens)
+        ? `The rendered prompt is ${context.inputTokens.toLocaleString("en-US")} tokens, exceeding the model's ${context.maximumTokens.toLocaleString("en-US")}-token context window.`
+        : "The rendered prompt exceeds the model's context window.";
+    return {
+      error: {
+        message:
+          `${providerName} could not run ${modelName}. ${measured} ` +
+          "This is a context-window or tokenizer/template mismatch, not high demand. " +
+          "Start a shorter task or choose a different model tag.",
+        type: "invalid_request_error",
+        param: "input",
+        code: "context_length_exceeded",
+      },
+    };
+  }
   const failure = describeFailure({
     status,
     detail,

@@ -15,6 +15,17 @@ Every client shares one installation: one background service, one gateway, one
 set of provider credentials, one provider selection. Installing a second or
 third integration does not ask for a single key again.
 
+The router is also the source of truth for routed model policy. Provider/model
+selection and external picker visibility are stored locally in the router state
+directory (`model-picker.json` is an explicit allowlist: only router models you
+show or select during curation are published), then republished to every
+installed client. A signed-in Codex
+installation keeps its native GPT catalog and native visibility client-owned;
+the router never lets an external overlay erase that original picker. Codex's
+active task remains in Codex configuration. Its default model does too unless
+you explicitly opt into a router-owned routed default; that choice is saved
+locally, survives rebuilds, and can be restored to the prior Codex default.
+
 Codex Router is an independent community project. It is not affiliated with or
 endorsed by OpenAI, GitHub, Anthropic, Moonshot AI, DeepSeek, OpenRouter,
 opencode, Google, or the referenced opencodex project.
@@ -337,10 +348,10 @@ enable the family:
 
 The desktop panel and macOS tray Settings tab provide both per-model controls
 and provider-level Select all / Unselect all actions for which registry-proven
-v2 models can run as subagents and which models appear in the Codex picker.
-Local settings cannot promote an unverified model. Fully quit and reopen Codex
-after changing either list; an open task keeps the model and subagent picker it
-started with.
+v2 models can run as subagents and which models appear in installed client
+pickers. Local settings cannot promote an unverified model. Fully quit and
+reopen Codex after changing either list; DeepSeek Harness hot-reloads its route,
+and the next Gemini CLI invocation reads the new environment.
 
 | Picker label | Model ID |
 | --- | --- |
@@ -560,6 +571,7 @@ often for the repository to pin and live-verify individual entries:
 | Google Gemini API | `gemini-api` | `https://generativelanguage.googleapis.com/v1beta/openai` |
 | GitHub Copilot | `github-copilot` | Account-specific GitHub Copilot endpoint |
 | Chutes | `chutes` | `https://llm.chutes.ai/v1` |
+| OrcaRouter | `orca` | `https://api.orcarouter.ai/v1` |
 
 Add a key, then pick the models you want from the provider's live catalog:
 
@@ -567,6 +579,23 @@ Add a key, then pick the models you want from the provider's live catalog:
 ./bin/model-router codex provider-key groq set
 ./bin/curate-models groq
 ```
+
+OrcaRouter's public catalog includes paid models and concrete zero-price model
+deployments. Inference still requires an OrcaRouter API key, including for free
+models. The moving `orcarouter/free` meta-router is intentionally not curated:
+the picker shows the concrete model identity with a **Free** badge instead. To
+add every currently advertised free OpenAI-compatible model without pinning
+that changing list in the repository:
+
+```sh
+./bin/model-router codex provider-key orca set
+./bin/curate-models orca --free-only --apply
+```
+
+The free list is read live from OrcaRouter's `/models` response. Re-run the
+command when its catalog changes, and verify a curated model with
+`./bin/test-model 'orca/MODEL_ID' --live --yes` before relying on it for
+tool-driven work.
 
 Curated entries use the context window, image support, and reasoning efforts
 you provide during curation — the context window falling back to the one the
@@ -593,7 +622,9 @@ Gemini is routed through Google's OpenAI-compatible surface rather than the
 native Gemini protocol, so it shares the existing forwarder and needs no
 separate adapter.
 
-Only enabled providers appear in the Codex picker:
+Only explicitly selected router models from enabled providers appear in
+installed client pickers. Adding a model during curation selects it for the
+picker; merely enabling a provider does not flood the list:
 
 ```sh
 ./bin/model-router codex providers
@@ -603,6 +634,21 @@ Only enabled providers appear in the Codex picker:
 ```
 
 On Windows, use `./model-router.ps1 codex` with the same commands.
+
+### Router-owned default model (optional)
+
+In a normal signed-in Codex installation, you can opt into an external router
+model as the default for new tasks. The model must already be selected for the
+picker. The router snapshots the prior Codex default, reapplies your router
+choice after an update or repair, and restores that prior default when cleared:
+
+```sh
+./bin/control router-default set deepseek/deepseek-v4-flash
+./bin/control router-default clear
+```
+
+This is separate from login-free mode, which has always owned its routed
+default. Fully quit and reopen Codex after changing either default.
 
 The API-key prompt disables terminal echo. Protected files use mode `600` on
 POSIX and an inheritance-disabled, current-user ACL on Windows. Diagnostics

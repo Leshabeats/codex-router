@@ -74,6 +74,8 @@ import {
   retainedToolResultsUsage,
 } from "./tool-result-retention.mjs";
 import { retentionTtlMs } from "./tool-result-aging-state.mjs";
+import { loopbackProxyBypassStatus } from "./loopback-proxy-bypass.mjs";
+import { serviceProxyOptInProblem } from "./proxy-environment.mjs";
 
 const checks = [];
 const add = (status, name, detail, fix) => checks.push({ status, name, detail, fix });
@@ -212,6 +214,11 @@ function repair() {
       throw new Error(`Homebrew-managed LiteLLM is damaged (${problem}). ${dependencyFix}.`);
     }
   }
+  if (homebrewManaged && !jsonOutput) {
+    process.stdout.write(
+      "Homebrew manages the dependency files; run `brew reinstall codex-router` to rebuild them if needed.\n",
+    );
+  }
 
   const legacy = detectLegacyInstallations();
   if (legacy.unknownConflict) {
@@ -233,6 +240,7 @@ function repair() {
   // environment. Homebrew has already validated its package-owned tree above,
   // so its repair only regenerates configuration and services.
   const posixArguments = homebrewManaged ? [] : ["--force-deps"];
+  const windowsArguments = homebrewManaged ? ["-CheckoutInstall"] : ["-CheckoutInstall", "-ForceDeps"];
   const result = process.platform === "win32"
     ? spawnSync(
         "powershell.exe",
@@ -243,8 +251,7 @@ function repair() {
           "Bypass",
           "-File",
           path.join(SOURCE_ROOT, "install.ps1"),
-          "-CheckoutInstall",
-          "-ForceDeps",
+          ...windowsArguments,
         ],
         { cwd: SOURCE_ROOT, env: process.env, stdio: repairStdio },
       )
@@ -671,7 +678,9 @@ add(
   venvCheck.status,
   "LiteLLM venv runtime",
   venvCheck.detail,
-  `${dependencyFix}.`,
+  jsonOutput && homebrewManaged
+    ? "Reinstall codex-router with its package manager to rebuild dependencies."
+    : `${dependencyFix}.`,
 );
 
 const secretMode = existsSync(INTERNAL_SECRET_PATH)
@@ -1096,6 +1105,26 @@ add(
         : `not ready on 127.0.0.1:${PORTS.router} after ${serviceLoaded ? 30 : 2} seconds; ${health.error}`,
   "Run ./bin/doctor --fix. If it still fails, create a support bundle.",
 );
+
+// A healthy router that no client can reach looks identical to a healthy
+// router, which is why this sits directly under the health check. When a
+// system proxy does not bypass loopback, a GUI client's request dies at the
+// proxy and never arrives, so `router.log` stays empty and every check above
+// this one still passes. The terminal is no guide either: a shell exports
+// `no_proxy`, so the CLI keeps working while Codex Desktop cannot connect.
+const loopbackBypass = loopbackProxyBypassStatus();
+if (loopbackBypass) {
+  add("warn", "Loopback proxy bypass", loopbackBypass.detail, loopbackBypass.remedy);
+}
+
+// The outbound counterpart of the check above, and the same shape of failure:
+// everything nearby passes while the one hop that matters cannot be made. A
+// repair started from a desktop app inherits no shell environment, so the
+// opt-in is the part most easily lost without anyone touching a setting.
+const proxyOptIn = serviceProxyOptInProblem();
+if (proxyOptIn) {
+  add("warn", "Service proxy opt-in", proxyOptIn.detail, proxyOptIn.remedy);
+}
 
 // The skill pack that teaches custom routed models the native tools. Checks
 // are read-only; the fixes re-run ./bin/install, which refreshes exactly the

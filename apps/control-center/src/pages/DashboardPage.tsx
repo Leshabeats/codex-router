@@ -1,20 +1,17 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import {
   Activity,
   ArrowUpRight,
   BarChart3,
-  Boxes,
-  BrainCircuit,
   CircleGauge,
   Clock3,
   Gauge,
-  KeyRound,
   Server,
-  Settings,
   Waypoints,
 } from "lucide-react";
 import { Badge, Button, EmptyState, InlineNotice, PageHeader, SectionHeading } from "../components";
 import { ProviderLogo } from "../provider-branding";
+import { ServiceHealthPanel } from "../ServiceHealth";
 import {
   classNames,
   compactNumber,
@@ -33,8 +30,10 @@ import type {
   RouterHealth,
   RouterTarget,
   UsageEvent,
+  UsageBucket,
   UsageMetric,
   ViewId,
+  ModelViewFocus,
 } from "../types";
 import "./dashboard.css";
 
@@ -58,13 +57,6 @@ interface MetricEntry {
   metric: UsageMetric;
 }
 
-interface Chip {
-  key: string;
-  label: string;
-  value: string;
-  tone?: Tone;
-}
-
 interface TrafficBucket {
   key: string;
   label: string;
@@ -78,27 +70,63 @@ interface TrafficBucket {
   measuredBreakdown: boolean;
 }
 
+type TrafficRange = 24 | 7 | 30;
+type TokenActivityMode = "daily" | "weekly" | "cumulative";
+
+interface TokenActivityDay {
+  date: Date;
+  dateKey: string;
+  tokens: number;
+  measured: boolean;
+  weekIndex: number;
+  dayIndex: number;
+}
+
+interface TokenActivityViewDay extends TokenActivityDay {
+  displayTokens: number;
+  tooltip: string;
+}
+
+interface TokenActivityMonth {
+  label: string;
+  weekIndex: number;
+}
+
 interface TrafficBreakdownRow {
   id: string;
   label: string;
+  providerId?: string;
   provider?: string;
   tokens: number;
   requests: number;
   measuredTokens: boolean;
   share: number;
   scope?: "rolling 24h" | "90-day ledger";
+  inputTokens?: number | null;
+  cachedInputTokens?: number | null;
+  outputTokens?: number | null;
+  tokensPerSecond?: number | null;
+  speedSampleCount?: number;
+}
+
+interface ModelBreakdownAccumulator extends TrafficBreakdownRow {
+  inputTotal: number;
+  cachedTotal: number;
+  outputTotal: number;
+  inputMeasured: boolean;
+  cacheMeasured: boolean;
+  outputMeasured: boolean;
+  speedSamples: number[];
 }
 
 const RECENT_EVENT_LIMIT = 5;
-const PROVIDER_LOGO_LIMIT = 8;
+const TOKEN_ACTIVITY_WEEKS = 53;
 
 export function DashboardPage({
   target,
   health,
   account,
   providerUsage,
-  setup,
-  presence,
   api,
   refreshing,
   onRefresh,
@@ -113,8 +141,9 @@ export function DashboardPage({
   api?: RouterControlApi;
   refreshing: boolean;
   onRefresh: () => void;
-  onNavigate: (view: ViewId) => void;
+  onNavigate: (view: ViewId, modelFocus?: ModelViewFocus) => void;
 }) {
+  const [trafficRange, setTrafficRange] = useState<TrafficRange>(24);
   // Every prop can be undefined on first paint and after a failed refresh, so
   // each tile below separates three cases: still loading, reported-but-absent,
   // and a genuine zero. A missing field must never render as 0.
@@ -170,32 +199,14 @@ export function DashboardPage({
     ? lowestAllowance.percent < 15 ? "danger" : lowestAllowance.percent < 35 ? "warning" : undefined
     : undefined;
 
-  const models = target?.models ?? [];
-  const availableModels = models.filter((model) => model.enabled || model.native).length;
-  const pickerModels = models.filter((model) => model.visible).length;
-  const agentReadyModels = models.filter((model) =>
-    model.enabled && model.multiAgentVersion === "v2",
-  ).length;
-
-  const configuredProviders = setup ? setup.providers.filter((provider) => provider.configured).length : null;
-  const totalProviders = setup ? setup.providers.length : null;
-  const routedProviderIds = target?.enabledProviders ?? [];
-
-  const cachedInput = providerUsage?.contextEfficiency?.last24hCachedInputTokens;
   const events: UsageEvent[] | undefined = target?.usageEvents;
-  const observedInput = events
-    ? events.reduce((sum, event) => sum + (event.inputTokens || 0), 0)
-    : null;
-  const reuseShare = cachedInput !== undefined && observedInput !== null && observedInput > 0
-    ? Math.min(100, (cachedInput / observedInput) * 100)
-    : null;
   const recentEvents = events ? [...events].reverse().slice(0, RECENT_EVENT_LIMIT) : [];
 
   // The provider snapshot gives us accurate rolling totals, while the bounded
   // event stream gives the dashboard an honest hourly shape. Keep this local to
   // the renderer: it is a presentation view and must not become a second
   // accounting ledger in the router.
-  const trafficBuckets = buildTrafficBuckets(events, Date.now());
+  const trafficBuckets = buildTrafficBuckets(events, providerUsage, trafficRange, Date.now());
   const providerBreakdown = buildProviderBreakdown(providerUsage, events, Date.now());
   const modelBreakdown = buildModelBreakdown(providerUsage, events, Date.now());
   const trafficHasRequests = trafficBuckets.some((bucket) => bucket.requests > 0);
@@ -275,41 +286,6 @@ export function DashboardPage({
     },
   ];
 
-  const routingChips: Chip[] = [
-    {
-      key: "login-free",
-      label: "Login-free",
-      value: target ? target.loginFree === true ? "On" : "Off" : pending,
-      tone: target ? target.loginFree === true ? "accent" : undefined : undefined,
-    },
-    {
-      key: "signed-routing",
-      label: "Signed routing",
-      value: target ? target.signedRouting === true ? "On" : "Off" : pending,
-      tone: target ? target.signedRouting === true ? "success" : undefined : undefined,
-    },
-    {
-      key: "default-model",
-      label: "Default model",
-      value: target
-        ? target.selectedModel
-          ? modelName(target, target.selectedModel)
-          : "Codex default"
-        : pending,
-    },
-    {
-      key: "presence",
-      label: "Presence",
-      value: presence ? presenceLabel(presence.mode) : pending,
-    },
-  ];
-
-  const routedProviders = routedProviderIds
-    .map((id) => ({
-      id,
-      displayName: target?.providers.find((provider) => provider.id === id)?.displayName || id,
-    }));
-
   return (
     <div className="dashboard-page page-stack">
       <PageHeader
@@ -327,6 +303,8 @@ export function DashboardPage({
       ) : health && !health.ok && health.error ? (
         <InlineNotice tone="danger" title="Router health check failed">{health.error}</InlineNotice>
       ) : null}
+
+      <ServiceHealthPanel health={health} compact onOpen={() => onNavigate("status")} />
 
       <div className="db-summary-grid" role="list" aria-label="Router summary">
         {tiles.map((tile) => {
@@ -360,191 +338,60 @@ export function DashboardPage({
         })}
       </div>
 
-      <div className="db-panel-grid">
-        <section className="panel-section db-panel">
-          <SectionHeading
-            title="Routing mode"
-            description="How requests leave this machine."
-            action={(
-              <Button variant="ghost" aria-label="Open Settings" onClick={() => onNavigate("settings")}>
-                <Settings aria-hidden size={13} strokeWidth={1.7} />
-                Settings
-              </Button>
-            )}
-          />
-          <div className="db-chip-row">
-            {routingChips.map((chip) => (
-              <span key={chip.key} className={classNames("db-chip", chip.tone && `tone-${chip.tone}`)}>
-                <small>{chip.label}</small>
-                <strong title={chip.value}>{chip.value}</strong>
-              </span>
-            ))}
-          </div>
-        </section>
-
-        <section className="panel-section db-panel">
-          <SectionHeading
-            title="Providers"
-            description="Credentials on file and routes in use."
-            action={(
-              <Button variant="ghost" aria-label="Open Providers" onClick={() => onNavigate("providers")}>
-                <KeyRound aria-hidden size={13} strokeWidth={1.7} />
-                Providers
-              </Button>
-            )}
-          />
-          <dl className="db-mini-stats">
-            <div>
-              <dt>Connected</dt>
-              <dd>{setup ? `${exactNumber(configuredProviders)} of ${exactNumber(totalProviders)}` : pending}</dd>
-              <small>{setup ? "Providers holding a usable credential" : "Waiting for the provider setup snapshot"}</small>
-            </div>
-            <div>
-              <dt>Routing</dt>
-              <dd>{target ? exactNumber(routedProviderIds.length) : pending}</dd>
-              <small>{target ? "Providers currently eligible for routing" : "Waiting for the router snapshot"}</small>
-            </div>
-          </dl>
-          {routedProviders.length ? (
-            <div className="db-provider-logos" aria-label="Providers currently routing">
-              {routedProviders.slice(0, PROVIDER_LOGO_LIMIT).map((provider) => (
-                <ProviderLogo
-                  key={provider.id}
-                  providerId={provider.id}
-                  displayName={provider.displayName}
-                  size="small"
-                />
-              ))}
-              {routedProviders.length > PROVIDER_LOGO_LIMIT ? (
-                <span className="db-more-count">+{routedProviders.length - PROVIDER_LOGO_LIMIT}</span>
-              ) : null}
-            </div>
-          ) : target ? (
-            <p className="db-panel-note">No provider is routing yet. Connect an account to start.</p>
-          ) : null}
-        </section>
-
-        <section className="panel-section db-panel">
-          <SectionHeading
-            title="Catalog readiness"
-            description="What the model picker and subagents can reach."
-            action={(
-              <Button variant="ghost" aria-label="Open Models" onClick={() => onNavigate("models")}>
-                <Boxes aria-hidden size={13} strokeWidth={1.7} />
-                Models
-              </Button>
-            )}
-          />
-          {target ? (
-            <dl className="db-mini-stats">
-              <div>
-                <dt>Available</dt>
-                <dd>{exactNumber(availableModels)}</dd>
-                <small>Enabled or natively routed, of {exactNumber(models.length)} curated</small>
-              </div>
-              <div>
-                <dt>In picker</dt>
-                <dd>{exactNumber(pickerModels)}</dd>
-                <small>{exactNumber(models.length - pickerModels)} hidden from the Codex picker</small>
-              </div>
-              <div>
-                <dt>Agent-ready</dt>
-                <dd>{exactNumber(agentReadyModels)}</dd>
-                <small>Enabled models on the native v2 subagent path</small>
-              </div>
-            </dl>
-          ) : (
-            <EmptyState
-              icon={<Boxes size={20} />}
-              title={refreshing ? "Reading the catalog" : "Catalog unavailable"}
-              body="Model counts appear once the router snapshot loads."
-            />
-          )}
-        </section>
-
-        <section className="panel-section db-panel">
-          <SectionHeading
-            title="Context reused, 24h"
-            description="Prefix cache the router did not have to resend."
-            action={(
-              <Button variant="ghost" aria-label="Open Status" onClick={() => onNavigate("status")}>
-                <BrainCircuit aria-hidden size={13} strokeWidth={1.7} />
-                Status
-              </Button>
-            )}
-          />
-          <dl className="db-mini-stats">
-            <div>
-              <dt>Cached input</dt>
-              <dd>{!providerUsage ? pending : cachedInput === undefined ? "Not measured" : compactNumber(cachedInput)}</dd>
-              <small>
-                {!providerUsage
-                  ? "Waiting for the provider usage snapshot"
-                  : cachedInput === undefined
-                    ? "This router build does not report cached input"
-                    : `${exactNumber(cachedInput)} tokens reused`}
-              </small>
-            </div>
-            <div>
-              <dt>Input observed</dt>
-              <dd>{observedInput === null ? pending : compactNumber(observedInput)}</dd>
-              <small>
-                {observedInput === null
-                  ? "Waiting for the router snapshot"
-                  : `Across ${exactNumber(events?.length)} recent events`}
-              </small>
-            </div>
-            <div>
-              <dt>Reuse share</dt>
-              <dd>{reuseShare === null ? "Not measured" : `${reuseShare.toFixed(1)}%`}</dd>
-              <small>Cached input divided by observed input</small>
-            </div>
-          </dl>
-        </section>
-      </div>
-
       <div className="db-traffic-grid">
         <section className="panel-section db-traffic-panel">
           <SectionHeading
-            title="Traffic, last 24 hours"
-            description="Hourly local buckets from router request telemetry. This is observed traffic, not provider billing."
+            title={`Traffic, ${trafficRangeLabel(trafficRange)}`}
+            description={trafficDescription(trafficRange)}
             action={(
-              <Button variant="ghost" aria-label="Open Usage" onClick={() => onNavigate("usage")}>
-                <BarChart3 aria-hidden size={13} strokeWidth={1.7} />
-                Usage
-              </Button>
+              <div className="db-traffic-actions">
+                <TrafficRangePicker value={trafficRange} onChange={setTrafficRange} />
+                <Button variant="ghost" aria-label="Open Usage" onClick={() => onNavigate("usage")}>
+                  <BarChart3 aria-hidden size={13} strokeWidth={1.7} />
+                  Usage
+                </Button>
+              </div>
             )}
           />
           {!events ? (
             <EmptyState
               icon={<BarChart3 size={20} />}
               title={refreshing ? "Reading router telemetry" : "Router telemetry unavailable"}
-              body="Hourly traffic appears once the router snapshot loads."
+              body="Traffic appears once the router snapshot loads."
             />
           ) : trafficHasRequests ? (
-            <TrafficTrend buckets={trafficBuckets} hasTokens={trafficHasTokens} />
+            <TrafficTrend buckets={trafficBuckets} hasTokens={trafficHasTokens} range={trafficRange} />
           ) : (
             <EmptyState
               icon={<BarChart3 size={20} />}
-              title="No requests in the last 24 hours"
+              title={`No requests in ${trafficRangeLabel(trafficRange)}`}
               body="The chart will fill as a request passes through the local router."
             />
           )}
           {events ? (
             <p className="db-panel-note db-traffic-note">
               {trafficHasTokens
-                ? `${exactNumber(trafficBuckets.reduce((sum, bucket) => sum + bucket.tokens, 0))} measured tokens across ${exactNumber(trafficBuckets.reduce((sum, bucket) => sum + bucket.requests, 0))} requests in this rolling window. The chart uses the latest 1,000 event details; provider rows use rolling counters when available.`
+                ? `${exactNumber(trafficBuckets.reduce((sum, bucket) => sum + bucket.tokens, 0))} measured tokens across ${exactNumber(trafficBuckets.reduce((sum, bucket) => sum + bucket.requests, 0))} requests in ${trafficRangeLabel(trafficRange)}. ${trafficRange === 24 ? "Hourly bars use the latest 1,000 event details." : "Daily bars use the retained provider ledger when available."}`
                 : trafficHasRequests
-                  ? `${exactNumber(trafficBuckets.reduce((sum, bucket) => sum + bucket.requests, 0))} requests observed, but token counts were not reported by the upstream responses. The chart uses the latest 1,000 event details.`
-                  : "The router returned an empty telemetry window; this is different from a failed health check."}
+                  ? `${exactNumber(trafficBuckets.reduce((sum, bucket) => sum + bucket.requests, 0))} requests observed in ${trafficRangeLabel(trafficRange)}, but token counts were not reported by the upstream responses.`
+                  : `The router returned an empty ${trafficRangeLabel(trafficRange)} telemetry window; this is different from a failed health check.`}
             </p>
           ) : null}
         </section>
 
+      </div>
+
+      <TokenActivity
+        events={events}
+        providerUsage={providerUsage}
+        refreshing={refreshing}
+      />
+
+      <div className="db-panel-grid db-dashboard-details">
         <section className="panel-section db-breakdown-panel">
           <SectionHeading
             title="Provider and model mix"
-            description={providerUsage ? "Rolling provider totals and the busiest models on this router." : "Breakdowns appear with the provider usage snapshot."}
+            description={providerUsage ? "Rolling provider totals and the busiest models on this router; model rows include 24-hour input, cache, output, and speed." : "Breakdowns appear with the provider usage snapshot."}
             action={(
               <Button variant="ghost" aria-label="Open Status" onClick={() => onNavigate("status")}>
                 <Activity aria-hidden size={13} strokeWidth={1.7} />
@@ -573,7 +420,7 @@ export function DashboardPage({
       <section className="panel-section db-events-panel">
         <SectionHeading
           title="Recent activity"
-          description="The last few routed requests from the rolling 24-hour telemetry window. Request metadata only."
+          description="The last few routed requests from the rolling 24-hour telemetry window, with output speed and token mix when reported."
           action={(
             <Button variant="ghost" aria-label="Open Status" onClick={() => onNavigate("status")}>
               <Activity aria-hidden size={13} strokeWidth={1.7} />
@@ -601,7 +448,139 @@ export function DashboardPage({
   );
 }
 
-function TrafficTrend({ buckets, hasTokens }: { buckets: TrafficBucket[]; hasTokens: boolean }) {
+function TokenActivity({
+  events,
+  providerUsage,
+  refreshing,
+}: {
+  events?: UsageEvent[];
+  providerUsage?: ProviderUsageSnapshot;
+  refreshing: boolean;
+}) {
+  const [mode, setMode] = useState<TokenActivityMode>("daily");
+  const activity = useMemo(
+    () => buildTokenActivity(events, providerUsage, Date.now()),
+    [events, providerUsage],
+  );
+  const viewDays = useMemo(
+    () => tokenActivityForMode(activity.days, mode),
+    [activity.days, mode],
+  );
+  const levels = useMemo(
+    () => tokenActivityLevels(viewDays.map((day) => day.displayTokens)),
+    [viewDays],
+  );
+  const total = activity.days.reduce((sum, day) => sum + day.tokens, 0);
+  const activeDays = activity.days.filter((day) => day.tokens > 0).length;
+
+  return (
+    <section className="panel-section db-token-activity">
+      <div className="db-token-activity-heading">
+        <div>
+          <h2>Token activity</h2>
+          <p>
+            {providerUsage
+              ? `${exactNumber(total)} measured tokens across the last year`
+              : refreshing
+                ? "Reading the retained router ledger"
+                : events
+                  ? "Recent event telemetry; retained daily totals are unavailable"
+                  : "Token history appears after the router reports usage"}
+          </p>
+        </div>
+        <div className="db-token-mode" role="radiogroup" aria-label="Token activity display">
+          {(["daily", "weekly", "cumulative"] as const).map((option) => (
+            <button
+              key={option}
+              type="button"
+              role="radio"
+              aria-checked={mode === option}
+              className={mode === option ? "is-active" : ""}
+              onClick={() => setMode(option)}
+            >
+              {capitalize(option)}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="db-token-calendar-scroll">
+        <div className="db-token-calendar">
+          <div className="db-token-cells" role="grid" aria-label={`${capitalize(mode)} token activity for the last year`}>
+            {viewDays.map((day) => {
+              const level = levelForTokenActivity(day.displayTokens, levels);
+              const isFuture = day.date.getTime() > activity.today;
+              return (
+                <span
+                  key={day.dateKey}
+                  role="gridcell"
+                  tabIndex={isFuture ? -1 : 0}
+                  aria-label={day.tooltip}
+                  data-edge={day.weekIndex > TOKEN_ACTIVITY_WEEKS - 16 ? "end" : undefined}
+                  data-row={day.dayIndex < 2 ? "top" : day.dayIndex > 4 ? "bottom" : undefined}
+                  className={classNames(
+                    "db-token-day",
+                    `level-${level}`,
+                    isFuture && "is-future",
+                  )}
+                  style={{
+                    gridColumn: day.weekIndex + 1,
+                    gridRow: day.dayIndex + 1,
+                  }}
+                >
+                  <span className="db-token-tooltip" role="tooltip">{day.tooltip}</span>
+                </span>
+              );
+            })}
+          </div>
+          <div className="db-token-months" aria-hidden="true">
+            {activity.months.map((month) => (
+              <span
+                key={`${month.label}-${month.weekIndex}`}
+                style={{ gridColumn: `${month.weekIndex + 1} / span ${Math.min(4, TOKEN_ACTIVITY_WEEKS - month.weekIndex)}` }}
+              >
+                {month.label}
+              </span>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="db-token-activity-footer">
+        <span>{activeDays ? `${exactNumber(activeDays)} active ${plural(activeDays, "day")}` : "No measured activity yet"}</span>
+        <span className="db-token-scale" aria-label="Token activity intensity from less to more">
+          Less
+          {[0, 1, 2, 3, 4].map((level) => <i key={level} className={`level-${level}`} />)}
+          More
+        </span>
+      </div>
+    </section>
+  );
+}
+
+function TrafficRangePicker({ value, onChange }: {
+  value: TrafficRange;
+  onChange: (value: TrafficRange) => void;
+}) {
+  return (
+    <div className="db-range-picker" role="radiogroup" aria-label="Dashboard traffic range">
+      {([24, 7, 30] as const).map((range) => (
+        <button
+          type="button"
+          key={range}
+          role="radio"
+          aria-checked={value === range}
+          className={value === range ? "is-active" : ""}
+          onClick={() => onChange(range)}
+        >
+          {range === 24 ? "24h" : `${range}d`}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function TrafficTrend({ buckets, hasTokens, range }: { buckets: TrafficBucket[]; hasTokens: boolean; range: TrafficRange }) {
   const maxTokens = Math.max(...buckets.map((bucket) => bucket.tokens), 1);
   const maxRequests = Math.max(...buckets.map((bucket) => bucket.requests), 1);
   const hasBreakdown = buckets.some((bucket) => bucket.measuredBreakdown);
@@ -609,13 +588,16 @@ function TrafficTrend({ buckets, hasTokens }: { buckets: TrafficBucket[]; hasTok
     <div
       className="db-trend"
       role="img"
-      aria-label={`Hourly router traffic for the last 24 hours${hasTokens ? hasBreakdown ? " split into regular input, cached input, and output" : " by tokens" : " by requests"}`}
+      aria-label={`${range === 24 ? "Hourly" : "Daily"} router traffic for ${trafficRangeLabel(range)}${hasTokens ? hasBreakdown ? " split into regular input, cached input, and output" : " by tokens" : " by requests"}`}
     >
       <div className="db-trend-scale" aria-hidden="true">
         <span>{hasTokens ? compactNumber(maxTokens) : exactNumber(maxRequests)}</span>
         <span>0</span>
       </div>
-      <div className="db-trend-bars">
+      <div
+        className="db-trend-bars"
+        style={{ gridTemplateColumns: `repeat(${Math.max(1, buckets.length)}, minmax(0, 1fr))` }}
+      >
         {buckets.map((bucket, index) => {
           const ratio = hasTokens
             ? bucket.tokens / maxTokens
@@ -737,12 +719,16 @@ function BreakdownGroup({
         <div className="db-breakdown-list" role="list" aria-label={`${title} usage breakdown`}>
           {visibleRows.map((row) => (
             <div className="db-breakdown-row" role="listitem" key={row.id}>
-              {providerRows ? (
-                <ProviderLogo providerId={row.id.replace(/^provider:/, "")} displayName={row.label} size="small" />
-              ) : <span className="db-model-glyph" aria-hidden="true"><Activity size={12} strokeWidth={1.8} /></span>}
+              <ProviderLogo
+                providerId={row.providerId || row.id.replace(/^provider:/, "")}
+                displayName={row.provider || row.label}
+                size="small"
+                className="db-breakdown-logo"
+              />
               <div className="db-breakdown-label">
                 <strong title={row.label}>{row.label}</strong>
                 <small>{row.provider ? `${row.provider} · ` : ""}{exactNumber(row.requests)} {plural(row.requests, "request")}{row.measuredTokens ? ` · ${compactNumber(row.tokens)} tok` : " · tokens not reported"}</small>
+                {!providerRows ? <ModelBreakdownFacts row={row} /> : null}
                 <span className="db-breakdown-meter" aria-hidden="true"><i style={{ width: `${row.tokens > 0 ? Math.max(2, (row.tokens / max) * 100) : 0}%` }} /></span>
               </div>
               <strong className="db-breakdown-value">{row.measuredTokens ? compactNumber(row.tokens) : "—"}</strong>
@@ -759,11 +745,32 @@ function BreakdownGroup({
   );
 }
 
+function ModelBreakdownFacts({ row }: { row: TrafficBreakdownRow }) {
+  const facts: Array<{ label: string; tone: "input" | "cached" | "output" | "speed" }> = [];
+  if (row.inputTokens != null) facts.push({ label: `${compactNumber(row.inputTokens)} input`, tone: "input" });
+  if (row.cachedInputTokens != null) facts.push({ label: `${compactNumber(row.cachedInputTokens)} cache`, tone: "cached" });
+  if (row.outputTokens != null) facts.push({ label: `${compactNumber(row.outputTokens)} output`, tone: "output" });
+  if (row.tokensPerSecond != null) facts.push({ label: formatTokensPerSecond(row.tokensPerSecond), tone: "speed" });
+  if (!facts.length) return null;
+  return (
+    <span
+      className="db-breakdown-facts"
+      title={facts.map((fact) => fact.label).join(" · ")}
+    >
+      {facts.map((fact) => <span className={`is-${fact.tone}`} key={fact.label}>{fact.label}</span>)}
+    </span>
+  );
+}
+
 function DashboardEventRow({ event }: { event: UsageEvent }) {
   const status = event.status;
   const tone: Tone | "neutral" = status === undefined
     ? "neutral"
     : status >= 400 ? "danger" : status >= 200 ? "success" : "neutral";
+  const total = tokenCountFromEvent(event);
+  const speed = tokensPerSecondFromEvent(event);
+  const breakdown = tokenBreakdownFromEvent(event);
+  const tokenFacts = formatEventTokenFacts(total, breakdown);
   return (
     <article>
       <ProviderLogo
@@ -776,13 +783,19 @@ function DashboardEventRow({ event }: { event: UsageEvent }) {
         <strong>{shortModelName(event.model || "Unknown model")}</strong>
         <small>{event.provider || "router"}</small>
       </span>
+      <span className="db-event-metering">
+        <strong>{speed == null ? "Speed unmeasured" : formatTokensPerSecond(speed)}</strong>
+        <small title={tokenFacts}>{tokenFacts}</small>
+      </span>
       <span className="db-event-duration">
         <strong>{event.durationMs === undefined ? "No duration" : formatDuration(event.durationMs)}</strong>
         <small>{formatDateTime(event.at)}</small>
       </span>
-      <Badge tone={tone === "neutral" ? "neutral" : tone}>
-        {status === undefined ? "no status" : String(status)}
-      </Badge>
+      <span className="db-event-status">
+        <Badge tone={tone === "neutral" ? "neutral" : tone}>
+          {status === undefined ? "no status" : String(status)}
+        </Badge>
+      </span>
     </article>
   );
 }
@@ -813,8 +826,165 @@ function collectMetrics(
 }
 
 const HOUR_MS = 60 * 60 * 1_000;
+const DAY_MS = 24 * HOUR_MS;
 
-function buildTrafficBuckets(events: UsageEvent[] | undefined, now: number): TrafficBucket[] {
+function buildTokenActivity(
+  events: UsageEvent[] | undefined,
+  providerUsage: ProviderUsageSnapshot | undefined,
+  now: number,
+): { days: TokenActivityDay[]; months: TokenActivityMonth[]; today: number } {
+  const today = new Date(now);
+  today.setHours(0, 0, 0, 0);
+  const first = new Date(today);
+  first.setDate(first.getDate() - first.getDay() - ((TOKEN_ACTIVITY_WEEKS - 1) * 7));
+
+  const tokensByDay = new Map<string, number>();
+  const measuredDays = new Set<string>();
+  const retainedProviders = providerUsage?.retained?.providers;
+  const providers = retainedProviders?.length
+    ? retainedProviders
+    : providerUsage?.providers ?? [];
+  let dailyRows = 0;
+
+  for (const provider of providers) {
+    for (const bucket of provider.dailyUsageBuckets ?? []) {
+      const dateKey = normalizeDateKey(bucket.startDate);
+      if (!dateKey) continue;
+      dailyRows += 1;
+      measuredDays.add(dateKey);
+      tokensByDay.set(dateKey, (tokensByDay.get(dateKey) ?? 0) + Math.max(0, Number(bucket.tokens) || 0));
+    }
+  }
+
+  if (dailyRows === 0) {
+    for (const event of events ?? []) {
+      const at = new Date(event.at);
+      if (!Number.isFinite(at.getTime())) continue;
+      const dateKey = localDateKey(at);
+      const tokens = tokenCountFromEvent(event);
+      if (tokens === null) continue;
+      measuredDays.add(dateKey);
+      tokensByDay.set(dateKey, (tokensByDay.get(dateKey) ?? 0) + tokens);
+    }
+  }
+
+  const days = Array.from({ length: TOKEN_ACTIVITY_WEEKS * 7 }, (_, index) => {
+    const date = new Date(first);
+    date.setDate(first.getDate() + index);
+    const dateKey = localDateKey(date);
+    return {
+      date,
+      dateKey,
+      tokens: tokensByDay.get(dateKey) ?? 0,
+      measured: measuredDays.has(dateKey),
+      weekIndex: Math.floor(index / 7),
+      dayIndex: date.getDay(),
+    };
+  });
+
+  const monthFormatter = new Intl.DateTimeFormat("en-US", { month: "short" });
+  const months: TokenActivityMonth[] = [];
+  let previousMonth = -1;
+  for (const day of days) {
+    const month = day.date.getMonth();
+    if (month === previousMonth) continue;
+    previousMonth = month;
+    if (day.date.getDate() > 7) continue;
+    months.push({ label: monthFormatter.format(day.date), weekIndex: day.weekIndex });
+  }
+
+  return { days, months, today: today.getTime() };
+}
+
+function tokenActivityForMode(
+  days: TokenActivityDay[],
+  mode: TokenActivityMode,
+): TokenActivityViewDay[] {
+  const dateFormatter = new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+  const weeklyTotals = new Map<number, number>();
+  for (const day of days) {
+    weeklyTotals.set(day.weekIndex, (weeklyTotals.get(day.weekIndex) ?? 0) + day.tokens);
+  }
+
+  let cumulative = 0;
+  return days.map((day) => {
+    cumulative += day.tokens;
+    if (mode === "weekly") {
+      const weekStart = days[day.weekIndex * 7]?.date ?? day.date;
+      const weekEnd = days[(day.weekIndex * 7) + 6]?.date ?? day.date;
+      const displayTokens = weeklyTotals.get(day.weekIndex) ?? 0;
+      return {
+        ...day,
+        displayTokens,
+        tooltip: `${exactNumber(displayTokens)} tokens from ${dateFormatter.format(weekStart)} to ${dateFormatter.format(weekEnd)}`,
+      };
+    }
+    if (mode === "cumulative") {
+      return {
+        ...day,
+        displayTokens: cumulative,
+        tooltip: `${exactNumber(cumulative)} cumulative tokens through ${dateFormatter.format(day.date)}`,
+      };
+    }
+    return {
+      ...day,
+      displayTokens: day.tokens,
+      tooltip: `${exactNumber(day.tokens)} tokens on ${dateFormatter.format(day.date)}`,
+    };
+  });
+}
+
+function tokenActivityLevels(values: number[]): number {
+  return Math.max(0, ...values.filter((value) => Number.isFinite(value)));
+}
+
+function levelForTokenActivity(tokens: number, max: number): number {
+  if (tokens <= 0 || max <= 0) return 0;
+  return Math.max(1, Math.min(4, Math.ceil((Math.log1p(tokens) / Math.log1p(max)) * 4)));
+}
+
+function normalizeDateKey(value: string): string | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
+  return match ? `${match[1]}-${match[2]}-${match[3]}` : null;
+}
+
+function localDateKey(date: Date): string {
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, "0");
+  const day = `${date.getDate()}`.padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function capitalize(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function trafficRangeLabel(range: TrafficRange): string {
+  return range === 24 ? "the last 24 hours" : `the last ${range} days`;
+}
+
+function trafficDescription(range: TrafficRange): string {
+  return range === 24
+    ? "Hourly local buckets from router request telemetry. This is observed traffic, not provider billing."
+    : "Daily local buckets from the retained router ledger. This is observed traffic, not provider billing.";
+}
+
+function buildTrafficBuckets(
+  events: UsageEvent[] | undefined,
+  providerUsage: ProviderUsageSnapshot | undefined,
+  range: TrafficRange,
+  now: number,
+): TrafficBucket[] {
+  return range === 24
+    ? buildHourlyTrafficBuckets(events, now)
+    : buildDailyTrafficBuckets(events, providerUsage, range, now);
+}
+
+function buildHourlyTrafficBuckets(events: UsageEvent[] | undefined, now: number): TrafficBucket[] {
   const anchor = new Date(now);
   anchor.setMinutes(0, 0, 0);
   const first = anchor.getTime() - (23 * HOUR_MS);
@@ -860,6 +1030,118 @@ function buildTrafficBuckets(events: UsageEvent[] | undefined, now: number): Tra
     }
   }
   return buckets;
+}
+
+function buildDailyTrafficBuckets(
+  events: UsageEvent[] | undefined,
+  providerUsage: ProviderUsageSnapshot | undefined,
+  range: Exclude<TrafficRange, 24>,
+  now: number,
+): TrafficBucket[] {
+  const anchor = new Date(now);
+  anchor.setHours(0, 0, 0, 0);
+  const first = anchor.getTime() - (range - 1) * DAY_MS;
+  const labelFormatter = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" });
+  const fullFormatter = new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: range === 30 ? "numeric" : undefined,
+  });
+  const buckets = Array.from({ length: range }, (_, index) => {
+    const start = new Date(first + index * DAY_MS);
+    return {
+      key: start.toISOString(),
+      label: labelFormatter.format(start),
+      fullLabel: fullFormatter.format(start),
+      tokens: 0,
+      requests: 0,
+      measuredTokens: false,
+      regularInputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      measuredBreakdown: false,
+    };
+  });
+
+  const retainedProviders = providerUsage?.retained?.providers;
+  const providers = retainedProviders?.length
+    ? retainedProviders
+    : providerUsage?.providers ?? [];
+  let providerBuckets = 0;
+  for (const provider of providers) {
+    for (const usageBucket of provider.dailyUsageBuckets ?? []) {
+      const index = indexForLocalDay(usageBucket.startDate, first, range);
+      if (index === null) continue;
+      const bucket = buckets[index];
+      providerBuckets += 1;
+      const tokens = optionalNumber(usageBucket.tokens);
+      if (tokens !== null) {
+        bucket.tokens += tokens;
+        bucket.measuredTokens = true;
+      }
+      const requests = optionalNumber(usageBucket.requests);
+      if (requests !== null) bucket.requests += requests;
+      const breakdown = trafficPartsFromUsageBucket(usageBucket);
+      if (breakdown) {
+        bucket.regularInputTokens += breakdown.regularInputTokens;
+        bucket.cachedInputTokens += breakdown.cachedInputTokens;
+        bucket.outputTokens += breakdown.outputTokens;
+        bucket.measuredBreakdown = true;
+      }
+    }
+  }
+
+  // A mixed-version snapshot can have no daily provider rows yet. Keep the
+  // chart useful while it catches up by deriving the same daily shape from
+  // the bounded event details, without adding those events to provider rows.
+  if (providerBuckets === 0) {
+    for (const event of events ?? []) {
+      const at = Date.parse(event.at);
+      if (!Number.isFinite(at) || at < first || at >= anchor.getTime() + DAY_MS) continue;
+      const index = Math.floor((at - first) / DAY_MS);
+      if (index < 0 || index >= buckets.length) continue;
+      const bucket = buckets[index];
+      bucket.requests += 1;
+      const tokens = tokenCountFromEvent(event);
+      if (tokens !== null) {
+        bucket.tokens += tokens;
+        bucket.measuredTokens = true;
+      }
+      const breakdown = trafficPartsFromEvent(event);
+      if (breakdown) {
+        bucket.regularInputTokens += breakdown.regularInputTokens;
+        bucket.cachedInputTokens += breakdown.cachedInputTokens;
+        bucket.outputTokens += breakdown.outputTokens;
+        bucket.measuredBreakdown = true;
+      }
+    }
+  }
+  return buckets;
+}
+
+function indexForLocalDay(value: string, first: number, count: number): number | null {
+  const date = new Date(`${value}T00:00:00`);
+  if (!Number.isFinite(date.getTime())) return null;
+  const index = Math.floor((date.getTime() - first) / DAY_MS);
+  return index >= 0 && index < count ? index : null;
+}
+
+function trafficPartsFromUsageBucket(bucket: UsageBucket): {
+  regularInputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+} | null {
+  const input = optionalNumber(bucket.inputTokens);
+  const cached = optionalNumber(bucket.cachedInputTokens);
+  const output = optionalNumber(bucket.outputTokens);
+  if (input === null && cached === null && output === null) return null;
+  const inputTokens = input ?? 0;
+  const cachedInputTokens = input === null ? cached ?? 0 : Math.min(inputTokens, cached ?? 0);
+  return {
+    regularInputTokens: Math.max(0, inputTokens - cachedInputTokens),
+    cachedInputTokens,
+    outputTokens: output ?? 0,
+  };
 }
 
 type TrafficPart = {
@@ -925,6 +1207,7 @@ function buildProviderBreakdown(
     rows.set(provider.id, {
       id: `provider:${provider.id}`,
       label: provider.displayName,
+      providerId: provider.id,
       tokens,
       requests,
       measuredTokens,
@@ -937,6 +1220,7 @@ function buildProviderBreakdown(
     rows.set(providerId, {
       id: `provider:${providerId}`,
       label: names.get(providerId) || providerId,
+      providerId,
       tokens: eventRow.tokens,
       requests: eventRow.requests,
       measuredTokens: eventRow.measuredTokens,
@@ -953,7 +1237,7 @@ function buildModelBreakdown(
   now: number,
 ): TrafficBreakdownRow[] {
   const names = new Map((providerUsage?.providers ?? []).map((provider) => [provider.id, provider.displayName]));
-  const eventRows = new Map<string, TrafficBreakdownRow>();
+  const eventRows = new Map<string, ModelBreakdownAccumulator>();
   for (const event of recentWindowEvents(events, now)) {
     const model = event.model || "unknown";
     const provider = event.provider || "unknown";
@@ -961,12 +1245,20 @@ function buildModelBreakdown(
     const previous = eventRows.get(id) ?? {
       id,
       label: shortModelName(model),
+      providerId: provider,
       provider: names.get(provider) || provider,
       tokens: 0,
       requests: 0,
       measuredTokens: false,
       share: 0,
       scope: "rolling 24h",
+      inputTotal: 0,
+      cachedTotal: 0,
+      outputTotal: 0,
+      inputMeasured: false,
+      cacheMeasured: false,
+      outputMeasured: false,
+      speedSamples: [],
     };
     previous.requests += 1;
     const tokens = tokenCountFromEvent(event);
@@ -974,9 +1266,33 @@ function buildModelBreakdown(
       previous.tokens += tokens;
       previous.measuredTokens = true;
     }
+    const breakdown = tokenBreakdownFromEvent(event);
+    if (breakdown.inputTokens !== null) {
+      previous.inputTotal += breakdown.inputTokens;
+      previous.inputMeasured = true;
+    }
+    if (breakdown.cachedInputTokens !== null) {
+      previous.cachedTotal += breakdown.cachedInputTokens;
+      previous.cacheMeasured = true;
+    }
+    if (breakdown.outputTokens !== null) {
+      previous.outputTotal += breakdown.outputTokens;
+      previous.outputMeasured = true;
+    }
+    const speed = tokensPerSecondFromEvent(event);
+    if (speed !== null) previous.speedSamples.push(speed);
     eventRows.set(id, previous);
   }
-  if (eventRows.size) return withBreakdownShares([...eventRows.values()]);
+  if (eventRows.size) {
+    return withBreakdownShares([...eventRows.values()].map((row) => ({
+      ...row,
+      inputTokens: row.inputMeasured ? row.inputTotal : null,
+      cachedInputTokens: row.cacheMeasured ? row.cachedTotal : null,
+      outputTokens: row.outputMeasured ? row.outputTotal : null,
+      tokensPerSecond: median(row.speedSamples),
+      speedSampleCount: row.speedSamples.length,
+    })));
+  }
 
   // The event stream may be empty while the provider snapshot still has a
   // useful long-window model ledger (for example after the app was reopened).
@@ -988,12 +1304,20 @@ function buildModelBreakdown(
       .map((model) => ({
         id: `${provider.id}:${model.slug || model.displayName || "unknown"}`,
         label: model.displayName || shortModelName(model.slug || "unknown"),
+        providerId: provider.id,
         provider: provider.displayName,
         tokens: Number(model.totalTokens) || 0,
         requests: Number(model.requests) || 0,
         measuredTokens: Number.isFinite(Number(model.totalTokens)),
         share: 0,
         scope: "90-day ledger" as const,
+        inputTokens: Number.isFinite(Number(model.inputTokens)) ? Number(model.inputTokens) : null,
+        cachedInputTokens: null,
+        outputTokens: Number.isFinite(Number(model.outputTokens)) ? Number(model.outputTokens) : null,
+        tokensPerSecond: Number.isFinite(Number(model.observedTokensPerSecond))
+          ? Number(model.observedTokensPerSecond)
+          : null,
+        speedSampleCount: Number(model.speedSampleCount) || 0,
       })),
   );
   return withBreakdownShares(fallback);
@@ -1018,6 +1342,62 @@ function tokenCountFromEvent(event: UsageEvent): number | null {
   const input = optionalNumber(event.billedInputTokens ?? event.inputTokens);
   const output = optionalNumber(event.billedOutputTokens ?? event.outputTokens);
   return input !== null || output !== null ? (input || 0) + (output || 0) : null;
+}
+
+interface EventTokenBreakdown {
+  inputTokens: number | null;
+  cachedInputTokens: number | null;
+  outputTokens: number | null;
+}
+
+function tokenBreakdownFromEvent(event: UsageEvent): EventTokenBreakdown {
+  const input = optionalNumber(event.billedInputTokens ?? event.inputTokens);
+  const cached = optionalNumber(event.cachedInputTokens);
+  const output = optionalNumber(event.billedOutputTokens ?? event.outputTokens);
+  return {
+    inputTokens: input,
+    cachedInputTokens: cached === null ? null : input === null ? cached : Math.min(input, cached),
+    outputTokens: output,
+  };
+}
+
+function tokensPerSecondFromEvent(event: UsageEvent): number | null {
+  const output = optionalNumber(event.outputTokens);
+  const durationMs = optionalNumber(event.durationMs);
+  const firstTokenMs = optionalNumber(event.firstTokenMs);
+  if (output === null || output <= 0 || durationMs === null || durationMs <= 0 || firstTokenMs === null) return null;
+  if (event.status === undefined || event.status < 200 || event.status >= 400) return null;
+  if (
+    event.retries
+    || event.streamAborted
+    || event.emptyCompletion
+    || event.emptyCompletionRetried
+    || event.progressOnlyRetried
+    || event.emptyCompletionUnrepairable
+  ) return null;
+  const generationDurationMs = durationMs - firstTokenMs;
+  if (generationDurationMs <= 0) return null;
+  const rate = (output * 1_000) / generationDurationMs;
+  return Number.isFinite(rate) && rate <= 500 ? Math.round(rate * 10) / 10 : null;
+}
+
+function median(values: number[]): number | null {
+  const sorted = values.filter((value) => Number.isFinite(value)).sort((left, right) => left - right);
+  if (!sorted.length) return null;
+  return Math.round(sorted[Math.floor(sorted.length / 2)] * 10) / 10;
+}
+
+function formatTokensPerSecond(value: number): string {
+  return `${value.toFixed(1)} tok/s`;
+}
+
+function formatEventTokenFacts(total: number | null, breakdown: EventTokenBreakdown): string {
+  const facts: string[] = [];
+  if (total !== null) facts.push(`${compactNumber(total)} tok`);
+  if (breakdown.inputTokens !== null) facts.push(`${compactNumber(breakdown.inputTokens)} input`);
+  if (breakdown.cachedInputTokens !== null) facts.push(`${compactNumber(breakdown.cachedInputTokens)} cache`);
+  if (breakdown.outputTokens !== null) facts.push(`${compactNumber(breakdown.outputTokens)} output`);
+  return facts.length ? facts.join(" · ") : "No token usage reported";
 }
 
 function optionalNumber(value: number | string | null | undefined): number | null {
@@ -1076,16 +1456,6 @@ function uniqueCount(values: Array<string | undefined>): number {
 
 function plural(count: number, word: string): string {
   return count === 1 ? word : `${word}s`;
-}
-
-function modelName(target: RouterTarget, slug: string): string {
-  return target.models.find((model) => model.slug === slug)?.displayName || slug;
-}
-
-function presenceLabel(mode: string): string {
-  if (mode === "follow-codex") return "Follows Codex";
-  if (mode === "always") return "Always on";
-  return mode;
 }
 
 function activityLabel(state: string): string {

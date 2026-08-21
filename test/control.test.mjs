@@ -7,6 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { pickerCommandArgs } from "../src/control-args.mjs";
+import { userModelEntry } from "../src/user-models.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -56,6 +57,13 @@ function probe(target, providers, usageEvents = [], options = {}) {
       { mode: 0o600 },
     );
   }
+  if (options.userModels) {
+    writeFileSync(
+      path.join(stateDir, "user-models.json"),
+      `${JSON.stringify({ version: 1, models: options.userModels })}\n`,
+      { mode: 0o600 },
+    );
+  }
   if (options.loginFree) {
     writeFileSync(
       path.join(stateDir, "config.toml"),
@@ -95,6 +103,26 @@ test("codex probe reports enabled models", () => {
   assert.equal(slice.target, "codex");
   const deepseek = slice.models.filter((m) => m.provider === "deepseek");
   assert.ok(deepseek.length > 0 && deepseek.every((m) => m.enabled));
+});
+
+test("desktop snapshots expose Ox Alpha Free instead of its opaque OpenCode id", () => {
+  const stored = {
+    ...userModelEntry({
+      providerId: "opencode-free",
+      upstreamId: "x-preview-f-free",
+      priority: 100,
+      metadata: { isFree: true },
+    }),
+    // Simulate curation written by an older router. Registry normalization
+    // updates presentation without changing the routing identity.
+    displayName: "x-preview-f-free (curated)",
+  };
+  const slice = probe("codex", ["opencode-free"], [], { userModels: [stored] });
+  const model = slice.models.find((entry) => entry.slug === "opencode-free/x-preview-f-free");
+  assert.equal(model.displayName, "Ox Alpha Free");
+  assert.equal(model.slug, "opencode-free/x-preview-f-free");
+  assert.equal(model.provider, "opencode-free");
+  assert.equal(model.enabled, true);
 });
 
 test("codex probe folds protocol variants into one provider family", () => {
@@ -734,6 +762,29 @@ test("aggregate overview covers every target", () => {
   const stateDir = mkdtempSync(path.join(os.tmpdir(), "control-targets-"));
   try {
     assert.deepEqual(overviewTargets(stateDir), ["codex"]);
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("aggregate overview exposes the router-owned catalog separately from client probes", () => {
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "control-catalog-"));
+  try {
+    const output = execFileSync(process.execPath, [path.join(root, "src", "control.mjs"), "--json"], {
+      cwd: root,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        CODEX_HOME: stateDir,
+        MODEL_ROUTER_STATE_DIR: stateDir,
+      },
+    });
+    const parsed = JSON.parse(output);
+    assert.equal(parsed.catalog.source, "codex-router");
+    assert.ok(Array.isArray(parsed.catalog.models));
+    assert.ok(Array.isArray(parsed.catalog.enabledProviders));
+    assert.ok(Array.isArray(parsed.catalog.picker.hidden));
+    assert.ok(Array.isArray(parsed.catalog.picker.visible));
   } finally {
     rmSync(stateDir, { recursive: true, force: true });
   }

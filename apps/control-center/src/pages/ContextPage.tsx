@@ -16,6 +16,7 @@ import {
   EmptyState,
   InlineNotice,
   PageHeader,
+  PanelSkeleton,
   SearchField,
   SectionHeading,
   StatStrip,
@@ -145,7 +146,9 @@ export function ContextPage({ target, api, refreshing, onRefresh, runAction }: C
           <span className="lhc-session-count">{filtered.length} shown</span>
         </div>
 
-        {filtered.length ? (
+        {!snapshot && !error ? (
+          <PanelSkeleton label="Loading task history" variant="list" count={5} />
+        ) : filtered.length ? (
           <div className="lhc-session-list" role="list">
             {filtered.map((session) => (
               <SessionRow

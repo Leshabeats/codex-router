@@ -285,3 +285,25 @@ test("scripted curation stores the advertised window, not the conservative guess
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// Committing a curated model used to shell out to bin/install, which
+// reinstalls the background service and waits on its health. That installer's
+// own EXIT trap disables the client config when the wait fails, so adding a
+// single model could leave the router unrouted -- and on a GUI-launched app it
+// failed outright, because bin/install resolves `node` by name off a PATH a
+// desktop process does not inherit. Curation publishes through the shared
+// overlay finalizer instead; nothing here may reach for the installer again.
+test("curation publishes through the overlay finalizer, never the installer", () => {
+  const source = readFileSync(path.join(root, "src", "curate-models.mjs"), "utf8");
+  assert.equal(
+    /bin["'\s,)\]]*\s*,\s*["']install|install\.ps1/.test(source),
+    false,
+    "curate-models.mjs must not invoke the installer to publish curated models",
+  );
+  assert.equal(
+    source.includes('from "node:child_process"'),
+    false,
+    "curate-models.mjs must not spawn processes to publish curated models",
+  );
+  assert.match(source, /applyModelOverlayPublication/);
+});

@@ -88,7 +88,8 @@ import {
   activityMetadataFromHeaders,
   threadIdFromHeaders,
 } from "./codex-session-names.mjs";
-import { translateGatewayError } from "./error-translation.mjs";
+import { gatewayErrorStatus, translateGatewayError } from "./error-translation.mjs";
+import { describeTransportFailure } from "./transport-failure.mjs";
 import { recordUsageEvent } from "./usage-events.mjs";
 import {
   classifySsePrefix,
@@ -2637,17 +2638,24 @@ async function handleResponses(request, response, requestUrl) {
       const provider = providerForModel(route);
       const retryAfterHeader = upstream.headers.get("retry-after");
       const retryAfterSeconds = Number(retryAfterHeader);
+      const translatedStatus = gatewayErrorStatus({
+        status: upstream.status,
+        bodyText: failedBodyText,
+      });
       if (retryAfterHeader) response.setHeader("Retry-After", retryAfterHeader);
       writeJson(
         response,
-        upstream.status,
+        translatedStatus,
         translateGatewayError({
           status: upstream.status,
           // Already drained above so the failover classifier could read it; a
           // second `.text()` on the same response yields "".
           bodyText: failedBodyText ?? (await upstream.text().catch(() => "")),
           modelName: route.displayName || route.slug,
-          providerName: provider?.ownedBy || provider?.displayName || route.provider,
+          providerName:
+            provider?.transport === "ollama"
+              ? "Ollama"
+              : provider?.ownedBy || provider?.displayName || route.provider,
           providerKind: provider?.kind,
           retryAfterSeconds: Number.isFinite(retryAfterSeconds)
             ? retryAfterSeconds
@@ -2663,8 +2671,8 @@ async function handleResponses(request, response, requestUrl) {
         firstTokenMs,
       });
       observeSubagentOutcome(request, route, upstream.status);
-      finalStatus = upstream.status;
-      activityStatus = upstream.status;
+      finalStatus = translatedStatus;
+      activityStatus = translatedStatus;
       usageRecorded = true;
       if (!QUIET) {
         console.error(
@@ -3276,18 +3284,33 @@ const server = http.createServer((request, response) => {
     // `TypeError: fetch failed` with the socket-level code buried on its cause
     // (#171). The whole chain belongs in the log; response bodies never do.
     console.error(`[codex-router] request failed: ${formatErrorChain(error)}`);
+    // A socket-level failure is the one class of error whose cause is safe to
+    // state and useless to withhold: it names a host and a network condition,
+    // never a credential or an upstream body. Without it Codex reports only
+    // its own transport wording -- `stream disconnected before completion` --
+    // and an unreachable upstream is indistinguishable from a router bug.
+    const transport = describeTransportFailure(error);
     if (!response.headersSent) {
       writeJson(response, status, {
         error: {
           type: "local_router_error",
-          message: "The local router could not complete the request.",
+          code: transport?.code,
+          message: transport
+            ? `The local router could not complete the request: ${transport.cause}.${transport.hint}`
+            : "The local router could not complete the request.",
         },
       });
     } else {
       // The body is already streaming, so there is no status left to change.
       // Destroying here reset the socket and cost the chunked terminator,
-      // which the client reported only as a decode failure.
-      endStreamedResponse(response);
+      // which the client reported only as a decode failure. The event code
+      // stays `local_router_stream_failed`: a diagnosed cause is extra detail
+      // about the same failure, not a different one for a client to branch on.
+      endStreamedResponse(response, {
+        message: transport
+          ? `The local router lost the upstream response stream: ${transport.cause}.${transport.hint}`
+          : undefined,
+      });
     }
   });
 });

@@ -8,6 +8,7 @@ import {
   formatReset,
   observedModelSpeed,
   readOnlyCapabilities,
+  serviceHealthRows,
   sevenDayTokens,
   sourceOptions,
   todayTokens,
@@ -113,6 +114,7 @@ function startPanel() {
     quotaCards: document.getElementById("quota-cards"),
     usageOverview: document.getElementById("usage-overview"),
     statusSummary: document.getElementById("status-summary"),
+    serviceHealth: document.getElementById("service-health"),
     activeRequests: document.getElementById("active-requests"),
     quotaResets: document.getElementById("quota-resets"),
     providers: document.getElementById("provider-list"),
@@ -473,6 +475,7 @@ function startPanel() {
     elements.statusSummary.textContent = activeCount
       ? `${activeCount} request${activeCount === 1 ? "" : "s"} in flight · ${activity.state || "active"}`
       : `Router ${state.health?.ok === false ? "offline" : "ready"} · nothing in flight`;
+    renderServiceHealth();
     elements.activeRequests.innerHTML = `<header><strong>Live requests</strong><small>${activeCount ? activeCount : "none"}</small></header>${active.length
       ? active.map((request) => {
           const started = Number(request.startedAt) || Date.now();
@@ -486,6 +489,19 @@ function startPanel() {
     elements.quotaResets.innerHTML = `<header><strong>Quota resets</strong><small>${resets.length || "none"}</small></header>${resets.length
       ? resets.map((card) => `<div class="status-row"><span><strong>${escapeHtml(card.providerName)}</strong><small>${escapeHtml(card.label)}</small></span><strong>${escapeHtml(formatReset(card.resetAt))}</strong></div>`).join("")
       : '<p class="status-empty">No reset times are available.</p>'}`;
+  }
+
+  function renderServiceHealth() {
+    const rows = serviceHealthRows(state.health);
+    const attention = rows.filter((row) => row.state === "offline" || row.state === "degraded").length;
+    const summary = attention
+      ? `${attention} needs attention`
+      : rows.every((row) => row.state === "standby" || row.state === "ready")
+        ? "All clear"
+        : "Checking";
+    elements.serviceHealth.innerHTML = `<header><strong>Service health</strong><small>${summary}</small></header><div class="service-health-list">${rows
+      .map((row) => `<div class="service-health-row" data-state="${row.state}"><span class="service-health-title"><i class="service-health-dot" aria-hidden="true"></i><strong>${escapeHtml(row.label)}</strong></span><span class="service-health-pill">${escapeHtml(row.status)}</span><small class="service-health-detail">${escapeHtml(row.detail)}</small></div>`)
+      .join("")}</div>`;
   }
 
   function renderQuotas() {
@@ -691,15 +707,23 @@ function startPanel() {
 
   function renderModelSettings() {
     const snapshot = state.snapshot?.targets?.codex;
+    const routerCatalog = state.snapshot?.catalog;
     const settings = snapshot?.modelSettings;
-    const models = snapshot?.models || [];
+    // External model identity and picker policy are router-owned. Keep
+    // Codex's native entries from the client probe as the only supplement.
+    const clientModels = snapshot?.models || [];
+    const nativeModels = clientModels.filter((model) => model.native);
+    const seenModels = new Set(nativeModels.map((model) => model.slug));
+    const models = routerCatalog
+      ? [...nativeModels, ...(routerCatalog.models || []).filter((model) => !seenModels.has(model.slug))]
+      : clientModels;
     const enabledModels = models.filter((model) => model.enabled);
     const pickerModels = models.filter((model) => model.enabled);
-    const subagent = settings?.subagents || { mode: "proven", enabled: [], disabled: [] };
+    const subagent = routerCatalog?.subagents || settings?.subagents || { mode: "proven", enabled: [], disabled: [] };
     const disabledSubagents = new Set(subagent.disabled || []);
     const selectedSubagents = new Set(subagent.enabled || []);
     const subagentProofs = subagent.proofs || {};
-    const hiddenModels = new Set(settings?.picker?.hidden || []);
+    const hiddenModels = new Set(routerCatalog?.picker?.hidden || settings?.picker?.hidden || []);
     const providerNames = new Map(
       (snapshot?.providers || []).map((provider) => [provider.id, provider.displayName]),
     );
@@ -740,8 +764,8 @@ function startPanel() {
           (group) => `<details class="model-provider-group" open>
             <summary><span>${escapeHtml(providerLabel(group.provider))}</span><span class="model-provider-count">${escapeHtml(groupSummary(group))}</span></summary>
             <div class="model-provider-toolbar">
-              <button class="text-button" type="button" data-command="${groupCommand}" data-provider-setting="${setting}" data-provider="${escapeHtml(group.provider)}" data-enabled="true">${onLabel}</button>
-              <button class="text-button" type="button" data-command="${groupCommand}" data-provider-setting="${setting}" data-provider="${escapeHtml(group.provider)}" data-enabled="false">${offLabel}</button>
+              ${setting === "picker" && group.items.every((model) => model.native === true && model.nativeClientManaged !== false) ? `<span class="model-provider-note">Managed by Codex</span>` : `<button class="text-button" type="button" data-command="${groupCommand}" data-provider-setting="${setting}" data-provider="${escapeHtml(group.provider)}" data-enabled="true">${onLabel}</button>
+              <button class="text-button" type="button" data-command="${groupCommand}" data-provider-setting="${setting}" data-provider="${escapeHtml(group.provider)}" data-enabled="false">${offLabel}</button>`}
             </div>
             <div class="model-settings-list">${group.items.map(rowMarkup).join("")}</div>
           </details>`,
@@ -803,10 +827,11 @@ function startPanel() {
 
     const pickerGroups = groupModels(pickerModels);
     const pickerRow = (model) => {
-        const visible = !hiddenModels.has(model.slug);
+        const nativeClientManaged = model.native === true && model.nativeClientManaged !== false;
+        const visible = nativeClientManaged ? model.visible !== false : !hiddenModels.has(model.slug);
         return `<label class="model-setting-row">
           <span><strong>${escapeHtml(model.displayName)}</strong><small>${escapeHtml(model.slug)}</small></span>
-          <span class="provider-check"><input type="checkbox" data-command="set_picker_model" data-picker="${escapeHtml(model.slug)}" aria-label="${escapeHtml(t("models.showModelAria", { model: model.displayName }))}"${visible ? " checked" : ""}${state.modelSettingsBusy ? " disabled" : ""}></span>
+          <span class="provider-check"><input type="checkbox" data-command="set_picker_model" data-picker="${escapeHtml(model.slug)}" aria-label="${escapeHtml(t("models.showModelAria", { model: model.displayName }))}"${visible ? " checked" : ""}${state.modelSettingsBusy || nativeClientManaged ? " disabled" : ""}></span>
         </label>`;
       };
 

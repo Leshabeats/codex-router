@@ -1,5 +1,12 @@
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import {
+  accessSync,
+  constants as fsConstants,
+  existsSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,6 +17,116 @@ const MAX_TIMEOUT_MS = 11 * 60_000;
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 const SECRET_WORD = /(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|password|secret|credential)/i;
 const APP_CONTRACT_LIMIT = 1024 * 1024;
+const WINDOWS_EXECUTABLE_EXTENSIONS = [".exe", ".com", ".cmd", ".bat"];
+
+function pathEntries(environment, platform = process.platform) {
+  const home = os.homedir();
+  const configuredNode = environment.CODEX_ROUTER_NODE_BIN;
+  const candidates = [
+    ...(configuredNode && path.isAbsolute(configuredNode) ? [path.dirname(configuredNode)] : []),
+    ...String(environment.PATH || "").split(path.delimiter),
+    ...(path.isAbsolute(process.execPath) ? [path.dirname(process.execPath)] : []),
+    // GUI applications on macOS and Linux are commonly launched without the
+    // login-shell PATH. Keep these explicit locations in the same search set
+    // the Control Center uses when reporting an installed runtime.
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    path.join(home, ".npm-global", "bin"),
+    path.join(home, ".local", "bin"),
+    path.join(home, ".volta", "bin"),
+    path.join(home, ".asdf", "shims"),
+    path.join(home, ".nvm", "current", "bin"),
+    ...(platform === "win32"
+      ? [
+          environment.ProgramFiles ? path.join(environment.ProgramFiles, "nodejs") : undefined,
+          environment.LOCALAPPDATA ? path.join(environment.LOCALAPPDATA, "Programs", "nodejs") : undefined,
+          environment.APPDATA ? path.join(environment.APPDATA, "npm") : undefined,
+        ]
+      : []),
+  ];
+  return [...new Set(candidates.filter((candidate) => candidate && path.isAbsolute(candidate)))];
+}
+
+/**
+ * Validate that a path can be executed, and return the path as named.
+ *
+ * The link target is resolved only to prove the entry is a regular file. The
+ * name itself must be preserved: a version-manager shim such as volta's is one
+ * dispatcher binary that decides what to run from the name it was invoked
+ * under, so `~/.volta/bin/node` -> `volta-shim` only behaves as Node while it
+ * is still called `node`. Returning the resolved target would hand a launcher
+ * that refuses to start to `bin/install`, which records it in the background
+ * service. `command -v` reports the unresolved path for the same reason.
+ */
+function runnableExecutable(candidate, platform = process.platform) {
+  if (!candidate || !path.isAbsolute(candidate)) return undefined;
+  try {
+    accessSync(candidate, platform === "win32" ? fsConstants.F_OK : fsConstants.X_OK);
+    return statSync(realpathSync(candidate)).isFile() ? candidate : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function discoverExecutable(environment, executable, platform = process.platform) {
+  const configured = executable === "node"
+    ? runnableExecutable(environment.CODEX_ROUTER_NODE_BIN, platform)
+    : undefined;
+  if (configured) return configured;
+  const names = platform === "win32" && !path.extname(executable)
+    ? WINDOWS_EXECUTABLE_EXTENSIONS.map((extension) => `${executable}${extension}`)
+    : [executable];
+  for (const directory of pathEntries(environment, platform)) {
+    for (const name of names) {
+      const found = runnableExecutable(path.join(directory, name), platform);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Desktop apps do not inherit a user's login-shell environment. Keep the
+ * router child commands able to invoke the checked-out POSIX/PowerShell
+ * installers by adding the directory containing a real Node executable to
+ * PATH. The router entrypoint itself can run inside Electron, but bin/install
+ * intentionally uses `node` and `npm` by name.
+ */
+export function runtimeEnvironment(
+  environment = process.env,
+  { platform = process.platform } = {},
+) {
+  const node = discoverExecutable(environment, "node", platform);
+  if (!node) {
+    // Do not hand an invalid explicit path to the installer. It would look
+    // deliberate in the generated service definition and fail on every boot.
+    const cleaned = { ...environment };
+    delete cleaned.CODEX_ROUTER_NODE_BIN;
+    return cleaned;
+  }
+  const npm = discoverExecutable(environment, "npm", platform);
+  const runtimeDirectories = [
+    path.dirname(node),
+    ...(npm ? [path.dirname(npm)] : []),
+  ];
+  const existing = String(environment.PATH || "")
+    .split(path.delimiter)
+    .filter(Boolean);
+  const PATH = [
+    ...runtimeDirectories,
+    ...existing.filter((entry) => !runtimeDirectories.includes(entry)),
+  ].join(path.delimiter);
+  return {
+    ...environment,
+    PATH,
+    // bin/install and install.ps1 re-resolve the runtime for the background
+    // service. Naming the executable the app itself found keeps a GUI-started
+    // install from picking a different Node than the one on this PATH, and it
+    // is the value the installer trusts before any PATH lookup.
+    CODEX_ROUTER_NODE_BIN: node,
+  };
+}
 
 function validSourceRoot(candidate) {
   if (!candidate || typeof candidate !== "string") return undefined;
@@ -289,7 +406,7 @@ function runEntrypoint(entry, args = [], { stdin, timeoutMs = DEFAULT_TIMEOUT_MS
   }
   const sourceRoot = discoverSourceRoot();
   const childEnvironment = {
-    ...process.env,
+    ...runtimeEnvironment(process.env),
     MODEL_ROUTER_SOURCE_ROOT: sourceRoot,
     MODEL_ROUTER_TARGET: "codex",
     ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: "1" } : {}),

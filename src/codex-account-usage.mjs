@@ -54,6 +54,11 @@ function normalizeWindow(window) {
   };
 }
 
+function optionalTokenCount(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? Math.trunc(number) : undefined;
+}
+
 export function normalizeCodexAccountUsage(rateLimitResponse, usageResponse, now = new Date()) {
   const buckets = Array.isArray(usageResponse?.dailyUsageBuckets)
     ? usageResponse.dailyUsageBuckets
@@ -66,6 +71,15 @@ export function normalizeCodexAccountUsage(rateLimitResponse, usageResponse, now
         .map((bucket) => ({
           startDate: bucket.startDate,
           tokens: Math.max(0, Math.trunc(bucket.tokens)),
+          ...(optionalTokenCount(bucket.inputTokens) !== undefined
+            ? { inputTokens: optionalTokenCount(bucket.inputTokens) }
+            : {}),
+          ...(optionalTokenCount(bucket.cachedInputTokens) !== undefined
+            ? { cachedInputTokens: optionalTokenCount(bucket.cachedInputTokens) }
+            : {}),
+          ...(optionalTokenCount(bucket.outputTokens) !== undefined
+            ? { outputTokens: optionalTokenCount(bucket.outputTokens) }
+            : {}),
         }))
         .sort((left, right) => left.startDate.localeCompare(right.startDate))
     : [];

@@ -11,7 +11,7 @@ import { existsSync, readFileSync } from "node:fs";
 
 import { NATIVE_CATALOG_PATH } from "./paths.mjs";
 import { nativeSessionAvailable } from "./codex-native-session.mjs";
-import { readHiddenModels } from "./model-picker-state.mjs";
+import { modelPickerSnapshot } from "./model-picker-state.mjs";
 import { readMultiAgentSettings } from "./multi-agent-state.mjs";
 import { selectedConfiguredListedModels } from "./provider-selection.mjs";
 import { applySubagentProofs, subagentProofSnapshot } from "./subagent-proofs.mjs";
@@ -62,13 +62,18 @@ export function nativeClientModels(nativeCatalogModels) {
 
 /** The routed models a published client should be offered, vision bridge included. */
 export function routedClientModels() {
-  const hidden = readHiddenModels();
+  const picker = modelPickerSnapshot();
+  const hidden = new Set(picker.hidden);
+  const visible = new Set(picker.visible);
   // The same machine-local capability proofs the Codex catalog honors: a model
   // this machine verified as a subagent is one everywhere the proven set is
   // consumed, or a client's tool-subagent preset silently disagrees with the
   // picker about which children exist.
   const selected = applySubagentProofs(
-    selectedConfiguredListedModels().filter((model) => !hidden.has(String(model.slug))),
+    selectedConfiguredListedModels().filter((model) => {
+      const slug = String(model.slug);
+      return !hidden.has(slug) && (!picker.hasExplicitVisibility || visible.has(slug));
+    }),
     subagentProofSnapshot(),
     { hidden, disabled: readMultiAgentSettings().disabled },
   );

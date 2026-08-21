@@ -35,8 +35,9 @@ and disables its activity-pill switch; router monitoring continues normally.
   prior model-provider setting when switched off.
 - **Models** has three accordions: **Subagent models** controls which
   registry-proven v2 models remain available as Codex subagent overrides, and
-  **Model picker** hides or shows individual models without changing their
-  provider connection.
+  **Model picker** is a persisted allowlist for individual router models
+  without changing their provider connection. Models added in curation are
+  selected automatically.
 - **Local LLMs** installs, enables, and removes Ollama models on this machine.
   Installs poll their detached download worker and show live percentage;
   removals keep a visible operation banner even when the installed row

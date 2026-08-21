@@ -57,7 +57,7 @@ test("the macOS tray labels Chutes as a metered API route", () => {
   );
   assert.match(
     sourceLabel,
-    /\["deepseek", "chutes"\]\.contains\(provider\)[\s\S]*return "METERED API"/,
+    /\["deepseek", "chutes", "orca"\]\.contains\(provider\)[\s\S]*return "METERED API"/,
   );
 });
 
@@ -150,13 +150,22 @@ test("Chutes public-catalog fixtures drive discovery, deterministic curation, an
       env,
     );
     assert.equal(discovery.status, 0, discovery.stderr);
-    assert.deepEqual(JSON.parse(discovery.stdout), {
+    const discovered = JSON.parse(discovery.stdout);
+    // A fixture comparison is not what the provider serves, so it is answered
+    // live and never stored.
+    assert.equal(discovered.cached, false);
+    assert.equal(discovered.stale, false);
+    assert.ok(discovered.fetchedAt);
+    assert.deepEqual({ ...discovered, cached: undefined, stale: undefined, fetchedAt: undefined }, {
       provider: "chutes",
       discovered: ["moonshotai/Kimi-K3-TEE", "zai-org/GLM-5.2-TEE"],
       registered: [],
       unregistered: ["moonshotai/Kimi-K3-TEE", "zai-org/GLM-5.2-TEE"],
       unavailable: [],
       contextLengths: { "moonshotai/Kimi-K3-TEE": 262144 },
+      cached: undefined,
+      stale: undefined,
+      fetchedAt: undefined,
       note: "Discovery never edits the registry. New models must pass the live compatibility test before they are listed in Codex.",
     });
 

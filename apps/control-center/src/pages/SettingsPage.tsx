@@ -1,11 +1,10 @@
-import { useState } from "react";
-import { AppWindow, Eye, Moon, RefreshCw, Server, Sun } from "lucide-react";
+import { useMemo, useState } from "react";
+import { AppWindow, Eye, Moon, RefreshCw, Server, Sun, Wrench } from "lucide-react";
 import { Badge, Button, Dialog, InlineNotice, PageHeader, SectionHeading, Toggle } from "../components";
 import { compactNumber } from "../lib";
 import { LANGUAGE_OPTIONS, type LanguageId, type Translate } from "../i18n";
-import type { PresenceSnapshot, RouterControlApi, RouterHealth, RouterTarget, VisionEngine } from "../types";
-
-type RunAction = (label: string, action: () => Promise<unknown>) => Promise<void>;
+import type { DoctorSnapshot, PresenceSnapshot, RouterControlApi, RouterHealth, RouterTarget, VisionEngine } from "../types";
+import { useOptimisticValues, type RunAction } from "../useOptimisticValues";
 
 // Mirrors RETENTION_MIN/MAX/DEFAULT_TTL_DAYS in src/tool-result-retention.mjs.
 // `0` is not "no retention" -- it is the stored answer meaning "keep the
@@ -41,6 +40,36 @@ export function SettingsPage({ target, health, presence, api, theme, onTheme, la
   runAction: RunAction;
 }) {
   const [confirmTrayDisable, setConfirmTrayDisable] = useState(false);
+  const [confirmRepair, setConfirmRepair] = useState(false);
+  const [repairing, setRepairing] = useState(false);
+  const [repairReport, setRepairReport] = useState<DoctorSnapshot | null>(null);
+  const repairFailures = useMemo(
+    () => (repairReport?.checks ?? []).filter((check) => check.status === "fail"),
+    [repairReport],
+  );
+
+  // Repair reinstalls and restarts the service, so it can outlast several
+  // ordinary actions. `runAction` owns the toast and the refresh; the report
+  // is kept here as well because runAction discards the resolved value and a
+  // repair that finishes with checks still failing needs to say which ones.
+  const runRepair = async () => {
+    if (!api || repairing) return;
+    setRepairing(true);
+    setRepairReport(null);
+    try {
+      await runAction(t("settings.maintenance.fix"), async () => {
+        const report = await api.repairInstall();
+        setRepairReport(report);
+        if (!report.ok) {
+          const failed = report.checks?.find((check) => check.status === "fail");
+          throw new Error(failed ? `${failed.name}: ${failed.detail || "check failed"}` : "Repair finished with failing checks.");
+        }
+        return report;
+      });
+    } finally {
+      setRepairing(false);
+    }
+  };
 
   const aging = target?.modelSettings?.toolResultAging;
   const agingLocked = aging?.environmentOverride === true;
@@ -55,15 +84,37 @@ export function SettingsPage({ target, health, presence, api, theme, onTheme, la
     : RETENTION_CHOICES;
 
   const bridge = target?.modelSettings?.visionBridge;
-  const engines: Array<VisionEngine & { group: string }> = [
-    ...(bridge?.nativeEngines ?? []).map((engine) => ({ ...engine, group: "native" })),
-    ...(bridge?.paidEngines ?? []).map((engine) => ({ ...engine, group: "paid" })),
-  ];
+  const toggleStates = useMemo(() => new Map([
+    ["signed-routing", target?.signedRouting === true],
+    ["tool-result-aging", aging?.enabled === true],
+    ["native-tool-result-aging", aging?.nativeEnabled === true],
+    ["vision-bridge", bridge?.enabled === true],
+  ]), [aging?.enabled, aging?.nativeEnabled, bridge?.enabled, target?.signedRouting]);
+  const optimisticToggles = useOptimisticValues(toggleStates, runAction);
+  const toolResultAgingEnabled = optimisticToggles.value("tool-result-aging", aging?.enabled === true);
+  // Same split the tray menu shows: the models the operator already pays for,
+  // then the ones their ChatGPT plan covers. Which bill a choice lands on is
+  // the only thing separating two otherwise identical engine names.
+  const paidEngines = bridge?.paidEngines ?? [];
+  const nativeEngines = bridge?.nativeEngines ?? [];
   const selectedEngine = bridge?.engine || "auto";
-  const selectedEngineMeta = engines.find((engine) => engine.slug === selectedEngine);
-  const effortOptions = selectedEngineMeta?.efforts?.length
+  const selectedEngineMeta = [...paidEngines, ...nativeEngines].find((engine) => engine.slug === selectedEngine);
+  // A pinned engine can leave both lists -- a native model that dropped out of
+  // the picker, a provider switched off. The tray keeps naming it; carry it as
+  // its own entry so the select cannot silently fall back to its first option
+  // and report an engine the router is not using.
+  const unlistedEngine: VisionEngine | null = selectedEngine !== "auto" && selectedEngine !== "local" && !selectedEngineMeta
+    ? { slug: selectedEngine, displayName: bridge?.resolvedEngineName || bridge?.resolvedEngine || selectedEngine }
+    : null;
+  const engineEfforts = selectedEngineMeta?.efforts?.length
     ? selectedEngineMeta.efforts
     : bridge?.availableEfforts ?? [];
+  const selectedEffort = bridge?.effort || "default";
+  // Same reason as the engine above: show the pinned level even when the
+  // engine that declared it is no longer listed.
+  const effortOptions = selectedEffort !== "default" && !engineEfforts.includes(selectedEffort)
+    ? [...engineEfforts, selectedEffort]
+    : engineEfforts;
 
   return (
     <>
@@ -75,7 +126,7 @@ export function SettingsPage({ target, health, presence, api, theme, onTheme, la
             <div className="settings-list">
               <div className="setting-row">
                 <div><strong>{t("settings.signedRouting.title")}</strong><small>{t("settings.signedRouting.detail")}</small></div>
-                <Toggle checked={target?.signedRouting === true} disabled={!api || !target} label={t("settings.signedRouting.title")} onChange={(enabled) => api && void runAction("Change signed routing", () => api.setSignedRouting(enabled))} />
+                <Toggle checked={optimisticToggles.value("signed-routing", target?.signedRouting === true)} disabled={!api || !target} label={t("settings.signedRouting.title")} onChange={(enabled) => api && void optimisticToggles.mutate("signed-routing", enabled, "Change signed routing", () => api.setSignedRouting(enabled))} />
               </div>
             </div>
             <InlineNotice tone="neutral" title={t("settings.restart.title")}>{t("settings.restart.body")}</InlineNotice>
@@ -113,11 +164,11 @@ export function SettingsPage({ target, health, presence, api, theme, onTheme, la
                 <div className="settings-list">
                   <div className="setting-row">
                     <div><strong>{t("settings.context.enable.title")}</strong><small>{t("settings.context.enable.detail")}</small></div>
-                    <Toggle checked={aging.enabled === true} disabled={!api || agingLocked} label={t("settings.context.enable.title")} onChange={(enabled) => api && void runAction("Change tool result compaction", () => api.setToolResultAging(enabled))} />
+                    <Toggle checked={toolResultAgingEnabled} disabled={!api || agingLocked} label={t("settings.context.enable.title")} onChange={(enabled) => api && void optimisticToggles.mutate("tool-result-aging", enabled, "Change tool result compaction", () => api.setToolResultAging(enabled))} />
                   </div>
                   <div className="setting-row">
                     <div><strong>{t("settings.context.native.title")}</strong><small>{t("settings.context.native.detail")}</small></div>
-                    <Toggle checked={aging.nativeEnabled === true} disabled={!api || agingLocked || aging.enabled !== true} label={t("settings.context.native.title")} onChange={(enabled) => api && void runAction("Change native tool result compaction", () => api.setNativeToolResultAging(enabled))} />
+                    <Toggle checked={optimisticToggles.value("native-tool-result-aging", aging.nativeEnabled === true)} disabled={!api || agingLocked || !toolResultAgingEnabled} label={t("settings.context.native.title")} onChange={(enabled) => api && void optimisticToggles.mutate("native-tool-result-aging", enabled, "Change native tool result compaction", () => api.setNativeToolResultAging(enabled))} />
                   </div>
                   <div className="setting-row">
                     <div><strong>{t("settings.context.ttl.title")}</strong><small>{t("settings.context.ttl.detail")}</small></div>
@@ -162,7 +213,7 @@ export function SettingsPage({ target, health, presence, api, theme, onTheme, la
                 <div className="settings-list">
                   <div className="setting-row">
                     <div><strong>{t("settings.vision.enable.title")}</strong><small>{t("settings.vision.enable.detail")}</small></div>
-                    <Toggle checked={bridge.enabled === true} disabled={!api} label={t("settings.vision.enable.title")} onChange={(enabled) => api && void runAction("Change vision bridge", () => api.setVisionBridgeEnabled(enabled))} />
+                    <Toggle checked={optimisticToggles.value("vision-bridge", bridge.enabled === true)} disabled={!api} label={t("settings.vision.enable.title")} onChange={(enabled) => api && void optimisticToggles.mutate("vision-bridge", enabled, "Change vision bridge", () => api.setVisionBridgeEnabled(enabled))} />
                   </div>
                   <div className="setting-row">
                     <div><strong>{t("settings.vision.engine.title")}</strong><small>{t("settings.vision.engine.detail")}</small></div>
@@ -172,8 +223,22 @@ export function SettingsPage({ target, health, presence, api, theme, onTheme, la
                       disabled={!api}
                       onChange={(event) => api && void runAction("Change vision engine", () => api.setVisionBridgeEngine(event.target.value))}
                     >
-                      <option value="auto">{t("settings.vision.engine.auto", { name: bridge.resolvedEngineName || bridge.resolvedEngine || "—" })}</option>
-                      {engines.map((engine) => <option key={engine.slug} value={engine.slug}>{engine.displayName}</option>)}
+                      {/* No standing "Auto" choice, matching the tray: the ranking behind it
+                          scored cost by slug spelling, so it tied across a normal install and
+                          resolved alphabetically. It stays visible only while the install is
+                          still on it, so the row reports the truth without offering it back. */}
+                      {selectedEngine === "auto" ? <option value="auto">{t("settings.vision.engine.auto", { name: bridge.resolvedEngineName || bridge.resolvedEngine || "—" })}</option> : null}
+                      {unlistedEngine ? <option value={unlistedEngine.slug}>{unlistedEngine.displayName}</option> : null}
+                      {paidEngines.length ? (
+                        <optgroup label={t("settings.vision.engine.paid")}>
+                          {paidEngines.map((engine) => <option key={engine.slug} value={engine.slug}>{engine.displayName}</option>)}
+                        </optgroup>
+                      ) : null}
+                      {nativeEngines.length ? (
+                        <optgroup label={t("settings.vision.engine.native")}>
+                          {nativeEngines.map((engine) => <option key={engine.slug} value={engine.slug}>{engine.displayName}</option>)}
+                        </optgroup>
+                      ) : null}
                       {bridge.local ? <option value="local">{t("settings.vision.engine.local", { name: bridge.local.model || "runtime" })}</option> : null}
                     </select>
                   </div>
@@ -181,7 +246,7 @@ export function SettingsPage({ target, health, presence, api, theme, onTheme, la
                     <div><strong>{t("settings.vision.effort.title")}</strong><small>{effortOptions.length ? t("settings.vision.effort.detail") : t("settings.vision.effort.none")}</small></div>
                     <select
                       aria-label={t("settings.vision.effort.title")}
-                      value={bridge.effort || "default"}
+                      value={selectedEffort}
                       disabled={!api || !effortOptions.length}
                       onChange={(event) => api && void runAction("Change vision effort", () => api.setVisionBridgeEffort(event.target.value))}
                     >
@@ -192,7 +257,7 @@ export function SettingsPage({ target, health, presence, api, theme, onTheme, la
                 </div>
                 <div className="surface-summary">
                   <Eye aria-hidden size={20} strokeWidth={1.6} />
-                  <div><strong>{bridge.resolvedEngineName || bridge.resolvedEngine || "—"}</strong><small>{t("settings.vision.localNote")}</small></div>
+                  <div><strong>{bridge.resolvedEngineName || bridge.resolvedEngine || bridge.engine || "—"}</strong><small>{t("settings.vision.localNote")}</small></div>
                 </div>
               </>
             ) : <InlineNotice tone="neutral" title={t("settings.vision.title")}>{t("settings.vision.unavailable")}</InlineNotice>}
@@ -232,13 +297,52 @@ export function SettingsPage({ target, health, presence, api, theme, onTheme, la
           </section>
 
           <section className="panel-section">
-            <SectionHeading title={t("settings.maintenance.title")} description="Updates and repairs are terminal-only during the beta." />
-            <InlineNotice tone="neutral" title="Run maintenance in an interactive terminal">
-              Use <code>bin/model-router codex doctor --fix</code> to repair the installation, or the documented update command for your install method. The Control Center keeps Doctor read-only.
+            <SectionHeading title={t("settings.maintenance.title")} description={t("settings.maintenance.description")} />
+            <div className="surface-summary">
+              <Wrench aria-hidden size={20} strokeWidth={1.6} />
+              <div><strong>{t("settings.maintenance.repairTitle")}</strong><small>{t("settings.maintenance.footnote")}</small></div>
+            </div>
+            <div className="settings-actions">
+              <Button variant="primary" disabled={!api || repairing} onClick={() => setConfirmRepair(true)}>
+                {repairing ? t("settings.maintenance.fixRunning") : t("settings.maintenance.fix")}
+              </Button>
+            </div>
+            {repairReport && repairReport.ok ? (
+              <InlineNotice tone="success" title={t("settings.maintenance.fixDone")}>
+                {t("settings.maintenance.fixDoneDetail")}
+              </InlineNotice>
+            ) : null}
+            {repairFailures.length ? (
+              <InlineNotice tone="danger" title={t("settings.maintenance.fixIncomplete")}>
+                {/* Repair ran; these checks still fail. Naming them with their
+                    own remedy is the whole point of showing the report -- a
+                    bare "it failed" would send the user back to the terminal
+                    the button exists to replace. */}
+                {repairFailures.map((check) => `${check.name}: ${check.detail || ""}${check.fix ? ` — ${check.fix}` : ""}`).join(" · ")}
+              </InlineNotice>
+            ) : null}
+            <InlineNotice tone="neutral" title={t("settings.maintenance.update")}>
+              {t("settings.maintenance.updateNote")}
             </InlineNotice>
           </section>
         </div>
       </div>
+
+      <Dialog
+        open={confirmRepair}
+        title={t("settings.maintenance.confirm.title")}
+        description={t("settings.maintenance.confirm.description")}
+        onClose={() => setConfirmRepair(false)}
+      >
+        <p className="dialog-copy">{t("settings.maintenance.confirm.body")}</p>
+        <div className="dialog-actions">
+          <Button variant="secondary" onClick={() => setConfirmRepair(false)}>{t("settings.desktop.confirm.cancel")}</Button>
+          <Button variant="primary" onClick={() => {
+            setConfirmRepair(false);
+            void runRepair();
+          }}>{t("settings.maintenance.fix")}</Button>
+        </div>
+      </Dialog>
 
       <Dialog open={confirmTrayDisable} title={t("settings.desktop.confirm.title")} description={t("settings.desktop.confirm.description")} onClose={() => setConfirmTrayDisable(false)}>
         <p className="dialog-copy">{t("settings.desktop.confirm.body")}</p>

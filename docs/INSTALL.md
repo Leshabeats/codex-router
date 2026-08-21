@@ -108,10 +108,11 @@ API-key providers use hidden prompts:
 ./bin/provider-key zai-coding set
 ./bin/provider-key zai-api set
 ./bin/provider-key github-copilot set
+./bin/provider-key orca set
 ```
 
 Replace a stored key by running `set` again. Delete one with `remove`, which
-also hides the provider from the model picker:
+also hides the provider from every installed client's model picker:
 
 ```sh
 ./bin/provider-key deepseek remove
@@ -142,11 +143,19 @@ Windows:
 ./codex-router.ps1 provider-key grok-api set
 ./codex-router.ps1 provider-key anthropic-api set
 ./codex-router.ps1 provider-key github-copilot set
+./codex-router.ps1 provider-key orca set
 ```
 
-Kimi OAuth, Kimi Platform, DeepSeek, xAI, Anthropic, and GitHub Copilot are separate account and billing
+Kimi OAuth, Kimi Platform, DeepSeek, xAI, Anthropic, GitHub Copilot, and OrcaRouter are separate account and billing
 systems. Never put a credential in chat, a command argument, shell history,
 the provider registry, or a tracked file.
+
+OrcaRouter is catalog-only: after storing its key, use
+`./bin/curate-models orca` to choose from the account-visible live
+catalog, or `./bin/curate-models orca --free-only --apply` to add its
+current concrete zero-price chat deployments. They appear under OrcaRouter
+with a **Free** badge; the moving `orcarouter/free` meta-router is excluded.
+Free inference still requires the key.
 
 GitHub Copilot requires a fine-grained PAT with the **Copilot Requests**
 permission. After storing it, run `./bin/curate-models github-copilot`; the
@@ -191,6 +200,36 @@ proxy variables remain unused by the router.
 
 Include `localhost`, `127.0.0.1`, and `::1` in `no_proxy` because the router's
 own processes communicate over loopback.
+
+### GUI clients and the system proxy
+
+`no_proxy` covers processes that inherit your shell. Apps launched from the
+Dock, Finder, or an IDE inherit nothing and fall back to the operating
+system's proxy settings instead, whose bypass list routinely omits loopback.
+When that happens the client sends its router request to the proxy, the proxy
+closes the connection, and the client reports a bare transport failure such as
+`stream disconnected before completion: error sending request for url`. Nothing
+reaches the router, so `router.log` stays empty and `doctor` still reports the
+service healthy -- the terminal keeps working the whole time, because a shell
+exports `no_proxy`.
+
+`doctor` detects this and names the remedy. On macOS, put loopback into the
+session every GUI app inherits:
+
+```sh
+launchctl setenv NO_PROXY "localhost,127.0.0.1,::1"
+```
+
+Then fully quit and reopen the client; apps read this only at launch. The
+setting lasts until you log out. To make it permanent, add a login agent at
+`~/Library/LaunchAgents/local.noproxy-loopback.plist` that runs the same
+command with `RunAtLoad`, and load it with
+`launchctl bootstrap gui/$(id -u) <plist>`.
+
+Adding loopback to the system bypass list (System Settings -> Network ->
+Details -> Proxies) is equivalent in principle, but VPN clients that manage
+the system proxy tend to rewrite that list whenever they reconnect, and some
+clients do not honour it for literal loopback addresses.
 
 `all_proxy` / `ALL_PROXY` is also preserved for child processes that support
 it, but the router's Undici transport requires `http_proxy` or `https_proxy` to

@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { instructionOverlayExists } from "./instruction-overlays.mjs";
 import { SOURCE_ROOT } from "./paths.mjs";
-import { readUserModels } from "./user-models.mjs";
+import { officialModelDisplayName, readUserModels } from "./user-models.mjs";
 
 export const REGISTRY_PATH =
   process.env.MODEL_ROUTER_REGISTRY ||
@@ -449,12 +449,16 @@ function endpointProblem(model, provider) {
 // has to be provider-shaped so the existing base-URL and credential chains
 // accept it. Identity is derived here rather than read from the fragment.
 function normalizedModel(model, provider) {
-  if (!provider?.perModelEndpoint) return Object.freeze(model);
+  const officialDisplayName = officialModelDisplayName(model.provider, model.upstreamModel);
+  const presented = officialDisplayName && model.displayName !== officialDisplayName
+    ? { ...model, displayName: officialDisplayName }
+    : model;
+  if (!provider?.perModelEndpoint) return Object.freeze(presented);
   return Object.freeze({
-    ...model,
+    ...presented,
     endpoint: Object.freeze({
-      ...model.endpoint,
-      id: model.slug,
+      ...presented.endpoint,
+      id: presented.slug,
       kind: "openai-compatible",
     }),
   });
@@ -547,6 +551,9 @@ function modelProblem(model, providers, slugs, gatewayModels) {
   // never needs it, so only false is accepted.
   if (model.visionBridge !== undefined && model.visionBridge !== false) {
     return `model ${model.slug} may only set visionBridge to false`;
+  }
+  if (model.isFree !== undefined && typeof model.isFree !== "boolean") {
+    return `model ${model.slug} has an invalid isFree flag`;
   }
   // "hosted" means the provider's own backend executes web searches
   // server-side (xAI's Responses proxy today). "standalone" means Codex

@@ -6,12 +6,13 @@ export type ViewId =
   | "context"
   | "settings"
   | "usage"
-  | "status"
-  | "providers";
+  | "status";
 
-export interface ReasoningLevel {
-  effort: string;
-  description?: string;
+export type ModelViewFocus = "providers" | "models";
+
+export interface ModelViewFocusRequest {
+  region: ModelViewFocus;
+  id: number;
 }
 
 export interface RouterModel {
@@ -22,13 +23,16 @@ export interface RouterModel {
   gatewayModel?: string;
   enabled: boolean;
   native?: boolean;
+  /** Base native Codex entries stay client-managed; variants remain router-managed. */
+  nativeClientManaged?: boolean;
   multiAgentVersion?: "v1" | "v2" | string;
   visible: boolean;
   defaultEffort?: string;
-  reasoningLevels?: ReasoningLevel[];
+  reasoningLevels?: string[];
   contextWindow?: number;
   autoCompact?: number;
   inputModalities?: string[];
+  isFree?: boolean;
 }
 
 export interface SubagentSettings {
@@ -92,6 +96,41 @@ export interface LocalModelsSnapshot {
     percent?: number;
     detail?: string;
   } | null;
+  mlx?: {
+    host?: {
+      supported: boolean;
+      platform?: string;
+      arch?: string;
+      reason?: string;
+    };
+    model: {
+      id: string;
+      slug: string;
+      source: string;
+      precision: string;
+      contextLength: number;
+    };
+    prerequisites: {
+      lms: { available: boolean; automaticWithYes?: boolean; source?: string; installHint?: string };
+      uvx: { available: boolean; automaticWithYes?: boolean; source?: string; installHint?: string };
+    };
+    operation: {
+      status: "idle" | "preparing" | "downloading" | "loading" | "starting-server" | "verifying" | "publishing" | "done" | "error" | "cancelled";
+      detail?: string;
+      percent?: number;
+      progressMode?: "determinate" | "indeterminate";
+      startedAt?: number | null;
+      updatedAt?: number | null;
+      controllerPid?: number | null;
+      workerPid?: number | null;
+      error?: string;
+    };
+    runtime: {
+      loopbackReachable: boolean;
+      served: boolean;
+      published: boolean;
+    };
+  };
 }
 
 export interface VisionEngine {
@@ -168,10 +207,12 @@ export interface RouterTarget {
   loginFreeManaged?: boolean;
   signedRouting?: boolean;
   signedRoutingManaged?: boolean;
+  routerDefaultModel?: string;
+  routerDefaultManaged?: boolean;
   usageEvents?: UsageEvent[];
   modelSettings?: {
     subagents: SubagentSettings;
-    picker: { hidden: string[] };
+    picker: { hidden: string[]; visible?: string[]; hasExplicitVisibility?: boolean; path?: string };
     localModels: LocalModelsSnapshot;
     visionBridge: VisionBridgeSnapshot;
     toolResultAging?: ToolResultAgingSnapshot;
@@ -180,12 +221,23 @@ export interface RouterTarget {
 
 export interface RouterSnapshot {
   targets: { codex?: RouterTarget; [target: string]: RouterTarget | undefined };
+  /** The router-owned model policy, independent of any client adapter. */
+  catalog?: RouterCatalogSnapshot;
+}
+
+export interface RouterCatalogSnapshot {
+  source: "codex-router" | string;
+  configured: boolean;
+  enabledProviders: string[];
+  models: RouterModel[];
+  picker: { hidden: string[]; visible?: string[]; hasExplicitVisibility?: boolean; path?: string };
+  subagents: SubagentSettings;
 }
 
 export interface ProviderSetup {
   id: string;
   displayName: string;
-  kind: "oauth" | "api";
+  kind: "oauth" | "api" | "anonymous" | "per-model";
   configured: boolean;
   action: string;
   planNote?: string;
@@ -195,6 +247,23 @@ export interface ProviderSetup {
   signIn?: boolean;
   signedIn?: boolean;
   signInAction?: string;
+}
+
+export interface ProviderCatalog {
+  provider: string;
+  discovered: string[];
+  registered: string[];
+  unregistered: string[];
+  unavailable: string[];
+  contextLengths?: Record<string, number>;
+  free?: string[];
+  /** True when the list came from the stored copy rather than a live request. */
+  cached?: boolean;
+  /** True when the stored copy is past its trust window and wants re-reading. */
+  stale?: boolean;
+  /** ISO timestamp of the last time the provider itself published this list. */
+  fetchedAt?: string;
+  note?: string;
 }
 
 export interface ProviderSetupSnapshot {
@@ -312,6 +381,10 @@ export interface UsageEvent {
   provider?: string;
   status?: number;
   durationMs?: number;
+  /** Milliseconds until the upstream response headers arrived. */
+  responseStartMs?: number;
+  /** Milliseconds until the first generated token reached the client. */
+  firstTokenMs?: number;
   inputTokens?: number;
   billedInputTokens?: number;
   cachedInputTokens?: number;
@@ -323,6 +396,8 @@ export interface UsageEvent {
   streamAborted?: boolean;
   emptyCompletion?: boolean;
   emptyCompletionRetried?: boolean;
+  progressOnlyRetried?: boolean;
+  emptyCompletionUnrepairable?: boolean;
   emptyCompletionGuardReleased?: boolean;
 }
 
@@ -342,10 +417,19 @@ export interface ActiveRequest {
   isSubagent?: boolean;
 }
 
+export interface RouterServiceHealth {
+  reachable?: boolean;
+  enabled?: boolean;
+}
+
 export interface RouterHealth {
   ok: boolean;
   version?: string;
   error?: string;
+  degraded?: string[];
+  gateway?: RouterServiceHealth;
+  oauth?: RouterServiceHealth;
+  api?: RouterServiceHealth;
   activity?: {
     state?: "idle" | "starting" | "generating" | "error" | "offline" | string;
     activeCount?: number;
@@ -444,26 +528,32 @@ export interface RouterControlApi {
   getSnapshot(): Promise<RouterSnapshot>;
   getHealth(): Promise<RouterHealth>;
   getProviders(): Promise<ProviderSetupSnapshot>;
+  discoverProviderModels(provider: string, options?: { refresh?: boolean }): Promise<ProviderCatalog>;
   getAccountUsage(): Promise<AccountUsage>;
   getProviderUsage(): Promise<ProviderUsageSnapshot>;
   getLocalModels(): Promise<LocalModelsSnapshot>;
   getVisionBridge(): Promise<VisionBridgeSnapshot>;
   getToolResultAging(): Promise<ToolResultAgingSnapshot>;
   getDoctor(): Promise<DoctorSnapshot>;
+  repairInstall(): Promise<DoctorSnapshot>;
   getPresence(): Promise<PresenceSnapshot>;
   getHarnesses(): Promise<HarnessSnapshot>;
   getContextSessions(): Promise<ContextSessionsSnapshot>;
   refreshAll(): Promise<unknown>;
   setProviderEnabled(provider: string, enabled: boolean): Promise<unknown>;
+  addProviderModels(provider: string, modelIds: string[]): Promise<unknown>;
   connectProvider(provider: string): Promise<unknown>;
   saveProviderCredential(provider: string, credential: string): Promise<unknown>;
   removeProviderCredential(provider: string): Promise<unknown>;
   setSubagentMode(mode: "all" | "selected" | "proven"): Promise<unknown>;
   setSubagentModel(slug: string, enabled: boolean): Promise<unknown>;
+  setSubagentEffort(slug: string, effort: string): Promise<unknown>;
   setSubagentSelection(selectAll: boolean): Promise<unknown>;
   setPickerModel(slug: string, visible: boolean): Promise<unknown>;
   setPickerModels(showAll: boolean): Promise<unknown>;
   installLocalModel(model: string, force?: boolean): Promise<unknown>;
+  installLocalMlx(): Promise<unknown>;
+  cancelLocalMlx(): Promise<unknown>;
   uninstallLocalModel(model: string): Promise<unknown>;
   setLocalModelEnabled(model: string, enabled: boolean): Promise<unknown>;
   benchmarkLocalModel(model: string): Promise<unknown>;
@@ -478,6 +568,8 @@ export interface RouterControlApi {
   setNativeToolResultAging(enabled: boolean): Promise<ToolResultAgingSnapshot>;
   setToolResultRetentionTtl(days: number | "default" | "off"): Promise<ToolResultAgingSnapshot>;
   setDefaultModel(model: string): Promise<unknown>;
+  setRouterDefault(model: string): Promise<unknown>;
+  clearRouterDefault(): Promise<unknown>;
   setSignedRouting(enabled: boolean): Promise<unknown>;
   setPresence(mode: "always" | "follow-codex"): Promise<PresenceSnapshot>;
   controlService(action: "status" | "start"): Promise<unknown>;

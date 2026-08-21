@@ -7,7 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const { PROVIDERS } = await import("../src/model-registry.mjs");
+const { MODELS, PROVIDERS } = await import("../src/model-registry.mjs");
 const { modelContextLengths, modelIds } = await import("../src/model-discovery.mjs");
 
 test("model discovery compares fixtures without needing or exposing a key", () => {
@@ -145,6 +145,71 @@ test("anonymous discovery keeps only each provider's documented free models", ()
     ] }, kilo),
     ["minimax/minimax-m2.1:free", "z-ai/glm-5:free"],
   );
+});
+
+test("the current OpenCode catalogs remain fully fetchable without preselecting Zen", () => {
+  // Captured from the two official endpoints on 2026-08-21. Free/Zen stay
+  // catalog-only, so this proves the live response is filtered at discovery
+  // time instead of turning a changing remote list into checked-in defaults.
+  const zenIds = [
+    "big-pickle",
+    "claude-fable-5",
+    "deepseek-v4-flash-free",
+    "gpt-5.6-sol",
+    "hy3-free",
+    "laguna-s-2.1-free",
+    "mimo-v2.5-free",
+    "muse-spark-1.2-contributor-free",
+    "nemotron-3-ultra-free",
+    "nemotron-3.5-lightning-free",
+    "x-preview-f-free",
+  ];
+  assert.deepEqual(
+    modelIds({ data: zenIds.map((id) => ({ id })) }, PROVIDERS.get("opencode-free")),
+    [
+      "big-pickle",
+      "deepseek-v4-flash-free",
+      "hy3-free",
+      "laguna-s-2.1-free",
+      "mimo-v2.5-free",
+      "muse-spark-1.2-contributor-free",
+      "nemotron-3-ultra-free",
+      "nemotron-3.5-lightning-free",
+      "x-preview-f-free",
+    ],
+  );
+
+  const goLive = [
+    "deepseek-v4-flash", "deepseek-v4-pro", "glm-5", "glm-5.1", "glm-5.2", "glm-5.3",
+    "gpt-5.6-luna", "grok-4.5", "hy3", "hy3-preview", "kimi-k2.5", "kimi-k2.6",
+    "kimi-k2.7-code", "kimi-k3", "mimo-v2-omni", "mimo-v2-pro", "mimo-v2.5",
+    "mimo-v2.5-pro", "minimax-m2.5", "minimax-m2.7", "minimax-m3",
+    "muse-spark-1.2-contributor", "qwen3.5-plus", "qwen3.6-plus", "qwen3.7-max",
+    "qwen3.7-plus", "qwen3.8-max",
+  ];
+  assert.deepEqual(
+    modelIds({ data: goLive.map((id) => ({ id })) }, PROVIDERS.get("opencode-go")),
+    [...goLive].sort(),
+  );
+});
+
+test("the checked-in OpenCode Go set matches the official current-model table", () => {
+  const documented = [
+    "deepseek-v4-flash", "deepseek-v4-pro", "glm-5.1", "glm-5.2", "glm-5.3",
+    "gpt-5.6-luna", "grok-4.5", "hy3", "kimi-k2.6", "kimi-k2.7-code", "kimi-k3",
+    "mimo-v2.5", "mimo-v2.5-pro", "minimax-m2.7", "minimax-m3",
+    "muse-spark-1.2-contributor", "qwen3.6-plus", "qwen3.7-max", "qwen3.7-plus",
+    "qwen3.8-max",
+  ].sort();
+  const registered = MODELS
+    .filter(({ provider }) => ["opencode-go", "opencode-go-messages", "opencode-go-responses"].includes(provider))
+    .map(({ upstreamModel }) => upstreamModel)
+    .sort();
+  assert.deepEqual(registered, documented);
+  for (const model of MODELS.filter(({ upstreamModel }) => documented.includes(upstreamModel))) {
+    if (!model.provider.startsWith("opencode-go")) continue;
+    assert.notEqual(model.multiAgentVersion, "v2", `${model.slug} lacks native Codex collaboration proof`);
+  }
 });
 
 test("discovery reports the context length the provider advertises", () => {

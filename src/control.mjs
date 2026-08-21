@@ -15,8 +15,10 @@ import { withNativeContextVariants } from "./native-context-variants.mjs";
 // vary by target, so reading it here does not disturb the per-target probes
 // below that re-import paths with their own MODEL_ROUTER_TARGET.
 import {
+  CALLER_SECRET_PATH,
   DSH_CATALOG_PATH,
   GEMINI_CATALOG_PATH,
+  PORTS,
   PROVIDER_SELECTION_PATH,
 } from "./paths.mjs";
 // Same reasoning: presence is a property of the shared plane, not of a target,
@@ -24,6 +26,7 @@ import {
 import { presenceSnapshot } from "./presence-state.mjs";
 import { harnessSnapshotWithWeb } from "./dsh-install.mjs";
 import { USER_MODELS_PATH } from "./user-models.mjs";
+import { refreshTargetPickerIfInstalled } from "./target-integration.mjs";
 
 // Cross-target control plane for a tray/UI (e.g. the planned pane fork). It
 // reads which registry models are enabled per target and toggles them. Toggling
@@ -112,6 +115,11 @@ function nativeCodexModels(
   if (!existsSync(catalogPath)) return [];
   try {
     const parsed = JSON.parse(readFileSync(catalogPath, "utf8"));
+    const nativeBaseSlugs = new Set(
+      (Array.isArray(parsed.models) ? parsed.models : [])
+        .map((model) => String(model?.slug || ""))
+        .filter(Boolean),
+    );
     return promoteNativeMultiAgent(
       // The capture holds what Codex published; the extended-window variants
       // are the router's own additions to the same group, and the tray is
@@ -133,8 +141,14 @@ function nativeCodexModels(
         gatewayModel: model.slug,
         enabled: true,
         native: true,
+        // Omit the field for base entries for compatibility with existing
+        // probe consumers; a false marker identifies synthesized variants.
+        ...(nativeBaseSlugs.has(model.slug) ? {} : { nativeClientManaged: false }),
         multiAgentVersion: model.multi_agent_version || "v1",
-        visible: !hiddenModels.has(model.slug),
+        // Base native entries belong to Codex's own catalog.  A router picker
+        // overlay must not make them disappear; synthesized context variants
+        // remain router-managed and can still be switched off explicitly.
+        visible: nativeBaseSlugs.has(model.slug) || !hiddenModels.has(model.slug),
         ...reasoningLevelField(model.supported_reasoning_levels),
       }));
   } catch {
@@ -198,7 +212,9 @@ async function emitProbe() {
   const localInstalled = localInventory.map((model) => model.tag);
 
   const enabledProviders = readProviderSelection();
-  const hiddenModels = new Set(modelPickerSnapshot().hidden);
+  const picker = modelPickerSnapshot();
+  const hiddenModels = new Set(picker.hidden);
+  const visibleModels = new Set(picker.visible);
   const subagentSettings = subagentSettingsSnapshot();
   const usageEvents = TARGET === "codex"
     ? (await import("./usage-events.mjs")).recentUsageEvents()
@@ -228,7 +244,10 @@ async function emitProbe() {
     gatewayModel: model.gatewayModel,
     enabled: enabledProviders.includes(model.provider),
     multiAgentVersion: model.multiAgentVersion || "v1",
-    visible: !hiddenModels.has(model.slug),
+    visible: picker.hasExplicitVisibility
+      ? visibleModels.has(model.slug)
+      : !hiddenModels.has(model.slug),
+    isFree: model.isFree === true,
     // The ladders differ per model, so a surface offering a subagent effort
     // has to be told which levels this one accepts rather than guessing from a
     // global list. Omitted when the model advertises none, so an entry without
@@ -281,6 +300,8 @@ async function emitProbe() {
             loginFreeManaged: Boolean(codexConfig.login_free_managed),
             signedRouting: Boolean(codexConfig.signed_routing),
             signedRoutingManaged: Boolean(codexConfig.signed_routing_managed),
+            routerDefaultModel: codexConfig.router_default_model || undefined,
+            routerDefaultManaged: Boolean(codexConfig.router_default_managed),
           }
         : {}),
       ...(TARGET === "codex"
@@ -366,6 +387,47 @@ async function emitProbeSet(provider, desired) {
   process.stdout.write(JSON.stringify({ target: TARGET, enabledProviders: next }));
 }
 
+// The client probes below intentionally include client-specific details (for
+// example Codex's native catalog and login-free aliases).  Model visibility and
+// routed model identity do not belong to any of those clients, so expose one
+// adapter-independent snapshot for the Control Center and other local tools.
+// This is the router's source of truth: every client publisher consumes the
+// same selected registry, picker state, and subagent policy.
+async function routerCatalogSnapshot() {
+  const { canonicalProviderId, readProviderSelection, selectedConfiguredListedModels } =
+    await import("./provider-selection.mjs");
+  const { modelPickerSnapshot } = await import("./model-picker-state.mjs");
+  const { subagentSettingsSnapshot } = await import("./multi-agent-state.mjs");
+  const { applySubagentProofs } = await import("./subagent-proofs.mjs");
+  const settings = subagentSettingsSnapshot();
+  const picker = modelPickerSnapshot();
+  const hidden = new Set(picker.hidden);
+  const visible = new Set(picker.visible);
+  const models = applySubagentProofs(
+    selectedConfiguredListedModels(),
+    settings.proofs,
+    { hidden, disabled: settings.disabled },
+  ).map((model) => ({
+    slug: model.slug,
+    displayName: model.displayName,
+    provider: canonicalProviderId(model.provider),
+    gatewayModel: model.gatewayModel,
+    enabled: true,
+    multiAgentVersion: model.multiAgentVersion || "v1",
+    visible: picker.hasExplicitVisibility ? visible.has(model.slug) : !hidden.has(model.slug),
+    isFree: model.isFree === true,
+    ...reasoningLevelField(model.reasoningLevels),
+  }));
+  return {
+    source: "codex-router",
+    configured: existsSync(PROVIDER_SELECTION_PATH),
+    enabledProviders: readProviderSelection(),
+    models,
+    picker,
+    subagents: settings,
+  };
+}
+
 // --- aggregate over all targets --------------------------------------------
 
 function probeTargets() {
@@ -395,7 +457,15 @@ async function printOverview(asJson) {
     // harness as stopped and offers to start one that is already up.
     process.stdout.write(
       `${JSON.stringify(
-        { targets, presence: presenceSnapshot(), harness: await harnessSnapshotWithWeb() },
+        {
+          targets,
+          // Keep this separate from `targets.codex`: native Codex entries and
+          // login-free aliases are client concerns, while this catalog is the
+          // durable router policy shared by Codex, DSH, and Gemini.
+          catalog: await routerCatalogSnapshot(),
+          presence: presenceSnapshot(),
+          harness: await harnessSnapshotWithWeb(),
+        },
         null,
         2,
       )}\n`,
@@ -592,6 +662,12 @@ async function saveProviderCredential(providerId) {
     enableProvider(providerId);
     const { refreshTargetPickerIfInstalled } = await import("./target-integration.mjs");
     refreshTargetPickerIfInstalled();
+    // The stored catalog is what the previous credential could see. A new key
+    // may be a different account with a different entitlement, so the next
+    // read has to come from the provider rather than from the old account's
+    // list. Removal drops the entry for the same reason.
+    const { forgetProviderCatalogCache } = await import("./model-catalog-cache.mjs");
+    forgetProviderCatalogCache(providerId);
   });
   process.stdout.write(`${JSON.stringify(providerOnboardingSnapshot())}\n`);
 }
@@ -607,6 +683,11 @@ async function deleteProviderCredential(providerId) {
     if (removal.removedFiles) {
       const { refreshTargetPickerIfInstalled } = await import("./target-integration.mjs");
       refreshTargetPickerIfInstalled();
+      // The cached catalog was what this credential could see. Another key may
+      // see a different one, so drop it rather than let a disconnected
+      // provider keep showing the previous account's model list.
+      const { forgetProviderCatalogCache } = await import("./model-catalog-cache.mjs");
+      forgetProviderCatalogCache(providerId);
     }
   });
   process.stdout.write(
@@ -803,6 +884,43 @@ async function setLoginFreeModel(slug) {
   process.stdout.write(result.stdout);
 }
 
+async function setRouterDefault(action, slug) {
+  if (!["set", "clear"].includes(action)) {
+    throw new Error("Usage: control router-default <set MODEL|clear>");
+  }
+  let value;
+  if (action === "set") {
+    value = String(slug || "").trim();
+    if (!value) throw new Error("Usage: control router-default set MODEL");
+    const { selectedConfiguredListedModels } = await import("./provider-selection.mjs");
+    if (!selectedConfiguredListedModels().some((model) => model.slug === value)) {
+      throw new Error(`${value} is not an enabled, authenticated external model.`);
+    }
+    const { modelPickerSnapshot } = await import("./model-picker-state.mjs");
+    const picker = modelPickerSnapshot();
+    const visible = picker.hasExplicitVisibility
+      ? picker.visible.includes(value)
+      : !picker.hidden.includes(value);
+    if (!visible) {
+      throw new Error(`${value} is not selected for the model picker. Show it before making it default.`);
+    }
+  }
+  const command = action === "set" ? "router-default-set" : "router-default-clear";
+  const result = spawnSync(
+    process.execPath,
+    [path.join(REPO_ROOT, "src", "config-manager.mjs"), command, ...(value ? [value] : [])],
+    {
+      cwd: REPO_ROOT,
+      env: { ...process.env, MODEL_ROUTER_TARGET: "codex" },
+      encoding: "utf8",
+    },
+  );
+  if (result.status !== 0) {
+    throw new Error((result.stderr || "The Codex router default could not be changed.").trim());
+  }
+  process.stdout.write(result.stdout);
+}
+
 async function updateAndVerifyCodex() {
   const { runCodexMaintenance } = await import("./codex-maintenance.mjs");
   process.stdout.write(`${JSON.stringify(runCodexMaintenance())}\n`);
@@ -850,18 +968,18 @@ function runDoctor(args) {
 }
 
 function refreshModelSettingsCatalog() {
-  const result = spawnSync(
-    process.execPath,
-    [path.join(REPO_ROOT, "src", "catalog.mjs")],
-    {
-      cwd: REPO_ROOT,
-      env: { ...process.env, MODEL_ROUTER_TARGET: "codex" },
-      stdio: "ignore",
-    },
-  );
-  if (result.status !== 0) {
+  // The router owns the model policy.  Rebuilding only merged-models.json
+  // leaves a published DSH route with the previous picker state (and makes
+  // Gemini look different again at its next process start).  The target
+  // integration helper refreshes every installed client from this same state,
+  // while preserving the Codex-only native catalog capture where applicable.
+  try {
+    return refreshTargetPickerIfInstalled();
+  } catch (error) {
     throw new Error(
-      (result.stderr || "The model settings catalog could not be refreshed.").trim(),
+      error instanceof Error
+        ? error.message
+        : "The router model catalogs could not be refreshed.",
     );
   }
 }
@@ -925,6 +1043,21 @@ async function knownModelSlug(slug) {
   return MODEL_BY_SLUG.has(slug);
 }
 
+async function nativeCodexBaseSlugs() {
+  const { NATIVE_CATALOG_PATH } = await import("./paths.mjs");
+  if (!existsSync(NATIVE_CATALOG_PATH)) return new Set();
+  try {
+    const parsed = JSON.parse(readFileSync(NATIVE_CATALOG_PATH, "utf8"));
+    return new Set(
+      (Array.isArray(parsed.models) ? parsed.models : [])
+        .map((model) => String(model?.slug || ""))
+        .filter(Boolean),
+    );
+  } catch {
+    return new Set();
+  }
+}
+
 async function handleSubagents(action, value, flag, rest = []) {
   const {
     replaceMultiAgentState,
@@ -942,13 +1075,17 @@ async function handleSubagents(action, value, flag, rest = []) {
     replaceMultiAgentState({ mode: "all", enabled: [], disabled: [] });
   } else if (action === "unselect-all") {
     const { selectedConfiguredListedModels } = await import("./provider-selection.mjs");
-    const { readHiddenModels } = await import("./model-picker-state.mjs");
+    const { modelPickerSnapshot } = await import("./model-picker-state.mjs");
     const { NATIVE_CATALOG_PATH } = await import("./paths.mjs");
-    const hidden = readHiddenModels();
+    const picker = modelPickerSnapshot();
+    const hidden = new Set(picker.hidden);
+    const visible = new Set(picker.visible);
     const visibleModels = [
       ...nativeCodexModels(NATIVE_CATALOG_PATH, hidden).map((model) => model.slug),
       ...selectedConfiguredListedModels()
-        .filter((model) => !hidden.has(model.slug))
+        .filter((model) => !hidden.has(model.slug) && (
+          !picker.hasExplicitVisibility || visible.has(model.slug)
+        ))
         .map((model) => model.slug),
     ];
     replaceMultiAgentState({
@@ -1537,10 +1674,15 @@ async function handleLocalModels(action, value, ...rest) {
   // HTTP call with a short timeout, so an LM Studio that is simply off costs
   // the snapshot a bounded wait, not an error.
   const { lmstudioSnapshot } = await import("./lmstudio-models.mjs");
-  const snapshot = async () => ({
-    ...localModelsSnapshot({ benchmarks: localAndVisionBenchmarks }),
-    lmstudio: await lmstudioSnapshot(),
-  });
+  const { localMlxUiSnapshot } = await import("./local-mlx-operation.mjs");
+  const snapshot = async () => {
+    const [lmstudio, mlx] = await Promise.all([lmstudioSnapshot(), localMlxUiSnapshot()]);
+    return {
+      ...localModelsSnapshot({ benchmarks: localAndVisionBenchmarks }),
+      lmstudio,
+      mlx,
+    };
+  };
   if (action === "list" || action === "status" || !action) {
     const current = await snapshot();
     // The tray and any script read JSON; a person at a terminal was handed a
@@ -1644,6 +1786,21 @@ async function handleLocalModels(action, value, ...rest) {
     process.stdout.write(`${JSON.stringify(result)}\n`);
     return;
   }
+  if (action === "mlx-status") {
+    process.stdout.write(`${JSON.stringify(await localMlxUiSnapshot())}\n`);
+    return;
+  }
+  if (action === "mlx-install") {
+    const { startLocalMlxOperation } = await import("./local-mlx-operation.mjs");
+    const result = startLocalMlxOperation({ yes: value === "--yes" || flags.has("--yes") });
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    return;
+  }
+  if (action === "mlx-cancel") {
+    const { cancelLocalMlxOperation } = await import("./local-mlx-operation.mjs");
+    process.stdout.write(`${JSON.stringify(cancelLocalMlxOperation())}\n`);
+    return;
+  }
   if (action === "cancel") {
     const { cancelLocalDownload } = await import("./local-download.mjs");
     const result = cancelLocalDownload(value);
@@ -1704,6 +1861,13 @@ async function handleLocalModels(action, value, ...rest) {
     // installation. The tray may refresh while either one is in progress, and
     // the operator should still see that the click was accepted.
     try {
+      const { isLocalMlxOperationActive, readLocalMlxOperation } = await import(
+        "./local-mlx-operation.mjs"
+      );
+      const mlxOperation = readLocalMlxOperation();
+      if (isLocalMlxOperationActive(mlxOperation)) {
+        throw new Error(`The curated MLX model is already ${mlxOperation.status}.`);
+      }
       const active = readLocalDownload();
       if (isLocalOperationActive(active) && active.tag !== tag) {
         throw new Error(
@@ -1866,6 +2030,13 @@ async function handleLocalModels(action, value, ...rest) {
       throw new Error("Another local model operation is starting. Try again shortly.");
     }
     try {
+    const { isLocalMlxOperationActive, readLocalMlxOperation } = await import(
+      "./local-mlx-operation.mjs"
+    );
+    const mlxOperation = readLocalMlxOperation();
+    if (isLocalMlxOperationActive(mlxOperation)) {
+      throw new Error(`The curated MLX model is already ${mlxOperation.status}.`);
+    }
     const active = readLocalDownload();
     if (isLocalOperationActive(active) && active.tag !== tag) {
       throw new Error(
@@ -1995,6 +2166,7 @@ async function handleLocalModels(action, value, ...rest) {
       "Usage: control local-models list [--json]|inspect <tag-or-url>|" +
         "install <tag-or-url> [--yes] [--force]|benchmark <tag>|" +
         "runtime status|runtime start [--yes]|runtime update --yes|" +
+        "mlx-install --yes|mlx-status|mlx-cancel|" +
         "uninstall <tag> --yes|cancel [<tag>]|set <tag> <on|off>|" +
         "lmstudio-set <id> <on|off>\n" +
         "  --yes    consent to installing/starting Ollama itself (headless)\n" +
@@ -2015,62 +2187,84 @@ async function handlePicker(action, value, flag) {
     process.stdout.write(`${JSON.stringify(modelPickerSnapshot())}\n`);
     return;
   }
-  if (action === "all") {
-    if (!["show", "hide"].includes(flag)) {
-      throw new Error("Usage: control picker all <show|hide>");
-    }
-    const { MERGED_CATALOG_PATH } = await import("./paths.mjs");
-    const parsed = JSON.parse(readFileSync(MERGED_CATALOG_PATH, "utf8"));
-    const slugs = Array.isArray(parsed.models)
-      ? parsed.models.map((model) => String(model.slug))
-      : [];
-    setAllModelsVisible(slugs, flag === "show");
-  } else if (action === "set") {
-    if (!["show", "hide"].includes(flag)) {
-      throw new Error("Usage: control picker set <model-slug> <show|hide>");
-    }
-    if (!(await knownModelSlug(value))) {
-      throw new Error(`Unknown model slug: ${value}`);
-    }
-    setModelVisible(value, flag === "show");
-  } else if (action === "provider") {
-    if (!["show", "hide"].includes(flag)) {
-      throw new Error("Usage: control picker provider <provider-id> <show|hide>");
-    }
-    const provider = String(value || "").trim();
-    let slugs;
-    if (provider === "openai") {
-      const { NATIVE_CATALOG_PATH } = await import("./paths.mjs");
-      // Through the same helper the tray draws its rows with, so the group's
-      // Show all / Hide all covers every row in the group. Reading the capture
-      // straight off disk skipped the extended-window variants, which left
-      // "Hide all" with one row still showing.
-      slugs = nativeCodexModels(NATIVE_CATALOG_PATH).map((model) => model.slug);
+  await withModelOverlayLock(async () => {
+    const nativeBaseSlugs = await nativeCodexBaseSlugs();
+    if (action === "all") {
+      if (!["show", "hide"].includes(flag)) {
+        throw new Error("Usage: control picker all <show|hide>");
+      }
+      // Do not use only merged-models.json here. That file belongs to the
+      // Codex adapter and may not exist on a DSH/Gemini-only installation;
+      // the router's selected registry plus the captured native catalog is
+      // the complete local policy surface for every installed client.
+      const { MERGED_CATALOG_PATH } = await import("./paths.mjs");
+      const { selectedConfiguredListedModels } = await import("./provider-selection.mjs");
+      const slugs = new Set(selectedConfiguredListedModels().map((model) => String(model.slug)));
+      // The router owns routed models; Codex owns its native picker entries.
+      // Keep routed aliases/context variants from the last publication so a
+      // refresh cannot lose a model merely because its native capture is
+      // temporarily unavailable.
+      if (existsSync(MERGED_CATALOG_PATH)) {
+        try {
+          const parsed = JSON.parse(readFileSync(MERGED_CATALOG_PATH, "utf8"));
+          for (const model of Array.isArray(parsed?.models) ? parsed.models : []) {
+            if (model?.slug && !nativeBaseSlugs.has(String(model.slug))) {
+              slugs.add(String(model.slug));
+            }
+          }
+        } catch {
+          // The next publication will repair the merged catalog. The shared
+          // router model set above is still enough to persist this mutation.
+        }
+      }
+      setAllModelsVisible([...slugs], flag === "show");
+    } else if (action === "set") {
+      if (!["show", "hide"].includes(flag)) {
+        throw new Error("Usage: control picker set <model-slug> <show|hide>");
+      }
+      if (!(await knownModelSlug(value))) {
+        throw new Error(`Unknown model slug: ${value}`);
+      }
+      if (nativeBaseSlugs.has(String(value))) {
+        throw new Error(
+          "Native Codex model visibility is managed by Codex and is not part of the router picker overlay.",
+        );
+      }
+      setModelVisible(value, flag === "show");
+    } else if (action === "provider") {
+      if (!["show", "hide"].includes(flag)) {
+        throw new Error("Usage: control picker provider <provider-id> <show|hide>");
+      }
+      const provider = String(value || "").trim();
+      let slugs;
+      if (provider === "openai") {
+        throw new Error(
+          "Native Codex model visibility is managed by Codex and is not part of the router picker overlay.",
+        );
+      } else {
+        const { canonicalProviderId, selectedConfiguredListedModels } = await import(
+          "./provider-selection.mjs",
+        );
+        const canonical = canonicalProviderId(provider);
+        slugs = selectedConfiguredListedModels()
+          .filter((model) => canonicalProviderId(model.provider) === canonical)
+          .map((model) => model.slug);
+      }
+      if (slugs.length === 0) {
+        throw new Error(`No enabled models found for provider: ${value}`);
+      }
+      setModelsVisible(slugs, flag === "show");
     } else {
-      const { canonicalProviderId, readProviderSelection } = await import(
-        "./provider-selection.mjs"
+      throw new Error(
+        "Usage: control picker status|all <show|hide>|set <model-slug> <show|hide>|" +
+          "provider <provider-id> <show|hide>",
       );
-      const { LISTED_MODELS } = await import("./model-registry.mjs");
-      const canonical = canonicalProviderId(provider);
-      const selected = new Set(readProviderSelection());
-      slugs = LISTED_MODELS
-        .filter(
-          (model) =>
-            selected.has(model.provider) && canonicalProviderId(model.provider) === canonical,
-        )
-        .map((model) => model.slug);
     }
-    if (slugs.length === 0) {
-      throw new Error(`No enabled models found for provider: ${value}`);
-    }
-    setModelsVisible(slugs, flag === "show");
-  } else {
-    throw new Error(
-      "Usage: control picker status|all <show|hide>|set <model-slug> <show|hide>|" +
-        "provider <provider-id> <show|hide>",
-    );
-  }
-  refreshModelSettingsCatalog();
+    // The write above is the router's durable source of truth. Publish it to
+    // Codex, DSH, and Gemini while the same model-overlay lock is held so a
+    // second command cannot race a client snapshot between the two steps.
+    refreshModelSettingsCatalog();
+  });
   process.stdout.write(`${JSON.stringify(modelPickerSnapshot())}\n`);
 }
 
@@ -2234,6 +2428,62 @@ async function handlePresence(action, value) {
   process.stdout.write(`${JSON.stringify(setPresenceMode(value))}\n`);
 }
 
+// The public `/health` leaf intentionally contains only the router summary and
+// a closed set of degraded dependency names. Desktop surfaces need the richer
+// local service view, but should not be handed the forwarders' credential
+// metadata. Read the protected health leaf here, then project it to the small
+// contract the tray and Control Center render.
+async function printHealth() {
+  const { assertCallerSecret, callerBaseUrl } = await import("./caller-auth.mjs");
+  let callerSecret;
+  try {
+    callerSecret = assertCallerSecret(readFileSync(CALLER_SECRET_PATH, "utf8").trim());
+  } catch {
+    process.stdout.write(`${JSON.stringify({
+      ok: false,
+      status: 0,
+      error: "The local router caller key is unavailable.",
+      activity: { state: "offline", active: [], activeCount: 0 },
+    })}\n`);
+    return;
+  }
+
+  const safeService = (service) => {
+    if (!service || typeof service !== "object") return undefined;
+    return {
+      reachable: service.reachable === true,
+      ...(typeof service.enabled === "boolean" ? { enabled: service.enabled } : {}),
+    };
+  };
+  try {
+    const response = await fetch(`${callerBaseUrl(PORTS.router, callerSecret)}/health`, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(3_000),
+    });
+    const raw = await response.json().catch(() => ({}));
+    const body = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+    process.stdout.write(`${JSON.stringify({
+      ok: response.ok,
+      status: response.status,
+      ...(typeof body.service === "string" ? { service: body.service } : {}),
+      ...(typeof body.version === "string" ? { version: body.version } : {}),
+      ...(typeof body.router === "string" ? { router: body.router } : {}),
+      ...(Array.isArray(body.degraded) ? { degraded: body.degraded } : {}),
+      ...(body.activity && typeof body.activity === "object" ? { activity: body.activity } : {}),
+      ...(safeService(body.gateway) ? { gateway: safeService(body.gateway) } : {}),
+      ...(safeService(body.oauth) ? { oauth: safeService(body.oauth) } : {}),
+      ...(safeService(body.api) ? { api: safeService(body.api) } : {}),
+    })}\n`);
+  } catch (error) {
+    process.stdout.write(`${JSON.stringify({
+      ok: false,
+      status: 0,
+      error: error?.name === "AbortError" ? "Health check timed out." : "Router is unreachable.",
+      activity: { state: "offline", active: [], activeCount: 0 },
+    })}\n`);
+  }
+}
+
 // --- dispatch ---------------------------------------------------------------
 
 if (args.includes("--probe")) {
@@ -2275,6 +2525,8 @@ if (args.includes("--probe")) {
   await setSignedRouting(args[1]);
 } else if (args[0] === "model-set") {
   await setLoginFreeModel(args[1]);
+} else if (args[0] === "router-default") {
+  await setRouterDefault(args[1], args[2]);
 } else if (args[0] === "subagents") {
   await handleSubagents(args[1], args[2], args[3], args.slice(2));
 } else if (args[0] === "tool-result-aging") {
@@ -2297,6 +2549,8 @@ if (args.includes("--probe")) {
   await handleHarness(args[1]);
 } else if (args[0] === "presence") {
   await handlePresence(args[1], args[2]);
+} else if (args[0] === "health") {
+  await printHealth();
 } else if (args[0] === "maintenance") {
   await updateAndVerifyCodex();
 } else if (args[0] === "doctor") {

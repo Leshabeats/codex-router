@@ -289,10 +289,16 @@ fn desktop_settings(state: State<'_, RouterState>) -> Result<DesktopSettings, St
 }
 
 #[tauri::command]
-async fn router_health() -> Value {
-    tauri::async_runtime::spawn_blocking(read_router_health)
-        .await
-        .unwrap_or_else(|_| offline_health("Router health check did not finish."))
+async fn router_health(state: State<'_, RouterState>) -> Result<Value, String> {
+    // `control health` reads the protected router health leaf with the local
+    // caller capability and projects away credential metadata. The public
+    // `/health` endpoint intentionally carries only the degraded names.
+    run_json_command(
+        state.inner().clone(),
+        vec!["health".into(), "--json".into()],
+        None,
+    )
+    .await
 }
 
 #[tauri::command]

@@ -30,7 +30,7 @@ import {
   readMultiAgentSettings,
   subagentEligibleModels,
 } from "./multi-agent-state.mjs";
-import { readHiddenModels, seedModelsHidden } from "./model-picker-state.mjs";
+import { modelPickerSnapshot, readHiddenModels, seedModelsHidden } from "./model-picker-state.mjs";
 import { buildNativeAliasAssignments } from "./native-alias.mjs";
 import {
   NATIVE_CONTEXT_VARIANT_SLUGS,
@@ -824,19 +824,42 @@ export function buildLoginFreeCatalog(native, routedModelsList) {
   return { models: sortCatalogModels(models), aliases };
 }
 
+// A signed-in Codex catalog contains two policy domains: the account's native
+// entries and the router's routed entries. Keep the router overlay off native
+// base slugs so stale external picker state cannot erase Codex's original
+// picker. Login-free mode deliberately aliases external models onto those
+// slugs, so it is the one mode where the overlay applies to all entries.
+export function effectivePickerHiddenModels(hiddenModels, nativeBaseSlugs, { loginFree = false } = {}) {
+  const hidden = new Set([...hiddenModels || []].map((slug) => String(slug)));
+  if (loginFree) return hidden;
+  const native = new Set([...nativeBaseSlugs || []].map((slug) => String(slug)));
+  return new Set([...hidden].filter((slug) => !native.has(slug)));
+}
+
 function main() {
   // The catalog is what Codex offers in its picker. Writing it from a checkout
   // that does not own this state directory is how the picker ends up
   // advertising models the running gateway has no route for.
   assertStateOwnership("write the Codex model catalog");
   const userSlugs = new Set(readUserModels().map((model) => String(model.slug)));
-  // Before the hidden set is read, not after: an extended-window variant costs
-  // more per turn than the model it shadows, so it arrives switched off and
-  // stays off until the operator says otherwise. Only slugs with no recorded
-  // decision are touched, so this cannot undo a choice already made.
-  seedModelsHidden(NATIVE_CONTEXT_VARIANT_SLUGS);
-  const hiddenModels = readHiddenModels();
   const selectedModels = selectedConfiguredListedModels();
+  const loginFree = loginFreeConfigured();
+  // Before the picker state is read, not after: new router models are opt-in
+  // in a normal signed-in Codex install.  Curation or a picker "show" action
+  // records the positive selection; simply enabling a provider or updating a
+  // catalog must not make every one of its models appear.  The same one-time
+  // seeding also keeps extended-window variants off because they cost more per
+  // turn than the base model they shadow.  Login-free mode is different: its
+  // native-looking slots are router aliases and retain the existing behavior.
+  // Only slugs with no recorded decision are touched, so no later rebuild can
+  // undo an operator's choice.
+  seedModelsHidden([
+    ...NATIVE_CONTEXT_VARIANT_SLUGS,
+    ...(loginFree ? [] : selectedModels.map((model) => String(model.slug))),
+  ]);
+  const hiddenModels = readHiddenModels();
+  const pickerState = modelPickerSnapshot();
+  const visibleModels = new Set(pickerState.visible);
   const multiAgentSettings = readMultiAgentSettings();
   // Demotions first, then this machine's own recorded proofs. Settings still
   // never manufacture a v2 claim — a promotion here traces to a live probe
@@ -857,7 +880,18 @@ function main() {
     Date.now(),
   );
   const captured = nativeCatalog();
-  const loginFree = loginFreeConfigured();
+  // The router picker overlay is for routed models.  In a normal signed-in
+  // Codex install the account's native entries remain Codex-owned; applying a
+  // stale router `hidden` decision to them can erase the original Codex picker
+  // (for example after a previous "hide all" action).  Login-free mode is the
+  // exception: its native slugs are deliberately aliases for routed models,
+  // so the overlay remains authoritative there.
+  const nativeBaseSlugs = new Set(captured.models.map((model) => String(model.slug || "")));
+  const effectiveHiddenModels = effectivePickerHiddenModels(
+    hiddenModels,
+    nativeBaseSlugs,
+    { loginFree },
+  );
   const native = {
     ...captured,
     // Variants join before the multi-agent pass so the extended-context alias
@@ -866,7 +900,7 @@ function main() {
     models: promoteNativeMultiAgent(
       withNativeContextVariants(captured.models, { enabled: !loginFree }),
       multiAgentSettings,
-      hiddenModels,
+      effectiveHiddenModels,
     ),
   };
   // Dropping every native model is destructive, so only do it when Codex
@@ -899,7 +933,7 @@ function main() {
   // the verdict back out of.
   const nativeEngines = nativeVisionEngines({
     models: captured.models,
-    hidden: hiddenModels,
+    hidden: effectiveHiddenModels,
     authorized: openaiAuthenticated && !loginFree,
   });
   const visionEngine = resolveVisionEngine(
@@ -924,11 +958,26 @@ function main() {
     atomicJson(NATIVE_ALIAS_PATH, { version: 1, aliases });
     writeAnnouncedAt(announcedAt);
     atomicJson(MERGED_CATALOG_PATH, {
-      models: merged.map((model) =>
-        hiddenModels.has(String(model.slug))
+      models: merged.map((model) => {
+        const slug = String(model.slug);
+        // In login-free mode a native-looking slot is an alias for a routed
+        // model, so visibility follows the canonical routed slug that the
+        // operator selected. Normal signed-in native base entries remain
+        // client-owned and are never removed by router picker state.
+        const policySlug = aliases[slug] || slug;
+        const routerManaged = loginFree || !nativeBaseSlugs.has(slug);
+        const hidden = effectiveHiddenModels.has(policySlug);
+        // A state file written by the new picker carries positive selections.
+        // Older installs had only `hidden`; preserve their behavior until an
+        // operator makes a picker change, at which point the write records the
+        // explicit allowlist permanently.
+        const selected = pickerState.hasExplicitVisibility
+          ? visibleModels.has(policySlug)
+          : !hidden;
+        return routerManaged && (hidden || !selected)
           ? { ...model, visibility: "hide" }
-          : model,
-      ),
+          : model;
+      }),
     });
     if (process.env.MODEL_ROUTER_TEST_FAIL_AFTER_CATALOG_WRITE === "1") {
       throw new Error("Forced failure after model catalog publication.");

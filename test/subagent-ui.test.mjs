@@ -26,4 +26,11 @@ test("macOS subagent settings show native and unverified enabled models", () => 
   );
   assert.doesNotMatch(subagentList, /provider != "openai"/);
   assert.match(source, /selectedSubagentSet\.contains\(model\.slug\)/);
+  assert.match(source, /if !isPickerVisible\(model\) \{ return false \}/);
+  assert.match(source, /disabled: !isPickerVisible\(model\)/);
+  assert.match(source, /title: model\.displayName/);
+  assert.match(source, /subagentStatusTags\(for: model\)/);
+  assert.match(source, /Text\(routerLocalized\("Subagent"\)\)/);
+  assert.match(source, /settings\?\.subagents\.efforts\?\[model\.slug\]/);
+  assert.match(source, /subagentEffortRow\(for: model\)/);
 });

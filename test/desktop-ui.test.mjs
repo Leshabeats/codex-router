@@ -14,6 +14,7 @@ import {
   observedModelSpeed,
   quotaWindow,
   readOnlyCapabilities,
+  serviceHealthRows,
   toolResultAgingChecked,
   visibleLocalDownload,
 } from "../apps/desktop/ui/model.mjs";
@@ -185,6 +186,34 @@ test("active model speed prefers its provider and matches qualified slugs", () =
   usage.providers[0].models[0].observedTokensPerSecond = null;
   assert.equal(observedModelSpeed(usage, "deepseek", "deepseek/deepseek-v4-flash"), null);
   assert.equal(observedModelSpeed(usage, "deepseek", "missing/model"), null);
+});
+
+test("service health rows expose enabled dependencies without leaking endpoint details", () => {
+  assert.deepEqual(
+    serviceHealthRows({
+      ok: false,
+      degraded: ["gateway"],
+      gateway: { reachable: false },
+      oauth: { enabled: false, reachable: true },
+      api: { enabled: true, reachable: true },
+    }).map(({ id, state, status, detail }) => ({ id, state, status, detail })),
+    [
+      { id: "router", state: "degraded", status: "Degraded", detail: "1 dependency needs attention" },
+      { id: "gateway", state: "offline", status: "Offline", detail: "Unreachable" },
+      { id: "oauth", state: "standby", status: "Standby", detail: "Not enabled" },
+      { id: "api", state: "ready", status: "Ready", detail: "Reachable" },
+    ],
+  );
+  assert.deepEqual(
+    serviceHealthRows({ ok: true, gateway: { reachable: true } }).at(-1),
+    {
+      id: "forwarders",
+      label: "External forwarders",
+      state: "standby",
+      status: "Standby",
+      detail: "No external forwarders enabled",
+    },
+  );
 });
 
 // src/tool-result-aging-state.mjs defaults the feature off when no state file

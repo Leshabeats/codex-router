@@ -58,7 +58,7 @@ user.
    environment API key; it has no router-managed CLI sign-in path. The
    catalog-only providers `groq`, `openrouter`, `together`, `fireworks`,
    `cerebras`, `mistral`, `nvidia-nim`, `siliconflow`, `huggingface`,
-   `gemini-api`, `github-copilot`, and `chutes` are also selectable, but they ship no
+   `gemini-api`, `github-copilot`, `chutes`, and `orca` are also selectable, but they ship no
    preselected models: after
    the credential is stored, the user must run `bin/curate-models PROVIDER` in an
    interactive terminal to choose models. If they did not specify and
@@ -517,6 +517,11 @@ to ship tested support to every installer.
    exact IDs and the live catalog confirms them, the deterministic form is
    `./bin/curate-models PROVIDER --models ID1,ID2 --apply`. On Windows use
    `node .\src\curate-models.mjs` with the same arguments.
+   OrcaRouter also supports `--free-only`, which additively curates every live
+   concrete OpenAI-compatible entry whose catalog price is zero, tags it
+   `isFree`, and removes the moving `orcarouter/free` meta-router if an older
+   run curated it. It still requires an OrcaRouter API key for inference and
+   never turns the provider on implicitly.
 5. Local curation writes protected `user-models.json` state and survives router
    updates. Never edit the checked-in `config/` registry tree merely to
    satisfy one machine's

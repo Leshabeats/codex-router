@@ -25,7 +25,10 @@ import {
   runRouterScript,
 } from "./command-runner.mjs";
 
-const TARGET = "codex";
+// Codex is the one client-specific adapter this panel still exposes (native
+// GPT details and the current task default). Routed model identity and picker
+// policy come from the shared router catalog below.
+const CLIENT_TARGET = "codex";
 const PRESENCE_MODES = ["always", "follow-codex"];
 // Stop/restart can interrupt active router turns and downloads. Keep those
 // intentional operator actions in the interactive CLI during the beta.
@@ -51,6 +54,11 @@ const SESSION_LIST_LIMIT = 500;
 // lock wait and the build itself; killing the lock holder at the old 30/120s
 // limits would strand a stale lock and force a rollback to race recovery.
 const CATALOG_MUTATION_TIMEOUT_MS = 330_000;
+// Repair reruns the installer with --force-deps, which rebuilds node_modules
+// and the Python environment from scratch. That is the slowest thing this app
+// can start, so it gets the runner's whole ceiling rather than a catalog-sized
+// budget; timing it out early would leave a half-rebuilt tree behind.
+const REPAIR_TIMEOUT_MS = 11 * 60_000;
 const DEEPCODE_PACKAGE = "@vegamo/deepcode-cli";
 const DEEPCODE_DOCS = "https://api-docs.deepseek.com/quick_start/agent_integrations/deepcode";
 const CODEX_DOCS = "https://developers.openai.com/codex/cli/";
@@ -464,9 +472,28 @@ async function snapshot() {
   return runControlJson(["--json"]);
 }
 
-async function codexSlice() {
+async function modelEntries() {
   const result = await snapshot();
-  return result?.targets?.[TARGET] || {};
+  const entries = [];
+  const seen = new Set();
+  // The router catalog is the durable source for routed models. Keep the
+  // Codex target's native entries as an adapter-only supplement because those
+  // models come from the user's OpenAI session rather than the router plane.
+  const targetModels = Array.isArray(result?.targets?.[CLIENT_TARGET]?.models)
+    ? result.targets[CLIENT_TARGET].models
+    : [];
+  const adapterModels = result?.catalog
+    ? targetModels.filter((model) => model.native)
+    : targetModels;
+  for (const model of [
+    ...(Array.isArray(result?.catalog?.models) ? result.catalog.models : []),
+    ...adapterModels,
+  ]) {
+    if (!model?.slug || seen.has(model.slug)) continue;
+    seen.add(model.slug);
+    entries.push(model);
+  }
+  return entries;
 }
 
 async function providerEntries() {
@@ -489,7 +516,7 @@ async function validateProvider(providerId, capability) {
 
 async function validateModel(slug) {
   const value = stringValue(slug, "Model", MODEL_SLUG);
-  const models = (await codexSlice()).models || [];
+  const models = await modelEntries();
   if (!models.some((model) => model.slug === value)) throw new Error(`Unknown model: ${value}`);
   return value;
 }
@@ -536,7 +563,10 @@ async function updateProviderSelection(id, enabled) {
   // model-overlay lock. Splitting those commands here lets a failed apply
   // restore a snapshot older than another process's successful toggle.
   await runControl(
-    ["set-apply", id, enabled ? "on" : "off", "--targets", TARGET],
+    // Provider selection and publication are shared by every installed
+    // client. Leaving targets to control.mjs makes this true even when the
+    // Control Center was opened from a Codex-only view.
+    ["set-apply", id, enabled ? "on" : "off"],
     { timeoutMs: CATALOG_MUTATION_TIMEOUT_MS },
   );
   return snapshot();
@@ -628,6 +658,23 @@ export function registerIpcHandlers({ ipcMain, BrowserWindow, shell, fetchImpl =
     return { opened: true };
   }, { requiresCompatibleRouter: false });
   handle("getProviders", async () => runJson(["providers"]));
+  handle("discoverProviderModels", async ({ providerId, refresh = false } = {}) => {
+    const { id } = await validateProvider(providerId);
+    if (typeof refresh !== "boolean") throw new Error("refresh must be boolean.");
+    // Without --refresh the router answers from the provider's cached list, so
+    // opening a provider costs no round trip and works offline. Refreshing is
+    // the caller's explicit choice and is the only path that re-asks upstream.
+    const result = await runRouterScript(
+      "model-discovery.mjs",
+      [id, "--json", ...(refresh ? ["--refresh"] : [])],
+      { timeoutMs: 45_000 },
+    );
+    try {
+      return JSON.parse(result.stdout.trim());
+    } catch {
+      throw new Error("Provider discovery returned invalid JSON.");
+    }
+  });
   handle("getAccountUsage", async () => runJson(["account"], { timeoutMs: 20_000 }));
   handle("getProviderUsage", async () => runJson(["provider-usage"], { timeoutMs: 20_000 }));
   handle("getLocalModels", async () => runJson(["local-models", "list", "--json"], { timeoutMs: 20_000 }));
@@ -643,21 +690,34 @@ export function registerIpcHandlers({ ipcMain, BrowserWindow, shell, fetchImpl =
       return { ...report, ok: result.code === 0 && report.ok !== false };
     } catch { throw new Error("Doctor returned invalid JSON."); }
   });
-  handle("getHealth", async () => {
-    const port = Number.parseInt(process.env.MODEL_ROUTER_PORT || process.env.CODEX_ROUTER_PORT || "4202", 10);
-    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Router port is invalid.");
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 3_000);
-    try {
-      const response = await fetchImpl(`http://127.0.0.1:${port}/health`, { signal: controller.signal });
-      const text = await response.text();
-      let body;
-      try { body = JSON.parse(text); } catch { body = { ok: response.ok, detail: text.slice(0, 500) }; }
-      return { ok: response.ok, status: response.status, ...body };
-    } catch (error) {
-      return { ok: false, status: 0, error: error?.name === "AbortError" ? "Health check timed out." : "Router is unreachable." };
-    } finally { clearTimeout(timer); }
-  });
+  // Doctor reads; repair is the one maintenance path that writes. It runs the
+  // same `doctor.mjs --fix` the CLI exposes and takes no renderer arguments at
+  // all, so the installer -- not this process, and certainly not the page --
+  // decides what gets rewritten. --json keeps the installer's own chatter off
+  // stdout, so the report below is the only thing parsed.
+  //
+  // requiresCompatibleRouter is off deliberately. A protocol mismatch between
+  // this app and the installed router is precisely the damage repair exists to
+  // undo, so gating repair on compatibility would withhold the fix exactly
+  // when it is needed. Repair is also the one action that must work while the
+  // service is down, which is why it reinstalls rather than merely restarting.
+  handleAction("repairInstall", async () => {
+    const result = await runRouterScript("doctor.mjs", ["--fix", "--json"], {
+      timeoutMs: REPAIR_TIMEOUT_MS,
+      allowNonZero: true,
+    });
+    let report;
+    try { report = JSON.parse(result.stdout.trim()); }
+    catch { throw new Error("Repair returned invalid JSON."); }
+    // A non-zero exit here means repair ran and some check still fails, not
+    // that repair itself failed. Report that as a completed run with failing
+    // checks so the page can name them; throwing would hide the report.
+    return { ...report, ok: result.code === 0 && report.ok !== false };
+  }, { requiresCompatibleRouter: false });
+  // The public health leaf deliberately omits per-service payloads. The
+  // control command reads the protected leaf with the local caller capability
+  // and returns only the redacted service summary the UI needs.
+  handle("getHealth", async () => runJson(["health"]));
   handle("refreshAll", async () => ({
     snapshot: await snapshot(),
     providers: await runJson(["providers"]),
@@ -672,6 +732,32 @@ export function registerIpcHandlers({ ipcMain, BrowserWindow, shell, fetchImpl =
     const { id } = await validateProvider(providerId);
     if (typeof enabled !== "boolean") throw new Error("enabled must be boolean.");
     return updateProviderSelection(id, enabled);
+  });
+  handleAction("addProviderModels", async ({ providerId, modelIds } = {}) => {
+    const { id } = await validateProvider(providerId);
+    if (!Array.isArray(modelIds) || modelIds.length < 1 || modelIds.length > 200) {
+      throw new Error("Choose between 1 and 200 provider models.");
+    }
+    const unique = [...new Set(modelIds.map((modelId) => stringValue(modelId, "Model id", MODEL_SLUG)))];
+    if (unique.length !== modelIds.length) throw new Error("Provider model ids must be unique.");
+    // The trusted curation script repeats live discovery, rejects ids that are
+    // no longer candidates, writes the private overlay transactionally, and
+    // republishes every installed client. The renderer never supplies paths,
+    // credentials, request profiles, or arbitrary command arguments.
+    //
+    // --refresh is what keeps the first clause of that true. Browsing a
+    // provider is answered from its stored list, but committing a model to the
+    // picker must be checked against what the provider serves right now, or a
+    // list old enough to name a withdrawn model would curate a route that
+    // fails on its first real request. The added round trip is nothing beside
+    // the republish this same command performs, and it leaves the stored list
+    // fresh for the next visit.
+    await runRouterScript(
+      "curate-models.mjs",
+      [id, "--models", unique.join(","), "--refresh", "--apply"],
+      { timeoutMs: CATALOG_MUTATION_TIMEOUT_MS },
+    );
+    return { provider: id, added: unique };
   });
   handleAction("connectProvider", async ({ providerId } = {}) => {
     if (!terminalAvailable()) {
@@ -726,6 +812,11 @@ export function registerIpcHandlers({ ipcMain, BrowserWindow, shell, fetchImpl =
     if (typeof enabled !== "boolean") throw new Error("enabled must be boolean.");
     return runJson(["subagents", "set", model, enabled ? "on" : "off"], { timeoutMs: CATALOG_MUTATION_TIMEOUT_MS });
   });
+  handleAction("setSubagentEffort", async ({ slug, effort } = {}) => {
+    const model = await validateModel(slug);
+    oneOf(effort, EFFORTS, "Subagent effort");
+    return runJson(["subagents", "effort", model, effort], { timeoutMs: CATALOG_MUTATION_TIMEOUT_MS });
+  });
   handleAction("setSubagentSelection", async ({ selectAll } = {}) => {
     if (typeof selectAll !== "boolean") throw new Error("selectAll must be boolean.");
     return runJson(["subagents", selectAll ? "select-all" : "unselect-all"], { timeoutMs: CATALOG_MUTATION_TIMEOUT_MS });
@@ -761,6 +852,11 @@ export function registerIpcHandlers({ ipcMain, BrowserWindow, shell, fetchImpl =
     if (force) args.push("--force");
     return runJson(args, { timeoutMs: 330_000 });
   });
+  handleAction("installLocalMlx", async ({ yes = false } = {}) => {
+    if (yes !== true) throw new Error("Installing the MLX runtime and model requires explicit consent.");
+    return runJson(["local-models", "mlx-install", "--yes"], { timeoutMs: 30_000 });
+  });
+  handleAction("cancelLocalMlx", async () => runJson(["local-models", "mlx-cancel"], { timeoutMs: 20_000 }));
   handleAction("uninstallLocalModel", async ({ tag } = {}) => runJson(["local-models", "uninstall", validateLocalTag(tag), "--yes"], { timeoutMs: 330_000 }));
   handleAction("setLocalModelEnabled", async ({ tag, enabled } = {}) => {
     if (typeof enabled !== "boolean") throw new Error("enabled must be boolean.");
@@ -811,6 +907,15 @@ export function registerIpcHandlers({ ipcMain, BrowserWindow, shell, fetchImpl =
   handleAction("setDefaultModel", async ({ slug } = {}) => {
     const model = await validateModel(slug);
     await runControl(["model-set", model], { timeoutMs: 120_000 });
+    return snapshot();
+  });
+  handleAction("setRouterDefault", async ({ slug } = {}) => {
+    const model = await validateModel(slug);
+    await runControl(["router-default", "set", model], { timeoutMs: 120_000 });
+    return snapshot();
+  });
+  handleAction("clearRouterDefault", async () => {
+    await runControl(["router-default", "clear"], { timeoutMs: 120_000 });
     return snapshot();
   });
   handleAction("setSignedRouting", async ({ enabled } = {}) => {

@@ -1,10 +1,8 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
 
 import { discoverProviderModels } from "./model-discovery.mjs";
 import { MODELS, PROVIDERS, USER_MODEL_WARNINGS } from "./model-registry.mjs";
-import { SOURCE_ROOT } from "./paths.mjs";
 import { confirm, promptLine } from "./setup-shared.mjs";
 import { toggleSelection } from "./setup-ui.mjs";
 import {
@@ -12,9 +10,14 @@ import {
   USER_MODELS_PATH,
   readUserModels,
   userModelEntry,
+  userModelIdentity,
   writeUserModels,
 } from "./user-models.mjs";
-import { transactModelOverlayMutation } from "./model-overlay-publication.mjs";
+import {
+  applyModelOverlayPublication,
+  transactModelOverlayMutation,
+} from "./model-overlay-publication.mjs";
+import { MODEL_PICKER_STATE_PATH, setModelsVisible } from "./model-picker-state.mjs";
 
 // Interactive curation: list the provider's live models that are not part of
 // the checked-in registry, let the user toggle the ones they want, and persist
@@ -31,6 +34,8 @@ const removeOption = (() => {
 })();
 const apply = process.argv.includes("--apply");
 const noApply = process.argv.includes("--no-apply");
+const freeOnly = process.argv.includes("--free-only");
+const refreshCatalog = process.argv.includes("--refresh");
 const effortsOption = (() => {
   const index = process.argv.indexOf("--efforts");
   return index === -1 ? undefined : process.argv[index + 1];
@@ -88,7 +93,8 @@ export function curatedSizing(contextLength) {
 function usage() {
   console.error(
     "Usage: curate-models.mjs PROVIDER [--models id1,id2 | interactive] " +
-      "[--remove id1,id2] [--apply|--no-apply] [--efforts minimal,low,medium,high,xhigh] " +
+      "[--free-only] [--remove id1,id2] [--refresh] [--apply|--no-apply] " +
+      "[--efforts minimal,low,medium,high,xhigh] " +
       `[--request-profile ${Object.keys(REQUEST_PROFILE_DESCRIPTIONS).join("|")}]`,
   );
   process.exit(2);
@@ -224,26 +230,6 @@ function chooseInteractively(candidates, curated) {
   return [...selected].sort((a, b) => a - b).map((position) => candidates[position - 1]);
 }
 
-function applyInstall() {
-  const result =
-    process.platform === "win32"
-      ? spawnSync(
-          "powershell.exe",
-          [
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            path.join(SOURCE_ROOT, "install.ps1"),
-            "-CheckoutInstall",
-          ],
-          { stdio: "inherit" },
-        )
-      : spawnSync(path.join(SOURCE_ROOT, "bin", "install"), [], { stdio: "inherit" });
-  if (result.status !== 0) {
-    throw new Error("Applying the curated models did not finish; run the install command manually.");
-  }
-}
 
 async function main() {
   for (const warning of USER_MODEL_WARNINGS) console.error(warning);
@@ -252,6 +238,9 @@ async function main() {
   const curated = new Set(mine.map((model) => model.upstreamModel));
   if (modelsOption !== undefined && removeOption !== undefined) {
     throw new Error("Use --models to add models or --remove to prune them, not both.");
+  }
+  if (freeOnly && (modelsOption !== undefined || removeOption !== undefined)) {
+    throw new Error("Use --free-only, --models, or --remove by itself.");
   }
   if (modelsOption !== undefined && (!modelsOption.trim() || modelsOption.startsWith("--"))) {
     throw new Error("--models requires at least one model id.");
@@ -273,10 +262,24 @@ async function main() {
 
   // Removing local curation must not depend on provider credentials or network
   // availability. Discovery is needed only for additions and the picker.
+  //
+  // Additions read the provider's cached list by default: it is the same list
+  // the caller chose from, and re-asking the provider makes every add pay for
+  // a network round trip it does not need. `--refresh` re-asks.
   const discovery = removeOption === undefined
-    ? await discoverProviderModels(providerId)
+    ? await discoverProviderModels(providerId, { refresh: refreshCatalog })
     : { unregistered: [] };
   const candidates = [...new Set([...discovery.unregistered, ...curated])].sort();
+
+  if (freeOnly && !Array.isArray(discovery.free)) {
+    throw new Error(`${provider.displayName} does not publish a supported free-model catalog.`);
+  }
+  const freeCandidates = freeOnly
+    ? discovery.free.filter((id) => candidates.includes(id))
+    : [];
+  if (freeOnly && freeCandidates.length === 0) {
+    throw new Error(`${provider.displayName} currently advertises no unregistered free OpenAI-compatible models.`);
+  }
 
   if (candidates.length === 0 && removeOption === undefined) {
     process.stdout.write(
@@ -285,9 +288,11 @@ async function main() {
     return;
   }
 
-  const interactiveSelection = modelsOption === undefined && removeOption === undefined;
+  const interactiveSelection = modelsOption === undefined && removeOption === undefined && !freeOnly;
   const chosen = modelsOption
     ? modelsOption.split(",").map((value) => value.trim()).filter(Boolean)
+    : freeOnly
+      ? freeCandidates
     : interactiveSelection
       ? chooseInteractively(candidates, curated)
       : [];
@@ -311,7 +316,10 @@ async function main() {
   const interactive = interactiveSelection && Boolean(process.stdin.isTTY);
 
   const metadataFor = (id) => {
-    const metadata = { ...(flagEfforts || {}) };
+    const metadata = {
+      ...(flagEfforts || {}),
+      ...(discovery.free?.includes(id) ? { isFree: true } : {}),
+    };
     // The provider already published this model's size; asking the user to
     // retype it, or defaulting past it, is how a million-token model ends up
     // stored as a 131K one. A catalog that said nothing still falls back.
@@ -361,10 +369,16 @@ async function main() {
       : undefined;
   };
 
+  // Older builds included OrcaRouter's moving free meta-router. A free-only
+  // refresh replaces it with the concrete free models the live catalog names,
+  // while preserving every paid model the operator curated separately.
+  const effectiveRemovals = freeOnly && curated.has("orcarouter/free")
+    ? [...removals, "orcarouter/free"]
+    : removals;
   const { surviving, additions } = planCuration({
     mine,
     chosen,
-    removals,
+    removals: effectiveRemovals,
     interactive: interactiveSelection,
   });
   const nextMine = [
@@ -381,10 +395,27 @@ async function main() {
         metadata,
       });
     }),
-  ];
+  ].map((model) => {
+    if (providerId !== "orca" || !discovery.free?.includes(model.upstreamModel)) return model;
+    return {
+      ...model,
+      ...userModelIdentity({
+        providerId,
+        upstreamId: model.upstreamModel,
+        metadata: { ...model, isFree: true },
+      }),
+      isFree: true,
+    };
+  });
   let target;
   const added = nextMine.filter((model) => !curated.has(model.upstreamModel)).length;
   const removed = mine.length - (nextMine.length - added);
+  // Selecting a model in curation means selecting it for the picker as well.
+  // Provider enablement alone remains deliberately non-expansive: it must not
+  // flood every installed client's picker with that provider's whole catalog.
+  const pickerSelections = nextMine
+    .filter((model) => chosen.includes(model.upstreamModel))
+    .map((model) => model.slug);
 
   const wantsApply =
     !noApply && (
@@ -392,7 +423,7 @@ async function main() {
       confirm("Apply now? This rebuilds gateway routes and restarts the background service.")
     );
   await transactModelOverlayMutation({
-    files: [USER_MODELS_PATH],
+    files: [USER_MODELS_PATH, MODEL_PICKER_STATE_PATH],
     mutate: () => {
       // Discovery and prompts intentionally happen before the lock, but the
       // document merge cannot: another provider's curation may have landed
@@ -406,12 +437,23 @@ async function main() {
         expectedMine: mine,
         nextMine,
       }));
+      if (pickerSelections.length) setModelsVisible(pickerSelections, true);
     },
-    applyPublication: async () => {
-      if (!wantsApply) return {};
-      applyInstall();
-      return {};
-    },
+    restart: wantsApply,
+    // Publishing curated models is a catalog operation, not an installation.
+    // This used to shell out to bin/install, which reinstalls the background
+    // service and waits on its health -- and whose own EXIT trap disables the
+    // client config when that wait fails. Adding one model could therefore
+    // leave the router unrouted. rebuildModelOverlayPublication already writes
+    // the gateway routes and republishes every installed client's picker --
+    // the same catalog steps the installer ran -- and the restart requested
+    // above is the only reload the new gateway routes actually need.
+    //
+    // --no-apply still publishes nothing: it persists the overlay and leaves
+    // the routing plane untouched until the operator asks for it.
+    applyPublication: async (options) => (
+      wantsApply ? applyModelOverlayPublication(options) : {}
+    ),
   });
   process.stdout.write(
     `Saved ${nextMine.length} curated ${provider.displayName} model${

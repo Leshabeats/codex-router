@@ -1,5 +1,5 @@
 import type { ButtonHTMLAttributes, ReactNode } from "react";
-import { AlertTriangle, CheckCircle2, LoaderCircle, RefreshCw, Search, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, RefreshCw, Search, X } from "lucide-react";
 import { classNames } from "./lib";
 
 export function Badge({ children, tone = "neutral" }: { children: ReactNode; tone?: "neutral" | "success" | "warning" | "danger" | "accent" }) {
@@ -99,9 +99,48 @@ export function EmptyState({ icon, title, body, action }: { icon?: ReactNode; ti
 
 export function LoadingState({ label = "Loading router data" }: { label?: string }) {
   return (
-    <div className="loading-state" role="status">
-      <LoaderCircle aria-hidden size={18} strokeWidth={1.7} className="spin" />
-      <span>{label}</span>
+    <div className="loading-state app-loading-skeleton" role="status" aria-live="polite">
+      <span className="visually-hidden">{label}</span>
+      <div className="skeleton-heading">
+        <SkeletonBlock className="skeleton-eyebrow" />
+        <SkeletonBlock className="skeleton-title" />
+        <SkeletonBlock className="skeleton-copy" />
+      </div>
+      <div className="skeleton-stat-grid" aria-hidden="true">
+        {Array.from({ length: 4 }, (_, index) => <SkeletonBlock key={index} className="skeleton-stat" />)}
+      </div>
+      <SkeletonBlock className="skeleton-panel" />
+      <div className="skeleton-directory" aria-hidden="true">
+        {Array.from({ length: 5 }, (_, index) => <SkeletonBlock key={index} className="skeleton-row" />)}
+      </div>
+    </div>
+  );
+}
+
+export function SkeletonBlock({ className = "" }: { className?: string }) {
+  return <i className={classNames("skeleton-block", className)} aria-hidden="true" />;
+}
+
+export function CatalogSkeleton({ label = "Loading provider catalog" }: { label?: string }) {
+  return (
+    <div className="catalog-skeleton" role="status" aria-live="polite">
+      <span className="visually-hidden">{label}</span>
+      {Array.from({ length: 4 }, (_, index) => (
+        <div className="catalog-skeleton-row" key={index} aria-hidden="true">
+          <SkeletonBlock className="skeleton-check" />
+          <SkeletonBlock className="skeleton-catalog-name" />
+          <SkeletonBlock className="skeleton-catalog-meta" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export function PanelSkeleton({ label = "Loading content", variant = "list", count = 4 }: { label?: string; variant?: "list" | "cards"; count?: number }) {
+  return (
+    <div className={classNames("panel-skeleton", `panel-skeleton-${variant}`)} role="status" aria-live="polite">
+      <span className="visually-hidden">{label}</span>
+      {Array.from({ length: count }, (_, index) => <SkeletonBlock className="panel-skeleton-item" key={index} />)}
     </div>
   );
 }

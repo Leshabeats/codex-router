@@ -23,11 +23,20 @@ import {
 } from "./service-process.mjs";
 import { protectPrivateFile } from "./file-security.mjs";
 import { serviceProxyEnvironment } from "./proxy-environment.mjs";
+import { assertServiceWriteIsolated } from "./service-write-guard.mjs";
 
 const effectivePlatform = process.env.CODEX_ROUTER_SERVICE_PLATFORM || process.platform;
 const command = process.argv[2] || "status";
 const renderCommands = new Set(["render", "render-launcher", "render-task"]);
 const taskName = "Codex Router";
+const guardLauncherWrite = () => assertServiceWriteIsolated(STATE_DIR, {
+  redirected: Boolean(
+    process.env.MODEL_ROUTER_STATE_DIR || process.env.CODEX_ROUTER_STATE_DIR,
+  ),
+  label: "service launchers",
+  override: "MODEL_ROUTER_STATE_DIR",
+});
+
 const wrapperPath = path.join(STATE_DIR, "start-codex-router.cmd");
 const launcherPath = path.join(STATE_DIR, "start-codex-router-hidden.vbs");
 
@@ -114,6 +123,7 @@ function schtasks(args, options = {}) {
 }
 
 function writeAtomic(target, contents) {
+  guardLauncherWrite();
   const temporary = `${target}.tmp.${process.pid}`;
   try {
     writeFileSync(temporary, contents, { mode: 0o600 });
@@ -418,6 +428,7 @@ if (command === "render") {
   } catch {
     // The task may not exist.
   }
+  guardLauncherWrite();
   for (const target of [launcherPath, wrapperPath]) {
     try {
       if (existsSync(target)) unlinkSync(target);

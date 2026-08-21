@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  contextLengthFailure,
   extractUpstreamDetail,
+  gatewayErrorStatus,
   translateGatewayError,
 } from "../src/error-translation.mjs";
 
@@ -35,6 +37,52 @@ test("extractUpstreamDetail falls back to truncated raw text for non-JSON bodies
 test("extractUpstreamDetail returns empty string for empty bodies", () => {
   assert.equal(extractUpstreamDetail(""), "");
   assert.equal(extractUpstreamDetail(undefined), "");
+});
+
+test("an Ollama MLX context rejection becomes a non-retryable context error", () => {
+  const bodyText = JSON.stringify({
+    error: {
+      message:
+        "litellm.APIConnectionError: APIConnectionError: OllamaException - input length (269931 tokens) exceeds the model's maximum context length (262144 tokens). LiteLLM Retried: 2 times",
+      type: null,
+      code: "500",
+    },
+  });
+
+  assert.deepEqual(contextLengthFailure(bodyText), {
+    detail:
+      "input length (269931 tokens) exceeds the model's maximum context length (262144 tokens). LiteLLM Retried: 2 times",
+    inputTokens: 269931,
+    maximumTokens: 262144,
+  });
+  assert.equal(gatewayErrorStatus({ status: 500, bodyText }), 400);
+
+  const payload = translateGatewayError({
+    status: 500,
+    bodyText,
+    modelName: "Qwen3.8 27B MLX (local)",
+    providerName: "Ollama",
+  });
+  assert.equal(payload.error.type, "invalid_request_error");
+  assert.equal(payload.error.param, "input");
+  assert.equal(payload.error.code, "context_length_exceeded");
+  assert.match(payload.error.message, /269,931 tokens/);
+  assert.match(payload.error.message, /262,144-token context window/);
+  assert.match(payload.error.message, /not high demand/);
+  assert.doesNotMatch(payload.error.message, /LiteLLM|APIConnectionError/);
+});
+
+test("ordinary Ollama-style 500 errors remain retryable server errors", () => {
+  const bodyText = JSON.stringify({ error: { message: "mlx runner stopped unexpectedly" } });
+  assert.equal(gatewayErrorStatus({ status: 500, bodyText }), 500);
+  const payload = translateGatewayError({
+    status: 500,
+    bodyText,
+    modelName: "Qwen3.8 27B MLX (local)",
+    providerName: "Ollama",
+  });
+  assert.equal(payload.error.type, "server_error");
+  assert.equal(payload.error.code, "500");
 });
 
 test("a 5xx names the provider and keeps the upstream detail", () => {
