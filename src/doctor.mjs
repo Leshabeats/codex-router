@@ -74,6 +74,7 @@ import {
   retainedToolResultsUsage,
 } from "./tool-result-retention.mjs";
 import { retentionTtlMs } from "./tool-result-aging-state.mjs";
+import { loopbackProxyBypassStatus } from "./loopback-proxy-bypass.mjs";
 
 const checks = [];
 const add = (status, name, detail, fix) => checks.push({ status, name, detail, fix });
@@ -211,6 +212,11 @@ function repair() {
     if (problem) {
       throw new Error(`Homebrew-managed LiteLLM is damaged (${problem}). ${dependencyFix}.`);
     }
+  }
+  if (homebrewManaged && !jsonOutput) {
+    process.stdout.write(
+      "Homebrew manages the dependency files; run `brew reinstall codex-router` to rebuild them if needed.\n",
+    );
   }
 
   const legacy = detectLegacyInstallations();
@@ -671,7 +677,9 @@ add(
   venvCheck.status,
   "LiteLLM venv runtime",
   venvCheck.detail,
-  `${dependencyFix}.`,
+  jsonOutput && homebrewManaged
+    ? "Reinstall codex-router with its package manager to rebuild dependencies."
+    : `${dependencyFix}.`,
 );
 
 const secretMode = existsSync(INTERNAL_SECRET_PATH)
@@ -1096,6 +1104,17 @@ add(
         : `not ready on 127.0.0.1:${PORTS.router} after ${serviceLoaded ? 30 : 2} seconds; ${health.error}`,
   "Run ./bin/doctor --fix. If it still fails, create a support bundle.",
 );
+
+// A healthy router that no client can reach looks identical to a healthy
+// router, which is why this sits directly under the health check. When a
+// system proxy does not bypass loopback, a GUI client's request dies at the
+// proxy and never arrives, so `router.log` stays empty and every check above
+// this one still passes. The terminal is no guide either: a shell exports
+// `no_proxy`, so the CLI keeps working while Codex Desktop cannot connect.
+const loopbackBypass = loopbackProxyBypassStatus();
+if (loopbackBypass) {
+  add("warn", "Loopback proxy bypass", loopbackBypass.detail, loopbackBypass.remedy);
+}
 
 // The skill pack that teaches custom routed models the native tools. Checks
 // are read-only; the fixes re-run ./bin/install, which refreshes exactly the

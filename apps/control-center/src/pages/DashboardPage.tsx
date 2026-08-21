@@ -429,7 +429,7 @@ export function DashboardPage({
             title="Catalog readiness"
             description="What the model picker and subagents can reach."
             action={(
-              <Button variant="ghost" aria-label="Open Models" onClick={() => onNavigate("models")}>
+              <Button variant="ghost" aria-label="Open Providers and models" onClick={() => onNavigate("providers")}>
                 <Boxes aria-hidden size={13} strokeWidth={1.7} />
                 Models
               </Button>

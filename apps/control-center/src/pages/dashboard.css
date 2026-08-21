@@ -16,8 +16,8 @@
 }
 
 .dashboard-page :where(button):focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--accent) 72%, transparent);
-  outline-offset: 2px;
+  background-color: color-mix(in srgb, var(--accent) 11%, var(--surface-0));
+  color: var(--ink-strong);
 }
 
 .dashboard-page :where(dd, time, .db-summary-value, .db-summary-detail) {
@@ -249,8 +249,7 @@
 }
 
 .dashboard-page .db-trend-slot:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--accent) 72%, transparent);
-  outline-offset: 4px;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 
 .dashboard-page .db-trend-slot i {

@@ -9,7 +9,6 @@ import {
   CircleGauge,
   LayoutDashboard,
   HardDrive,
-  KeyRound,
   LoaderCircle,
   Moon,
   PanelLeftClose,
@@ -26,8 +25,7 @@ import { ContextPage } from "./pages/ContextPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { HarnessPage } from "./pages/HarnessPage";
 import { LocalPage } from "./pages/LocalPage";
-import { ModelsPage } from "./pages/ModelsPage";
-import { ProvidersPage } from "./pages/ProvidersPage";
+import { ProvidersModelsPage } from "./pages/ProvidersModelsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { StatusPage } from "./pages/StatusPage";
 import { UsagePage } from "./pages/UsagePage";
@@ -63,8 +61,7 @@ const NAV_ITEMS: Array<{
   { id: "dashboard", label: "Dashboard", description: "Router at a glance", icon: LayoutDashboard },
   { id: "usage", label: "Usage", description: "Quotas, balance, traffic", icon: CircleGauge },
   { id: "status", label: "Status", description: "Agents, speed, savings, requests", icon: Activity },
-  { id: "providers", label: "Providers", description: "Accounts and credentials", icon: KeyRound },
-  { id: "models", label: "Models", description: "Catalog and availability", icon: Boxes },
+  { id: "providers", label: "Providers & models", description: "Connections and catalog", icon: Boxes },
   { id: "local", label: "Local", description: "Runtime and on-device models", icon: HardDrive },
   { id: "harness", label: "Harness", description: "Codex and Deep Code", icon: Braces },
   { id: "context", label: "Context Manager", description: "Sessions across harnesses", icon: BrainCircuit },
@@ -78,8 +75,9 @@ function initialTheme(): "light" | "dark" {
 }
 
 function initialView(): ViewId {
-  const stored = localStorage.getItem(VIEW_KEY) as ViewId | null;
-  return NAV_ITEMS.some((item) => item.id === stored) ? stored! : "dashboard";
+  const stored = localStorage.getItem(VIEW_KEY);
+  if (stored === "models") return "providers";
+  return NAV_ITEMS.some((item) => item.id === stored) ? stored as ViewId : "dashboard";
 }
 
 export default function App() {
@@ -299,8 +297,7 @@ export default function App() {
       case "dashboard": return <DashboardPage target={target} health={health} account={accountUsage} providerUsage={providerUsage} setup={providers} presence={presence} api={api} refreshing={refreshing} onRefresh={() => void refreshAll()} onNavigate={navigateTo} />;
       case "usage": return <UsagePage target={target} account={accountUsage} providerUsage={providerUsage} api={api} refreshing={refreshing} onRefresh={() => void refreshAll()} />;
       case "status": return <StatusPage {...shared} health={health} account={accountUsage} providerUsage={providerUsage} />;
-      case "providers": return <ProvidersPage {...shared} setup={providers} usage={providerUsage} />;
-      case "models": return <ModelsPage {...shared} />;
+      case "providers": return <ProvidersModelsPage {...shared} setup={providers} usage={providerUsage} />;
       case "local": return <LocalPage {...shared} />;
       case "harness": return <HarnessPage {...shared} />;
       case "context": return <ContextPage {...shared} />;

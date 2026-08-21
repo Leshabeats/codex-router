@@ -388,8 +388,9 @@ test("control center sidebar keeps the requested product order", async () => {
   const navBlock = source.match(/const NAV_ITEMS:[\s\S]*?= \[([\s\S]*?)\n\];/)?.[1];
   assert.ok(navBlock, "NAV_ITEMS block should be readable");
   const ids = [...navBlock.matchAll(/id: "([^"]+)"/g)].map((match) => match[1]);
-  assert.deepEqual(ids, ["dashboard", "usage", "status", "providers", "models", "local", "harness", "context", "settings"]);
+  assert.deepEqual(ids, ["dashboard", "usage", "status", "providers", "local", "harness", "context", "settings"]);
   assert.doesNotMatch(navBlock, /deferred|Soon/);
+  assert.match(navBlock, /Providers & models/);
 
   const status = await readFile(new URL("../apps/control-center/src/pages/StatusPage.tsx", import.meta.url), "utf8");
   assert.doesNotMatch(status, /doctor/i);
@@ -476,6 +477,41 @@ test("provider and model directories use accessible single-open accordions", asy
   const sources = await readFile(new URL("../apps/control-center/src/assets/providers/SOURCES.md", import.meta.url), "utf8");
   assert.match(sources, /commandcode\.ai\/brand/);
   assert.match(sources, /CommandCodeAI\/command-code[^\s|]+\/symbol\.svg/);
+});
+
+test("providers and models share one keyboard-operable catalog destination", async () => {
+  const app = await readFile(new URL("../apps/control-center/src/App.tsx", import.meta.url), "utf8");
+  const hub = await readFile(new URL("../apps/control-center/src/pages/ProvidersModelsPage.tsx", import.meta.url), "utf8");
+  const types = await readFile(new URL("../apps/control-center/src/types.ts", import.meta.url), "utf8");
+
+  assert.match(app, /case "providers": return <ProvidersModelsPage/);
+  assert.doesNotMatch(app, /case "models"/);
+  assert.doesNotMatch(types, /\| "models"/);
+  assert.match(hub, /role="tablist"/);
+  assert.match(hub, /role="tabpanel"/);
+  assert.match(hub, /aria-selected=\{section === "providers"\}/);
+  assert.match(hub, /aria-selected=\{section === "models"\}/);
+  assert.match(hub, /"ArrowLeft", "ArrowRight", "Home", "End"/);
+  assert.match(hub, /<ProvidersPage \{\.\.\.shared\}/);
+  assert.match(hub, /<ModelsPage \{\.\.\.shared\}/);
+});
+
+test("control center focus feedback uses state changes without focus rings", async () => {
+  const styleUrls = [
+    "../apps/control-center/src/styles.css",
+    "../apps/control-center/src/pages/dashboard.css",
+    "../apps/control-center/src/pages/providers-models.css",
+    "../apps/control-center/src/pages/usage-status.css",
+    "../apps/control-center/src/search-dialog.css",
+  ];
+  const styles = (await Promise.all(styleUrls.map((url) => readFile(new URL(url, import.meta.url), "utf8")))).join("\n");
+
+  assert.doesNotMatch(styles, /outline:\s*2px/);
+  assert.doesNotMatch(styles, /box-shadow:\s*0 0 0/);
+  assert.match(styles, /:where\(button, \[tabindex\]\):focus-visible[\s\S]*?background-color/);
+  assert.match(styles, /:where\(input, select, textarea\):focus-visible[\s\S]*?border-color/);
+  assert.match(styles, /\.toggle input:focus-visible \+ span[\s\S]*?border-color/);
+  assert.match(styles, /\.db-trend-slot:focus-visible[\s\S]*?background/);
 });
 
 test("harness and context IPC remain fixed and session-scoped", async () => {

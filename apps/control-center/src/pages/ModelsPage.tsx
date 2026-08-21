@@ -14,6 +14,7 @@ interface ModelsPageProps {
   refreshing: boolean;
   onRefresh: () => void;
   runAction: RunAction;
+  embedded?: boolean;
 }
 
 function subagentEnabled(target: RouterTarget, slug: string): boolean {
@@ -27,7 +28,7 @@ function subagentEnabled(target: RouterTarget, slug: string): boolean {
   return settings.enabled.includes(slug);
 }
 
-export function ModelsPage({ target, api, refreshing, onRefresh, runAction }: ModelsPageProps) {
+export function ModelsPage({ target, api, refreshing, onRefresh, runAction, embedded = false }: ModelsPageProps) {
   const [search, setSearch] = useState("");
   const [provider, setProvider] = useState("all");
   const [enabledOnly, setEnabledOnly] = useState(true);
@@ -83,13 +84,15 @@ export function ModelsPage({ target, api, refreshing, onRefresh, runAction }: Mo
 
   return (
     <div className="providers-models-page models-page">
-      <PageHeader
-        eyebrow="Catalog"
-        title="Models"
-        description="Choose which connected models appear in Codex and which proven models can run as subagents."
-        onRefresh={onRefresh}
-        refreshing={refreshing}
-      />
+      {!embedded ? (
+        <PageHeader
+          eyebrow="Catalog"
+          title="Models"
+          description="Choose which connected models appear in Codex and which proven models can run as subagents."
+          onRefresh={onRefresh}
+          refreshing={refreshing}
+        />
+      ) : null}
 
       <StatStrip items={[
         { label: "Available", value: enabledCount, detail: `${models.length} registered` },

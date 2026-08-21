@@ -52,6 +52,22 @@ if [ "${CODEX_ROUTER_PACKAGE_MANAGER:-}" = homebrew ] && [ "$force_deps" = true 
   echo "--force-deps cannot rebuild Homebrew-managed dependencies; run brew reinstall codex-router instead." >&2
   exit 2
 fi
+
+# Package managers assemble and own the dependency trees under their prefix.
+# Refuse to mutate those trees even if a future installer integration reports a
+# different dependency status, and leave the package-manager repair command in
+# the error so the user has a safe recovery path.
+packaged_dependency_refusal() {
+  manager=${CODEX_ROUTER_PACKAGE_MANAGER:-}
+  [ -z "$manager" ] && return 0
+  if [ "$manager" = homebrew ]; then
+    echo "Homebrew owns this installation; run brew reinstall codex-router to rebuild ${1:-dependencies}." >&2
+  else
+    echo "Reinstall the codex-router package managed by $manager to rebuild ${1:-dependencies}." >&2
+  fi
+  exit 1
+}
+
 platform=$(uname -s)
 case "$platform" in
   Darwin|Linux) ;;
@@ -114,6 +130,7 @@ case "$(install_step node-deps)" in
   managed) echo "Homebrew manages Node dependencies; skipping npm ci." ;;
   skip) echo "Node dependencies already match package-lock.json; skipping npm ci." ;;
   *)
+    packaged_dependency_refusal "Node dependencies"
     npm ci --omit=dev
     node src/install-plan.mjs record node-deps
     ;;
@@ -123,6 +140,7 @@ case "$(install_step python-deps)" in
   managed) echo "Homebrew manages LiteLLM; skipping Python dependency installation." ;;
   skip) echo "LiteLLM already matches the pinned versions; skipping the Python install." ;;
   *)
+    packaged_dependency_refusal "LiteLLM"
     if command -v uv >/dev/null 2>&1; then
       if [ ! -x .venv/bin/python ]; then
         uv venv --python 3.12 .venv

@@ -93,8 +93,18 @@ button {
 }
 
 :where(button, input, select, textarea, [tabindex]):focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--accent) 72%, transparent);
-  outline-offset: 2px;
+  outline: none;
+}
+
+:where(button, [tabindex]):focus-visible {
+  background-color: color-mix(in srgb, var(--accent) 11%, var(--surface-0));
+  box-shadow: inset 0 -2px color-mix(in srgb, var(--accent) 72%, transparent);
+  color: var(--ink-strong);
+}
+
+:where(input, select, textarea):focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 70%, var(--line-strong));
+  background-color: color-mix(in srgb, var(--accent-soft) 34%, var(--surface-0));
 }
 
 ::-webkit-scrollbar {
@@ -850,6 +860,11 @@ textarea::placeholder {
 
 .search-field button:hover { background: var(--surface-2); color: var(--ink); }
 
+.search-field:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 70%, var(--line-strong));
+  background: color-mix(in srgb, var(--accent-soft) 34%, var(--surface-0));
+}
+
 .model-toolbar,
 .provider-toolbar {
   display: flex;
@@ -1037,6 +1052,11 @@ textarea::placeholder {
 .toggle input:checked + span i {
   transform: translateX(13px);
   background: var(--accent);
+}
+
+.toggle input:focus-visible + span {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 72%, var(--surface-2));
 }
 
 .toggle.is-disabled {

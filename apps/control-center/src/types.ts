@@ -1,6 +1,5 @@
 export type ViewId =
   | "dashboard"
-  | "models"
   | "local"
   | "harness"
   | "context"

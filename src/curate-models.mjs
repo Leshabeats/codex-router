@@ -31,6 +31,7 @@ const removeOption = (() => {
 })();
 const apply = process.argv.includes("--apply");
 const noApply = process.argv.includes("--no-apply");
+const freeOnly = process.argv.includes("--free-only");
 const effortsOption = (() => {
   const index = process.argv.indexOf("--efforts");
   return index === -1 ? undefined : process.argv[index + 1];
@@ -88,7 +89,8 @@ export function curatedSizing(contextLength) {
 function usage() {
   console.error(
     "Usage: curate-models.mjs PROVIDER [--models id1,id2 | interactive] " +
-      "[--remove id1,id2] [--apply|--no-apply] [--efforts minimal,low,medium,high,xhigh] " +
+      "[--free-only] [--remove id1,id2] [--apply|--no-apply] " +
+      "[--efforts minimal,low,medium,high,xhigh] " +
       `[--request-profile ${Object.keys(REQUEST_PROFILE_DESCRIPTIONS).join("|")}]`,
   );
   process.exit(2);
@@ -253,6 +255,9 @@ async function main() {
   if (modelsOption !== undefined && removeOption !== undefined) {
     throw new Error("Use --models to add models or --remove to prune them, not both.");
   }
+  if (freeOnly && (modelsOption !== undefined || removeOption !== undefined)) {
+    throw new Error("Use --free-only, --models, or --remove by itself.");
+  }
   if (modelsOption !== undefined && (!modelsOption.trim() || modelsOption.startsWith("--"))) {
     throw new Error("--models requires at least one model id.");
   }
@@ -278,6 +283,16 @@ async function main() {
     : { unregistered: [] };
   const candidates = [...new Set([...discovery.unregistered, ...curated])].sort();
 
+  if (freeOnly && !Array.isArray(discovery.free)) {
+    throw new Error(`${provider.displayName} does not publish a supported free-model catalog.`);
+  }
+  const freeCandidates = freeOnly
+    ? discovery.free.filter((id) => candidates.includes(id))
+    : [];
+  if (freeOnly && freeCandidates.length === 0) {
+    throw new Error(`${provider.displayName} currently advertises no unregistered free OpenAI-compatible models.`);
+  }
+
   if (candidates.length === 0 && removeOption === undefined) {
     process.stdout.write(
       `Every model ${provider.displayName} advertises is already in the registry.\n`,
@@ -285,9 +300,11 @@ async function main() {
     return;
   }
 
-  const interactiveSelection = modelsOption === undefined && removeOption === undefined;
+  const interactiveSelection = modelsOption === undefined && removeOption === undefined && !freeOnly;
   const chosen = modelsOption
     ? modelsOption.split(",").map((value) => value.trim()).filter(Boolean)
+    : freeOnly
+      ? freeCandidates
     : interactiveSelection
       ? chooseInteractively(candidates, curated)
       : [];

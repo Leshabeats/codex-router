@@ -560,6 +560,7 @@ often for the repository to pin and live-verify individual entries:
 | Google Gemini API | `gemini-api` | `https://generativelanguage.googleapis.com/v1beta/openai` |
 | GitHub Copilot | `github-copilot` | Account-specific GitHub Copilot endpoint |
 | Chutes | `chutes` | `https://llm.chutes.ai/v1` |
+| OrcaRouter | `orcarouter` | `https://api.orcarouter.ai/v1` |
 
 Add a key, then pick the models you want from the provider's live catalog:
 
@@ -567,6 +568,22 @@ Add a key, then pick the models you want from the provider's live catalog:
 ./bin/model-router codex provider-key groq set
 ./bin/curate-models groq
 ```
+
+OrcaRouter's public catalog includes paid models, concrete zero-price model
+deployments, and the `orcarouter/free` router alias. Inference still requires
+an OrcaRouter API key, including for free models. To add every currently
+advertised free OpenAI-compatible entry without pinning that changing list in
+the repository:
+
+```sh
+./bin/model-router codex provider-key orcarouter set
+./bin/curate-models orcarouter --free-only --apply
+```
+
+The free list is read live from OrcaRouter's `/models` response. Re-run the
+command when its catalog changes, and verify a curated model with
+`./bin/test-model 'orcarouter/MODEL_ID' --live --yes` before relying on it for
+tool-driven work.
 
 Curated entries use the context window, image support, and reasoning efforts
 you provide during curation — the context window falling back to the one the

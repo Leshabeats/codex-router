@@ -12,10 +12,9 @@ credentials, or service logic in the renderer.
   added to the router total.
 - Status: running chats and agents, live requests, model speed, cached-context
   savings, and upcoming quota resets.
-- Providers: enablement, API credential entry, CLI sign-in, plan notes, and
-  provider account metrics.
-- Models: catalog visibility, native v2 subagent availability, and provider
-  branding.
+- Providers & models: enablement, API credential entry, CLI sign-in, plan
+  notes, account metrics, catalog visibility, native v2 subagent availability,
+  and provider branding in one destination.
 - Local: Ollama runtime controls, installable and installed models, downloads,
   enablement, removal, benchmarks, and local image readers.
 - Harness: launch Codex in its app or a terminal, and install or launch the

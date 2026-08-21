@@ -24,6 +24,21 @@ export function modelIds(payload, provider) {
   if (!Array.isArray(data)) throw new Error("The provider returned an invalid model list.");
   const candidates = provider?.authMode === "anonymous"
     ? data.filter((item) => anonymousModelAllowed(provider, item?.id))
+    : provider?.id === "orcarouter"
+    ? data.filter((item) => {
+        // OrcaRouter's catalog also contains image, video, audio, and
+        // provider-native-only entries. This provider reaches its upstream
+        // through the OpenAI chat-completions surface, so offering anything
+        // that does not advertise that surface creates a picker entry the
+        // forwarder cannot call. The documented `-free` deployments are chat
+        // replicas, but some currently omit endpoint metadata, so their
+        // provider-owned naming contract is the narrow exception.
+        const id = String(item?.id || "").trim();
+        return (
+          Array.isArray(item?.supported_endpoint_types) &&
+          item.supported_endpoint_types.includes("openai")
+        ) || id === "orcarouter/free" || id.endsWith("-free");
+      })
     : provider?.authProfile === "github-copilot"
     ? data.filter((item) =>
         typeof item?.id === "string" &&
@@ -38,6 +53,35 @@ export function modelIds(payload, provider) {
       )
     : data;
   return [...new Set(candidates.map((item) => String(item?.id || "").trim()).filter(Boolean))].sort();
+}
+
+function zeroPrice(value) {
+  if (value === undefined || value === null || value === "") return false;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric === 0;
+}
+
+// Free catalog entries are useful only when they are also callable through
+// this provider's supported OpenAI surface. The named router is intentionally
+// included even though it has no price object: its contract is to choose from
+// the current free pool, while concrete free deployments advertise either a
+// zero request price or zero input and output token prices.
+export function freeModelIds(payload, provider) {
+  if (provider?.id !== "orcarouter") return [];
+  const data = Array.isArray(payload) ? payload : payload?.data;
+  if (!Array.isArray(data)) throw new Error("The provider returned an invalid model list.");
+  const callable = new Set(modelIds(payload, provider));
+  return data
+    .filter((item) => {
+      const id = String(item?.id || "").trim();
+      if (!callable.has(id)) return false;
+      if (id === "orcarouter/free" || id.endsWith("-free")) return true;
+      if (zeroPrice(item?.pricing?.request)) return true;
+      return zeroPrice(item?.pricing?.prompt) && zeroPrice(item?.pricing?.completion);
+    })
+    .map((item) => String(item.id).trim())
+    .filter((id, index, ids) => ids.indexOf(id) === index)
+    .sort();
 }
 
 // What a provider says one model's context window is, or undefined when it says
@@ -133,6 +177,7 @@ export async function discoverProviderModels(providerId) {
   }
   const payload = await providerPayload(provider);
   const discovered = modelIds(payload, provider);
+  const free = freeModelIds(payload, provider);
   const registered = MODELS
     .filter((model) => model.provider === providerId)
     .map((model) => model.upstreamModel)
@@ -148,6 +193,7 @@ export async function discoverProviderModels(providerId) {
     // Sizing the provider published for itself. Curation stores it rather than
     // guessing a window for a model whose catalog entry already names one.
     contextLengths: modelContextLengths(payload, provider),
+    ...(provider.id === "orcarouter" ? { free } : {}),
     note: "Discovery never edits the registry. New models must pass the live compatibility test before they are listed in Codex.",
   };
 }

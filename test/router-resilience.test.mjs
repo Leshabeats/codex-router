@@ -197,6 +197,10 @@ test("a gateway that dies mid-stream ends the routed body and logs the cause", a
     assert.match(result.body, /event: response\.created/);
     assert.match(result.body, /event: error/);
     assert.match(result.body, /local_router_stream_failed/);
+    // The terminal event is the only place a cause can still reach the client
+    // once the head is committed. Without it Codex reports a stream that just
+    // stopped as `stream disconnected before completion`, which names nothing.
+    assert.match(result.body, /closed early|reset the connection/);
 
     // The log has to name the cause; the bare string it used to write is why
     // this was undiagnosable in production.

@@ -192,6 +192,36 @@ proxy variables remain unused by the router.
 Include `localhost`, `127.0.0.1`, and `::1` in `no_proxy` because the router's
 own processes communicate over loopback.
 
+### GUI clients and the system proxy
+
+`no_proxy` covers processes that inherit your shell. Apps launched from the
+Dock, Finder, or an IDE inherit nothing and fall back to the operating
+system's proxy settings instead, whose bypass list routinely omits loopback.
+When that happens the client sends its router request to the proxy, the proxy
+closes the connection, and the client reports a bare transport failure such as
+`stream disconnected before completion: error sending request for url`. Nothing
+reaches the router, so `router.log` stays empty and `doctor` still reports the
+service healthy -- the terminal keeps working the whole time, because a shell
+exports `no_proxy`.
+
+`doctor` detects this and names the remedy. On macOS, put loopback into the
+session every GUI app inherits:
+
+```sh
+launchctl setenv NO_PROXY "localhost,127.0.0.1,::1"
+```
+
+Then fully quit and reopen the client; apps read this only at launch. The
+setting lasts until you log out. To make it permanent, add a login agent at
+`~/Library/LaunchAgents/local.noproxy-loopback.plist` that runs the same
+command with `RunAtLoad`, and load it with
+`launchctl bootstrap gui/$(id -u) <plist>`.
+
+Adding loopback to the system bypass list (System Settings -> Network ->
+Details -> Proxies) is equivalent in principle, but VPN clients that manage
+the system proxy tend to rewrite that list whenever they reconnect, and some
+clients do not honour it for literal loopback addresses.
+
 `all_proxy` / `ALL_PROXY` is also preserved for child processes that support
 it, but the router's Undici transport requires `http_proxy` or `https_proxy` to
 enable proxy routing. After changing these variables, rerun install to refresh

@@ -7,7 +7,7 @@ import "./providers-models.css";
 
 type RunAction = (label: string, action: () => Promise<unknown>) => Promise<void>;
 
-export function ProvidersPage({ target, setup, usage, api, refreshing, onRefresh, runAction }: {
+export function ProvidersPage({ target, setup, usage, api, refreshing, onRefresh, runAction, embedded = false }: {
   target?: RouterTarget;
   setup?: ProviderSetupSnapshot;
   usage?: ProviderUsageSnapshot;
@@ -15,6 +15,7 @@ export function ProvidersPage({ target, setup, usage, api, refreshing, onRefresh
   refreshing: boolean;
   onRefresh: () => void;
   runAction: RunAction;
+  embedded?: boolean;
 }) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<"all" | "connected" | "available">("all");
@@ -43,13 +44,15 @@ export function ProvidersPage({ target, setup, usage, api, refreshing, onRefresh
   return (
     <>
       <div className="providers-models-page providers-page">
-        <PageHeader
-          eyebrow="Connections"
-          title="Providers"
-          description="Connect provider accounts, manage credentials, and choose which model networks the router can use."
-          onRefresh={onRefresh}
-          refreshing={refreshing}
-        />
+        {!embedded ? (
+          <PageHeader
+            eyebrow="Connections"
+            title="Providers"
+            description="Connect provider accounts, manage credentials, and choose which model networks the router can use."
+            onRefresh={onRefresh}
+            refreshing={refreshing}
+          />
+        ) : null}
         <StatStrip items={[
           { label: "Providers", value: providers.length, detail: "Registered families" },
           { label: "Connected", value: connectedCount, detail: "Credential resolved" },

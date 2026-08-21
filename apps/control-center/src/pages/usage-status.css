@@ -15,8 +15,8 @@
 }
 
 .usage-status-page :where(button, select, input):focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--accent) 72%, transparent);
-  outline-offset: 2px;
+  background-color: color-mix(in srgb, var(--accent) 10%, var(--surface-0));
+  color: var(--ink-strong);
 }
 
 .usage-status-page .panel-section {
