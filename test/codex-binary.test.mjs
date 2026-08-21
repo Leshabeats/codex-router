@@ -4,7 +4,13 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { findCodexBinary, preferSpawnablePath, spawnableCommand } from "../src/codex-binary.mjs";
+import {
+  codexCandidatePaths,
+  findCodexBinary,
+  linuxDesktopAppBundledCodex,
+  preferSpawnablePath,
+  spawnableCommand,
+} from "../src/codex-binary.mjs";
 
 // Reported in #46: `where.exe codex` on an npm global install lists the
 // extensionless POSIX shim before the batch shim. Node cannot spawn the former
@@ -52,6 +58,24 @@ test("ignores blank lines in finder output", () => {
 test("returns undefined for empty finder output", () => {
   assert.equal(preferSpawnablePath([], "win32"), undefined);
   assert.equal(preferSpawnablePath(["", "   "], "darwin"), undefined);
+});
+
+test("prefers the Linux desktop app's bundled CLI over a standalone CLI", () => {
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-linux-desktop-cli-"));
+  const bundled = path.join(testRoot, "resources", "codex");
+  mkdirSync(path.dirname(bundled), { recursive: true });
+  writeFileSync(bundled, "");
+
+  try {
+    assert.equal(
+      linuxDesktopAppBundledCodex({ platform: "linux", roots: [testRoot] }),
+      bundled,
+    );
+    const candidates = codexCandidatePaths({ platform: "linux", linuxDesktopRoots: [testRoot] });
+    assert.ok(candidates.indexOf(bundled) < candidates.indexOf("/usr/local/bin/codex"));
+  } finally {
+    rmSync(testRoot, { recursive: true, force: true });
+  }
 });
 
 test("a Windows batch shim runs through cmd.exe with its path escaped", () => {
