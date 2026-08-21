@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -10,6 +10,35 @@ import { freeModelIds, modelIds } from "../src/model-discovery.mjs";
 import { LISTED_MODELS, PROVIDERS } from "../src/model-registry.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+function isolatedEnvironment(testRoot) {
+  return {
+    ...process.env,
+    HOME: testRoot,
+    CODEX_HOME: path.join(testRoot, "codex"),
+    CODEX_ROUTER_STATE_DIR: path.join(testRoot, "state"),
+    MODEL_ROUTER_USER_MODELS: path.join(testRoot, "state", "user-models.json"),
+    CODEX_ROUTER_SERVICE_PLATFORM: "linux",
+    CODEX_ROUTER_LAUNCH_AGENTS_DIR: path.join(testRoot, "LaunchAgents"),
+    CODEX_ROUTER_SKIP_LAUNCHCTL: "1",
+    KIMI_CODE_HOME: path.join(testRoot, "kimi-code"),
+    GROK_AUTH_PATH: path.join(testRoot, "grok", "auth.json"),
+    ORCAROUTER_API_KEY: "",
+    ORCAROUTER_BASE_URL: "",
+  };
+}
+
+function runNode(args, env) {
+  return spawnSync(process.execPath, args, { cwd: root, env, encoding: "utf8" });
+}
+
+function writeCredential(testRoot) {
+  const stateDir = path.join(testRoot, "state");
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  writeFileSync(path.join(stateDir, "orcarouter-api-key.secret"), "TEST_ORCAROUTER_KEY\n", {
+    mode: 0o600,
+  });
+}
 
 function catalogFixture() {
   return {
@@ -81,6 +110,34 @@ test("OrcaRouter discovery keeps callable chat models and identifies the free su
     "vendor/unspecified-surface-free",
     "vendor/zero-token-price",
   ]);
+});
+
+test("a configured OrcaRouter provider enables cleanly and doctor requests curation", () => {
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "orcarouter-enable-test-"));
+  try {
+    writeCredential(testRoot);
+    const stateDir = path.join(testRoot, "state");
+    writeFileSync(
+      path.join(stateDir, "enabled-providers.json"),
+      `${JSON.stringify({ version: 1, providers: [] })}\n`,
+      { mode: 0o600 },
+    );
+    const env = isolatedEnvironment(testRoot);
+    const enabled = runNode(["src/providers.mjs", "enable", "orcarouter"], env);
+    assert.equal(enabled.status, 0, enabled.stderr);
+    assert.match(enabled.stdout, /OrcaRouter is enabled, but ships no preselected models/);
+    assert.match(enabled.stdout, /curate-models orcarouter/);
+
+    const doctor = runNode(["src/doctor.mjs", "--json"], env);
+    assert.equal(doctor.status, 1, doctor.stderr);
+    const report = JSON.parse(doctor.stdout);
+    const byName = Object.fromEntries(report.checks.map((check) => [check.name, check]));
+    assert.equal(byName["OrcaRouter key"].status, "ok");
+    assert.equal(byName["OrcaRouter models"].status, "warn");
+    assert.match(byName["OrcaRouter models"].fix, /curate-models orcarouter/);
+  } finally {
+    rmSync(testRoot, { recursive: true, force: true });
+  }
 });
 
 test("--free-only additively curates the live free OrcaRouter catalog", () => {

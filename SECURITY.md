@@ -45,6 +45,7 @@ Router state lives under `$CODEX_HOME/codex-router` by default:
 | `xai-api-key.secret` | Optional xAI key | `600` |
 | `anthropic-api-key.secret` | Optional Anthropic key | `600` |
 | `github-copilot-token.secret` | Optional fine-grained GitHub token with Copilot Requests permission | `600` |
+| `orcarouter-api-key.secret` | Optional OrcaRouter API key | `600` |
 | `native-models.json` | Cached native Codex catalog | `600` |
 | `merged-models.json` | Native plus registry model catalog | `600` |
 | `litellm.yaml` | Generated routes with environment references only | `600` |
