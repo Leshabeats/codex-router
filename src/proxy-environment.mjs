@@ -150,8 +150,8 @@ export function serviceProxyEnvironment(
   // `bin/install` renders the service before it rewrites the manifest, so the
   // values restored here are the previous install's and are still the
   // authoritative answer at this point.
+  const preserved = recorded !== undefined ? recorded : recordedProxyEnvironment(manifestPath);
   if (!proxyEnvironmentDeclared(environment)) {
-    const preserved = recorded !== undefined ? recorded : recordedProxyEnvironment(manifestPath);
     if (preserved) return { ...preserved };
   }
   const values = {};
@@ -164,5 +164,18 @@ export function serviceProxyEnvironment(
   // decision after the installer exits. A positive CLI/NODE_OPTIONS opt-in
   // wins over NODE_USE_ENV_PROXY=0, matching Node's precedence.
   if (environmentProxyOptedIn(environment)) values.NODE_USE_ENV_PROXY = "1";
+  else if (
+    environment.NODE_USE_ENV_PROXY === undefined
+    && preserved?.NODE_USE_ENV_PROXY === "1"
+    && (values.http_proxy ?? values.HTTP_PROXY ?? values.https_proxy ?? values.HTTPS_PROXY)
+  ) {
+    // The address and the permission to use it are separate answers, and an
+    // ordinary shell only ever gives the first: exporting HTTP_PROXY says
+    // nothing about NODE_USE_ENV_PROXY. Reading that silence as "stop using
+    // the proxy this service was installed with" reinstates the original bug
+    // from a terminal -- the variables stay in the service, quietly ignored.
+    // Naming NODE_USE_ENV_PROXY at all, including as 0, still decides it.
+    values.NODE_USE_ENV_PROXY = "1";
+  }
   return values;
 }

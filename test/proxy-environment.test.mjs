@@ -240,3 +240,65 @@ test("proxy variables the router will silently ignore are reported", () => {
   // An install recorded before this field existed is unknown, not broken.
   assert.equal(serviceProxyOptInProblem({}), undefined);
 });
+
+test("a shell that exports a proxy but never mentions the opt-in keeps it", () => {
+  // The gap that reinstated the bug from a terminal: an ordinary shell exports
+  // HTTP_PROXY and says nothing about NODE_USE_ENV_PROXY. That silence is not
+  // a decision to stop using the proxy, and reading it as one leaves the
+  // variables in the service where the router quietly ignores them.
+  const { file, cleanup } = manifestWith({ proxyEnvironment: { ...PROXIED } });
+  try {
+    const values = serviceProxyEnvironment(
+      {
+        HTTP_PROXY: "http://127.0.0.1:3213",
+        HTTPS_PROXY: "http://127.0.0.1:3213",
+        NO_PROXY: "localhost,127.0.0.1,::1",
+      },
+      { manifestPath: file },
+    );
+    assert.equal(values.NODE_USE_ENV_PROXY, "1");
+    assert.equal(values.HTTPS_PROXY, "http://127.0.0.1:3213");
+
+    // A changed address still inherits the opt-in: the operator moved the
+    // proxy, they did not decide to stop using one.
+    assert.equal(
+      serviceProxyEnvironment({ HTTPS_PROXY: "http://10.0.0.9:8080" }, { manifestPath: file })
+        .NODE_USE_ENV_PROXY,
+      "1",
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("naming the opt-in still decides it, and nothing recorded means nothing inherited", () => {
+  const { file, cleanup } = manifestWith({ proxyEnvironment: { ...PROXIED } });
+  try {
+    // Explicit 0 wins over the recorded 1 -- the escape hatch must survive.
+    assert.equal(
+      serviceProxyEnvironment(
+        { HTTPS_PROXY: "http://127.0.0.1:3213", NODE_USE_ENV_PROXY: "0" },
+        { manifestPath: file },
+      ).NODE_USE_ENV_PROXY,
+      "0",
+    );
+    // A bypass list alone is not a proxy, so there is nothing to opt into.
+    assert.equal(
+      serviceProxyEnvironment({ NO_PROXY: "localhost" }, { manifestPath: file }).NODE_USE_ENV_PROXY,
+      undefined,
+    );
+  } finally {
+    cleanup();
+  }
+  // A first install that never recorded an opt-in does not invent one.
+  const fresh = manifestWith({ packageVersion: "0.0.0" });
+  try {
+    assert.equal(
+      serviceProxyEnvironment({ HTTPS_PROXY: "http://p:1" }, { manifestPath: fresh.file })
+        .NODE_USE_ENV_PROXY,
+      undefined,
+    );
+  } finally {
+    fresh.cleanup();
+  }
+});
