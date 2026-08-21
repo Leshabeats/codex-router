@@ -34,10 +34,9 @@ export function modelIds(payload, provider) {
         // replicas, but some currently omit endpoint metadata, so their
         // provider-owned naming contract is the narrow exception.
         const id = String(item?.id || "").trim();
-        return (
-          Array.isArray(item?.supported_endpoint_types) &&
-          item.supported_endpoint_types.includes("openai")
-        ) || id === "orcarouter/free" || id.endsWith("-free");
+        const endpointTypes = item?.supported_endpoint_types;
+        if (Array.isArray(endpointTypes)) return endpointTypes.includes("openai");
+        return id === "orcarouter/free" || id.endsWith("-free");
       })
     : provider?.authProfile === "github-copilot"
     ? data.filter((item) =>
