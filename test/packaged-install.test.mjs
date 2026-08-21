@@ -143,7 +143,7 @@ function runFix(env) {
     return {
       result,
       argv: existsSync(marker)
-        ? readFileSync(marker, "utf8").split("\n").filter(Boolean)
+        ? readFileSync(marker, "utf8").split(/\r?\n/).filter(Boolean)
         : undefined,
     };
   } finally {
