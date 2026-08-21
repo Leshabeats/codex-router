@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { getGlobalDispatcher, setGlobalDispatcher } from "undici";
 
 import {
-  FETCH_CONNECTIONS_PER_ORIGIN,
+  createLoopbackProbeDispatcher,
   fetchDispatcherOptions,
   installStableFetchTransport,
   loopbackProbeFetch,
@@ -55,7 +55,7 @@ test("the router disables HTTP/2 on its process-wide fetch dispatcher", () => {
   assert.equal(dispatcher.kind, "direct");
   assert.deepEqual(created[0].options, fetchDispatcherOptions());
   assert.equal(created[0].options.allowH2, false);
-  assert.equal(created[0].options.connections, FETCH_CONNECTIONS_PER_ORIGIN);
+  assert.equal("connections" in created[0].options, false);
   assert.equal(dispatcher, created[0]);
   assert.deepEqual(installed, [dispatcher]);
 });
@@ -202,6 +202,39 @@ test("every long-lived server process installs the stable transport", () => {
       `${name} creates a server but never installs the stable fetch transport`,
     );
   }
+});
+
+test("loopback health probes use the same proxy opt-in as routed traffic", () => {
+  const created = [];
+  class FakeAgent {
+    constructor(options) {
+      this.kind = "direct";
+      this.options = options;
+      created.push(this);
+    }
+  }
+  class FakeEnvHttpProxyAgent {
+    constructor(options) {
+      this.kind = "environment-proxy";
+      this.options = options;
+      created.push(this);
+    }
+  }
+
+  const proxied = createLoopbackProbeDispatcher({
+    AgentClass: FakeAgent,
+    EnvHttpProxyAgentClass: FakeEnvHttpProxyAgent,
+    environment: { NODE_USE_ENV_PROXY: "1", HTTP_PROXY: "http://proxy.example:8080" },
+  });
+  assert.equal(proxied.kind, "environment-proxy");
+
+  created.length = 0;
+  const direct = createLoopbackProbeDispatcher({
+    AgentClass: FakeAgent,
+    EnvHttpProxyAgentClass: FakeEnvHttpProxyAgent,
+    environment: { HTTP_PROXY: "http://proxy.example:8080" },
+  });
+  assert.equal(direct.kind, "direct");
 });
 
 test("loopback probes use undici fetch so a separate Agent is accepted", async () => {

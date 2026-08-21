@@ -4,7 +4,11 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { DEFAULT_HEALTH_TTL_MS, createHealthCache } from "../src/health-cache.mjs";
+import {
+  DEFAULT_HEALTH_TTL_MS,
+  DEFAULT_MAX_STALE_MS,
+  createHealthCache,
+} from "../src/health-cache.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -152,4 +156,42 @@ test("stale-while-revalidate keeps serving the last answer when the refresh thro
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(await cached("gateway", probe), { reachable: true });
   assert.equal(probes, 2);
+});
+
+test("stale-while-revalidate waits once the snapshot exceeds the max stale age", async () => {
+  const clock = fixedClock();
+  const cached = createHealthCache({
+    ttlMs: 3_000,
+    maxStaleMs: 15_000,
+    now: clock.now,
+    staleWhileRevalidate: true,
+  });
+  let probes = 0;
+  let finishRefresh;
+  const hanging = new Promise((resolve) => {
+    finishRefresh = resolve;
+  });
+  const probe = () => {
+    probes += 1;
+    if (probes === 1) return { reachable: true };
+    return hanging.then(() => ({ reachable: false }));
+  };
+
+  assert.deepEqual(await cached("gateway", probe), { reachable: true });
+  clock.t = 15_001;
+  let settled;
+  const pending = cached("gateway", probe).then((value) => {
+    settled = value;
+    return value;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, undefined);
+  assert.equal(probes, 2);
+  finishRefresh();
+  assert.deepEqual(await pending, { reachable: false });
+});
+
+test("the default max stale age is longer than the companion TTL and still bounded", () => {
+  assert.ok(DEFAULT_MAX_STALE_MS > DEFAULT_HEALTH_TTL_MS);
+  assert.ok(DEFAULT_MAX_STALE_MS <= 30_000);
 });

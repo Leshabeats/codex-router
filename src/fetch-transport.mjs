@@ -10,20 +10,15 @@ import { KEEPALIVE_TIMEOUT_MS } from "./http-utils.mjs";
 // require HTTP/2; an HTTP/1.1-only dispatcher removes that poisoned-session
 // state while retaining keep-alive connection reuse.
 //
-// Concurrent Codex turns (parent plus subagents) each hold one HTTP/1.1
-// streaming socket for the whole generation. Undici's default of 10
-// connections per origin plus a shared pool for loopback health probes
-// starves `/health` and the next turn: the probe waits for a free socket
-// that a long SSE response is sitting on, the tray reports Starting, and
-// Codex surfaces "waiting for network". Size the pool for several parallel
-// sessions, and keep idle sockets as long as the router server does so
+// Concurrent Codex turns each hold one HTTP/1.1 streaming socket for the
+// whole generation. Do not cap `connections`: Undici's HTTP/1.1 pool is
+// unbounded by default, and one router plane serves every installed client.
+// A numeric ceiling queues the next turn once it fills and recreates
+// "waiting for network". Keep idle sockets as long as the router server so
 // Codex's 90s client pool is not handed a dead connection.
-export const FETCH_CONNECTIONS_PER_ORIGIN = 32;
-
 export function fetchDispatcherOptions() {
   return {
     allowH2: false,
-    connections: FETCH_CONNECTIONS_PER_ORIGIN,
     pipelining: 1,
     keepAliveTimeout: KEEPALIVE_TIMEOUT_MS,
   };
@@ -54,11 +49,16 @@ export function installStableFetchTransport({
 // probe looks unreachable, and `/health` stays 503 until startup gives up.
 export function createLoopbackProbeDispatcher({
   AgentClass = Agent,
+  EnvHttpProxyAgentClass = EnvHttpProxyAgent,
+  environment = process.env,
+  execArgv = process.execArgv,
   timeoutMs = 3_000,
 } = {}) {
-  return new AgentClass({
+  const DispatcherClass = environmentHttpProxyConfigured(environment, execArgv)
+    ? EnvHttpProxyAgentClass
+    : AgentClass;
+  return new DispatcherClass({
     allowH2: false,
-    connections: 8,
     pipelining: 1,
     keepAliveTimeout: 10_000,
     headersTimeout: timeoutMs,

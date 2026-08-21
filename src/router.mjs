@@ -320,6 +320,15 @@ async function parseBodyAsync(buffer) {
   return parseBody(buffer);
 }
 
+function bindClientAbort(request, response, onAbort) {
+  const abort = () => onAbort();
+  request.once("aborted", abort);
+  response.once("close", () => {
+    if (!response.writableEnded) abort();
+  });
+  if (request.aborted || response.destroyed) abort();
+}
+
 function decodeBody(body, contentEncoding) {
   const value = Array.isArray(contentEncoding)
     ? contentEncoding.join(",")
@@ -2326,6 +2335,11 @@ async function handleResponses(request, response, requestUrl) {
   let finalStatus;
   let activityStatus;
   let usageRecorded = false;
+  const controller = new AbortController();
+  bindClientAbort(request, response, () => {
+    clientGone = true;
+    controller.abort();
+  });
   try {
     if (!requireCodexTransport(request, response)) return;
     const encoded = await readRequestBody(request);
@@ -2379,18 +2393,6 @@ async function handleResponses(request, response, requestUrl) {
       route &&
       Array.isArray(payload.input) &&
       payload.input.at(-1)?.type === "compaction_trigger";
-
-    const controller = new AbortController();
-    request.once("aborted", () => {
-      clientGone = true;
-      controller.abort();
-    });
-    response.once("close", () => {
-      if (!response.writableEnded) {
-        clientGone = true;
-        controller.abort();
-      }
-    });
 
     if (route && (compactV1 || compactV2)) {
       const compaction = await handleRoutedCompaction(
@@ -3097,6 +3099,11 @@ async function handleNativeRequest(request, response, requestUrl, defaultModel) 
   const activity = beginRequestActivity();
   let clientGone = false;
   let requestedModel = defaultModel;
+  const controller = new AbortController();
+  bindClientAbort(request, response, () => {
+    clientGone = true;
+    controller.abort();
+  });
   try {
     if (!requireCodexTransport(request, response)) return;
     // Image and web-search turns are native-only; an idle install refuses
@@ -3114,18 +3121,6 @@ async function handleNativeRequest(request, response, requestUrl, defaultModel) 
       provider: "openai",
       model: requestedModel,
       ...activityMetadataFromHeaders(request.headers),
-    });
-
-    const controller = new AbortController();
-    request.once("aborted", () => {
-      clientGone = true;
-      controller.abort();
-    });
-    response.once("close", () => {
-      if (!response.writableEnded) {
-        clientGone = true;
-        controller.abort();
-      }
     });
 
     const headers = nativeHeaders(request);

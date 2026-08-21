@@ -9,13 +9,24 @@
 // short: the tray shows live service status, so a stale "reachable" is a lie
 // with a shelf life, and a few seconds is the most that is honest.
 export const DEFAULT_HEALTH_TTL_MS = 3_000;
+// Stale-while-revalidate must not serve an hours-old "reachable" to doctor on a
+// tray-less machine that has not polled since the gateway died. The TTL is the
+// companion's refresh cadence; this is the hard bound on how old a nonblocking
+// snapshot may be before `/health` waits for a live probe.
+export const DEFAULT_MAX_STALE_MS = 15_000;
 
 export function createHealthCache({
   ttlMs = DEFAULT_HEALTH_TTL_MS,
+  maxStaleMs = DEFAULT_MAX_STALE_MS,
   now = () => Date.now(),
   staleWhileRevalidate = false,
 } = {}) {
   const entries = new Map();
+
+  function canServeStale(existing) {
+    if (!staleWhileRevalidate || existing?.lastValue === undefined) return false;
+    return now() - existing.lastValueAt <= maxStaleMs;
+  }
 
   return function cachedProbe(key, probe) {
     const existing = entries.get(key);
@@ -23,15 +34,11 @@ export function createHealthCache({
     // Concurrent callers share the in-flight promise rather than each starting
     // their own probe, so a burst of polls costs one request, not one each.
     if (fresh) {
-      if (staleWhileRevalidate && existing.lastValue !== undefined) {
-        return Promise.resolve(existing.lastValue);
-      }
+      if (canServeStale(existing)) return Promise.resolve(existing.lastValue);
       return existing.promise;
     }
     if (existing?.promise && existing.refreshing) {
-      if (staleWhileRevalidate && existing.lastValue !== undefined) {
-        return Promise.resolve(existing.lastValue);
-      }
+      if (canServeStale(existing)) return Promise.resolve(existing.lastValue);
       return existing.promise;
     }
 
@@ -40,8 +47,10 @@ export function createHealthCache({
       .then((value) => {
         const current = entries.get(key);
         if (current?.promise === promise) {
+          const observedAt = now();
           entries.set(key, {
-            at: now(),
+            at: observedAt,
+            lastValueAt: observedAt,
             promise,
             lastValue: value,
             refreshing: false,
@@ -65,9 +74,10 @@ export function createHealthCache({
         throw error;
       });
 
-    if (staleWhileRevalidate && existing?.lastValue !== undefined) {
+    if (canServeStale(existing)) {
       entries.set(key, {
         at: now(),
+        lastValueAt: existing.lastValueAt,
         promise,
         lastValue: existing.lastValue,
         refreshing: true,
@@ -77,6 +87,7 @@ export function createHealthCache({
 
     entries.set(key, {
       at: now(),
+      lastValueAt: existing?.lastValueAt,
       promise,
       lastValue: existing?.lastValue,
       refreshing: true,
