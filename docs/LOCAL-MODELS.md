@@ -149,9 +149,9 @@ confidently suggest destructive code. Keep LM Studio bound to `127.0.0.1` and
 review every proposed command or patch before running it.
 
 If Hugging Face reports that the repository is missing, private, or gated,
-authenticate directly with the official Hugging Face or LM Studio tooling and
-retry. The router never asks for, reads, copies, logs, or forwards your
-Hugging Face token.
+authenticate with the official Hugging Face CLI used by this command, then
+retry. The router never asks for, reads, copies, logs, or forwards your Hugging
+Face token.
 
 After installation, fully quit every Codex window and process, reopen Codex,
 create a new task, and select `lmstudio/qwen38-27b-uncensored-mlx`. Model size

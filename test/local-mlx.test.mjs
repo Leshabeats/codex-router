@@ -148,7 +148,7 @@ test("a failed or empty gated download cannot reach load or publication", async 
           : { code: 0, stdout: "", stderr: "" };
       },
     }),
-    /never reads or copies Hugging Face tokens/,
+    /official Hugging Face CLI used by this command/,
   );
   assert.equal(failedCalls.length, 2);
 
@@ -168,6 +168,72 @@ test("a failed or empty gated download cannot reach load or publication", async 
     /without a usable 4-bit model directory/,
   );
   assert.equal(emptyCalls.length, 2);
+});
+
+test("download failures direct authentication to Hugging Face CLI, not LM Studio", async () => {
+  let error;
+  try {
+    await installLocalMlx({
+      yes: true,
+      lmsPath: "/fake/lms",
+      uvxPath: "/fake/uvx",
+      modelDir: path.join(stateDir, "auth-guidance"),
+      run: async (command) =>
+        command === "/fake/uvx"
+          ? { code: 1, stdout: "", stderr: "gated" }
+          : { code: 0, stdout: "", stderr: "" },
+    });
+  } catch (caught) {
+    error = caught;
+  }
+  assert.match(error?.message || "", /official Hugging Face CLI used by this command/);
+  assert.doesNotMatch(error?.message || "", /authenticate.*LM Studio/i);
+});
+
+test("a nonzero server start is idempotent when the configured loopback is reachable", async () => {
+  const calls = [];
+  const result = await installLocalMlx({
+    yes: true,
+    lmsPath: "/fake/lms",
+    uvxPath: "/fake/uvx",
+    modelDir: path.join(stateDir, "server-already-running"),
+    downloadReady: () => true,
+    run: async (command, args) => {
+      calls.push({ command, args });
+      return args[0] === "server"
+        ? { code: 1, stdout: "", stderr: "already running" }
+        : { code: 0, stdout: "", stderr: "" };
+    },
+    fetchImpl: fetchModels([LOCAL_MLX_ID]),
+    probeAttempts: 1,
+  });
+  assert.equal(result.ok, true);
+  assert.ok(calls.some((call) => /bin[/\\]control$/.test(call.command)));
+});
+
+test("a nonzero server start fails closed when loopback is unreachable", async () => {
+  const calls = [];
+  await assert.rejects(
+    installLocalMlx({
+      yes: true,
+      lmsPath: "/fake/lms",
+      uvxPath: "/fake/uvx",
+      modelDir: path.join(stateDir, "server-start-failed"),
+      downloadReady: () => true,
+      run: async (command, args) => {
+        calls.push({ command, args });
+        return args[0] === "server"
+          ? { code: 1, stdout: "", stderr: "failed" }
+          : { code: 0, stdout: "", stderr: "" };
+      },
+      fetchImpl: async () => {
+        throw new Error("connection refused");
+      },
+      probeAttempts: 1,
+    }),
+    /Starting the LM Studio server failed \(exit 1\)/,
+  );
+  assert.ok(!calls.some((call) => /bin[/\\]control$/.test(call.command)));
 });
 
 test("install requires explicit consent and both official CLIs", async () => {

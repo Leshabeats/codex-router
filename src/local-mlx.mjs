@@ -247,7 +247,8 @@ export async function installLocalMlx({
   } catch {
     throw new Error(
       "LM Studio could not download the model. Check that the repository exists and is not gated; " +
-        "if Hugging Face authentication is needed, complete it directly in LM Studio. " +
+        "if Hugging Face authentication is needed, sign in with the official Hugging Face CLI " +
+        "used by this command, then retry. " +
         "The router never reads or copies Hugging Face tokens.",
     );
   }
@@ -274,12 +275,22 @@ export async function installLocalMlx({
     ],
     "Loading the MLX model",
   );
-  await checkedRun(
-    run,
+  const serverStart = await run(
     lmsPath,
     ["server", "start", "--port", "1234", "--bind", "127.0.0.1"],
-    "Starting the LM Studio server",
+    { cwd: REPO_ROOT },
   );
+  if (serverStart?.code !== 0) {
+    // `lms server start` can reject a duplicate start even though the exact
+    // loopback server we need is already healthy. That state is success; any
+    // other nonzero result remains a hard failure before publication.
+    const existing = await probeLmstudio({ fetchImpl });
+    if (!existing.reachable) {
+      throw new Error(
+        `Starting the LM Studio server failed (exit ${serverStart?.code ?? "unknown"}).`,
+      );
+    }
+  }
 
   let served = { reachable: false, ids: [] };
   for (let attempt = 0; attempt < probeAttempts; attempt += 1) {
