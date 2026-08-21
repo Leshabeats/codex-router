@@ -21,6 +21,7 @@ import {
   TARGET_DISPLAY_NAME,
 } from "./paths.mjs";
 import { serviceProxyEnvironment } from "./proxy-environment.mjs";
+import { assertServiceWriteIsolated } from "./service-write-guard.mjs";
 
 const effectivePlatform = process.env.CODEX_ROUTER_SERVICE_PLATFORM || process.platform;
 const command = process.argv[2] || "status";
@@ -35,6 +36,12 @@ const unitPath = path.join(
   "user",
   unitName,
 );
+
+const guardUnitWrite = () => assertServiceWriteIsolated(unitPath, {
+  redirected: Boolean(process.env.XDG_CONFIG_HOME),
+  label: "systemd unit",
+  override: "XDG_CONFIG_HOME",
+});
 
 if (effectivePlatform !== "linux" && command !== "render") {
   throw new Error("The systemd service manager runs on Linux only.");
@@ -112,6 +119,7 @@ function writeUnit() {
   const temporary = `${unitPath}.tmp.${process.pid}`;
   // Proxy URLs may carry credentials, so the generated unit is private just
   // like the state it launches with.
+  guardUnitWrite();
   writeFileSync(temporary, unit(), { encoding: "utf8", mode: 0o600 });
   chmodSync(temporary, 0o600);
   renameSync(temporary, unitPath);
@@ -141,6 +149,7 @@ if (command === "render") {
   } catch {
     // The service may not be installed or running.
   }
+  guardUnitWrite();
   if (existsSync(unitPath)) unlinkSync(unitPath);
   try {
     systemctl(["daemon-reload"], { quiet: true });
