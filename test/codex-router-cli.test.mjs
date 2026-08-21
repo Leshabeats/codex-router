@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dispatcher = path.join(root, "bin", "codex-router");
+const posixOnly = process.platform === "win32" ? "the POSIX dispatcher is not the Windows entry point" : false;
 
 function run(args, options = {}) {
   return spawnSync(dispatcher, args, { encoding: "utf8", ...options });
@@ -41,11 +42,11 @@ test("bin/codex-router is valid POSIX shell", () => {
   assert.equal(result.status, 0, result.stderr);
 });
 
-test("bin/codex-router is executable", () => {
+test("bin/codex-router is executable", { skip: posixOnly }, () => {
   assert.ok(statSync(dispatcher).mode & 0o111, "bin/codex-router must be executable");
 });
 
-test("the dispatcher resolves its root through a symlink", () => {
+test("the dispatcher resolves its root through a symlink", { skip: posixOnly }, () => {
   const { dir, link } = linkedCopy("codex-router");
   try {
     const result = spawnSync(link, ["--version"], { encoding: "utf8" });
@@ -56,7 +57,7 @@ test("the dispatcher resolves its root through a symlink", () => {
   }
 });
 
-test("the dispatcher resolves a chain of symlinks", () => {
+test("the dispatcher resolves a chain of symlinks", { skip: posixOnly }, () => {
   // Homebrew stacks two: `bin/codex-router` points at `opt/<name>/...`, which is
   // itself a symlink into the versioned Cellar directory.
   const { dir, link } = linkedCopy("codex-router");
@@ -71,7 +72,7 @@ test("the dispatcher resolves a chain of symlinks", () => {
   }
 });
 
-test("a bare invocation and --help print the usage", () => {
+test("a bare invocation and --help print the usage", { skip: posixOnly }, () => {
   for (const args of [[], ["help"], ["--help"], ["-h"]]) {
     const result = run(args);
     assert.equal(result.status, 0, `codex-router ${args.join(" ")}: ${result.stderr}`);
@@ -79,7 +80,7 @@ test("a bare invocation and --help print the usage", () => {
   }
 });
 
-test("a command name may not reach outside bin/", () => {
+test("a command name may not reach outside bin/", { skip: posixOnly }, () => {
   // Without this the dispatcher is an arbitrary-execution primitive: the command
   // is interpolated straight into the path it runs.
   for (const argument of ["../install.sh", "..", "./setup", "a/b", ".hidden", "..\\install.ps1"]) {
@@ -89,13 +90,13 @@ test("a command name may not reach outside bin/", () => {
   }
 });
 
-test("an unknown command names the way to the list", () => {
+test("an unknown command names the way to the list", { skip: posixOnly }, () => {
   const result = run(["definitely-not-a-command"]);
   assert.equal(result.status, 2);
   assert.match(result.stderr, /codex-router help/);
 });
 
-test("the dispatcher refuses install", () => {
+test("the dispatcher refuses install", { skip: posixOnly }, () => {
   // `bin/install` rewrites the directory it lives in. A packaged install has no
   // writable one, and offering the command through the packaged entry point is
   // how someone would find that out the hard way.
@@ -104,7 +105,7 @@ test("the dispatcher refuses install", () => {
   assert.match(result.stderr, /unknown command/);
 });
 
-test("the dispatcher forwards arguments verbatim", () => {
+test("the dispatcher forwards arguments verbatim", { skip: posixOnly }, () => {
   // A wrapper that drops flags still runs the command, just not the one the
   // caller asked for -- the defect `rollback --force` hit on Windows.
   const dir = mkdtempSync(path.join(realpathSync(os.tmpdir()), "codex-router-args-"));
@@ -127,7 +128,7 @@ test("the dispatcher forwards arguments verbatim", () => {
   }
 });
 
-test("every command the usage advertises exists in bin/", () => {
+test("every command the usage advertises exists in bin/", { skip: posixOnly }, () => {
   // Usage text is the only place a user learns the command set, so it drifting
   // from bin/ is indistinguishable from the command being broken.
   const usage = run(["help"]).stdout;
@@ -167,14 +168,17 @@ test("the POSIX dispatcher covers the Windows command set", () => {
     // wrapper only still offers it because it is also the checkout installer.
     if (command === "install") continue;
     const target = path.join(root, "bin", posixAliases[command] ?? command);
-    assert.ok(
-      statSync(target).mode & 0o111,
-      `codex-router.ps1 offers ${command} but its POSIX entry point is missing: ${target}`,
-    );
+    assert.ok(statSync(target), `codex-router.ps1 offers ${command} but its POSIX entry point is missing: ${target}`);
+    if (!posixOnly) {
+      assert.ok(
+        statSync(target).mode & 0o111,
+        `codex-router.ps1 offers ${command} but its POSIX entry point is not executable: ${target}`,
+      );
+    }
   }
 });
 
-test("the dispatcher is the only bin/ entry that is not a plain command", () => {
+test("the dispatcher is the only bin/ entry that is not a plain command", { skip: posixOnly }, () => {
   // Guards the `[ -x "$bin_dir/$command" ]` check: a non-executable helper in
   // bin/ is unreachable through the dispatcher, which is intended, but a new
   // *executable* helper becomes a command whether or not it was meant to be.

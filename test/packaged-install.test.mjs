@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -92,14 +93,22 @@ function fakeSourceRoot() {
   // A packaged repair may regenerate configuration and services only when the
   // package-owned dependency tree is healthy. Keep this fixture on that path;
   // dependency-repair.test.mjs separately covers refusal for a damaged venv.
-  const venvBin = path.join(fake, ".venv", "bin");
+  const venvBin = path.join(fake, ".venv", process.platform === "win32" ? "Scripts" : "bin");
   mkdirSync(venvBin, { recursive: true });
   const venvPython = path.join(venvBin, "python");
   const liteLlm = path.join(venvBin, "litellm");
-  writeFileSync(venvPython, "#!/bin/sh\nexit 0\n");
-  writeFileSync(liteLlm, "#!/bin/sh\nexit 0\n");
-  chmodSync(venvPython, 0o755);
-  chmodSync(liteLlm, 0o755);
+  if (process.platform === "win32") {
+    // doctor probes the bundled interpreter with `--version`. A copy of the
+    // current Node executable is a small, real Windows executable that answers
+    // that probe successfully; a text file named `.exe` is not spawnable.
+    copyFileSync(process.execPath, `${venvPython}.exe`);
+    copyFileSync(process.execPath, `${liteLlm}.exe`);
+  } else {
+    writeFileSync(venvPython, "#!/bin/sh\nexit 0\n");
+    writeFileSync(liteLlm, "#!/bin/sh\nexit 0\n");
+    chmodSync(venvPython, 0o755);
+    chmodSync(liteLlm, 0o755);
+  }
   const marker = path.join(dir, "installer-argv");
   const stub = path.join(fake, "bin", "install");
   writeFileSync(
@@ -107,6 +116,13 @@ function fakeSourceRoot() {
     `#!/bin/sh\nprintf '%s\\n' "$@" > ${JSON.stringify(marker)}\nexit 0\n`,
   );
   chmodSync(stub, 0o755);
+  if (process.platform === "win32") {
+    const markerPath = marker.replaceAll("'", "''");
+    writeFileSync(
+      path.join(fake, "install.ps1"),
+      `$ErrorActionPreference = "Stop"\n$args | Set-Content -LiteralPath '${markerPath}'\nexit 0\n`,
+    );
+  }
   return { dir, fake, marker };
 }
 
@@ -141,7 +157,7 @@ test("doctor --fix rebuilds dependencies in a checkout", () => {
   // everyone in the course of exempting packaged installs.
   const { result, argv } = runFix({ CODEX_ROUTER_PACKAGE_MANAGER: "" });
   assert.notEqual(argv, undefined, `installer was never invoked: ${result.stderr}`);
-  assert.deepEqual(argv, ["--force-deps"]);
+  assert.deepEqual(argv, process.platform === "win32" ? ["-CheckoutInstall", "-ForceDeps"] : ["--force-deps"]);
 });
 
 test("doctor --fix repairs a packaged install without rebuilding dependencies", () => {
@@ -150,7 +166,7 @@ test("doctor --fix repairs a packaged install without rebuilding dependencies", 
   // is dropped rather than the whole repair being refused.
   const { result, argv } = runFix({ CODEX_ROUTER_PACKAGE_MANAGER: "homebrew" });
   assert.notEqual(argv, undefined, `installer was never invoked: ${result.stderr}`);
-  assert.deepEqual(argv, []);
+  assert.deepEqual(argv, process.platform === "win32" ? ["-CheckoutInstall"] : []);
   assert.match(result.stdout, /brew reinstall codex-router/);
 });
 

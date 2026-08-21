@@ -239,6 +239,7 @@ function repair() {
   // environment. Homebrew has already validated its package-owned tree above,
   // so its repair only regenerates configuration and services.
   const posixArguments = homebrewManaged ? [] : ["--force-deps"];
+  const windowsArguments = homebrewManaged ? ["-CheckoutInstall"] : ["-CheckoutInstall", "-ForceDeps"];
   const result = process.platform === "win32"
     ? spawnSync(
         "powershell.exe",
@@ -249,8 +250,7 @@ function repair() {
           "Bypass",
           "-File",
           path.join(SOURCE_ROOT, "install.ps1"),
-          "-CheckoutInstall",
-          "-ForceDeps",
+          ...windowsArguments,
         ],
         { cwd: SOURCE_ROOT, env: process.env, stdio: repairStdio },
       )
