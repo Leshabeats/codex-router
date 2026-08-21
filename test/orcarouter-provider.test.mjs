@@ -92,6 +92,15 @@ test("OrcaRouter is a credentialed catalog-only OpenAI provider", () => {
   assert.equal(provider.credential.file, "orcarouter-api-key.secret");
   assert.deepEqual(provider.credential.keychainServices, ["codex-router-orcarouter"]);
   assert.equal(LISTED_MODELS.some(({ provider: id }) => id === "orcarouter"), false);
+
+  const overlay = readFileSync(
+    path.join(root, "apps", "macos", "ModelRouterTray", "Sources", "IslandOverlay.swift"),
+    "utf8",
+  );
+  assert.match(
+    overlay,
+    /\["deepseek", "chutes", "orcarouter"\]\.contains\(provider\)[\s\S]*return "METERED API"/,
+  );
 });
 
 test("OrcaRouter discovery keeps callable chat models and identifies the free subset", () => {
@@ -194,6 +203,29 @@ test("--free-only additively curates the live free OrcaRouter catalog", () => {
     const qwen = stored.models.find((model) => model.upstreamModel === "qwen/qwen3.8-27b-free");
     assert.equal(qwen.contextWindow, 65_536);
     assert.equal(qwen.autoCompact, 55_705);
+
+    const route = runNode([
+      "-e",
+      "const { MODELS } = await import('./src/model-registry.mjs');" +
+        "const { renderLiteLlmConfig } = await import('./src/litellm-config.mjs');" +
+        "const model = MODELS.find((entry) => entry.provider === 'orcarouter' && entry.upstreamModel === 'qwen/qwen3.8-27b-free');" +
+        "process.stdout.write(JSON.stringify({ model, config: renderLiteLlmConfig() }));",
+    ], {
+      ...isolatedEnvironment(testRoot),
+      MODEL_ROUTER_USER_MODELS: userModels,
+    });
+    assert.equal(route.status, 0, route.stderr);
+    const rendered = JSON.parse(route.stdout);
+    assert.equal(rendered.model.gatewayModel, "orcarouter-qwen-qwen3-8-27b-free");
+    const blockStart = rendered.config.indexOf(
+      'model_name: "orcarouter-qwen-qwen3-8-27b-free"',
+    );
+    assert.ok(blockStart >= 0);
+    const nextBlock = rendered.config.indexOf("model_name:", blockStart + 1);
+    const block = rendered.config.slice(blockStart, nextBlock === -1 ? undefined : nextBlock);
+    assert.match(block, /model: "openai\/orcarouter-qwen-qwen3-8-27b-free"/);
+    assert.match(block, /api_base: "os\.environ\/CODEX_ROUTER_API_FORWARD_BASE_URL"/);
+    assert.doesNotMatch(block, /ORCAROUTER_API_KEY/);
   } finally {
     rmSync(testRoot, { recursive: true, force: true });
   }

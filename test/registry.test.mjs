@@ -120,6 +120,7 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "opencode-go-messages/qwen3.7-plus",
       "opencode-go-messages/qwen3.8-max",
       "opencode-go-responses/gpt-5.6-luna",
+      "opencode-go-responses/muse-spark-1.2-contributor",
       "qwen-plan/deepseek-v4-flash-0731",
       "qwen-plan/deepseek-v4-pro-0813",
       "qwen-plan/deepseek-v4-pro",
@@ -1089,6 +1090,13 @@ test("local models route with Ollama's native protocol and a bounded context", (
   const rendered = renderLiteLlmConfig();
   const openAiRoutes = rendered.match(/model: "openai\/local-[^"]+"/g);
   assert.equal(openAiRoutes, null, "a local model must not use the OpenAI-compatible surface");
+  for (const block of rendered.matchAll(/model: "ollama_chat\/[^"]+"([\s\S]*?)(?=\n\s*- model_name:|\nlitellm_settings:)/g)) {
+    assert.match(
+      block[1],
+      /num_retries: 0/,
+      "a deterministic local rejection must not be repeated inside LiteLLM",
+    );
+  }
   // Every non-local model keeps the forwarder path untouched.
   assert.match(rendered, /model: "openai\/deepseek-v4-pro"/);
 });

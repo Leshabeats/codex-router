@@ -806,6 +806,7 @@ final class RouterStore: ObservableObject {
     "github-copilot": "Copilot",
     "clinepass": "ClinePass",
     "chutes": "Chutes",
+    "orcarouter": "OrcaRouter",
   ]
 
   static func shortName(forRegistryProvider provider: RouterProviderInfo) -> String {

@@ -88,7 +88,7 @@ import {
   activityMetadataFromHeaders,
   threadIdFromHeaders,
 } from "./codex-session-names.mjs";
-import { translateGatewayError } from "./error-translation.mjs";
+import { gatewayErrorStatus, translateGatewayError } from "./error-translation.mjs";
 import { describeTransportFailure } from "./transport-failure.mjs";
 import { recordUsageEvent } from "./usage-events.mjs";
 import {
@@ -2638,10 +2638,14 @@ async function handleResponses(request, response, requestUrl) {
       const provider = providerForModel(route);
       const retryAfterHeader = upstream.headers.get("retry-after");
       const retryAfterSeconds = Number(retryAfterHeader);
+      const translatedStatus = gatewayErrorStatus({
+        status: upstream.status,
+        bodyText: failedBodyText,
+      });
       if (retryAfterHeader) response.setHeader("Retry-After", retryAfterHeader);
       writeJson(
         response,
-        upstream.status,
+        translatedStatus,
         translateGatewayError({
           status: upstream.status,
           // Already drained above so the failover classifier could read it; a
@@ -2664,8 +2668,8 @@ async function handleResponses(request, response, requestUrl) {
         firstTokenMs,
       });
       observeSubagentOutcome(request, route, upstream.status);
-      finalStatus = upstream.status;
-      activityStatus = upstream.status;
+      finalStatus = translatedStatus;
+      activityStatus = translatedStatus;
       usageRecorded = true;
       if (!QUIET) {
         console.error(
