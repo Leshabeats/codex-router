@@ -28,7 +28,9 @@ hotlinked at runtime. Research was refreshed on 2026-08-21.
 | `lmstudio.svg` | LM Studio local runtime | https://lmstudio.ai/brand | https://lmstudio.ai/assets/marketing/brand/download/logos/lm-studio-icon-color.svg (official asset; use is governed by the linked brand guidelines and usage terms) |
 | `cognition.svg` | Cognition and the Devin CLI provider | https://cognition.ai/ | https://avatars.githubusercontent.com/u/163493330?v=4 (official GitHub organization avatar for https://github.com/CognitionAI) |
 | `deepreinforce.svg` | DeepReinforce and local Ornith models | https://deep-reinforce.com/ornith_1_0.html | https://avatars.githubusercontent.com/u/313283775?v=4 (official GitHub account avatar for https://github.com/deepreinforce-ai; Ornith source is MIT-licensed) |
+| `poolside.svg` | Poolside Laguna models | https://poolside.ai/models | https://poolside.ai/favicon/favicon.svg (official site favicon; the official verified organization identifies Laguna as its model family at https://github.com/poolsideai) |
 | `stepfun.svg` | StepFun models | https://www.stepfun.com/ | https://www.stepfun.com/step_favicon.svg |
+| `tencent.svg` | Tencent Hy3 models | https://www.tencent.com/en-us/ | https://www.tencent.com/wp-content/themes/tencent-web/assets/favicon/favicon-32x32.png (official site favicon; OpenCode attributes Hy3 to Tencent at https://opencode.ai/data/tencent/hy3) |
 | `google.svg` | Google Gemini and Gemma | https://about.google/brand-resource-center/ | https://cdn.simpleicons.org/google |
 | `meta.svg` | Meta and Llama models | https://about.meta.com/brand/resources/meta/company-brand/ | https://cdn.simpleicons.org/meta |
 | `minimax.svg` | MiniMax | https://www.minimax.io/about | https://cdn.simpleicons.org/minimax |

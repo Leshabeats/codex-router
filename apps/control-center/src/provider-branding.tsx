@@ -24,9 +24,11 @@ import ollamaLogo from "./assets/providers/ollama.png";
 import openaiLogo from "./assets/providers/openai.png";
 import openCodeLogo from "./assets/providers/opencode.png";
 import openRouterLogo from "./assets/providers/openrouter.png";
+import poolsideLogo from "./assets/providers/poolside.svg";
 import qwenLogo from "./assets/providers/qwen.svg";
 import siliconFlowLogo from "./assets/providers/siliconflow.png";
 import stepFunLogo from "./assets/providers/stepfun.svg";
+import tencentLogo from "./assets/providers/tencent.svg";
 import togetherLogo from "./assets/providers/together.png";
 import xaiLogo from "./assets/providers/xai.png";
 import xiaomiLogo from "./assets/providers/xiaomi.svg";
@@ -73,9 +75,11 @@ const BRANDS: Record<string, ProviderBrand> = {
   openai: { key: "openai", name: "OpenAI", shortName: "OA", color: "#5c6662", logo: openaiLogo },
   opencode: { key: "opencode", name: "opencode", shortName: "OC", color: "#666666", logo: openCodeLogo, logoMode: "artwork" },
   openrouter: { key: "openrouter", name: "OpenRouter", shortName: "OR", color: "#6467f2", logo: openRouterLogo, logoMode: "artwork" },
+  poolside: { key: "poolside", name: "Poolside", shortName: "PS", color: "#4137ff", logo: poolsideLogo, logoMode: "artwork" },
   qwen: { key: "qwen", name: "Qwen", shortName: "Q", color: "#6950ef", logo: qwenLogo },
   siliconflow: { key: "siliconflow", name: "SiliconFlow", shortName: "SF", color: "#6736f1", logo: siliconFlowLogo, logoMode: "artwork" },
   stepfun: { key: "stepfun", name: "StepFun", shortName: "ST", color: "#5167f4", logo: stepFunLogo },
+  tencent: { key: "tencent", name: "Tencent", shortName: "T", color: "#0052d9", logo: tencentLogo, logoMode: "artwork" },
   together: { key: "together", name: "Together AI", shortName: "TA", color: "#d84a15", logo: togetherLogo, logoMode: "artwork" },
   xai: { key: "xai", name: "xAI", shortName: "X", color: "#606060", logo: xaiLogo },
   xiaomi: { key: "xiaomi", name: "Xiaomi", shortName: "MI", color: "#ff6900", logo: xiaomiLogo },
@@ -150,6 +154,8 @@ export function brandForModel(model: BrandableModel): ProviderBrand {
   if (/\b(?:gpt|codex)\b/.test(identity) || /^openai\//.test(model.slug.toLowerCase())) return BRANDS.openai;
   if (/\bmimo(?:-|\b)/.test(identity)) return BRANDS.xiaomi;
   if (/\bstep(?:-|\s)/.test(identity)) return BRANDS.stepfun;
+  if (/\bhy3(?:-|\b)/.test(identity)) return BRANDS.tencent;
+  if (/\blaguna(?:-|\b)/.test(identity)) return BRANDS.poolside;
   if (/\b(?:llama|muse spark)\b/.test(identity)) return BRANDS.meta;
   if (/\b(?:mistral|mixtral|codestral)\b/.test(identity)) return BRANDS.mistral;
   if (/\bnemotron\b/.test(identity)) return BRANDS.nvidia;

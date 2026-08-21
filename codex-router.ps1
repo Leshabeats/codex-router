@@ -15,7 +15,7 @@ $Arguments = @(if ($args.Count -gt 1) { $args[1..($args.Count - 1)] })
 $Commands = @(
   "setup", "install", "doctor", "status", "providers", "provider-key", "enable",
   "disable", "uninstall", "update", "rollback", "support-bundle",
-  "smoke-test", "start", "stop", "test-model", "discover-models",
+  "smoke-test", "start", "stop", "test-model", "discover-models", "local-mlx",
   "signed-routing", "refresh-catalog", "media", "tray", "panel", "companion"
 )
 if ($Command -notin $Commands) {
@@ -78,6 +78,7 @@ switch ($Command) {
   "stop" { Invoke-RouterNode "src\service.mjs" @("stop") }
   "test-model" { Invoke-RouterNode "src\compatibility-test.mjs" $Arguments }
   "discover-models" { Invoke-RouterNode "src\model-discovery.mjs" $Arguments }
+  "local-mlx" { Invoke-RouterNode "src\local-mlx.mjs" $Arguments }
   "media" { Invoke-RouterNode "src\minimax-media.mjs" $Arguments }
   # The companion with nothing to build and nothing to download. The router is
   # already serving it; this is the one thing that knows the address.

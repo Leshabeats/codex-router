@@ -111,6 +111,61 @@ terminal can be unchecked in the panel and vice versa. Loading and unloading
 the weights stays in LM Studio; the checkbox only controls whether the model
 is offered in the picker.
 
+### Qwen3.8 27B Uncensored MLX
+
+The supported one-command path installs the 4-bit MLX weights from
+`orcarouter/Qwen3.8-27B-Uncensored-MLX`, loads them into LM Studio with a stable
+API identifier and a 32,768-token context, starts the loopback-only server, and
+publishes `lmstudio/qwen38-27b-uncensored-mlx` to Codex:
+
+```text
+./bin/model-router codex local-mlx install --yes
+./bin/local-mlx status
+```
+
+You can also supply the repository URL explicitly:
+
+```text
+./bin/model-router codex local-mlx install \
+  https://huggingface.co/orcarouter/Qwen3.8-27B-Uncensored-MLX --yes
+```
+
+The upstream repository contains separate nested `2-bit/`, `4-bit/`, `6-bit/`,
+and `8-bit/` trees. The command deliberately downloads only `4-bit/**` with the
+official Hugging Face CLI run through `uvx`, stores it under the router's private
+state directory, and gives LM Studio that exact directory. It does not use the
+router's universal Python lock and does not install LM Studio, llmster, `uv`, or
+any package manager. If `lms` or `uvx` is missing, it stops with the official
+installation location instead of piping an installer into a shell.
+
+A 27B model at 4-bit is a sensible fit for a 64 GB Apple Silicon machine; the
+weights, runtime, 32K KV cache, Codex prompt, and normal application headroom
+all share unified memory. Smaller-memory machines may load it with heavy memory
+pressure or fail LM Studio's resource guardrails.
+
+This is an uncensored/abliterated community model. Treat its output as
+untrusted: it may ignore safety constraints, produce offensive material, or
+confidently suggest destructive code. Keep LM Studio bound to `127.0.0.1` and
+review every proposed command or patch before running it.
+
+If Hugging Face reports that the repository is missing, private, or gated,
+authenticate directly with the official Hugging Face or LM Studio tooling and
+retry. The router never asks for, reads, copies, logs, or forwards your
+Hugging Face token.
+
+After installation, fully quit every Codex window and process, reopen Codex,
+create a new task, and select `lmstudio/qwen38-27b-uncensored-mlx`. Model size
+and a tool template do not prove that it can reliably drive a coding agent. Run
+the real Codex agent check, which uses a scratch workspace and requires two
+successful tool-using runs:
+
+```text
+node src/agent-check.mjs lmstudio/qwen38-27b-uncensored-mlx
+```
+
+Only a `2/2` agent verdict should be treated as evidence that this model can
+operate Codex tools consistently.
+
 Downloads rated too large for the machine are stopped unless `--force` is
 present; `--yes` alone does not override the fit check, because consenting to
 install Ollama is not the same as consenting to a model that will not run. A

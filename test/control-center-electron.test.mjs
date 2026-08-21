@@ -388,9 +388,9 @@ test("control center sidebar keeps the requested product order", async () => {
   const navBlock = source.match(/const NAV_ITEMS:[\s\S]*?= \[([\s\S]*?)\n\];/)?.[1];
   assert.ok(navBlock, "NAV_ITEMS block should be readable");
   const ids = [...navBlock.matchAll(/id: "([^"]+)"/g)].map((match) => match[1]);
-  assert.deepEqual(ids, ["dashboard", "usage", "status", "providers", "local", "harness", "context", "settings"]);
+  assert.deepEqual(ids, ["dashboard", "usage", "status", "models", "local", "harness", "context", "settings"]);
   assert.doesNotMatch(navBlock, /deferred|Soon/);
-  assert.match(navBlock, /Providers & models/);
+  assert.match(navBlock, /label: "Models"/);
 
   const status = await readFile(new URL("../apps/control-center/src/pages/StatusPage.tsx", import.meta.url), "utf8");
   assert.doesNotMatch(status, /doctor/i);
@@ -460,21 +460,22 @@ test("settings keeps model choice out and exposes durable app preferences", asyn
   assert.doesNotMatch(i18n, /settings\.routing\.modelNote/);
 });
 
-test("provider and model directories use accessible single-open accordions", async () => {
-  const providers = await readFile(new URL("../apps/control-center/src/pages/ProvidersPage.tsx", import.meta.url), "utf8");
+test("the model directory combines provider setup and models in accessible single-open accordions", async () => {
   const models = await readFile(new URL("../apps/control-center/src/pages/ModelsPage.tsx", import.meta.url), "utf8");
-  for (const source of [providers, models]) {
-    assert.match(source, /aria-expanded=\{expanded\}/);
-    assert.match(source, /aria-controls=\{panelId\}/);
-    assert.match(source, /hidden=\{!expanded\}/);
-  }
-  assert.match(providers, /setExpandedProviderId\(expanded \? null : provider\.id\)/);
-  assert.match(models, /setExpandedProviderId\(expanded \? null : providerId\)/);
+  assert.match(models, /aria-expanded=\{expanded\}/);
+  assert.match(models, /aria-controls=\{panelId\}/);
+  assert.match(models, /hidden=\{!expanded\}/);
+  assert.match(models, /setExpandedProviderId\(expanded \? null : entry\.id\)/);
+  assert.match(models, /className="pm-provider-detail"[\s\S]*className="pm-provider-connection"[\s\S]*className="pm-model-list"/);
+  assert.match(models, /saveProviderCredential/);
+  assert.match(models, /setProviderEnabled/);
+  assert.match(models, /setPickerModel/);
+  assert.match(models, /setSubagentModel/);
 
   const branding = await readFile(new URL("../apps/control-center/src/provider-branding.tsx", import.meta.url), "utf8");
   assert.match(branding, /assets\/providers\/commandcode\.svg/);
   assert.match(branding, /commandcode:[^\n]+logoMode: "artwork"/);
-  for (const asset of ["cognition", "deepreinforce", "kilo", "lmstudio"]) {
+  for (const asset of ["cognition", "deepreinforce", "kilo", "lmstudio", "poolside", "tencent"]) {
     assert.match(branding, new RegExp(`assets/providers/${asset}\\.svg`), `${asset} logo is not bundled`);
   }
   for (const providerId of [
@@ -485,6 +486,8 @@ test("provider and model directories use accessible single-open accordions", asy
   }
   assert.match(branding, /"lmstudio": "lmstudio"/);
   assert.match(branding, /ornith[^\n]+BRANDS\.deepreinforce/);
+  assert.match(branding, /hy3[^\n]+BRANDS\.tencent/);
+  assert.match(branding, /laguna[^\n]+BRANDS\.poolside/);
   assert.match(branding, /export function brandForLocalModel/);
   const sources = await readFile(new URL("../apps/control-center/src/assets/providers/SOURCES.md", import.meta.url), "utf8");
   assert.match(sources, /commandcode\.ai\/brand/);
@@ -496,30 +499,24 @@ test("provider and model directories use accessible single-open accordions", asy
   assert.match(local, /<BrandLogo brand=\{brandForLocalModel\(model\)\}/);
 });
 
-test("providers and models share one keyboard-operable catalog destination", async () => {
+test("providers and models share one provider-first Models destination without tabs", async () => {
   const app = await readFile(new URL("../apps/control-center/src/App.tsx", import.meta.url), "utf8");
-  const hub = await readFile(new URL("../apps/control-center/src/pages/ProvidersModelsPage.tsx", import.meta.url), "utf8");
+  const models = await readFile(new URL("../apps/control-center/src/pages/ModelsPage.tsx", import.meta.url), "utf8");
   const types = await readFile(new URL("../apps/control-center/src/types.ts", import.meta.url), "utf8");
   const viewType = types.match(/export type ViewId =[\s\S]*?;/)?.[0] || "";
 
-  assert.match(app, /case "providers": return <ProvidersModelsPage/);
-  assert.doesNotMatch(app, /case "models"/);
-  assert.doesNotMatch(viewType, /\| "models"/);
-  assert.match(hub, /role="tablist"/);
-  assert.match(hub, /role="tabpanel"/);
-  assert.match(hub, /aria-selected=\{section === "providers"\}/);
-  assert.match(hub, /aria-selected=\{section === "models"\}/);
-  assert.match(hub, /"ArrowLeft", "ArrowRight", "Home", "End"/);
-  assert.match(app, /initialCatalogSection/);
-  assert.match(app, /section=\{catalogSection\}/);
-  assert.match(app, /onSectionChange=\{setCatalogSection\}/);
-  assert.match(app, /if \(nextCatalogSection\) setCatalogSection\(nextCatalogSection\)/);
-  assert.match(app, /stored === "models"/);
-  assert.match(hub, /<ProvidersPage \{\.\.\.shared\}/);
-  assert.match(hub, /<ModelsPage \{\.\.\.shared\}/);
+  assert.match(app, /case "models": return <ModelsPage/);
+  assert.doesNotMatch(app, /case "providers"|ProvidersModelsPage|ProvidersPage/);
+  assert.match(viewType, /\| "models"/);
+  assert.doesNotMatch(viewType, /\| "providers"/);
+  assert.doesNotMatch(models, /role="tablist"|role="tabpanel"|pm-section-switcher/);
+  assert.match(app, /stored === "models" \|\| stored === "providers"/);
+  assert.match(app, /focusRequest=\{modelFocusRequest\}/);
+  assert.match(models, /model-provider-directory/);
+  assert.match(models, /model-catalog-controls/);
   const dashboard = await readFile(new URL("../apps/control-center/src/pages/DashboardPage.tsx", import.meta.url), "utf8");
-  assert.match(dashboard, /onNavigate\("providers", "providers"\)/);
-  assert.match(dashboard, /onNavigate\("providers", "models"\)/);
+  assert.match(dashboard, /onNavigate\("models", "providers"\)/);
+  assert.match(dashboard, /onNavigate\("models", "models"\)/);
 });
 
 test("control center focus feedback uses state changes without focus rings", async () => {

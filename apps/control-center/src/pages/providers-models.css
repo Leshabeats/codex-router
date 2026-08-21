@@ -4,66 +4,6 @@
   min-width: 0;
 }
 
-.providers-models-hub {
-  display: grid;
-  gap: 24px;
-  min-width: 0;
-}
-
-.pm-section-switcher {
-  display: flex;
-  gap: 4px;
-  padding: 4px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--surface-1);
-}
-
-.pm-section-switcher button {
-  display: flex;
-  min-width: 0;
-  flex: 1;
-  align-items: center;
-  gap: 9px;
-  padding: 9px 12px;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--ink-subtle);
-  cursor: pointer;
-  text-align: left;
-}
-
-.pm-section-switcher button:hover,
-.pm-section-switcher button:focus-visible {
-  background: var(--surface-2);
-  color: var(--ink-strong);
-}
-
-.pm-section-switcher button.is-active {
-  background: var(--surface-0);
-  color: var(--ink-strong);
-}
-
-.pm-section-switcher button > span {
-  display: grid;
-  min-width: 0;
-  gap: 2px;
-}
-
-.pm-section-switcher strong {
-  font-size: 10.5px;
-  font-weight: 620;
-}
-
-.pm-section-switcher small {
-  overflow: hidden;
-  color: var(--ink-faint);
-  font-size: 8.5px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .provider-brand-logo {
   --provider-logo-size: 30px;
   display: inline-grid;
@@ -264,7 +204,7 @@
   font-weight: 620;
 }
 
-.pm-provider-panel {
+.pm-provider-connection {
   display: grid;
   grid-template-columns: minmax(240px, 1fr) auto;
   align-items: center;
@@ -274,9 +214,13 @@
   background: color-mix(in srgb, var(--surface-1) 70%, transparent);
 }
 
-.pm-provider-panel[hidden],
+.pm-provider-detail[hidden],
 .pm-model-list[hidden] {
   display: none;
+}
+
+.pm-provider-detail {
+  background: color-mix(in srgb, var(--surface-1) 45%, var(--surface-0));
 }
 
 .pm-provider-panel-copy {
@@ -317,7 +261,7 @@
   transition: transform 150ms ease, color 150ms ease;
 }
 
-[data-expanded="true"] > :is(.pm-provider-summary, header) .pm-accordion-chevron {
+.pm-provider-row[data-expanded="true"] .pm-accordion-chevron {
   color: var(--ink-subtle);
   transform: rotate(180deg);
 }
@@ -436,83 +380,21 @@
   flex: 1;
 }
 
-.pm-model-group {
-  border-bottom: 1px solid var(--line);
-}
-
-.pm-model-group:last-child {
-  border-bottom: 0;
-}
-
-.pm-model-group > header {
-  margin: 0;
-}
-
-.pm-model-group-trigger {
-  display: flex;
-  width: 100%;
-  min-height: 52px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  padding: 9px 14px;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-  font: inherit;
-  text-align: left;
-  transition: background 130ms ease;
-}
-
-.pm-model-group-trigger:hover,
-.pm-model-group[data-expanded="true"] .pm-model-group-trigger {
-  background: color-mix(in srgb, var(--surface-2) 62%, transparent);
-}
-
-.pm-model-group-meta {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  color: var(--ink-faint);
-  font-size: 9px;
-  white-space: nowrap;
-}
-
-.pm-model-group-brand {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 9px;
-}
-
-.pm-model-group-brand > div {
-  min-width: 0;
-}
-
-.pm-model-group h2 {
-  margin: 0;
-  overflow: hidden;
-  color: var(--ink-strong);
-  font-size: 11.5px;
-  font-weight: 620;
-  letter-spacing: -0.01em;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.pm-model-group-brand small {
-  display: block;
-  margin-top: 2px;
-  color: var(--ink-faint);
-  font-size: 8.5px;
-}
-
 .pm-model-list {
   overflow: hidden;
   margin: 0 14px 14px;
   border: 1px solid var(--line);
   border-radius: 8px;
+}
+
+.pm-provider-model-empty {
+  margin: 0 14px 14px;
+  padding: 13px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface-0);
+  color: var(--ink-faint);
+  font-size: 9.5px;
 }
 
 .pm-model-row {
@@ -608,8 +490,7 @@
   background-color: color-mix(in srgb, var(--accent-soft) 34%, var(--surface-0));
 }
 
-.pm-provider-summary:focus-visible,
-.pm-model-group-trigger:focus-visible {
+.pm-provider-summary:focus-visible {
   background: color-mix(in srgb, var(--accent) 10%, var(--surface-0));
 }
 
@@ -618,7 +499,7 @@
     grid-template-columns: 38px minmax(260px, 1fr) minmax(115px, 0.35fr) 16px;
   }
 
-  .pm-provider-panel {
+  .pm-provider-connection {
     grid-template-columns: minmax(0, 1fr);
   }
 
@@ -675,7 +556,7 @@
     align-self: center;
   }
 
-  .pm-provider-panel {
+  .pm-provider-connection {
     padding-left: 66px;
   }
 
@@ -712,7 +593,6 @@
 
 @media (prefers-reduced-motion: reduce) {
   .pm-provider-summary,
-  .pm-model-group-trigger,
   .pm-model-row,
   .pm-accordion-chevron {
     transition: none;

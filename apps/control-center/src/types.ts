@@ -1,14 +1,19 @@
 export type ViewId =
   | "dashboard"
+  | "models"
   | "local"
   | "harness"
   | "context"
   | "settings"
   | "usage"
-  | "status"
-  | "providers";
+  | "status";
 
-export type CatalogSection = "providers" | "models";
+export type ModelViewFocus = "providers" | "models";
+
+export interface ModelViewFocusRequest {
+  region: ModelViewFocus;
+  id: number;
+}
 
 export interface ReasoningLevel {
   effort: string;
