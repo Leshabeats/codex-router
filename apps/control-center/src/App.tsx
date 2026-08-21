@@ -53,6 +53,7 @@ import type {
 
 const THEME_KEY = "model-router-control-center-theme";
 const VIEW_KEY = "model-router-control-center-view";
+const ACTIVE_MLX_STATES = new Set(["preparing", "downloading", "loading", "starting-server", "verifying", "publishing"]);
 
 const NAV_ITEMS: Array<{
   id: ViewId;
@@ -110,8 +111,9 @@ export default function App() {
 
   const target = snapshot?.targets.codex;
   const localDownloadActive = target?.modelSettings?.localModels?.download?.status === "downloading";
+  const mlxOperationActive = ACTIVE_MLX_STATES.has(target?.modelSettings?.localModels?.mlx?.operation?.status || "idle");
   const visionDownloadActive = target?.modelSettings?.visionBridge?.download?.status === "downloading";
-  const downloadActive = localDownloadActive || visionDownloadActive;
+  const downloadActive = localDownloadActive || mlxOperationActive || visionDownloadActive;
 
   const refreshHealth = useCallback(async () => {
     if (!api) return;
@@ -151,7 +153,7 @@ export default function App() {
     downloadPollInFlight.current = true;
     try {
       const [localModels, visionBridge] = await Promise.allSettled([
-        localDownloadActive ? api.getLocalModels() : Promise.resolve(undefined),
+        localDownloadActive || mlxOperationActive ? api.getLocalModels() : Promise.resolve(undefined),
         visionDownloadActive ? api.getVisionBridge() : Promise.resolve(undefined),
       ]);
       setSnapshot((current) => {
@@ -180,7 +182,7 @@ export default function App() {
     } finally {
       downloadPollInFlight.current = false;
     }
-  }, [api, localDownloadActive, visionDownloadActive]);
+  }, [api, localDownloadActive, mlxOperationActive, visionDownloadActive]);
 
   const refreshAll = useCallback(async () => {
     if (!api) {
@@ -305,8 +307,8 @@ export default function App() {
       case "dashboard": return <DashboardPage target={target} health={health} account={accountUsage} providerUsage={providerUsage} setup={providers} presence={presence} api={api} refreshing={refreshing} onRefresh={() => void refreshAll()} onNavigate={navigateTo} />;
       case "usage": return <UsagePage target={target} account={accountUsage} providerUsage={providerUsage} api={api} refreshing={refreshing} onRefresh={() => void refreshAll()} />;
       case "status": return <StatusPage {...shared} health={health} account={accountUsage} providerUsage={providerUsage} />;
-      case "models": return <ModelsPage {...shared} setup={providers} usage={providerUsage} focusRequest={modelFocusRequest} />;
-      case "local": return <LocalPage {...shared} />;
+      case "models": return <ModelsPage {...shared} catalog={snapshot?.catalog} setup={providers} usage={providerUsage} focusRequest={modelFocusRequest} />;
+      case "local": return <LocalPage {...shared} operation={operation} />;
       case "harness": return <HarnessPage {...shared} />;
       case "context": return <ContextPage {...shared} />;
       case "settings": return <SettingsPage {...shared} health={health} presence={presence} theme={theme} onTheme={setTheme} language={language} onLanguage={setLanguage} t={t} />;
@@ -354,7 +356,7 @@ export default function App() {
           {operation?.status === "started" ? <span className="title-operation"><LoaderCircle aria-hidden size={12} strokeWidth={1.7} className="spin" />{operation.message || operation.action}</span> : null}
           <button className="title-refresh" type="button" aria-label="Refresh all data" disabled={refreshing} onClick={() => void refreshAll()}><RefreshCw aria-hidden size={13} strokeWidth={1.7} className={refreshing ? "spin" : ""} /></button>
         </div>
-        <div className="page-scroll">
+        <div className={classNames("page-scroll", `page-scroll-${view}`)}>
           {loadError ? <InlineNotice tone="warning" title="Some router data could not load">{loadError}</InlineNotice> : null}
           {loading ? <LoadingState /> : page}
         </div>

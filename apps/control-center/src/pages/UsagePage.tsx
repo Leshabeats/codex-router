@@ -5,7 +5,7 @@ import {
   Coins,
   Gauge,
 } from "lucide-react";
-import { Badge, Button, EmptyState, PageHeader, SectionHeading } from "../components";
+import { Badge, Button, EmptyState, PageHeader, SectionHeading, SkeletonBlock } from "../components";
 import {
   bucketRange,
   compactNumber,
@@ -126,6 +126,7 @@ export function UsagePage({
   const rangeRequests = bucketRequestsAvailable
     ? buckets.reduce((sum, bucket) => sum + (bucket.requests || 0), 0)
     : null;
+  const chartBreakdownAvailable = buckets.some((bucket) => tokenParts(bucket) !== null);
   const summary = source
     ? usageSummary(source, range, rangeTokens, rangeRequests, latestReportedBucket)
     : [];
@@ -191,11 +192,19 @@ export function UsagePage({
             <section className="panel-section us-chart-panel">
               <SectionHeading
                 title={source.kind === "subscription" ? "Daily account tokens" : "Daily router traffic"}
-                description={`${source.name}, shown over the selected local date range.${source.kind === "subscription" ? " Account history does not publish an input/cache/output split." : " Router bars split regular input, cached input, and output."}`}
+                description={source.kind === "subscription"
+                  ? chartBreakdownAvailable
+                    ? `${source.name}, shown over the selected local date range with the reported input/cache/output split.`
+                    : `${source.name}, shown over the selected local date range. The account API reports daily totals only.`
+                  : `${source.name}, shown over the selected local date range. Router bars split regular input, cached input, and output.`}
                 action={<RangePicker value={range} onChange={setRange} />}
               />
               {buckets.some((bucket) => bucket.tokens > 0 || (bucket.requests || 0) > 0) ? (
-                <UsageChart buckets={buckets} requestsAvailable={bucketRequestsAvailable} />
+                <UsageChart
+                  buckets={buckets}
+                  requestsAvailable={bucketRequestsAvailable}
+                  sourceKind={source.kind}
+                />
               ) : (
                 <div className="us-chart-empty">
                   <EmptyState
@@ -207,7 +216,8 @@ export function UsagePage({
                   />
                 </div>
               )}
-              <TokenMix source={source} />
+              <UsageChartHint sourceKind={source.kind} buckets={buckets} range={range} />
+              <TokenMix source={source} buckets={buckets} range={range} />
               <div className="us-chart-caption">
                 <span>{formatBucketDate(buckets[0]?.startDate)}</span>
                 <span>{formatBucketDate(buckets.at(-1)?.startDate)}</span>
@@ -625,28 +635,46 @@ function AggregateLedgerNote({ source }: { source: UsageSource }) {
   );
 }
 
-function TokenMix({ source }: { source: UsageSource }) {
-  if (source.kind === "subscription") return null;
-  const input = source.last24hInputTokens;
-  const regular = source.last24hRegularInputTokens
-    ?? (input != null && source.last24hCachedInputTokens != null
-      ? Math.max(0, input - source.last24hCachedInputTokens)
-      : null);
-  const cached = source.last24hCachedInputTokens;
-  const output = source.last24hOutputTokens;
+function TokenMix({ source, buckets, range }: {
+  source: UsageSource;
+  buckets: UsageBucketWithRequests[];
+  range: 7 | 30 | 90;
+}) {
+  const bucketMix = buckets.reduce((totals, bucket) => {
+    const parts = tokenParts(bucket);
+    if (!parts) return totals;
+    totals.regular += parts.find((part) => part.tone === "regular-input")?.tokens ?? 0;
+    totals.cached += parts.find((part) => part.tone === "cached-input")?.tokens ?? 0;
+    totals.output += parts.find((part) => part.tone === "output")?.tokens ?? 0;
+    totals.seen = true;
+    return totals;
+  }, { regular: 0, cached: 0, output: 0, seen: false });
+  const input = source.kind === "subscription" ? null : source.last24hInputTokens;
+  const recentRegular = source.kind === "subscription"
+    ? null
+    : source.last24hRegularInputTokens
+      ?? (input != null && source.last24hCachedInputTokens != null
+        ? Math.max(0, input - source.last24hCachedInputTokens)
+        : null);
+  const recentCached = source.kind === "subscription" ? null : source.last24hCachedInputTokens;
+  const recentOutput = source.kind === "subscription" ? null : source.last24hOutputTokens;
+  const regular = bucketMix.seen ? bucketMix.regular : recentRegular;
+  const cached = bucketMix.seen ? bucketMix.cached : recentCached;
+  const output = bucketMix.seen ? bucketMix.output : recentOutput;
   if (regular == null && cached == null && output == null) return null;
+  const scope = bucketMix.seen ? `selected ${range}-day range` : "last 24h";
   const rows = [
     { label: "Regular input", value: regular, tone: "regular" as const },
     { label: "Cached input", value: cached, tone: "cached" as const },
     { label: "Output", value: output, tone: "output" as const },
   ];
   return (
-    <div className="us-token-mix" aria-label="Last 24 hour token mix">
+    <div className="us-token-mix" aria-label={`Token mix for ${scope}`}>
       {rows.map((row) => (
         <div key={row.label} className={`tone-${row.tone}`}>
           <span>{row.label}</span>
           <strong>{row.value == null ? "Not reported" : exactNumber(row.value)}</strong>
-          <small>last 24h</small>
+          <small>{scope}</small>
         </div>
       ))}
     </div>
@@ -675,9 +703,10 @@ function RangePicker({ value, onChange }: {
   );
 }
 
-function UsageChart({ buckets, requestsAvailable }: {
+function UsageChart({ buckets, requestsAvailable, sourceKind }: {
   buckets: UsageBucketWithRequests[];
   requestsAvailable: boolean;
+  sourceKind: UsageSource["kind"];
 }) {
   const width = 840;
   const height = 228;
@@ -695,7 +724,7 @@ function UsageChart({ buckets, requestsAvailable }: {
     <div
       className="us-chart-wrap"
       role="group"
-      aria-label={`Daily token usage${breakdownAvailable ? " split into regular input, cached input, and output" : ""}${requestsAvailable ? " with request counts" : ""}`}
+      aria-label={`${sourceKind === "subscription" ? "Daily account" : "Daily router"} token usage${breakdownAvailable ? " split into regular input, cached input, and output" : " shown as account totals"}${requestsAvailable ? " with request counts" : ""}`}
     >
       <div className="us-chart-legend" aria-hidden="true">
         {breakdownAvailable ? (
@@ -704,7 +733,7 @@ function UsageChart({ buckets, requestsAvailable }: {
             <span className="is-cached">Cached input</span>
             <span className="is-output">Output</span>
           </>
-        ) : <span className="is-token">Tokens</span>}
+        ) : <span className={sourceKind === "subscription" ? "is-account" : "is-token"}>{sourceKind === "subscription" ? "Account total" : "Tokens"}</span>}
         {requestsAvailable ? <span className="is-request">Requests</span> : null}
       </div>
       <div className="us-chart-scale" aria-hidden="true">
@@ -820,12 +849,42 @@ function UsageChart({ buckets, requestsAvailable }: {
               aria-label={label}
               data-edge={edge}
             >
-              <ChartTooltip bucket={bucket} parts={parts} />
+              <ChartTooltip bucket={bucket} parts={parts} sourceKind={sourceKind} />
             </button>
           );
         })}
       </div>
     </div>
+  );
+}
+
+function UsageChartHint({ sourceKind, buckets, range }: {
+  sourceKind: UsageSource["kind"];
+  buckets: UsageBucketWithRequests[];
+  range: 7 | 30 | 90;
+}) {
+  const breakdownAvailable = buckets.some((bucket) => tokenParts(bucket) !== null);
+  if (sourceKind === "subscription") {
+    return (
+      <p className="us-chart-hint is-account" role="note">
+        <strong>Account graph</strong>
+        <span>
+          {breakdownAvailable
+            ? `The account API supplied the input/cache/output split for this ${range}-day range.`
+            : "OpenAI supplies daily account totals only here; use “This router · all providers” for regular input, cached input, and output."}
+        </span>
+      </p>
+    );
+  }
+  return (
+    <p className="us-chart-hint" role="note">
+      <strong>Token key</strong>
+      <span>
+        {breakdownAvailable
+          ? "Cached input is a subset of input, so it is shown as its own color and is not added a second time."
+          : "This router snapshot did not report an input/cache/output split for the selected range."}
+      </span>
+    </p>
   );
 }
 
@@ -836,8 +895,10 @@ function tokenParts(bucket: UsageBucketWithRequests): TokenPart[] | null {
     || bucket.cachedInputTokens !== undefined
     || bucket.outputTokens !== undefined;
   if (!hasBreakdown) return null;
+  const inputReported = bucket.inputTokens !== undefined;
   const input = Math.max(0, Number(bucket.inputTokens) || 0);
-  const cached = Math.min(input, Math.max(0, Number(bucket.cachedInputTokens) || 0));
+  const rawCached = Math.max(0, Number(bucket.cachedInputTokens) || 0);
+  const cached = inputReported ? Math.min(input, rawCached) : Math.min(bucket.tokens, rawCached);
   const regular = Math.max(0, input - cached);
   const output = Math.max(0, Number(bucket.outputTokens) || 0);
   const other = Math.max(0, bucket.tokens - regular - cached - output);
@@ -849,7 +910,11 @@ function tokenParts(bucket: UsageBucketWithRequests): TokenPart[] | null {
   ];
 }
 
-function ChartTooltip({ bucket, parts }: { bucket: UsageBucketWithRequests; parts: TokenPart[] | null }) {
+function ChartTooltip({ bucket, parts, sourceKind }: {
+  bucket: UsageBucketWithRequests;
+  parts: TokenPart[] | null;
+  sourceKind: UsageSource["kind"];
+}) {
   const visibleParts = parts?.filter((part) => part.tokens > 0) ?? [];
   const hasRequests = bucket.requests !== undefined;
   const hasRows = visibleParts.length > 0 || hasRequests;
@@ -877,7 +942,9 @@ function ChartTooltip({ bucket, parts }: { bucket: UsageBucketWithRequests; part
         </span>
       ) : (
         <span className="us-chart-tooltip-note">
-          Input and output details were not reported for this day.
+          {sourceKind === "subscription"
+            ? "The account API reports a daily total for this day; input, cached input, and output are not available."
+            : "Input and output details were not reported for this day."}
         </span>
       )}
     </span>
@@ -989,10 +1056,10 @@ function SourceRow({ source, selected, onSelect }: {
 
 function UsageLoading() {
   return (
-    <div className="us-loading" role="status" aria-label="Loading usage data">
-      <div className="us-loading-summary">{Array.from({ length: 7 }, (_, index) => <i key={index} />)}</div>
-      <div className="us-loading-panels"><i /><i /></div>
-      <span>Loading account and router usage</span>
+    <div className="us-loading" role="status" aria-live="polite">
+      <span className="visually-hidden">Loading account and router usage</span>
+      <div className="us-loading-summary">{Array.from({ length: 7 }, (_, index) => <SkeletonBlock key={index} />)}</div>
+      <div className="us-loading-panels"><SkeletonBlock /><SkeletonBlock /></div>
     </div>
   );
 }

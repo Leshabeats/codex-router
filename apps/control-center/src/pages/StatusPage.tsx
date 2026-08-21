@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { Badge, Button, EmptyState, PageHeader, SectionHeading } from "../components";
 import { ProviderLogo } from "../provider-branding";
+import { ServiceHealthPanel } from "../ServiceHealth";
 import {
   compactNumber,
   exactNumber,
@@ -77,8 +78,10 @@ export function StatusPage({
   health,
   account,
   providerUsage,
+  api,
   refreshing,
   onRefresh,
+  runAction,
 }: {
   target?: RouterTarget;
   health?: RouterHealth;
@@ -91,6 +94,27 @@ export function StatusPage({
 }) {
   const [modelQuery, setModelQuery] = useState("");
   const [modelLimit, setModelLimit] = useState(STATUS_MODEL_PAGE_SIZE);
+  const [repairing, setRepairing] = useState(false);
+  // The same repair Settings runs, reached from the panel where a stopped
+  // service first becomes visible. Settings stays the only page that renders
+  // the diagnostic report; here the toast plus the refreshed health rows are
+  // the whole answer, so this page keeps no report surface of its own.
+  const repair = async () => {
+    if (!api || repairing) return;
+    setRepairing(true);
+    try {
+      await runAction("Repair installation", async () => {
+        const report = await api.repairInstall();
+        if (!report.ok) {
+          const failed = report.checks?.find((check) => check.status === "fail");
+          throw new Error(failed ? `${failed.name}: ${failed.detail || "check failed"}` : "Repair finished with failing checks.");
+        }
+        return report;
+      });
+    } finally {
+      setRepairing(false);
+    }
+  };
   const activity = health?.activity;
   const active = (activity?.active ?? []) as ActiveRequestTelemetry[];
   const activeRequestCount = activity?.activeCount ?? active.length;
@@ -228,6 +252,8 @@ export function StatusPage({
       />
 
       <StatusSummary items={summary} />
+
+      <ServiceHealthPanel health={health} onRepair={api ? () => void repair() : undefined} repairing={repairing} />
 
       <div className="st-primary-grid">
         <section className="panel-section st-live-panel">

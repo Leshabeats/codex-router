@@ -7,11 +7,10 @@ import {
   Download,
   ExternalLink,
   Route,
-  SearchX,
   ShieldAlert,
   SquareTerminal,
 } from "lucide-react";
-import { Badge, Button, EmptyState, InlineNotice, PageHeader, SectionHeading, StatStrip } from "../components";
+import { Badge, Button, InlineNotice, PageHeader, PanelSkeleton, SectionHeading, StatStrip } from "../components";
 import type { HarnessDescriptor, HarnessSnapshot, RouterControlApi, RouterTarget } from "../types";
 import "./local-harness-context.css";
 
@@ -76,6 +75,7 @@ export function HarnessPage({ target, api, refreshing, onRefresh, runAction }: H
       {error ? <InlineNotice tone="warning" title="Harness detection is incomplete">{error}</InlineNotice> : null}
 
       <div className="lhc-harness-grid">
+        {!snapshot && !error ? <PanelSkeleton label="Detecting harnesses" variant="cards" count={2} /> : null}
         {codex ? (
           <HarnessCard
             harness={codex}
@@ -160,7 +160,6 @@ export function HarnessPage({ target, api, refreshing, onRefresh, runAction }: H
         </div>
       </section>
 
-      {!snapshot && !error ? <EmptyState icon={<SearchX size={20} />} title="Detecting harnesses" body="Checking installed apps and command-line tools." /> : null}
     </>
   );
 }

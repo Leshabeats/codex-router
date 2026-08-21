@@ -281,6 +281,7 @@
 }
 
 .usage-page .us-chart-legend .is-token::before { background: var(--token-total); }
+.usage-page .us-chart-legend .is-account::before { background: var(--token-total); }
 .usage-page .us-chart-legend .is-regular::before { background: var(--token-regular); }
 .usage-page .us-chart-legend .is-cached::before { background: var(--token-cached); }
 .usage-page .us-chart-legend .is-output::before { background: var(--token-output); }
@@ -469,6 +470,32 @@
   color: var(--ink-faint);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 8px;
+}
+
+.usage-page .us-chart-hint {
+  display: grid;
+  gap: 3px;
+  margin: 11px 0 0;
+  padding: 9px 11px;
+  border-left: 3px solid var(--telemetry-accent);
+  background: color-mix(in srgb, var(--telemetry-accent) 6%, var(--surface-1));
+  color: var(--ink-subtle);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.usage-page .us-chart-hint.is-account {
+  border-left-color: var(--token-total);
+}
+
+.usage-page .us-chart-hint strong {
+  color: var(--ink-strong);
+  font-size: 9.5px;
+  font-weight: 650;
+}
+
+.usage-page .us-chart-hint span {
+  color: var(--ink-faint);
 }
 
 .usage-page .us-aggregate-note {
@@ -911,16 +938,12 @@
 .usage-page .us-loading-summary { grid-template-columns: repeat(7, minmax(0, 1fr)); }
 .usage-page .us-loading-panels { grid-template-columns: 1.7fr 0.82fr; }
 
-.usage-page .us-loading i {
-  display: block;
+.usage-page .us-loading .skeleton-block {
   min-height: 62px;
   border-radius: 8px;
-  background: linear-gradient(90deg, var(--surface-1), var(--surface-2), var(--surface-1));
-  background-size: 200% 100%;
-  animation: us-shimmer 1.4s ease-in-out infinite;
 }
 
-.usage-page .us-loading-panels i { min-height: 340px; }
+.usage-page .us-loading-panels .skeleton-block { min-height: 340px; }
 
 /* Status */
 
@@ -1594,11 +1617,6 @@
   text-overflow: ellipsis;
 }
 
-@keyframes us-shimmer {
-  0% { background-position: 100% 0; }
-  100% { background-position: -100% 0; }
-}
-
 @keyframes st-breathe {
   0%, 100% { opacity: 0.5; transform: scale(0.82); }
   50% { opacity: 1; transform: scale(1); }
@@ -1736,7 +1754,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .usage-page .us-loading i,
+  .usage-page .us-loading .skeleton-block,
   .status-page .st-status-orb i,
   .usage-page .us-chart-hit-grid button .us-chart-tooltip {
     animation: none;

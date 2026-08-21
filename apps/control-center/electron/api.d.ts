@@ -64,6 +64,7 @@ export interface RouterControl {
   getSnapshot(): Promise<unknown>;
   getHealth(): Promise<unknown>;
   getProviders(): Promise<unknown>;
+  discoverProviderModels(provider: string, options?: { refresh?: boolean }): Promise<unknown>;
   getAccountUsage(): Promise<unknown>;
   getProviderUsage(): Promise<unknown>;
   getLocalModels(): Promise<unknown>;
@@ -75,15 +76,19 @@ export interface RouterControl {
   getContextSessions(): Promise<ContextSessionsSnapshot>;
   refreshAll(): Promise<unknown>;
   setProviderEnabled(provider: string, enabled: boolean): Promise<unknown>;
+  addProviderModels(provider: string, modelIds: string[]): Promise<unknown>;
   connectProvider(provider: string): Promise<unknown>;
   saveProviderCredential(provider: string, credential: string): Promise<unknown>;
   removeProviderCredential(provider: string): Promise<unknown>;
   setSubagentMode(mode: SubagentMode): Promise<unknown>;
   setSubagentModel(slug: string, enabled: boolean): Promise<unknown>;
+  setSubagentEffort(slug: string, effort: string): Promise<unknown>;
   setSubagentSelection(selectAll: boolean): Promise<unknown>;
   setPickerModel(slug: string, visible: boolean): Promise<unknown>;
   setPickerModels(showAll: boolean): Promise<unknown>;
   installLocalModel(model: string, force?: boolean): Promise<unknown>;
+  installLocalMlx(): Promise<unknown>;
+  cancelLocalMlx(): Promise<unknown>;
   uninstallLocalModel(model: string): Promise<unknown>;
   setLocalModelEnabled(model: string, enabled: boolean): Promise<unknown>;
   benchmarkLocalModel(model: string): Promise<unknown>;
@@ -98,6 +103,8 @@ export interface RouterControl {
   setNativeToolResultAging(enabled: boolean): Promise<unknown>;
   setToolResultRetentionTtl(days: number | "default" | "off"): Promise<unknown>;
   setDefaultModel(model: string): Promise<unknown>;
+  setRouterDefault(model: string): Promise<unknown>;
+  clearRouterDefault(): Promise<unknown>;
   setSignedRouting(enabled: boolean): Promise<unknown>;
   setPresence(mode: PresenceMode): Promise<unknown>;
   controlService(action: ServiceAction): Promise<unknown>;
