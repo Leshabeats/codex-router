@@ -57,7 +57,7 @@ test("the macOS tray labels Chutes as a metered API route", () => {
   );
   assert.match(
     sourceLabel,
-    /\["deepseek", "chutes"\]\.contains\(provider\)[\s\S]*return "METERED API"/,
+    /\["deepseek", "chutes", "orcarouter"\]\.contains\(provider\)[\s\S]*return "METERED API"/,
   );
 });
 

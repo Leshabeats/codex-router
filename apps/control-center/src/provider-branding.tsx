@@ -5,13 +5,17 @@ import cerebrasLogo from "./assets/providers/cerebras.png";
 import chutesLogo from "./assets/providers/chutes.svg";
 import clineLogo from "./assets/providers/cline.png";
 import commandCodeLogo from "./assets/providers/commandcode.svg";
+import cognitionLogo from "./assets/providers/cognition.svg";
 import deepSeekLogo from "./assets/providers/deepseek.png";
+import deepReinforceLogo from "./assets/providers/deepreinforce.svg";
 import fireworksLogo from "./assets/providers/fireworks.svg";
 import githubCopilotLogo from "./assets/providers/github-copilot.svg";
 import googleLogo from "./assets/providers/google.svg";
 import groqLogo from "./assets/providers/groq.svg";
 import huggingFaceLogo from "./assets/providers/huggingface.svg";
 import kimiLogo from "./assets/providers/kimi.png";
+import kiloLogo from "./assets/providers/kilo.svg";
+import lmStudioLogo from "./assets/providers/lmstudio.svg";
 import metaLogo from "./assets/providers/meta.svg";
 import minimaxLogo from "./assets/providers/minimax.svg";
 import mistralLogo from "./assets/providers/mistral.svg";
@@ -50,13 +54,17 @@ const BRANDS: Record<string, ProviderBrand> = {
   chutes: { key: "chutes", name: "Chutes", shortName: "CH", color: "#42a875", logo: chutesLogo },
   cline: { key: "cline", name: "Cline", shortName: "CL", color: "#5b6df2", logo: clineLogo, logoMode: "artwork" },
   commandcode: { key: "commandcode", name: "Command Code", shortName: "CC", color: "#8c4edd", logo: commandCodeLogo, logoMode: "artwork" },
+  cognition: { key: "cognition", name: "Cognition", shortName: "CO", color: "#656565", logo: cognitionLogo, logoMode: "artwork" },
   deepseek: { key: "deepseek", name: "DeepSeek", shortName: "DS", color: "#4d6bfe", logo: deepSeekLogo },
+  deepreinforce: { key: "deepreinforce", name: "DeepReinforce", shortName: "DR", color: "#292929", logo: deepReinforceLogo, logoMode: "artwork" },
   fireworks: { key: "fireworks", name: "Fireworks AI", shortName: "FW", color: "#6720ff", logo: fireworksLogo },
   github: { key: "github", name: "GitHub", shortName: "GH", color: "#59636e", logo: githubCopilotLogo },
   google: { key: "google", name: "Google", shortName: "G", color: "#4285f4", logo: googleLogo },
   groq: { key: "groq", name: "Groq", shortName: "GQ", color: "#f43e01", logo: groqLogo, logoMode: "artwork" },
   huggingface: { key: "huggingface", name: "Hugging Face", shortName: "HF", color: "#d89b00", logo: huggingFaceLogo },
   kimi: { key: "kimi", name: "Kimi", shortName: "K", color: "#2f6bff", logo: kimiLogo },
+  kilo: { key: "kilo", name: "Kilo", shortName: "KL", color: "#cfca00", logo: kiloLogo, logoMode: "artwork" },
+  lmstudio: { key: "lmstudio", name: "LM Studio", shortName: "LM", color: "#654cdb", logo: lmStudioLogo, logoMode: "artwork" },
   meta: { key: "meta", name: "Meta", shortName: "M", color: "#0467df", logo: metaLogo },
   minimax: { key: "minimax", name: "MiniMax", shortName: "MM", color: "#e73562", logo: minimaxLogo },
   mistral: { key: "mistral", name: "Mistral AI", shortName: "MI", color: "#e54b13", logo: mistralLogo },
@@ -82,6 +90,7 @@ const PROVIDER_BRANDS: Record<string, string> = {
   clinepass: "cline",
   commandcode: "commandcode",
   "commandcode-messages": "commandcode",
+  "devin-cli": "cognition",
   deepseek: "deepseek",
   fireworks: "fireworks",
   "gemini-api": "google",
@@ -91,7 +100,10 @@ const PROVIDER_BRANDS: Record<string, string> = {
   groq: "groq",
   huggingface: "huggingface",
   "kimi-api": "kimi",
+  "kimi-api-cn": "kimi",
   "kimi-oauth": "kimi",
+  "kilo-free": "kilo",
+  "lmstudio": "lmstudio",
   local: "ollama",
   meta: "meta",
   "minimax-token-plan": "minimax",
@@ -102,10 +114,13 @@ const PROVIDER_BRANDS: Record<string, string> = {
   "opencode-go-messages": "opencode",
   "opencode-go-responses": "opencode",
   "opencode-zen": "opencode",
+  "opencode-free": "opencode",
   openrouter: "openrouter",
   "qwen-plan": "qwen",
   siliconflow: "siliconflow",
   together: "together",
+  "xiaomi-mimo": "xiaomi",
+  "zai-api": "zai",
   "zai-coding": "zai",
 };
 
@@ -138,7 +153,17 @@ export function brandForModel(model: BrandableModel): ProviderBrand {
   if (/\b(?:llama|muse spark)\b/.test(identity)) return BRANDS.meta;
   if (/\b(?:mistral|mixtral|codestral)\b/.test(identity)) return BRANDS.mistral;
   if (/\bnemotron\b/.test(identity)) return BRANDS.nvidia;
+  if (/\bornith(?:-|\b)/.test(identity)) return BRANDS.deepreinforce;
   return brandForProvider(model.provider);
+}
+
+export function brandForLocalModel(model: { tag: string; family?: string; displayName?: string }): ProviderBrand {
+  return brandForModel({
+    provider: "local",
+    slug: `local/${model.tag}`,
+    displayName: `${model.family || ""} ${model.displayName || ""}`.trim(),
+    gatewayModel: model.tag,
+  });
 }
 
 export function ProviderLogo({ providerId, displayName, size = "medium", className = "" }: {

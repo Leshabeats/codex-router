@@ -1,6 +1,5 @@
 import { useMemo, useState, type FormEvent } from "react";
 import {
-  Box,
   ChevronDown,
   Download,
   Eye,
@@ -24,6 +23,7 @@ import {
   Toggle,
 } from "../components";
 import { compactNumber, formatBytesGb } from "../lib";
+import { BrandLogo, brandForLocalModel } from "../provider-branding";
 import type { LocalModel, LocalModelsSnapshot, RouterControlApi, RouterTarget, VisionEngine } from "../types";
 import "./local-harness-context.css";
 
@@ -181,7 +181,7 @@ export function LocalPage({ target, api, refreshing, onRefresh, runAction }: Loc
             <div className="lhc-recommendations">
               {quickPicks.map((model) => (
                 <button key={model.tag} type="button" disabled={model.downloadable === false} onClick={() => setInstallRef(model.tag)}>
-                  <Box aria-hidden size={14} strokeWidth={1.7} />
+                  <BrandLogo brand={brandForLocalModel(model)} size="small" />
                   <span><strong>{model.displayName || model.label || model.tag}</strong><small>{formatBytesGb(model.sizeGb)} · {model.fit || "fit unknown"}</small></span>
                   {model.downloadable === false ? <Badge tone="neutral">Cloud only</Badge> : model.recommended ? <Badge tone="accent">Recommended</Badge> : null}
                 </button>
@@ -210,6 +210,7 @@ export function LocalPage({ target, api, refreshing, onRefresh, runAction }: Loc
                       return next;
                     })}
                   >
+                    <BrandLogo brand={brandForLocalModel(family.models[0])} size="medium" />
                     <div>
                       <strong>{family.displayName}</strong>
                       <small>{family.models.length} tags · {familySummary(family.models)}</small>
@@ -282,7 +283,7 @@ export function LocalPage({ target, api, refreshing, onRefresh, runAction }: Loc
               return (
                 <article className="reader-card" key={reader.tag}>
                   <header>
-                    <span className="model-glyph"><HardDrive aria-hidden size={14} strokeWidth={1.7} /></span>
+                    <BrandLogo brand={brandForLocalModel(reader)} size="medium" />
                     <div><strong>{reader.label || reader.displayName || reader.tag}</strong><small>{formatBytesGb(reader.sizeGb)} · {reader.accuracy || "untested"}</small></div>
                     {active ? <Badge tone="success">Active</Badge> : reader.recommended ? <Badge tone="accent">Recommended</Badge> : null}
                   </header>
@@ -405,7 +406,7 @@ function CatalogModelRow({ model, onSelect }: { model: LocalModel; onSelect: () 
   const tone = model.downloadable === false ? "neutral" : tooLarge ? "danger" : model.fit === "tight" ? "warning" : "success";
   return (
     <article className="lhc-catalog-model">
-      <Box aria-hidden size={14} strokeWidth={1.7} />
+      <BrandLogo brand={brandForLocalModel(model)} size="small" />
       <div className="lhc-catalog-model-identity">
         <strong>{model.displayName || model.label || model.tag}</strong>
         <small>{model.tag}{model.sizeGb !== undefined ? ` · ${formatBytesGb(model.sizeGb)}` : ""}{model.context ? ` · ${compactNumber(model.context)} context` : ""}</small>
@@ -440,7 +441,7 @@ function LocalModelRow({ model, enabled, disabled, onToggle, onBenchmark, onRemo
   return (
     <article className="local-model-row">
       <div className="model-identity">
-        <span className="model-glyph"><HardDrive aria-hidden size={15} strokeWidth={1.7} /></span>
+        <BrandLogo brand={brandForLocalModel(model)} size="medium" />
         <div><strong>{model.displayName || model.label || model.tag}</strong><small>{model.tag}</small></div>
       </div>
       <div className="local-model-facts">

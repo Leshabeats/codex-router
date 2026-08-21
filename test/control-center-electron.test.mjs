@@ -474,9 +474,26 @@ test("provider and model directories use accessible single-open accordions", asy
   const branding = await readFile(new URL("../apps/control-center/src/provider-branding.tsx", import.meta.url), "utf8");
   assert.match(branding, /assets\/providers\/commandcode\.svg/);
   assert.match(branding, /commandcode:[^\n]+logoMode: "artwork"/);
+  for (const asset of ["cognition", "deepreinforce", "kilo", "lmstudio"]) {
+    assert.match(branding, new RegExp(`assets/providers/${asset}\\.svg`), `${asset} logo is not bundled`);
+  }
+  for (const providerId of [
+    "devin-cli", "kilo-free", "kimi-api-cn", "opencode-free",
+    "xiaomi-mimo", "zai-api",
+  ]) {
+    assert.match(branding, new RegExp(`"${providerId}":`), `${providerId} falls back to a monogram`);
+  }
+  assert.match(branding, /"lmstudio": "lmstudio"/);
+  assert.match(branding, /ornith[^\n]+BRANDS\.deepreinforce/);
+  assert.match(branding, /export function brandForLocalModel/);
   const sources = await readFile(new URL("../apps/control-center/src/assets/providers/SOURCES.md", import.meta.url), "utf8");
   assert.match(sources, /commandcode\.ai\/brand/);
   assert.match(sources, /CommandCodeAI\/command-code[^\s|]+\/symbol\.svg/);
+  assert.match(sources, /lmstudio\.ai\/brand/);
+  assert.match(sources, /github\.com\/deepreinforce-ai/);
+  const local = await readFile(new URL("../apps/control-center/src/pages/LocalPage.tsx", import.meta.url), "utf8");
+  assert.match(local, /brandForLocalModel/);
+  assert.match(local, /<BrandLogo brand=\{brandForLocalModel\(model\)\}/);
 });
 
 test("providers and models share one keyboard-operable catalog destination", async () => {
