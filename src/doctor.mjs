@@ -75,6 +75,7 @@ import {
 } from "./tool-result-retention.mjs";
 import { retentionTtlMs } from "./tool-result-aging-state.mjs";
 import { loopbackProxyBypassStatus } from "./loopback-proxy-bypass.mjs";
+import { serviceProxyOptInProblem } from "./proxy-environment.mjs";
 
 const checks = [];
 const add = (status, name, detail, fix) => checks.push({ status, name, detail, fix });
@@ -1114,6 +1115,15 @@ add(
 const loopbackBypass = loopbackProxyBypassStatus();
 if (loopbackBypass) {
   add("warn", "Loopback proxy bypass", loopbackBypass.detail, loopbackBypass.remedy);
+}
+
+// The outbound counterpart of the check above, and the same shape of failure:
+// everything nearby passes while the one hop that matters cannot be made. A
+// repair started from a desktop app inherits no shell environment, so the
+// opt-in is the part most easily lost without anyone touching a setting.
+const proxyOptIn = serviceProxyOptInProblem();
+if (proxyOptIn) {
+  add("warn", "Service proxy opt-in", proxyOptIn.detail, proxyOptIn.remedy);
 }
 
 // The skill pack that teaches custom routed models the native tools. Checks

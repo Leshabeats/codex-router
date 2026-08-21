@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 
 import { redactCallerUrl } from "./caller-auth.mjs";
 import { readInstallManifest } from "./install-manifest.mjs";
+import { redactProxyCredentials } from "./proxy-environment.mjs";
 import { protectPrivateFile } from "./file-security.mjs";
 import { detectLegacyInstallations } from "./legacy-migration.mjs";
 import { PROVIDERS, providerNeedsNoKey } from "./model-registry.mjs";
@@ -103,6 +104,24 @@ function knownLocalSecrets() {
   return [...values].filter((value) => value.length >= 8);
 }
 
+// The manifest records the proxy the service was installed with so a later
+// repair can restore it. That file is owner-only, but this bundle exists to be
+// handed to somebody else, and a proxy URL may carry `user:password@`. The
+// host and port stay -- they are the diagnostic value -- and only the
+// credential is removed, from past installs as well as the current one.
+function sharableInstallManifest() {
+  const manifest = readInstallManifest();
+  if (!manifest) return { installed: false };
+  const scrub = (entry) => (entry && entry.proxyEnvironment
+    ? { ...entry, proxyEnvironment: redactProxyCredentials(entry.proxyEnvironment) }
+    : entry);
+  return {
+    ...manifest,
+    current: scrub(manifest.current),
+    history: Array.isArray(manifest.history) ? manifest.history.map(scrub) : manifest.history,
+  };
+}
+
 function redactBundle(contents) {
   let redacted = redactCallerUrl(contents);
   for (const secret of knownLocalSecrets()) {
@@ -164,7 +183,7 @@ export function createSupportBundle(options = {}) {
     selection,
     credentialSources,
     ownership: detectLegacyInstallations(),
-    install: readInstallManifest() || { installed: false },
+    install: sharableInstallManifest(),
     files: {
       config: fileMetadata(CONFIG_PATH),
       log: fileMetadata(LOG_PATH),

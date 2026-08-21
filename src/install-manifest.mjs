@@ -13,6 +13,7 @@ import {
   TARGET,
 } from "./paths.mjs";
 import { providerSelectionStatus } from "./provider-selection.mjs";
+import { serviceProxyEnvironment } from "./proxy-environment.mjs";
 import { packSkillNames } from "./skills-install.mjs";
 
 function gitValue(args) {
@@ -71,6 +72,16 @@ export function recordInstall() {
     target: TARGET,
     platform: process.platform,
     packageManager: process.env.CODEX_ROUTER_PACKAGE_MANAGER || null,
+    // Recorded so a later repair can put it back. A repair started from a
+    // desktop app inherits no shell environment, and serviceProxyEnvironment()
+    // reads this field precisely to avoid rewriting the service without the
+    // proxy the operator configured.
+    //
+    // A proxy URL may embed `user:password@`, so this file is no less
+    // sensitive than the service definition that already stores the same
+    // value; both are owner-only. support-bundle.mjs strips the credential
+    // from the copy it produces, because that one is meant to be shared.
+    proxyEnvironment: serviceProxyEnvironment(),
     providers: providerSelectionStatus().providers,
     skills,
   };

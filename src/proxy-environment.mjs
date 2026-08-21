@@ -1,3 +1,7 @@
+import { readFileSync } from "node:fs";
+
+import { INSTALL_MANIFEST_PATH } from "./paths.mjs";
+
 const PROXY_ENVIRONMENT_VARIABLES = [
   "http_proxy",
   "https_proxy",
@@ -39,10 +43,117 @@ export function environmentHttpProxyConfigured(
   return Boolean(httpProxy || httpsProxy);
 }
 
+// An environment that names no proxy variable at all is silent, not a
+// decision. Any explicit mention is the operator speaking and outranks
+// whatever a previous install recorded -- including `NODE_USE_ENV_PROXY=0`,
+// which is how a proxy gets turned back off.
+export function proxyEnvironmentDeclared(
+  environment = process.env,
+  execArgv = process.execArgv,
+) {
+  if (environmentProxyOptedIn(environment, execArgv)) return true;
+  return PROXY_ENVIRONMENT_VARIABLES.some((name) => environment[name] !== undefined);
+}
+
+// The proxy settings the last install committed to the service.
+//
+// Repair runs from whatever launched it, and a desktop app started from the
+// Dock inherits no shell environment at all -- no HTTP_PROXY, no opt-in. Left
+// to `process.env` alone, such a repair rewrites the service without the proxy
+// the operator configured, and every upstream call begins timing out on a
+// network that requires one. The symptom is remote (a 502 from the router much
+// later), so the cause is close to unfindable from where it surfaces.
+//
+// This reads the manifest file directly rather than through
+// install-manifest.mjs, which would import this module back and drag its
+// install-time dependencies into every process that merely resolves a proxy.
+export function recordedProxyEnvironment(manifestPath = INSTALL_MANIFEST_PATH) {
+  let recorded;
+  try {
+    const parsed = JSON.parse(readFileSync(manifestPath, "utf8"));
+    if (parsed?.version !== 1) return undefined;
+    recorded = parsed.current?.proxyEnvironment;
+  } catch {
+    return undefined;
+  }
+  if (!recorded || typeof recorded !== "object") return undefined;
+  const values = {};
+  for (const name of PROXY_ENVIRONMENT_VARIABLES) {
+    if (typeof recorded[name] === "string") values[name] = recorded[name];
+  }
+  return Object.keys(values).length ? values : undefined;
+}
+
+// Proxy variables the service carries but the router will never use.
+//
+// Node's proxy support is opt-in, so a service installed with HTTP_PROXY and
+// no NODE_USE_ENV_PROXY looks correctly configured at every glance -- the
+// variables are right there in the service definition -- and still dials every
+// upstream directly. On a network that requires the proxy the failure surfaces
+// much later as a router 502 naming a connect timeout, with nothing near the
+// cause pointing back at the missing opt-in.
+//
+// This reports the state rather than assuming intent: proxy variables that are
+// deliberately ignored are a defensible setup, just never an obvious one.
+export function serviceProxyOptInProblem(recorded = recordedProxyEnvironment()) {
+  if (!recorded) return undefined;
+  const proxy = recorded.https_proxy ?? recorded.HTTPS_PROXY
+    ?? recorded.http_proxy ?? recorded.HTTP_PROXY;
+  if (!proxy) return undefined;
+  if (environmentProxyOptedIn(recorded, [])) return undefined;
+  return {
+    detail:
+      "the background service carries proxy variables but not the opt-in that lets " +
+      "Node use them, so the router connects directly and will time out on a " +
+      "network that requires the proxy",
+    remedy:
+      "Reinstall with the opt-in: NODE_USE_ENV_PROXY=1 ./bin/doctor --fix  " +
+      "(or clear it deliberately with NODE_USE_ENV_PROXY=0).",
+  };
+}
+
+// `@` before the first `/` is userinfo; after it, it is part of a path and
+// must be left alone. Proxy variables also hold bare `host:port` values and
+// comma-separated bypass lists, so this deliberately does not go through URL
+// parsing, which would reject them.
+function redactUserinfo(value) {
+  const scheme = value.match(/^([a-z][a-z0-9+.-]*:\/\/)(.*)$/i);
+  const rest = scheme ? scheme[2] : value;
+  const at = rest.indexOf("@");
+  if (at === -1) return value;
+  const slash = rest.indexOf("/");
+  if (slash !== -1 && slash < at) return value;
+  return `${scheme ? scheme[1] : ""}[REDACTED]@${rest.slice(at + 1)}`;
+}
+
+// A proxy URL may carry `user:password@`. The manifest that stores it is
+// owner-only, exactly like the service definition that already holds the same
+// value, but a support bundle is made to be sent to somebody else -- so the
+// credential has to come out of that copy without discarding the host and port
+// that make the field worth reporting at all.
+export function redactProxyCredentials(values) {
+  if (!values || typeof values !== "object") return values;
+  const output = {};
+  for (const [name, value] of Object.entries(values)) {
+    output[name] = typeof value === "string" ? redactUserinfo(value) : value;
+  }
+  return output;
+}
+
 // Background service managers do not read a user's shell startup files. Keep
 // the proxy environment present during installation so the router and the
 // child processes it launches see the same network policy after a restart.
-export function serviceProxyEnvironment(environment = process.env) {
+export function serviceProxyEnvironment(
+  environment = process.env,
+  { recorded, manifestPath } = {},
+) {
+  // `bin/install` renders the service before it rewrites the manifest, so the
+  // values restored here are the previous install's and are still the
+  // authoritative answer at this point.
+  if (!proxyEnvironmentDeclared(environment)) {
+    const preserved = recorded !== undefined ? recorded : recordedProxyEnvironment(manifestPath);
+    if (preserved) return { ...preserved };
+  }
   const values = {};
   for (const name of PROXY_ENVIRONMENT_VARIABLES) {
     if (environment[name] !== undefined) values[name] = environment[name];
