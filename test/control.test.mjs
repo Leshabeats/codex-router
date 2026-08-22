@@ -485,6 +485,7 @@ test("login-free control selects a ready external model and restores Codex defau
         .map((model) => [model.slug, model.visibility]),
       [
         ["deepseek/deepseek-v4-flash", "hide"],
+        ["deepseek/deepseek-v4-flash-vision-exp", "list"],
         ["deepseek/deepseek-v4-pro", "list"],
       ],
     );

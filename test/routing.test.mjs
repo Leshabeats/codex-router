@@ -1805,6 +1805,81 @@ test("API forwarder replaces an image a text-only model cannot read", async () =
   }
 });
 
+test("API forwarder keeps images for DeepSeek V4 Flash Vision Exp", async () => {
+  const upstreamRequests = [];
+  const upstream = await mockServer(async (request, response) => {
+    upstreamRequests.push(await bodyJson(request));
+    json(response, 200, { choices: [] });
+  });
+  const forwarderPort = await openPort();
+  const forwarder = run("api-forwarder.mjs", {
+    CODEX_ROUTER_API_PORT: String(forwarderPort),
+    DEEPSEEK_API_BASE_URL: `http://127.0.0.1:${upstream.port}/v1`,
+    DEEPSEEK_API_KEY: "TEST_DEEPSEEK_API_KEY",
+    KIMI_PROXY_QUIET: "1",
+  });
+
+  try {
+    await waitFor(`http://127.0.0.1:${forwarderPort}/health`, forwarder, {
+      Authorization: `Bearer ${INTERNAL_KEY}`,
+    });
+    const response = await fetch(`http://127.0.0.1:${forwarderPort}/v1/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${INTERNAL_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "deepseek-v4-flash-vision-exp",
+        reasoning_effort: "high",
+        temperature: 0.2,
+        tool_choice: "required",
+        tools: [
+          {
+            type: "function",
+            function: { name: "lookup", parameters: { type: "object", properties: {} } },
+          },
+        ],
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "what does this say?" },
+              {
+                type: "image_url",
+                image_url: {
+                  url: "data:image/png;base64,AAAA",
+                  detail: "original",
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    });
+    assert.equal(response.status, 200);
+    const body = upstreamRequests[0];
+    assert.equal(body.model, "deepseek-v4-flash-vision-exp");
+    assert.deepEqual(body.thinking, { type: "enabled" });
+    assert.equal(body.reasoning_effort, "high");
+    assert.equal(body.temperature, undefined);
+    assert.equal(body.tool_choice, "auto");
+    assert.deepEqual(body.messages[0].content, [
+      { type: "text", text: "what does this say?" },
+      {
+        type: "image_url",
+        image_url: {
+          url: "data:image/png;base64,AAAA",
+          detail: "original",
+        },
+      },
+    ]);
+  } finally {
+    await stopChild(forwarder);
+    await closeServer(upstream.server);
+  }
+});
+
 test("API forwarder fills only missing Gemini thought signatures", async () => {
   const upstreamRequests = [];
   const upstream = await mockServer(async (request, response) => {
@@ -2151,6 +2226,8 @@ test("API forwarder supports all DeepSeek V4 models and normalizes thinking", as
     for (const [gatewayModel, upstreamModel, sentEffort, effort] of [
       ["deepseek-v4-flash", "deepseek-v4-flash", "low", "low"],
       ["deepseek-v4-flash", "deepseek-v4-flash", "medium", "high"],
+      ["deepseek-v4-flash-vision-exp", "deepseek-v4-flash-vision-exp", "low", "low"],
+      ["deepseek-v4-flash-vision-exp", "deepseek-v4-flash-vision-exp", "medium", "high"],
       ["deepseek-v4-pro", "deepseek-v4-pro", "xhigh", "max"],
     ]) {
       const response = await fetch(
@@ -2231,6 +2308,7 @@ test("API forwarder downgrades forced tool choices for DeepSeek thinking models"
     // object form, so both must arrive as auto rather than failing the turn.
     for (const gatewayModel of [
       "deepseek-v4-flash",
+      "deepseek-v4-flash-vision-exp",
       "deepseek-v4-pro",
       "deepseek-legacy-reasoner",
     ]) {

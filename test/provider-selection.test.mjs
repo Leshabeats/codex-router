@@ -80,11 +80,19 @@ test("provider selection keeps backward compatibility and can hide the final pro
     }
     assert.deepEqual(
       selectedListedModels().map((model) => model.slug),
-      ["deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro"],
+      [
+        "deepseek/deepseek-v4-flash",
+        "deepseek/deepseek-v4-flash-vision-exp",
+        "deepseek/deepseek-v4-pro",
+      ],
     );
     assert.deepEqual(
       selectedConfiguredListedModels().map((model) => model.slug),
-      ["deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro"],
+      [
+        "deepseek/deepseek-v4-flash",
+        "deepseek/deepseek-v4-flash-vision-exp",
+        "deepseek/deepseek-v4-pro",
+      ],
     );
 
     assert.deepEqual(disableProvider("deepseek"), []);
@@ -186,7 +194,11 @@ test("an unknown provider id in the selection file is filtered out, not fatal", 
     // The surviving provider still routes and still filters the catalog.
     assert.deepEqual(
       selectedListedModels().map((model) => model.slug),
-      ["deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro"],
+      [
+        "deepseek/deepseek-v4-flash",
+        "deepseek/deepseek-v4-flash-vision-exp",
+        "deepseek/deepseek-v4-pro",
+      ],
     );
     // Doctor and the support bundle read through this, so the damage is
     // reportable instead of arriving as a 502 on every request.
