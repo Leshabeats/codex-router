@@ -22,7 +22,7 @@ import {
 } from "./paths.mjs";
 import { serviceProxyEnvironment } from "./proxy-environment.mjs";
 import {
-  assertServiceManagerIsolated,
+  skipServiceManagerCall,
   assertServiceWriteIsolated,
 } from "./service-write-guard.mjs";
 
@@ -114,19 +114,9 @@ WantedBy=default.target
 `;
 }
 
-// `is-active`/`show` only report state; everything else changes the user's
-// systemd instance.
-const READ_ONLY_SYSTEMCTL_VERBS = new Set(["is-active", "is-enabled", "show", "status"]);
 
 function systemctl(args, options = {}) {
-  if (
-    assertServiceManagerIsolated(`systemctl --user ${args[0]}`, {
-      mutates: !READ_ONLY_SYSTEMCTL_VERBS.has(args[0]),
-      hostManaged: HOST_MANAGED,
-    })
-  ) {
-    return "";
-  }
+  if (skipServiceManagerCall({ hostManaged: HOST_MANAGED })) return "";
   return execFileSync("systemctl", ["--user", ...args], {
     encoding: "utf8",
     stdio: options.quiet ? ["ignore", "ignore", "ignore"] : ["ignore", "pipe", "pipe"],

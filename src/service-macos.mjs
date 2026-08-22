@@ -22,7 +22,7 @@ import {
 } from "./paths.mjs";
 import { serviceProxyEnvironment } from "./proxy-environment.mjs";
 import {
-  assertServiceManagerIsolated,
+  skipServiceManagerCall,
   assertServiceWriteIsolated,
 } from "./service-write-guard.mjs";
 
@@ -127,24 +127,9 @@ ${environmentEntries()}
 `;
 }
 
-// Every verb here but `print` mutates the machine's launchd domain.
-const MUTATING_LAUNCHCTL_VERBS = new Set([
-  "bootout",
-  "bootstrap",
-  "disable",
-  "enable",
-  "kickstart",
-]);
 
 function run(args, options = {}) {
-  if (
-    assertServiceManagerIsolated(`launchctl ${args[0]}`, {
-      mutates: MUTATING_LAUNCHCTL_VERBS.has(args[0]),
-      hostManaged: HOST_MANAGED,
-    })
-  ) {
-    return "";
-  }
+  if (skipServiceManagerCall({ hostManaged: HOST_MANAGED })) return "";
   return execFileSync(launchctl, args, {
     encoding: "utf8",
     timeout: 15_000,

@@ -24,7 +24,7 @@ import {
 import { protectPrivateFile } from "./file-security.mjs";
 import { serviceProxyEnvironment } from "./proxy-environment.mjs";
 import {
-  assertServiceManagerIsolated,
+  skipServiceManagerCall,
   assertServiceWriteIsolated,
 } from "./service-write-guard.mjs";
 
@@ -123,17 +123,8 @@ function launcher() {
   ].join("\r\n");
 }
 
-// `/Query` only reports state; /Create, /Delete, /Run and /End all change the
-// machine's Task Scheduler.
 function schtasks(args, options = {}) {
-  if (
-    assertServiceManagerIsolated(`schtasks ${args[0]}`, {
-      mutates: String(args[0]).toLowerCase() !== "/query",
-      hostManaged: HOST_MANAGED,
-    })
-  ) {
-    return "";
-  }
+  if (skipServiceManagerCall({ hostManaged: HOST_MANAGED })) return "";
   return execFileSync("schtasks.exe", args, {
     encoding: "utf8",
     stdio: options.quiet ? ["ignore", "ignore", "ignore"] : ["ignore", "pipe", "pipe"],

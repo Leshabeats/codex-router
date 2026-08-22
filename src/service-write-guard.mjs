@@ -38,40 +38,29 @@ export function assertServiceWriteIsolated(
 // a definition that no longer existed. The router stayed dead until someone
 // reinstalled it by hand, with nothing tying it back to a test run.
 //
-// Tests have been setting CODEX_ROUTER_SKIP_LAUNCHCTL for exactly this, but
-// only the legacy-migration path ever read it. Honour it everywhere, and under
-// the test runner make a mutating call without it a loud failure rather than
-// silent damage. Reads are left alone: querying state harms nothing, and
-// several tests depend on it.
+// So under the test runner a service-manager call is skipped rather than made.
+// Refusing loudly was the first attempt and it was wrong: the damaging call is
+// indistinguishable from a legitimate one at the call site, so every existing
+// test would have had to opt out of a thing it never asked for, and the ones
+// that did not would fail for reasons unrelated to what they test. There is
+// nothing to remember this way.
+//
+// Reads are skipped too, not just the mutating verbs. `bootout` polls `print`
+// to confirm the job stopped; leaving that live has it watch the machine's own
+// job, which is still running and never will stop, until it times out.
 export function serviceManagerDisabled(env = process.env) {
   return env.CODEX_ROUTER_SKIP_LAUNCHCTL === "1"
     || env.MODEL_ROUTER_SKIP_SERVICE_MANAGER === "1";
 }
 
-// `hostManaged` is false when a platform module is being exercised away from
-// its own platform -- src/service-render.test.mjs runs the Windows and Linux
-// modules on macOS against executable stubs first on PATH. Those calls cannot
-// reach any real scheduler, and the stubs are the point of the test, so
-// neither the skip nor the refusal applies to them.
+// True when the caller should skip the invocation entirely.
 //
-// Returns true when the caller should skip the invocation entirely.
-export function assertServiceManagerIsolated(
-  command,
-  {
-    mutates = true,
-    hostManaged = true,
-    env = process.env,
-    override = "CODEX_ROUTER_SKIP_LAUNCHCTL",
-  } = {},
-) {
-  if (!hostManaged) return false;
+// `hostManaged` is false when a platform module is being exercised away from
+// its own platform -- src/service-render.test.mjs drives the Windows and Linux
+// modules on macOS against executable stubs first on PATH. Those calls reach no
+// real scheduler, and the stubs are the point of the test, so they are left
+// alone.
+export function skipServiceManagerCall({ hostManaged = true, env = process.env } = {}) {
   if (serviceManagerDisabled(env)) return true;
-  if (!env.NODE_TEST_CONTEXT) return false;
-  if (!mutates) return false;
-  throw new Error(
-    `Refusing to run \`${command}\` from a test run.\n`
-      + "This addresses the machine's own installed service, not a fixture: it "
-      + "would unload the router this machine is running and register the test's "
-      + `definition in its place. Set ${override}=1 in the test's environment.`,
-  );
+  return Boolean(env.NODE_TEST_CONTEXT) && hostManaged;
 }

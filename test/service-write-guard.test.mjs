@@ -124,70 +124,53 @@ test("a redirected install is still able to write its fixture", () => {
 // registers that fixture in its place -- addressed by label, which no path
 // override can redirect. When the test deleted its temporary directory,
 // launchd was left pointing at a definition that no longer existed and the
-// router stayed dead. Without the skip flag a mutating call must now fail
-// loudly instead.
-test("a mutating service-manager call is refused when a test did not opt out", () => {
-  const fixture = mkdtempSync(path.join(os.tmpdir(), "codex-router-manager-fixture-"));
-  const agents = path.join(fixture, "LaunchAgents");
-  mkdirSync(agents, { recursive: true });
-  try {
-    const result = spawnSync(
-      process.execPath,
-      [path.join(root, "src", "service-macos.mjs"), "install"],
-      {
-        cwd: root,
+// router stayed dead.
+//
+// Only meaningful where launchctl is this machine's own service manager;
+// elsewhere the darwin module reaches no real launchd and there is nothing to
+// protect.
+test(
+  "an install from a test leaves the machine's own launchd job alone",
+  { skip: process.platform !== "darwin" && "launchctl is not this host's service manager" },
+  () => {
+    const registration = () =>
+      spawnSync("/bin/launchctl", ["print", `gui/${process.getuid()}/io.github.codex-router`], {
         encoding: "utf8",
-        env: {
-          ...process.env,
-          HOME: fixture,
-          CODEX_HOME: path.join(fixture, "codex"),
-          MODEL_ROUTER_STATE_DIR: path.join(fixture, "state"),
-          CODEX_ROUTER_SERVICE_PLATFORM: "darwin",
-          CODEX_ROUTER_NODE_BIN: process.execPath,
-          NODE_TEST_CONTEXT: "child-v8",
-          MODEL_ROUTER_LAUNCH_AGENTS_DIR: agents,
-          // Deliberately absent: CODEX_ROUTER_SKIP_LAUNCHCTL.
-          CODEX_ROUTER_SKIP_LAUNCHCTL: "",
+      }).stdout || "";
+    const before = registration();
+    const fixture = mkdtempSync(path.join(os.tmpdir(), "codex-router-manager-fixture-"));
+    const agents = path.join(fixture, "LaunchAgents");
+    mkdirSync(agents, { recursive: true });
+    try {
+      const result = spawnSync(
+        process.execPath,
+        [path.join(root, "src", "service-macos.mjs"), "install"],
+        {
+          cwd: root,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            HOME: fixture,
+            CODEX_HOME: path.join(fixture, "codex"),
+            MODEL_ROUTER_STATE_DIR: path.join(fixture, "state"),
+            CODEX_ROUTER_SERVICE_PLATFORM: "darwin",
+            CODEX_ROUTER_NODE_BIN: process.execPath,
+            NODE_TEST_CONTEXT: "child-v8",
+            MODEL_ROUTER_LAUNCH_AGENTS_DIR: agents,
+            // Deliberately absent. Nothing should have to opt out of this.
+            CODEX_ROUTER_SKIP_LAUNCHCTL: "",
+          },
         },
-      },
-    );
-    assert.notEqual(result.status, 0, "the install must not succeed");
-    assert.match(result.stderr || "", /Refusing to run `launchctl bootout`/);
-    assert.match(result.stderr || "", /CODEX_ROUTER_SKIP_LAUNCHCTL=1/);
-  } finally {
-    rmSync(fixture, { recursive: true, force: true });
-  }
-});
-
-// Reading state is harmless and several tests depend on it, so the backstop
-// must not reach `launchctl print`.
-test("a read-only service-manager call is left alone under the test runner", () => {
-  const fixture = mkdtempSync(path.join(os.tmpdir(), "codex-router-manager-status-"));
-  const agents = path.join(fixture, "LaunchAgents");
-  mkdirSync(agents, { recursive: true });
-  try {
-    const result = spawnSync(
-      process.execPath,
-      [path.join(root, "src", "service-macos.mjs"), "status"],
-      {
-        cwd: root,
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          HOME: fixture,
-          CODEX_HOME: path.join(fixture, "codex"),
-          MODEL_ROUTER_STATE_DIR: path.join(fixture, "state"),
-          CODEX_ROUTER_SERVICE_PLATFORM: "darwin",
-          CODEX_ROUTER_NODE_BIN: process.execPath,
-          NODE_TEST_CONTEXT: "child-v8",
-          MODEL_ROUTER_LAUNCH_AGENTS_DIR: agents,
-          CODEX_ROUTER_SKIP_LAUNCHCTL: "",
-        },
-      },
-    );
-    assert.equal(result.status, 0, result.stderr);
-    assert.equal(JSON.parse(result.stdout).installed, false);
-  } finally {
-    rmSync(fixture, { recursive: true, force: true });
-  }
-});
+      );
+      assert.equal(result.status, 0, result.stderr);
+      // The fixture still gets its definition: the skip is of the service
+      // manager, not of the install.
+      assert.equal(existsSync(path.join(agents, "io.github.codex-router.plist")), true);
+      // And the machine's own registration is exactly as it was -- this is the
+      // assertion the old behaviour failed, silently.
+      assert.equal(registration(), before);
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+    }
+  },
+);
