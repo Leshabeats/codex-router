@@ -777,25 +777,31 @@ function startPanel() {
     elements.subagentAllSwitch.checked = subagent.mode === "all";
     elements.subagentAllSwitchLabel.title = t("models.onlyProvenV2");
 
-    // Every enabled model belongs here. Native OpenAI models use their
-    // effective Codex catalog capability, while an unverified routed model
-    // starts the existing capability probe when selected. Hiding v1 candidates
-    // made that route impossible to discover; filtering native models made
-    // usable GPT models disappear from the panel entirely.
+    // Every enabled model belongs here. Only repository-certified v2 routes
+    // are usable subagents. Unknown routes may run one low-cost compatibility
+    // test, while explicit v1 routes are never re-promoted locally.
     const subagentModels = enabledModels;
     const subagentGroups = groupModels(subagentModels);
     const isSubagentOn = (model) =>
       model.visible === false
         ? false
         : !disabledSubagents.has(model.slug) &&
-          (model.multiAgentVersion === "v2" || selectedSubagents.has(model.slug));
+          model.multiAgentVersion === "v2";
     const subagentRow = (model) => {
         const checked = isSubagentOn(model);
         const proof = subagentProofs[model.slug];
+        const certification = model.subagentCertification || (model.multiAgentVersion === "v2" ? "v2" : "unknown");
+        const knownV1 = certification === "v1";
+        const testActive = !knownV1 && model.multiAgentVersion !== "v2" &&
+          (proof?.status === "checking" || (!proof?.status || proof.status === "failed") && selectedSubagents.has(model.slug));
         const badge = model.visible === false
           ? t("models.hidden")
           : proof?.status === "checking"
             ? t("status.working")
+            : knownV1
+              ? "v1 only"
+            : proof?.status === "candidate"
+              ? "Certification candidate"
             : proof?.status === "failed"
               ? `${t("status.error")}: ${proof.reason || t("models.untested")}`
               : model.multiAgentVersion === "v2"
@@ -803,7 +809,7 @@ function startPanel() {
                 : t("models.untested");
         return `<label class="model-setting-row">
           <span><strong>${escapeHtml(model.displayName)}</strong><small>${escapeHtml(badge)}</small></span>
-          <span class="provider-check"><input type="checkbox" data-command="set_subagent_model" data-subagent="${escapeHtml(model.slug)}" aria-label="${escapeHtml(t("models.useModelAria", { model: model.displayName }))}"${checked ? " checked" : ""}${state.modelSettingsBusy || model.visible === false ? " disabled" : ""}></span>
+          <span class="provider-check"><input type="checkbox" data-command="set_subagent_model" data-subagent="${escapeHtml(model.slug)}" aria-label="${escapeHtml(model.multiAgentVersion === "v2" ? t("models.useModelAria", { model: model.displayName }) : knownV1 ? `${model.displayName} is certified v1` : `Test ${model.displayName} for v2 compatibility`)}"${model.multiAgentVersion === "v2" ? (checked ? " checked" : "") : (testActive ? " checked" : "")}${state.modelSettingsBusy || model.visible === false || knownV1 || proof?.status === "checking" || proof?.status === "candidate" ? " disabled" : ""}></span>
         </label>`;
       };
 

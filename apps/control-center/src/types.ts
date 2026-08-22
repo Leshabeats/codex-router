@@ -26,6 +26,8 @@ export interface RouterModel {
   /** Base native Codex entries stay client-managed; variants remain router-managed. */
   nativeClientManaged?: boolean;
   multiAgentVersion?: "v1" | "v2" | string;
+  /** Repository verdict; unlike `multiAgentVersion`, preserves unknown vs explicit v1. */
+  subagentCertification?: "v1" | "v2" | "unknown";
   visible: boolean;
   defaultEffort?: string;
   reasoningLevels?: string[];
@@ -40,6 +42,11 @@ export interface SubagentSettings {
   enabled: string[];
   disabled: string[];
   efforts?: Record<string, string>;
+  /** Machine-local v2 capability evidence, populated by the live probe. */
+  proofs?: Record<string, {
+    status: "checking" | "candidate" | "experimental" | "proven" | "failed" | string;
+    reason?: string;
+  }>;
   all?: boolean;
 }
 

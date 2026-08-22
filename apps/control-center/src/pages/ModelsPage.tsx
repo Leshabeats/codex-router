@@ -58,7 +58,12 @@ function catalogEligible(entry: ProviderDirectoryEntry): boolean {
 function subagentEnabled(target: RouterTarget, slug: string, settings = target.modelSettings?.subagents): boolean {
   if (!settings) return false;
   if (settings.disabled.includes(slug)) return false;
-  if (settings.mode === "all") return true;
+  // "all" exposes every route that already has a v2 claim. It does not
+  // manufacture one for an untested v1 model; an explicit row toggle moves
+  // that model into selected mode and starts its bounded capability probe.
+  if (settings.mode === "all") {
+    return target.models.find((model) => model.slug === slug)?.multiAgentVersion === "v2";
+  }
   if (settings.mode === "proven") {
     return target.models.find((model) => model.slug === slug)?.multiAgentVersion === "v2";
   }
@@ -142,7 +147,7 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
   const pickerStates = useMemo(() => new Map(models.map((model) => [model.slug, model.visible])), [models]);
   const subagentStates = useMemo(() => new Map(models.map((model) => [
     model.slug,
-    model.multiAgentVersion === "v2" && Boolean(target && subagentEnabled(target, model.slug, subagentSettings)),
+    Boolean(target && subagentEnabled(target, model.slug, subagentSettings)),
   ])), [models, subagentSettings, target]);
   const subagentEffortStates = useMemo(() => new Map(models.map((model) => [
     model.slug,
@@ -451,9 +456,23 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
                         {entry.visibleModels.length ? (
                           <div className="pm-model-list" role="list" aria-label={`${entry.displayName} models`}>
                             {entry.visibleModels.map((model) => {
-                              const eligible = model.multiAgentVersion === "v2";
+                              const certified = model.multiAgentVersion === "v2";
+                              const certification = model.subagentCertification ?? (certified ? "v2" : "unknown");
+                              const knownV1 = certification === "v1";
+                              const proof = subagentSettings?.proofs?.[model.slug];
+                              const checking = proof?.status === "checking";
+                              const candidate = proof?.status === "candidate";
+                              const eligible = certified;
                               const maker = brandForModel(model);
-                              const selectedAsSubagent = eligible && optimisticSubagents.value(model.slug, subagentEnabled(target, model.slug, subagentSettings));
+                              const selectedInSettings = optimisticSubagents.value(
+                                model.slug,
+                                Boolean(target && subagentEnabled(target, model.slug, subagentSettings)),
+                              );
+                              // Only a repository-certified v2 model is a usable
+                              // subagent. A local probe may show progress, but it
+                              // must never make this switch look enabled.
+                              const selectedAsSubagent = certified && selectedInSettings;
+                              const testActive = !certified && !knownV1 && (checking || (!candidate && selectedInSettings));
                               const effortOptions = model.reasoningLevels ?? [];
                               const subagentEffort = optimisticSubagentEfforts.value(
                                 model.slug,
@@ -469,14 +488,17 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
                                     <span>{formatContext(model.contextWindow)}</span>
                                     <span>{model.inputModalities?.includes("image") ? "Text + image" : "Text"}</span>
                                     {model.isFree ? <Badge tone="success">Free</Badge> : null}
-                                    <Badge tone={eligible ? "accent" : "neutral"}>{eligible ? "v2 relay" : "v1 relay"}</Badge>
+                                    <Badge tone={eligible ? "accent" : proof?.status === "failed" ? "danger" : "neutral"}>
+                                      {checking ? "Checking compatibility" : eligible ? "v2 relay" : knownV1 ? "v1 only" : candidate ? "Certification candidate" : proof?.status === "failed" ? "Compatibility failed" : "Untested"}
+                                    </Badge>
                                     {selectedAsSubagent ? <Badge tone="accent">Subagent</Badge> : null}
                                     {selectedAsSubagent && effortOptions.length ? <Badge tone="neutral">{effortLabel(subagentEffort)} thinking</Badge> : null}
                                   </div>
                                   <div className="pm-model-controls">
                                     <div className="pm-model-control"><span>Picker</span><Toggle checked={optimisticPicker.value(model.slug, model.visible)} disabled={!api || nativeClientManaged(model)} label={nativeClientManaged(model) ? `${model.displayName} is managed by Codex` : `Show ${model.displayName} in picker`} onChange={(checked) => void updatePicker(model.slug, checked)} /></div>
-                                    <div className="pm-subagent-controls" title={eligible ? "Expose as a native v2 subagent and choose its thinking effort" : "This model uses the conservative v1 relay"}>
-                                      <div className="pm-model-control"><span>Subagent</span><Toggle checked={selectedAsSubagent} disabled={!api || !eligible} label={`Use ${model.displayName} as subagent`} onChange={(checked) => void updateSubagent(model.slug, checked)} /></div>
+                                    <div className="pm-subagent-controls" title={certified ? "Expose this certified v2 model as a subagent" : knownV1 ? "This model is certified v1 and is not retested automatically" : checking ? "Testing low-cost compatibility; this does not enable v2" : candidate ? "Awaiting a reviewed native v2 certification" : "Run the one-time low-cost compatibility test"}>
+                                      <div className="pm-model-control"><span>{certified ? "Subagent" : knownV1 ? "v1 only" : "Test v2"}</span><Toggle checked={certified ? selectedAsSubagent : testActive} disabled={!api || checking || candidate || knownV1} label={certified ? `Use ${model.displayName} as subagent` : knownV1 ? `${model.displayName} is certified v1` : `Test ${model.displayName} for v2 compatibility`} onChange={(checked) => void updateSubagent(model.slug, checked)} /></div>
+                                      {proof?.status === "failed" && proof.reason ? <small className="pm-subagent-proof-error" title={proof.reason}>Test failed</small> : null}
                                       {eligible && effortOptions.length ? (
                                         <label className="pm-model-effort">
                                           <span>Thinking</span>

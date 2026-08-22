@@ -496,12 +496,14 @@ function normalizeNativeModel(model) {
   const supportsParallelToolCalls =
     typeof model.supports_parallel_tool_calls === "boolean"
       ? model.supports_parallel_tool_calls
-      : NATIVE_PARALLEL_TOOL_CALL_COMPAT.get(String(model.slug));
+      : NATIVE_PARALLEL_TOOL_CALL_COMPAT.get(String(model.slug)) ?? false;
   return {
     ...model,
-    ...(typeof supportsParallelToolCalls === "boolean"
-      ? { supports_parallel_tool_calls: supportsParallelToolCalls }
-      : {}),
+    // Recent Codex clients require this field on every catalog entry. An
+    // absent native declaration is not evidence that parallel calls work, so
+    // make the conservative answer explicit instead of leaving the catalog
+    // unparsable.
+    supports_parallel_tool_calls: supportsParallelToolCalls,
     supports_reasoning_summaries:
       typeof model.supports_reasoning_summaries === "boolean"
         ? model.supports_reasoning_summaries
@@ -589,6 +591,10 @@ export function routedModel(template, model, behaviorTemplate = template) {
     // absent declaration remains the conservative default.
     supports_search_tool: ["hosted", "standalone"].includes(model.searchTool?.mode),
     supports_image_detail_original: model.supportsImageDetailOriginal === true,
+    // A routed model must never inherit a native template's capability. Codex
+    // now requires the key, and `false` is both schema-valid and conservative
+    // until this exact provider/model route declares support.
+    supports_parallel_tool_calls: model.supportsParallelToolCalls === true,
     use_responses_lite: false,
     // Codex only knows one ApplyPatchToolType variant. The native template
     // carries "freeform", but upstreams that reject OpenAI custom tools (Meta
@@ -612,9 +618,6 @@ export function routedModel(template, model, behaviorTemplate = template) {
   // A few OpenAI-compatible upstreams reject tool scheduling the native
   // template advertises. Registry entries opt out explicitly so the picker
   // never offers a custom or parallel tool the provider backend will 400.
-  if (typeof model.supportsParallelToolCalls === "boolean") {
-    next.supports_parallel_tool_calls = model.supportsParallelToolCalls;
-  }
   if (Array.isArray(model.experimentalSupportedTools)) {
     next.experimental_supported_tools = [...model.experimentalSupportedTools];
   }
@@ -725,16 +728,10 @@ function sortCatalogModels(models) {
   });
 }
 
-// Native entries carry upstream's static multi_agent_version, and upstream
-// still ships gpt-5.6-luna as "v1" even though it runs correctly on the v2
-// backend (openai/codex#35097, #36294). spawn_agent filters candidate child
-// models on that static value, so a v1 entry can never be delegated to by a v2
-// parent.
-//
-// These upstream-verified slugs run fine on the v2 backend, so they are
-// promoted unconditionally — no mode switch, no Settings dance. The subagent
-// opt-in below only reaches the *remaining* native models, which stay
-// conservative because their v2 relay paths have not been verified.
+// Native entries carry upstream's static multi_agent_version. One pinned
+// backend exception is maintained in the repository after upstream evidence;
+// local selection or a stream/tool probe must never promote any other v1
+// model. That avoids turning a UI toggle into an unreviewed v2 assertion.
 const NATIVE_V2_BACKEND_SLUGS = new Set(["gpt-5.6-luna"]);
 
 export function promoteNativeMultiAgent(models, settings, hidden = new Set()) {
@@ -749,13 +746,16 @@ export function promoteNativeMultiAgent(models, settings, hidden = new Set()) {
       return { ...model, multi_agent_version: "v1" };
     }
     if (model.visibility !== "list") return model;
-    if (hidden.has(slug) || disabled.has(slug)) return model;
+    if (hidden.has(slug) || disabled.has(slug)) {
+      return { ...model, multi_agent_version: "v1" };
+    }
     if (NATIVE_V2_BACKEND_SLUGS.has(slug)) {
       return { ...model, multi_agent_version: "v2" };
     }
-    if (settings.mode === "all" || (settings.mode === "selected" && enabled.has(slug))) {
-      return { ...model, multi_agent_version: "v2" };
-    }
+    // Deliberately do not use `mode` / `enabled` to promote a native model.
+    // Settings may opt an existing certificate out, not create one.
+    void enabled;
+    void settings;
     return model;
   });
 }

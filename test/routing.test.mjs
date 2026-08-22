@@ -5388,13 +5388,10 @@ test("a live child turn settles an experimental subagent's proof", async () => {
   }
 });
 
-// Issue #257(b). Two things a `proven` slug could not do before: be taken back
-// by a structural rejection on a later turn, and be taken back by a child that
-// answers forever. The first was unreachable because the observer's gate was
-// the experimental window, so promotion on turn one closed the demotion path
-// with it; the second had no signal at all, because a looping child emits
-// nothing but 200s.
-test("a proven subagent is demoted by a later rejection and by a child that never converges", async () => {
+// Legacy local `proven` records no longer grant a v2 role. Keep them readable
+// for a safe upgrade, but ordinary child traffic must not mutate them: only a
+// reviewed repository certificate can now make or revoke the catalog claim.
+test("ordinary child traffic does not mutate a legacy local proven record", async () => {
   const stateDir = mkdtempSync(path.join(os.tmpdir(), "subagent-demote-e2e-"));
   const proofsPath = path.join(stateDir, "multi-agent-proofs.json");
   // Both already carry the durable proof: this is the state the old observer
@@ -5477,52 +5474,27 @@ test("a proven subagent is demoted by a later rejection and by a child that neve
   try {
     await waitFor(`${routerBase(routerPort)}/models`, router);
 
-    // A structural rejection after promotion is the same evidence it was
-    // before it, so it takes the proof back.
+    // A structural rejection does not alter a legacy local record: it was
+    // never a valid authority to advertise v2 in the first place.
     const rejected = await childTurn("deepseek/deepseek-v4-flash", {
       "thread-id": "99999999-8888-4777-8666-555555555555",
     });
     assert.equal(rejected.status, 400);
     const flash = await proofFor(
       "deepseek/deepseek-v4-flash",
-      (proof) => proof?.status === "failed",
+      (proof) => proof?.status === "proven",
     );
-    assert.equal(flash.status, "failed");
-    assert.match(flash.reason, /400/);
-    assert.match(flash.reason, /revoking the child role it had already served/);
+    assert.equal(flash.status, "proven");
 
-    // The looping child. Every turn is a clean 200, so nothing status-shaped
-    // could ever fire; what condemns it is how much of its own budget one
-    // spawn burns while still going.
+    // A looping child likewise leaves the legacy record alone.
     for (let index = 0; index < promptCounts.length; index += 1) {
       const looping = await childTurn("deepseek/deepseek-v4-pro", {
         "thread-id": spawnThread,
       });
       assert.equal(looping.status, 200, `child turn ${index + 1} failed`);
     }
-    const pro = await proofFor("deepseek/deepseek-v4-pro", (proof) => proof?.status === "failed");
-    assert.equal(pro.status, "failed", "a child that never converged kept its proof");
-    assert.equal(pro.spawn.turns, promptCounts.length);
-    assert.equal(pro.spawn.newInputTokens, 2_100_000);
-    assert.match(pro.reason, /without converging/);
-    assert.match(pro.reason, /1800000-token ceiling/);
-
-    // Both demotions have to be readable in the log, even under the QUIET the
-    // production LaunchAgent hard-sets: a picker entry that vanishes with no
-    // line explaining it is unexplainable.
-    //
-    // Waited for rather than read straight off, because the demotion writes
-    // the proof file *before* it logs (`settle` in router.mjs), and the log
-    // goes down a pipe -- which node writes asynchronously on macOS. So the
-    // file the loop above polls can already say `failed` while the line
-    // explaining it is still in flight; a bare read caught that ~1% of runs
-    // and blamed the ceiling for a demotion that had in fact already fired.
-    // The wait is on the line's arrival only: what is asserted is unchanged.
-    await waitForStderr(router, /subagent demoted: deepseek\/deepseek-v4-flash/);
-    await waitForStderr(router, /subagent demoted: deepseek\/deepseek-v4-pro/);
-    const errors = router.testErrors();
-    assert.match(errors, /subagent demoted: deepseek\/deepseek-v4-flash/);
-    assert.match(errors, /subagent demoted: deepseek\/deepseek-v4-pro/);
+    const pro = await proofFor("deepseek/deepseek-v4-pro", (proof) => proof?.status === "proven");
+    assert.equal(pro.status, "proven");
   } finally {
     await stopChild(router);
     await closeServer(gateway.server);

@@ -196,6 +196,7 @@ test("codex probe includes native GPT models and the configured default", () => 
       enabled: true,
       native: true,
       multiAgentVersion: "v1",
+      subagentCertification: "unknown",
       visible: true,
     },
   );
@@ -212,6 +213,22 @@ test("codex probe includes native GPT models and the configured default", () => 
   assert.equal(slice.modelSettings.localModels.lmstudio.provider, "lmstudio");
   assert.equal(typeof slice.modelSettings.localModels.lmstudio.reachable, "boolean");
   assert.ok(Array.isArray(slice.modelSettings.localModels.lmstudio.models));
+});
+
+test("codex probe preserves an explicit repository v1 verdict", () => {
+  const slice = probe("codex", [], [], {
+    nativeModels: [
+      {
+        slug: "gpt-reviewed-v1",
+        display_name: "GPT Reviewed V1",
+        visibility: "list",
+        multi_agent_version: "v1",
+      },
+    ],
+  });
+  const model = slice.models.find((entry) => entry.slug === "gpt-reviewed-v1");
+  assert.equal(model.multiAgentVersion, "v1");
+  assert.equal(model.subagentCertification, "v1");
 });
 
 // The row is the whole feature: an entry the operator cannot find is an entry
@@ -248,7 +265,7 @@ test("a login-free probe draws no extended-context variant", () => {
   assert.ok(slice.models.some((model) => model.slug === "gpt-5.6-sol"));
 });
 
-test("codex probe reports the effective v2 state of selected native GPT models", () => {
+test("codex probe does not turn a selected native v1 model into v2", () => {
   const slice = probe("codex", [], [], {
     nativeModels: [
       {
@@ -273,7 +290,7 @@ test("codex probe reports the effective v2 state of selected native GPT models",
 
   assert.equal(
     slice.models.find((model) => model.slug === "gpt-5.6-terra")?.multiAgentVersion,
-    "v2",
+    "v1",
   );
   assert.equal(
     slice.models.find((model) => model.slug === "gpt-5.6-luna")?.multiAgentVersion,
@@ -315,6 +332,32 @@ test("control exposes subagent and picker settings without credentials", () => {
       ),
     );
     assert.deepEqual(picker.hidden, []);
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("control refuses to enable a repository-certified v1 model as a v2 subagent", () => {
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "control-subagent-v1-"));
+  const env = {
+    ...process.env,
+    MODEL_ROUTER_TARGET: "codex",
+    MODEL_ROUTER_STATE_DIR: stateDir,
+  };
+  writeFileSync(
+    path.join(stateDir, "merged-models.json"),
+    `${JSON.stringify({ models: [{ slug: "gpt-reviewed-v1", multi_agent_version: "v1" }] })}\n`,
+    { mode: 0o600 },
+  );
+  try {
+    assert.throws(
+      () => execFileSync(
+        process.execPath,
+        [path.join(root, "src", "control.mjs"), "subagents", "set", "gpt-reviewed-v1", "on"],
+        { cwd: root, encoding: "utf8", env, stdio: "pipe" },
+      ),
+      /repository-certified v1/,
+    );
   } finally {
     rmSync(stateDir, { recursive: true, force: true });
   }

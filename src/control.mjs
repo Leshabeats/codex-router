@@ -145,6 +145,7 @@ function nativeCodexModels(
         // probe consumers; a false marker identifies synthesized variants.
         ...(nativeBaseSlugs.has(model.slug) ? {} : { nativeClientManaged: false }),
         multiAgentVersion: model.multi_agent_version || "v1",
+        subagentCertification: subagentCertification(model),
         // Base native entries belong to Codex's own catalog.  A router picker
         // overlay must not make them disappear; synthesized context variants
         // remain router-managed and can still be switched off explicitly.
@@ -164,6 +165,12 @@ function reasoningLevelField(levels) {
     .map((level) => (typeof level === "string" ? level : level?.effort))
     .filter((level) => typeof level === "string" && level);
   return names.length ? { reasoningLevels: names } : {};
+}
+
+function subagentCertification(model) {
+  const version = model?.multiAgentVersion ?? model?.multi_agent_version;
+  if (version === "v2" || version === "v1") return version;
+  return "unknown";
 }
 
 // --- per-target probes (run with MODEL_ROUTER_TARGET set) -------------------
@@ -219,16 +226,8 @@ async function emitProbe() {
   const usageEvents = TARGET === "codex"
     ? (await import("./usage-events.mjs")).recentUsageEvents()
     : [];
-  // The same machine-local capability proofs the catalog honors: the tray's
-  // "Subagent models" section filters on v2, so a probe built from the raw
-  // registry hid every model this machine had just verified — the third
-  // consumer to need this overlay, after the catalog and the DSH preset.
-  //
-  // Deliberately unlike the catalog, `disabled` is not passed: the catalog
-  // demotes a switched-off model so Codex stops offering it, but this probe
-  // is what draws the rows the operator switches. A proven model whose
-  // toggle is off must keep its row — with the toggle shown off — or the
-  // section it was switched off in loses the way to switch it back on.
+  // Local proof records are surfaced for status only. They never alter the
+  // registry capability sent to Codex.
   const { applySubagentProofs } = await import("./subagent-proofs.mjs");
   const provenListedModels = applySubagentProofs(
     LISTED_MODELS,
@@ -244,6 +243,7 @@ async function emitProbe() {
     gatewayModel: model.gatewayModel,
     enabled: enabledProviders.includes(model.provider),
     multiAgentVersion: model.multiAgentVersion || "v1",
+    subagentCertification: subagentCertification(model),
     visible: picker.hasExplicitVisibility
       ? visibleModels.has(model.slug)
       : !hiddenModels.has(model.slug),
@@ -414,6 +414,7 @@ async function routerCatalogSnapshot() {
     gatewayModel: model.gatewayModel,
     enabled: true,
     multiAgentVersion: model.multiAgentVersion || "v1",
+    subagentCertification: subagentCertification(model),
     visible: picker.hasExplicitVisibility ? visible.has(model.slug) : !hidden.has(model.slug),
     isFree: model.isFree === true,
     ...reasoningLevelField(model.reasoningLevels),
@@ -1043,6 +1044,23 @@ async function knownModelSlug(slug) {
   return MODEL_BY_SLUG.has(slug);
 }
 
+async function knownModelSubagentVersion(slug) {
+  try {
+    const { MERGED_CATALOG_PATH } = await import("./paths.mjs");
+    const parsed = JSON.parse(readFileSync(MERGED_CATALOG_PATH, "utf8"));
+    const model = Array.isArray(parsed.models)
+      ? parsed.models.find((candidate) => String(candidate?.slug) === slug)
+      : undefined;
+    if (model?.multi_agent_version === "v1" || model?.multi_agent_version === "v2") {
+      return model.multi_agent_version;
+    }
+  } catch {
+    // Fall back to the checked-in registry for fresh installs.
+  }
+  const { MODEL_BY_SLUG } = await import("./model-registry.mjs");
+  return MODEL_BY_SLUG.get(slug)?.multiAgentVersion;
+}
+
 async function nativeCodexBaseSlugs() {
   const { NATIVE_CATALOG_PATH } = await import("./paths.mjs");
   if (!existsSync(NATIVE_CATALOG_PATH)) return new Set();
@@ -1068,7 +1086,48 @@ async function handleSubagents(action, value, flag, rest = []) {
     subagentSettingsSnapshot,
   } = await import("./multi-agent-state.mjs");
   if (action === "status") {
-    process.stdout.write(`${JSON.stringify(subagentSettingsSnapshot())}\n`);
+    const { selectedConfiguredListedModels } = await import("./provider-selection.mjs");
+    const { subagentAutoPolicySnapshot } = await import("./subagent-auto-policy.mjs");
+    process.stdout.write(`${JSON.stringify({
+      ...subagentSettingsSnapshot(),
+      autoPolicies: subagentAutoPolicySnapshot(selectedConfiguredListedModels()),
+    })}\n`);
+    return;
+  }
+  if (action === "policy") {
+    const [kind, selector, desired] = [value, flag, rest[2]];
+    if (kind === "status" || !kind) {
+      const { selectedConfiguredListedModels } = await import("./provider-selection.mjs");
+      const { subagentAutoPolicySnapshot } = await import("./subagent-auto-policy.mjs");
+      process.stdout.write(`${JSON.stringify(subagentAutoPolicySnapshot(selectedConfiguredListedModels()))}\n`);
+      return;
+    }
+    if (!selector || !["on", "off"].includes(desired)) {
+      throw new Error(
+        "Usage: control subagents policy status|provider <provider-id> <on|off>|model <model-slug> <on|off>|family <name> <on|off>",
+      );
+    }
+    const { setSubagentAutoPolicy, matchingSubagentAutoPolicyModels } = await import(
+      "./subagent-auto-policy.mjs"
+    );
+    const policyState = setSubagentAutoPolicy(kind, selector, desired === "on");
+    // Enabling a policy is explicit standing consent for its matching live
+    // probes. Only models currently configured for this machine can spend it.
+    if (desired === "on") {
+      const { selectedConfiguredListedModels } = await import("./provider-selection.mjs");
+      const matches = matchingSubagentAutoPolicyModels(
+        selectedConfiguredListedModels().filter((model) => model.multiAgentVersion !== "v1"),
+        policyState.policies,
+      );
+      const slugs = matches.map((model) => model.slug);
+      if (slugs.length) {
+        setMultiAgentModels(slugs, true);
+        const { spawnDetachedVerification } = await import("./subagent-verify.mjs");
+        spawnDetachedVerification(slugs);
+      }
+    }
+    refreshModelSettingsCatalog();
+    process.stdout.write(`${JSON.stringify(policyState)}\n`);
     return;
   }
   if (action === "select-all") {
@@ -1115,6 +1174,11 @@ async function handleSubagents(action, value, flag, rest = []) {
     if (!(await knownModelSlug(value))) {
       throw new Error(`Unknown model slug: ${value}`);
     }
+    if (flag === "on" && (await knownModelSubagentVersion(value)) === "v1") {
+      throw new Error(
+        `${value} is repository-certified v1 and cannot be enabled as a native v2 subagent.`,
+      );
+    }
     setMultiAgentModel(value, flag === "on");
     // Selection is the assignment: switching a model on hands it to the
     // capability probe. Detached, because this command answers a tray toggle
@@ -1150,10 +1214,15 @@ async function handleSubagents(action, value, flag, rest = []) {
     let slugs;
     if (provider === "openai") {
       const { NATIVE_CATALOG_PATH } = await import("./paths.mjs");
-      slugs = nativeCodexModels(NATIVE_CATALOG_PATH).map((model) => model.slug);
+      slugs = nativeCodexModels(NATIVE_CATALOG_PATH)
+        .filter((model) => model.subagentCertification !== "v1")
+        .map((model) => model.slug);
     } else {
       slugs = selectedConfiguredListedModels()
-        .filter((model) => canonicalProviderId(model.provider) === provider)
+        .filter(
+          (model) =>
+            canonicalProviderId(model.provider) === provider && model.multiAgentVersion !== "v1",
+        )
         .map((model) => model.slug);
     }
     if (slugs.length === 0) {
@@ -1168,7 +1237,8 @@ async function handleSubagents(action, value, flag, rest = []) {
     throw new Error(
       "Usage: control subagents status|select-all|unselect-all|mode <all|selected|proven>|" +
         "set <model-slug> <on|off>|effort <model-slug> <level|default>|" +
-        "provider <provider-id> <on|off>|verify [model-slug ...]",
+        "provider <provider-id> <on|off>|verify [model-slug ...]|" +
+        "policy status|provider <provider-id> <on|off>|model <model-slug> <on|off>|family <name> <on|off>",
     );
   }
   refreshModelSettingsCatalog();
