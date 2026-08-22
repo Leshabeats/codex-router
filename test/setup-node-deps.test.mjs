@@ -42,6 +42,8 @@ if pid == 0:
     os.execve(node, [node, setup, "--guided", "--providers", "deepseek", "--selection-only"], env)
 
 output = bytearray()
+model_toggled = False
+models_confirmed = False
 confirmed = False
 key_sent = False
 while True:
@@ -58,6 +60,13 @@ while True:
     if not chunk:
         break
     output.extend(chunk)
+    model_prompts = output.count(b"Toggle model numbers")
+    if not model_toggled and model_prompts >= 1:
+        os.write(master, b"2\n")
+        model_toggled = True
+    elif model_toggled and not models_confirmed and model_prompts >= 2:
+        os.write(master, b"\n")
+        models_confirmed = True
     if not confirmed and b"Enter DeepSeek API key securely now?" in output:
         os.write(master, confirmation.encode() + b"\n")
         confirmed = True
@@ -145,6 +154,16 @@ test(
         readFileSync(path.join(stateDir, "deepseek-api-key.secret"), "utf8"),
         `${secret}\n`,
       );
+      const picker = JSON.parse(
+        readFileSync(path.join(stateDir, "model-picker.json"), "utf8"),
+      );
+      assert.deepEqual(picker.visible, [
+        "deepseek/deepseek-v4-flash",
+      ]);
+      assert.deepEqual(picker.hidden, ["deepseek/deepseek-v4-pro"]);
+      assert.match(result.stdout, /DeepSeek V4 Flash \(API\)/);
+      assert.match(result.stdout, /DeepSeek V4 Pro \(API\)/);
+      assert.doesNotMatch(result.stdout, /Kimi K3/);
       assert.equal(existsSync(path.join(checkout, "node_modules", ".package-lock.json")), true);
     });
   },
