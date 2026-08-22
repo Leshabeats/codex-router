@@ -14,6 +14,7 @@ import {
   readRequestBody,
   reportListenFailure,
   requireInternalAuth,
+  writeEventStreamHead,
   writeJson,
 } from "./http-utils.mjs";
 import { PORTS } from "./paths.mjs";
@@ -580,8 +581,7 @@ async function handleChatCompletions(request, response) {
 
   const startStream = () => {
     if (!wantsStream || streamStarted) return;
-    response.writeHead(200, {
-      "Content-Type": "text/event-stream",
+    writeEventStreamHead(response, 200, {
       "Cache-Control": "no-cache",
       Connection: "keep-alive",
     });

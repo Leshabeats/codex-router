@@ -46,23 +46,22 @@ export function assertServiceWriteIsolated(
 // that did not would fail for reasons unrelated to what they test. There is
 // nothing to remember this way.
 //
-// Reads stay live. Skipping them too had `loaded()` answer "nothing is there"
-// for every caller, which changed what the doctor reports about the service
-// and, through it, what else the doctor does -- CI caught that as two
-// unrelated Windows tests failing in their own cleanup. Callers that poll a
-// read after a skipped mutation bail out before the loop instead.
+// Reads stay live. A status/query call must still answer whether the service
+// exists. Callers that poll a read after a skipped mutation bail out before
+// the loop instead, because there was no host operation whose completion they
+// could be waiting for.
 //
-// Only launchd is covered here. systemd and Task Scheduler have the identical
-// hole -- both are addressed by unit and task name, neither of which a test
-// can redirect -- but the fix could not be verified on this machine, and two
-// attempts at it broke CI on platforms it was not written for. Worth doing
-// separately, on a host that can actually run it.
+// The platform modules apply this at their service-manager call sites. The
+// Windows module uses it for Task Scheduler mutations while deliberately
+// leaving query/read paths live, so status cannot claim a missing task is
+// installed.
 export function serviceManagerDisabled(env = process.env) {
   return env.CODEX_ROUTER_SKIP_LAUNCHCTL === "1"
     || env.MODEL_ROUTER_SKIP_SERVICE_MANAGER === "1";
 }
 
-// True when the caller should skip the invocation entirely.
+// True when a mutating caller should skip the invocation entirely. Read/query
+// callers intentionally do not consult this helper.
 //
 // `hostManaged` is false when a platform module is being exercised away from
 // its own platform -- src/service-render.test.mjs drives the Windows and Linux
