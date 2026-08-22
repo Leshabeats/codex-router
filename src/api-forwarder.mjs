@@ -552,6 +552,25 @@ function normalizeBody(buffer, contentType, route) {
     throw error;
   }
 
+  // OpenAI Chat Completions providers place terminal usage in a final empty
+  // choices chunk only when the caller opts into it. Keep this normalization
+  // on the provider's Chat Completions surface: Responses and Anthropic
+  // endpoints have different stream contracts, and a provider that declares
+  // either protocol must not receive an OpenAI-only stream_options field.
+  if (
+    route === "/chat/completions" &&
+    payload.stream === true &&
+    (provider.protocol === undefined || provider.protocol === "openai")
+  ) {
+    const streamOptions = payload.stream_options;
+    payload.stream_options = {
+      ...(streamOptions && typeof streamOptions === "object" && !Array.isArray(streamOptions)
+        ? streamOptions
+        : {}),
+      include_usage: true,
+    };
+  }
+
   payload.model = model.upstreamModel;
   // Google's OpenAI-compatible endpoint (/v1beta/openai/chat/completions)
   // rejects any field outside the OpenAI schema with a hard 400
