@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import http from "node:http";
 import test from "node:test";
 
@@ -18,13 +19,14 @@ function listen(server) {
 // test never depends on the runner's own signal disposition.
 const SHUTDOWN_EVENT = "codex-router-test-shutdown";
 
-function shutdownHarness(server, { drainMs }) {
+function shutdownHarness(server, { drainMs, flushMs }) {
   let exitCode;
   const exited = new Promise((resolve) => {
     installGracefulShutdown(server, {
       label: "test",
       signals: [SHUTDOWN_EVENT],
       drainMs,
+      flushMs,
       exit: (code) => {
         exitCode = code;
         resolve(code);
@@ -138,4 +140,35 @@ test("an idle service exits without waiting out the drain window", async () => {
   assert.equal(await exited, 0);
   assert.ok(Date.now() - startedAt < 5_000, "shutdown waited on the drain window");
   process.removeAllListeners(SHUTDOWN_EVENT);
+});
+
+// A canceled transformed stream can close its ServerResponse before Node
+// releases the connection from server.close(). The response tracker is empty
+// in that state, so returning early from shutdown leaves the process waiting on
+// the two-minute keep-alive timeout. The backstop applies to that untracked
+// state as well as to responses that are still visibly live.
+test("a pending server close is bounded when no response remains tracked", async () => {
+  const signal = `${SHUTDOWN_EVENT}-untracked`;
+  const server = new EventEmitter();
+  let forced = 0;
+  server.close = () => {};
+  server.closeIdleConnections = () => {};
+  server.closeAllConnections = () => {
+    forced += 1;
+  };
+
+  const exited = new Promise((resolve) => {
+    installGracefulShutdown(server, {
+      label: "test-untracked",
+      signals: [signal],
+      drainMs: 25,
+      flushMs: 25,
+      exit: resolve,
+    });
+  });
+  process.emit(signal);
+
+  assert.equal(await exited, 0);
+  assert.equal(forced, 1);
+  process.removeAllListeners(signal);
 });

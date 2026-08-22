@@ -12,6 +12,7 @@ import {
   readRequestBody,
   reportListenFailure,
   requireInternalAuth,
+  writeEventStreamHead,
   writeJson,
 } from "./http-utils.mjs";
 import { PORTS } from "./paths.mjs";
@@ -133,8 +134,7 @@ async function handleChatCompletions(request, response) {
   const openStream = () => {
     if (headersWritten || !wantsStream) return;
     headersWritten = true;
-    response.writeHead(200, {
-      "Content-Type": "text/event-stream",
+    writeEventStreamHead(response, 200, {
       "Cache-Control": "no-cache",
       Connection: "keep-alive",
     });
@@ -185,9 +185,12 @@ async function handleChatCompletions(request, response) {
       });
       return;
     }
-    // The turn already relayed bytes, so the client owns a partial message.
-    // End the stream rather than injecting an error object it would append.
-    if (!response.writableEnded) response.end("data: [DONE]\n\n");
+    // The turn already relayed bytes, so an ordinary [DONE] would certify a
+    // partial message as complete. Report the failure in-band, then end the
+    // HTTP body cleanly instead of resetting the socket.
+    endStreamedResponse(response, {
+      message: "The Devin CLI forwarder lost the upstream response stream.",
+    });
     return;
   }
 

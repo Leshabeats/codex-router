@@ -375,9 +375,13 @@ export function applyKeepAliveTimeouts(server) {
 // here ends -- a terminal SSE `error` frame and a clean close, never a reset.
 // The window is short because the process is going away regardless; it exists
 // so the turns that were about to finish do, not to hold a restart open.
-export const SHUTDOWN_DRAIN_MS = Number(
+const configuredShutdownDrainMs = Number(
   process.env.MODEL_ROUTER_SHUTDOWN_DRAIN_MS || 2_000,
 );
+export const SHUTDOWN_DRAIN_MS =
+  Number.isFinite(configuredShutdownDrainMs) && configuredShutdownDrainMs >= 0
+    ? configuredShutdownDrainMs
+    : 2_000;
 
 // Ending a response only queues its last bytes; the socket still has to drain
 // them. Destroying connections the instant the frames are written would undo
@@ -393,6 +397,7 @@ export function installGracefulShutdown(
     label,
     signals = ["SIGINT", "SIGTERM"],
     drainMs = SHUTDOWN_DRAIN_MS,
+    flushMs = SHUTDOWN_FLUSH_MS,
     exit = (code) => process.exit(code),
   } = {},
 ) {
@@ -408,9 +413,13 @@ export function installGracefulShutdown(
     if (shuttingDown) return;
     shuttingDown = true;
     let exited = false;
+    let drainTimer;
+    let flushTimer;
     const finish = () => {
       if (exited) return;
       exited = true;
+      if (drainTimer) clearTimeout(drainTimer);
+      if (flushTimer) clearTimeout(flushTimer);
       exit(0);
     };
     server.close(finish);
@@ -418,11 +427,16 @@ export function installGracefulShutdown(
     // (KEEPALIVE_TIMEOUT_MS), and `close` alone leaves them to expire on their
     // own schedule. Drop them now: nothing is riding on them.
     server.closeIdleConnections?.();
-    if (live.size === 0) return;
-    console.error(
-      `[${label}] shutting down with ${live.size} request(s) in flight; draining for up to ${drainMs}ms`,
-    );
-    const timer = setTimeout(() => {
+    if (live.size > 0) {
+      console.error(
+        `[${label}] shutting down with ${live.size} request(s) in flight; draining for up to ${drainMs}ms`,
+      );
+    }
+    // The response tracker can already be empty while Node still considers an
+    // aborted request active. In that state server.close() waits for the
+    // two-minute keep-alive timeout, so the bounded backstop is required even
+    // when there is no response left to terminate.
+    drainTimer = setTimeout(() => {
       for (const response of live) {
         // A response whose head is still unsent can still say what happened
         // with a status; one already streaming cannot, and takes the terminal
@@ -438,14 +452,15 @@ export function installGracefulShutdown(
       // `close` settles once those final writes drain and the sockets end,
       // which is the ordinary path. The backstop is for a peer that stops
       // reading and would otherwise hold the process open.
-      const flush = setTimeout(() => {
+      flushTimer = setTimeout(() => {
         server.closeAllConnections?.();
         finish();
-      }, SHUTDOWN_FLUSH_MS);
-      flush.unref();
+      }, flushMs);
+      flushTimer.unref();
     }, drainMs);
-    // A drain that empties early should not hold the process to the deadline.
-    timer.unref();
+    // A normal idle close or a drain that empties early calls finish through
+    // server.close's callback and clears this timer.
+    drainTimer.unref();
   };
   for (const signal of signals) process.on(signal, shutdown);
   return server;
