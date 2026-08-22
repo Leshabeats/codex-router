@@ -3781,6 +3781,167 @@ test("API forwarder routes opencode Go chat, Messages, and Responses surfaces", 
   }
 });
 
+test("API forwarder opts streamed Chat Completions into usage without changing legal tools or other surfaces", async () => {
+  const upstreamRequests = [];
+  let streamedRequests = 0;
+  const upstream = await mockServer(async (request, response) => {
+    const body = await bodyJson(request);
+    upstreamRequests.push({ url: request.url, body });
+    if (request.url.endsWith("/chat/completions") && body.stream === true) {
+      const usage = streamedRequests++ === 0
+        ? { prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 }
+        : { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+      response.writeHead(200, { "Content-Type": "text/event-stream" });
+      response.end([
+        'data: {"id":"chatcmpl_stream","choices":[{"delta":{"content":"ok"}}]}\n\n',
+        `data: ${JSON.stringify({ id: "chatcmpl_stream", choices: [], usage })}\n\n`,
+        "data: [DONE]\n\n",
+      ].join(""));
+      return;
+    }
+    if (request.url.endsWith("/messages")) {
+      json(response, 200, { id: "msg_stream_options", type: "message", content: [] });
+      return;
+    }
+    if (request.url.endsWith("/responses")) {
+      json(response, 200, {
+        id: "resp_stream_options",
+        object: "response",
+        status: "completed",
+        output: [],
+      });
+      return;
+    }
+    json(response, 200, { id: "chatcmpl_nonstream", choices: [], usage: { prompt_tokens: 1 } });
+  });
+  const forwarderPort = await openPort();
+  const forwarder = run("api-forwarder.mjs", {
+    CODEX_ROUTER_API_PORT: String(forwarderPort),
+    OPENCODE_GO_BASE_URL: `http://127.0.0.1:${upstream.port}/v1`,
+    OPENCODE_API_KEY: "TEST_OPENCODE_GO_API_KEY",
+    OPENCODE_GO_API_KEY: "TEST_OPENCODE_GO_API_KEY",
+    CODEX_ROUTER_QUIET: "1",
+  });
+
+  const headers = {
+    Authorization: `Bearer ${INTERNAL_KEY}`,
+    "Content-Type": "application/json",
+  };
+  const base = `http://127.0.0.1:${forwarderPort}`;
+  try {
+    await waitFor(`${base}/health`, forwarder, { Authorization: `Bearer ${INTERNAL_KEY}` });
+
+    // A non-streamed Chat Completions request must not gain include_usage.
+    const nonstream = await fetch(`${base}/v1/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: "opencode-go-mimo-v2-5",
+        stream: false,
+        stream_options: { custom_option: "keep" },
+        tools: [],
+        tool_choice: "none",
+        messages: [{ role: "user", content: "test" }],
+      }),
+    });
+    assert.equal(nonstream.status, 200);
+    const nonstreamBody = upstreamRequests.at(-1).body;
+    assert.deepEqual(nonstreamBody.stream_options, { custom_option: "keep" });
+    assert.deepEqual(nonstreamBody.tools, []);
+    assert.equal(nonstreamBody.tool_choice, "none");
+
+    // An omitted stream flag is non-streaming too; it must not inherit the
+    // streamed usage opt-in merely because the route is Chat Completions.
+    const implicitNonstream = await fetch(`${base}/v1/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: "opencode-go-mimo-v2-5",
+        stream_options: { custom_option: "keep" },
+        tools: [],
+        tool_choice: "none",
+        messages: [{ role: "user", content: "test" }],
+      }),
+    });
+    assert.equal(implicitNonstream.status, 200);
+    const implicitNonstreamBody = upstreamRequests.at(-1).body;
+    assert.deepEqual(implicitNonstreamBody.stream_options, { custom_option: "keep" });
+    assert.deepEqual(implicitNonstreamBody.tools, []);
+    assert.equal(implicitNonstreamBody.tool_choice, "none");
+
+    // Streamed Chat Completions requests opt in and retain every other option.
+    const streamed = await fetch(`${base}/v1/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: "opencode-go-mimo-v2-5",
+        stream: true,
+        stream_options: { custom_option: "keep", include_usage: false },
+        tools: [],
+        tool_choice: "none",
+        messages: [{ role: "user", content: "test" }],
+      }),
+    });
+    assert.equal(streamed.status, 200);
+    assert.match(await streamed.text(), /"prompt_tokens":7/);
+    const streamedBody = upstreamRequests.at(-1).body;
+    assert.deepEqual(streamedBody.stream_options, {
+      custom_option: "keep",
+      include_usage: true,
+    });
+    assert.deepEqual(streamedBody.tools, []);
+    assert.equal(streamedBody.tool_choice, "none");
+
+    // An explicit all-zero usage chunk is still relayed; only the request
+    // option is normalized, not provider accounting.
+    const zeroUsage = await fetch(`${base}/v1/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: "opencode-go-mimo-v2-5",
+        stream: true,
+        messages: [{ role: "user", content: "test" }],
+      }),
+    });
+    assert.equal(zeroUsage.status, 200);
+    assert.match(await zeroUsage.text(), /"prompt_tokens":0/);
+    assert.deepEqual(upstreamRequests.at(-1).body.stream_options, { include_usage: true });
+
+    // The Anthropic and Responses surfaces have their own stream contracts;
+    // no OpenAI stream_options field is injected there.
+    const messages = await fetch(`${base}/v1/messages`, {
+      method: "POST",
+      headers: { ...headers, "x-api-key": INTERNAL_KEY },
+      body: JSON.stringify({
+        model: "opencode-go-messages-minimax-m3",
+        stream: true,
+        stream_options: { custom_option: "keep" },
+        messages: [{ role: "user", content: "test" }],
+      }),
+    });
+    assert.equal(messages.status, 200);
+    assert.equal(upstreamRequests.at(-1).url, "/v1/messages");
+    assert.deepEqual(upstreamRequests.at(-1).body.stream_options, { custom_option: "keep" });
+
+    const responses = await fetch(`${base}/v1/responses`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: "responses/opencode-go-responses-gpt-5-6-luna",
+        stream: true,
+        stream_options: { custom_option: "keep" },
+        input: "test",
+      }),
+    });
+    assert.equal(responses.status, 200);
+    assert.equal(upstreamRequests.at(-1).url, "/v1/responses");
+    assert.deepEqual(upstreamRequests.at(-1).body.stream_options, { custom_option: "keep" });
+  } finally {
+    await stopChild(forwarder);
+    await closeServer(upstream.server);
+  }
+});
+
 test("API forwarder routes Command Code chat and Messages surfaces", async () => {
   const upstreamRequests = [];
   const upstream = await mockServer(async (request, response) => {
