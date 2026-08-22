@@ -21,7 +21,15 @@ import {
   TARGET,
 } from "./paths.mjs";
 import { serviceProxyEnvironment } from "./proxy-environment.mjs";
-import { assertServiceWriteIsolated } from "./service-write-guard.mjs";
+import {
+  assertServiceManagerIsolated,
+  assertServiceWriteIsolated,
+} from "./service-write-guard.mjs";
+
+// Only this platform's own module can reach this machine's service manager.
+// Run anywhere else -- the cross-platform render tests drive all three modules
+// on one host -- launchctl is absent or a test's own stub.
+const HOST_MANAGED = process.platform === "darwin";
 
 const command = process.argv[2] || "status";
 const effectivePlatform = process.env.CODEX_ROUTER_SERVICE_PLATFORM || process.platform;
@@ -119,7 +127,24 @@ ${environmentEntries()}
 `;
 }
 
+// Every verb here but `print` mutates the machine's launchd domain.
+const MUTATING_LAUNCHCTL_VERBS = new Set([
+  "bootout",
+  "bootstrap",
+  "disable",
+  "enable",
+  "kickstart",
+]);
+
 function run(args, options = {}) {
+  if (
+    assertServiceManagerIsolated(`launchctl ${args[0]}`, {
+      mutates: MUTATING_LAUNCHCTL_VERBS.has(args[0]),
+      hostManaged: HOST_MANAGED,
+    })
+  ) {
+    return "";
+  }
   return execFileSync(launchctl, args, {
     encoding: "utf8",
     timeout: 15_000,
@@ -216,6 +241,11 @@ if (command === "render") {
     })}\n`,
   );
 } else if (command === "install") {
+  // Before anything, including the bootout below: an install that is going to
+  // be refused for writing outside its fixture must not first unload the
+  // machine's running service. writePlist re-checks; the guard is a pure
+  // predicate.
+  guardPlistWrite();
   bootout();
   // Only safe here. launchd opens StandardOutPath before it execs the service,
   // so a rotation performed by the started process renames a file the process
