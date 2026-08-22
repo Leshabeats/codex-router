@@ -170,6 +170,14 @@ export function setAllModelsVisible(slugs, visible) {
 
 // Applies one explicit picker selection to the supplied models while leaving
 // every other provider's visibility untouched.
+//
+// `hasExplicitVisibility` is threaded through for the same reason
+// `seedModelsHidden` threads it: this call sees one screen's worth of models,
+// and turning a legacy file into an allowlist answers for every provider it
+// never looked at -- with "off", because they are absent from `visible`. The
+// selection is still durable on such a file, through `hidden` and `seeded`,
+// which is the representation that file already speaks. A file the catalog
+// build has migrated is an allowlist already and stays one.
 export function setModelSelection(slugs, selectedSlugs) {
   const values = [...new Set(
     (Array.isArray(slugs) ? slugs : []).map((slug) => String(slug || "").trim()).filter(Boolean),
@@ -180,7 +188,7 @@ export function setModelSelection(slugs, selectedSlugs) {
       .map((slug) => String(slug || "").trim())
       .filter(Boolean),
   );
-  const { hidden, visible, seeded } = readPickerState();
+  const { hidden, visible, seeded, hasExplicitVisibility } = readPickerState();
   for (const value of values) {
     if (selected.has(value)) {
       hidden.delete(value);
@@ -191,7 +199,7 @@ export function setModelSelection(slugs, selectedSlugs) {
     }
     seeded.add(value);
   }
-  return writePickerState({ hidden, visible, seeded });
+  return writePickerState({ hidden, visible, seeded, hasExplicitVisibility });
 }
 
 // Bridges one install from the pre-allowlist file format, exactly once.

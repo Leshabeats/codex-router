@@ -7,7 +7,7 @@ import { detectLegacyInstallations, applyKnownMigrations, rollbackLatestMigratio
 import { grokOAuthStatus } from "./grok-oauth-status.mjs";
 import { LISTED_MODELS, PROVIDERS, providerNeedsNoKey } from "./model-registry.mjs";
 import { ensureNodeDependencies } from "./node-dependency-install.mjs";
-import { modelPickerSnapshot, setModelSelection } from "./model-picker-state.mjs";
+import { effectiveVisibleModels, setModelSelection } from "./model-picker-state.mjs";
 import { kimiOAuthStatus } from "./oauth-status.mjs";
 import { SOURCE_ROOT, TARGET } from "./paths.mjs";
 import { credentialStatus } from "./provider-credentials.mjs";
@@ -263,10 +263,16 @@ function guidedModelSelection(providers) {
     return { models, selectedSlugs: [] };
   }
 
-  const hidden = new Set(modelPickerSnapshot().hidden);
+  // Pre-check what the picker is showing right now, which on a machine that
+  // has never had one is nothing: router models are opt-in, and enabling a
+  // provider must not put its whole catalog in the picker on one keystroke
+  // (the policy `src/catalog.mjs` states at its `seedModelsHidden` call). On a
+  // re-run this is instead the operator's existing picker, so pressing Enter
+  // through this step changes nothing.
+  const visible = effectiveVisibleModels(models.map((model) => model.slug));
   let selected = new Set(
     models
-      .map((model, index) => hidden.has(model.slug) ? undefined : index + 1)
+      .map((model, index) => (visible.has(model.slug) ? index + 1 : undefined))
       .filter(Boolean),
   );
   process.stdout.write("\nChoose models from the selected providers:\n");
@@ -462,9 +468,6 @@ async function main() {
     }
   }
   writeProviderSelection(providers);
-  if (guided) {
-    setModelSelection(modelChoices.map((model) => model.slug), selectedModelSlugs);
-  }
   // Written on every run, not only idle ones: re-running setup without
   // --no-discovery is the exit path from idle mode, so a normal install must
   // clear the marker just as an idle install sets it.
@@ -529,6 +532,15 @@ async function main() {
     if (!confirm("Proceed?")) {
       throw incomplete("Setup was cancelled before installing the service.");
     }
+  }
+
+  // Below the confirmation, and below the `--selection-only` return above it:
+  // model visibility is the operator's existing configuration, so a cancelled
+  // setup and a selection-only run must both leave `model-picker.json` exactly
+  // as they found it. Steps that only report a choice may run before the
+  // answer; the step that rewrites protected state may not.
+  if (guided) {
+    setModelSelection(modelChoices.map((model) => model.slug), selectedModelSlugs);
   }
 
   try {

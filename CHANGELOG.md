@@ -25,6 +25,18 @@
   Substitute your provider ID (`./bin/model-router codex providers list --json`
   lists them), repeat per provider, then fully quit and reopen Codex.
 
+- **Guided setup asks which models go in the picker.** `./bin/setup --guided`
+  now has a model step between choosing providers and connecting credentials.
+  It starts from the picker the machine already has -- nothing on a first
+  install, the operator's existing selection on a re-run -- so enabling a
+  provider still offers its models rather than choosing them, and pressing
+  Enter through the step never changes what is already there. The selection is
+  written after the "Proceed?" confirmation, so a cancelled setup and a
+  `--selection-only` run both leave `model-picker.json` untouched, and it
+  records `hidden`/`seeded` rather than an allowlist on a pre-allowlist file,
+  because one screen of models cannot answer for the providers it never
+  showed.
+
 - **Grok 4.6 can select Codex's native image viewer.** xAI stopped without a
   function call when the tool was named `view_image`, even when selection was
   required. The Grok OAuth boundary now presents that tool as `inspect_image`

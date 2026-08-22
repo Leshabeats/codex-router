@@ -188,3 +188,25 @@ test("effective picker visibility reads both state formats and neither one", () 
   });
   assert.deepEqual([...effectiveVisibleModels(ROUTED_SLUGS)], ["opencode-go/kimi-k3"]);
 });
+
+test("an explicit model selection does not turn a legacy file into an allowlist", () => {
+  writeLegacyState({
+    version: 1,
+    hidden: ["deepseek/deepseek-v4-pro"],
+    seeded: ["deepseek/deepseek-v4-pro"],
+  });
+
+  setModelSelection(
+    ["deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro"],
+    ["deepseek/deepseek-v4-flash"],
+  );
+
+  // Recording an allowlist here would answer for every provider this call
+  // never looked at, and every one of them would answer "off".
+  const persisted = JSON.parse(readFileSync(MODEL_PICKER_STATE_PATH, "utf8"));
+  assert.equal("visible" in persisted, false);
+  const picker = modelPickerSnapshot();
+  assert.equal(picker.hasExplicitVisibility, false);
+  assert.deepEqual(picker.hidden, ["deepseek/deepseek-v4-pro"]);
+  assert.ok(picker.visible.includes("deepseek/deepseek-v4-flash"));
+});
