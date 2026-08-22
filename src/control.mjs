@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { pickerCommandArgs } from "./control-args.mjs";
-import { promoteNativeMultiAgent } from "./catalog.mjs";
+import { nativeSubagentCertification, promoteNativeMultiAgent } from "./catalog.mjs";
 import {
   applyModelOverlayPublication,
   transactModelOverlayMutation,
@@ -120,16 +120,20 @@ function nativeCodexModels(
         .map((model) => String(model?.slug || ""))
         .filter(Boolean),
     );
-    return promoteNativeMultiAgent(
+    const nativeModels = withNativeContextVariants(
       // The capture holds what Codex published; the extended-window variants
       // are the router's own additions to the same group, and the tray is
       // where they are switched on, so they have to be drawn here too. The
       // catalog build derives them from this same list, so the rows the
       // operator sees and the entries Codex reads cannot drift apart.
-      withNativeContextVariants(
-        Array.isArray(parsed.models) ? parsed.models : [],
-        { enabled: contextVariants },
-      ),
+      Array.isArray(parsed.models) ? parsed.models : [],
+      { enabled: contextVariants },
+    );
+    const certificationBySlug = new Map(
+      nativeModels.map((model) => [model.slug, nativeSubagentCertification(model) || "unknown"]),
+    );
+    return promoteNativeMultiAgent(
+      nativeModels,
       subagentSettings,
       hiddenModels,
     )
@@ -145,6 +149,7 @@ function nativeCodexModels(
         // probe consumers; a false marker identifies synthesized variants.
         ...(nativeBaseSlugs.has(model.slug) ? {} : { nativeClientManaged: false }),
         multiAgentVersion: model.multi_agent_version || "v1",
+        subagentCertification: certificationBySlug.get(model.slug) || "unknown",
         // Base native entries belong to Codex's own catalog.  A router picker
         // overlay must not make them disappear; synthesized context variants
         // remain router-managed and can still be switched off explicitly.
@@ -164,6 +169,12 @@ function reasoningLevelField(levels) {
     .map((level) => (typeof level === "string" ? level : level?.effort))
     .filter((level) => typeof level === "string" && level);
   return names.length ? { reasoningLevels: names } : {};
+}
+
+function subagentCertification(model) {
+  const version = model?.multiAgentVersion ?? model?.multi_agent_version;
+  if (version === "v2" || version === "v1") return version;
+  return "unknown";
 }
 
 // --- per-target probes (run with MODEL_ROUTER_TARGET set) -------------------
@@ -219,31 +230,24 @@ async function emitProbe() {
   const usageEvents = TARGET === "codex"
     ? (await import("./usage-events.mjs")).recentUsageEvents()
     : [];
-  // The same machine-local capability proofs the catalog honors: the tray's
-  // "Subagent models" section filters on v2, so a probe built from the raw
-  // registry hid every model this machine had just verified — the third
-  // consumer to need this overlay, after the catalog and the DSH preset.
-  //
-  // Deliberately unlike the catalog, `disabled` is not passed: the catalog
-  // demotes a switched-off model so Codex stops offering it, but this probe
-  // is what draws the rows the operator switches. A proven model whose
-  // toggle is off must keep its row — with the toggle shown off — or the
-  // section it was switched off in loses the way to switch it back on.
+  // Local proof records are surfaced for status only. They never alter the
+  // registry capability sent to Codex.
   const { applySubagentProofs } = await import("./subagent-proofs.mjs");
-  const provenListedModels = applySubagentProofs(
+  const effectiveListedModels = applySubagentProofs(
     LISTED_MODELS,
     subagentSettings.proofs,
     { hidden: hiddenModels },
   );
   // The tray groups models by provider to build its rows, so protocol
   // variants report their canonical family id: one opencode Go row, not three.
-  const routedModels = provenListedModels.map((model) => ({
+  const routedModels = effectiveListedModels.map((model) => ({
     slug: model.slug,
     displayName: model.displayName,
     provider: canonicalProviderId(model.provider),
     gatewayModel: model.gatewayModel,
     enabled: enabledProviders.includes(model.provider),
     multiAgentVersion: model.multiAgentVersion || "v1",
+    subagentCertification: subagentCertification(model),
     visible: picker.hasExplicitVisibility
       ? visibleModels.has(model.slug)
       : !hiddenModels.has(model.slug),
@@ -414,6 +418,7 @@ async function routerCatalogSnapshot() {
     gatewayModel: model.gatewayModel,
     enabled: true,
     multiAgentVersion: model.multiAgentVersion || "v1",
+    subagentCertification: subagentCertification(model),
     visible: picker.hasExplicitVisibility ? visible.has(model.slug) : !hidden.has(model.slug),
     isFree: model.isFree === true,
     ...reasoningLevelField(model.reasoningLevels),
@@ -1043,6 +1048,52 @@ async function knownModelSlug(slug) {
   return MODEL_BY_SLUG.has(slug);
 }
 
+async function knownModelSubagentVersion(slug) {
+  // Routed-model certification belongs to the registry. The merged Codex
+  // catalog deliberately serializes an unknown route as conservative v1, so
+  // consulting it first would mislabel every still-uncertified route as a
+  // reviewed v1 verdict and make the compatibility-test workflow unreachable.
+  const { MODEL_BY_SLUG } = await import("./model-registry.mjs");
+  const registryModel = MODEL_BY_SLUG.get(slug);
+  if (registryModel) return registryModel.multiAgentVersion;
+
+  // Native models do not live in the routed registry. Read their undemoted
+  // capture before the merged catalog: a disabled certified route is
+  // deliberately serialized there as v1, but the operator must still be able
+  // to turn it back on. This helper also carries the repository-pinned Luna
+  // certificate and the parent-only verdict for context variants.
+  try {
+    const { NATIVE_CATALOG_PATH } = await import("./paths.mjs");
+    const parsed = JSON.parse(readFileSync(NATIVE_CATALOG_PATH, "utf8"));
+    const model = Array.isArray(parsed.models)
+      ? parsed.models.find((candidate) => String(candidate?.slug) === slug)
+      : undefined;
+    // Finding the route is itself decisive: an omitted version is genuinely
+    // unknown and must stay eligible for the compatibility workflow. Falling
+    // through to the effective merged catalog would turn that unknown into
+    // its conservative serialized v1 and make the UI's Test action fail.
+    if (model) return nativeSubagentCertification(model);
+  } catch {
+    // Fall back to the merged catalog when the original capture is absent.
+  }
+
+  // Retain compatibility with installations that have a merged catalog but
+  // no native capture. This is conservative: an effective v1 remains v1.
+  try {
+    const { MERGED_CATALOG_PATH } = await import("./paths.mjs");
+    const parsed = JSON.parse(readFileSync(MERGED_CATALOG_PATH, "utf8"));
+    const model = Array.isArray(parsed.models)
+      ? parsed.models.find((candidate) => String(candidate?.slug) === slug)
+      : undefined;
+    if (model?.multi_agent_version === "v1" || model?.multi_agent_version === "v2") {
+      return model.multi_agent_version;
+    }
+  } catch {
+    // A missing or damaged merged catalog proves no native v1/v2 verdict.
+  }
+  return undefined;
+}
+
 async function nativeCodexBaseSlugs() {
   const { NATIVE_CATALOG_PATH } = await import("./paths.mjs");
   if (!existsSync(NATIVE_CATALOG_PATH)) return new Set();
@@ -1068,7 +1119,48 @@ async function handleSubagents(action, value, flag, rest = []) {
     subagentSettingsSnapshot,
   } = await import("./multi-agent-state.mjs");
   if (action === "status") {
-    process.stdout.write(`${JSON.stringify(subagentSettingsSnapshot())}\n`);
+    const { selectedConfiguredListedModels } = await import("./provider-selection.mjs");
+    const { subagentAutoPolicySnapshot } = await import("./subagent-auto-policy.mjs");
+    process.stdout.write(`${JSON.stringify({
+      ...subagentSettingsSnapshot(),
+      autoPolicies: subagentAutoPolicySnapshot(selectedConfiguredListedModels()),
+    })}\n`);
+    return;
+  }
+  if (action === "policy") {
+    const [kind, selector, desired] = [value, flag, rest[2]];
+    if (kind === "status" || !kind) {
+      const { selectedConfiguredListedModels } = await import("./provider-selection.mjs");
+      const { subagentAutoPolicySnapshot } = await import("./subagent-auto-policy.mjs");
+      process.stdout.write(`${JSON.stringify(subagentAutoPolicySnapshot(selectedConfiguredListedModels()))}\n`);
+      return;
+    }
+    if (!selector || !["on", "off"].includes(desired)) {
+      throw new Error(
+        "Usage: control subagents policy status|provider <provider-id> <on|off>|model <model-slug> <on|off>|family <name> <on|off>",
+      );
+    }
+    const { setSubagentAutoPolicy, matchingSubagentAutoPolicyModels } = await import(
+      "./subagent-auto-policy.mjs"
+    );
+    const policyState = setSubagentAutoPolicy(kind, selector, desired === "on");
+    // Enabling a policy is explicit standing consent for its matching live
+    // probes. Only models currently configured for this machine can spend it.
+    if (desired === "on") {
+      const { selectedConfiguredListedModels } = await import("./provider-selection.mjs");
+      const matches = matchingSubagentAutoPolicyModels(
+        selectedConfiguredListedModels().filter((model) => model.multiAgentVersion !== "v1"),
+        policyState.policies,
+      );
+      const slugs = matches.map((model) => model.slug);
+      if (slugs.length) {
+        setMultiAgentModels(slugs, true);
+        const { spawnDetachedVerification } = await import("./subagent-verify.mjs");
+        spawnDetachedVerification(slugs);
+      }
+    }
+    refreshModelSettingsCatalog();
+    process.stdout.write(`${JSON.stringify(policyState)}\n`);
     return;
   }
   if (action === "select-all") {
@@ -1115,9 +1207,14 @@ async function handleSubagents(action, value, flag, rest = []) {
     if (!(await knownModelSlug(value))) {
       throw new Error(`Unknown model slug: ${value}`);
     }
+    if (flag === "on" && (await knownModelSubagentVersion(value)) === "v1") {
+      throw new Error(
+        `${value} is repository-certified v1 and cannot be enabled as a native v2 subagent.`,
+      );
+    }
     setMultiAgentModel(value, flag === "on");
     // Selection is the assignment: switching a model on hands it to the
-    // capability probe. Detached, because this command answers a tray toggle
+    // compatibility probe. Detached, because this command answers a tray toggle
     // and cannot sit on a live network round-trip; the proofs snapshot shows
     // "checking" until the worker records a verdict and republishes.
     if (flag === "on") {
@@ -1150,10 +1247,15 @@ async function handleSubagents(action, value, flag, rest = []) {
     let slugs;
     if (provider === "openai") {
       const { NATIVE_CATALOG_PATH } = await import("./paths.mjs");
-      slugs = nativeCodexModels(NATIVE_CATALOG_PATH).map((model) => model.slug);
+      slugs = nativeCodexModels(NATIVE_CATALOG_PATH)
+        .filter((model) => model.subagentCertification !== "v1")
+        .map((model) => model.slug);
     } else {
       slugs = selectedConfiguredListedModels()
-        .filter((model) => canonicalProviderId(model.provider) === provider)
+        .filter(
+          (model) =>
+            canonicalProviderId(model.provider) === provider && model.multiAgentVersion !== "v1",
+        )
         .map((model) => model.slug);
     }
     if (slugs.length === 0) {
@@ -1168,7 +1270,8 @@ async function handleSubagents(action, value, flag, rest = []) {
     throw new Error(
       "Usage: control subagents status|select-all|unselect-all|mode <all|selected|proven>|" +
         "set <model-slug> <on|off>|effort <model-slug> <level|default>|" +
-        "provider <provider-id> <on|off>|verify [model-slug ...]",
+        "provider <provider-id> <on|off>|verify [model-slug ...]|" +
+        "policy status|provider <provider-id> <on|off>|model <model-slug> <on|off>|family <name> <on|off>",
     );
   }
   refreshModelSettingsCatalog();

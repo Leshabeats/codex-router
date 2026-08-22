@@ -13,7 +13,12 @@
 // the loopback, and the answer is converted back. The extra hop is one local
 // socket; the alternative is two copies of the only path that matters.
 
-import { formatErrorChain, readRequestBody, writeJson } from "./http-utils.mjs";
+import {
+  formatErrorChain,
+  readRequestBody,
+  writeEventStreamHead,
+  writeJson,
+} from "./http-utils.mjs";
 import {
   createGeminiStreamTranslator,
   estimateGeminiTokens,
@@ -151,8 +156,7 @@ function dispatchSseBlock(block, onEvent) {
 
 async function streamTurn({ response, upstream, model }) {
   const translator = createGeminiStreamTranslator({ model });
-  response.writeHead(200, {
-    "Content-Type": "text/event-stream; charset=utf-8",
+  writeEventStreamHead(response, 200, {
     "Cache-Control": "no-cache",
     Connection: "keep-alive",
   });

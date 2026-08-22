@@ -569,82 +569,40 @@ can hold the v2 child role is the router's. The same model answers differently
 per provider — tool support, request profiles, and payload handling all vary —
 so the unit of evidence is always the slug, never the model name.
 
-1. Enabling a non-registry-v2 model hands it to a detached capability probe
+1. Enabling an unknown model hands it to a detached compatibility probe
    (`src/subagent-verify.mjs`): two live requests through the installed router
    proving streaming and a forced tool call. The proofs snapshot shows
-   `checking` until the verdict lands and the catalog republishes. A worker
-   that dies without a verdict marks its slugs `failed` on the way out, and a
-   `checking` older than the probe ceiling is treated as abandoned — so
-   switching a wedged model off and on always re-researches it.
-2. A passing model is advertised to Codex as an **experimental** v2 subagent,
-   recorded in the protected `multi-agent-proofs.json`. The first real child
-   turn settles it: Codex marks child turns with `x-openai-subagent`, and the
-   router's own request path records a clean completion as the durable proof
-   (`proven`) or a structural rejection — HTTP 400/422 — as a demotion back to
-   v1 with the reason kept where it was switched on. Transient failures (429,
-   5xx, disconnects) prove nothing and leave the window open.
-3. `proven` is a claim about the wire, not about the work. It says one child
-   turn for that slug completed cleanly, so the model can hold the child role;
-   it does not say the child finished what it was delegated. The router
-   observes HTTP turns, not agent lifecycles — a child makes one turn per
-   tool-call round trip, and the loop that strings them together is Codex's.
-   Do not write copy anywhere (log lines, tray, docs) that reads `proven` as
-   "the delegated task succeeded".
-4. **`proven` is revocable, and only downward automatically** (issue #257).
-   Promotion is a one-time event, but the window in which machine-local
-   evidence can be taken away stays open for as long as that evidence is what
-   the v2 advertisement rests on. A 400/422 on any child turn demotes the slug,
-   before or after promotion and without needing to repeat: it is the same
-   structural refusal the capability probe treats as disqualifying, the
-   transient statuses that prove nothing are already excluded, and the
-   alternative is letting the oldest observation beat the newest. A registry-v2
-   model is untouched — its claim is the shipped native collaboration proof,
-   not this machine's traffic. Re-promotion is never automatic: it costs live
-   requests, so it happens only through `control subagents verify` or switching
-   the model off and on.
-5. **A looping child is demoted against its own compaction budget**, because a
-   child that answers forever emits nothing but 200s and no status-shaped
-   branch can ever see it. `src/subagent-turns.mjs` accounts each spawn
-   separately, keyed on the `thread-id` header, and adds up the *new* input
-   tokens it produces (every child turn resends the whole conversation, so the
-   growth in the prompt count is what the child newly made; a compaction makes
-   the count fall and everything after the fall is work being done twice). The
-   ceiling is twice the larger of the model's declared `autoCompact` budget and
-   the largest prompt this spawn has actually had accepted. Nothing there is
-   invented: `autoCompact` is per model and comes from the provider's published
-   window, and the multiple comes from the pathology
-   `src/context-window-drift.mjs` already names — one budget is a large but
-   legitimate task, it is *compacting again without ever finishing* that is the
-   runaway. Measuring against the observed peak as well as the declaration is
-   what makes a false demotion impossible rather than merely unlikely: an
-   uncompacted spawn's total is exactly half its own ceiling however long its
-   task runs, which matters because the registry validator permits any
-   `1 <= autoCompact <= contextWindow` and one oversized tool result can carry a
-   single turn past the compaction limit in one step. A child thread reused for
-   a `FOLLOWUP_TASK` is deliberately one spawn here — its context really does
-   carry across — and an idle one expires rather than accumulating forever.
-   No positive "terminal turn" detector is needed or possible: the
-   turn that ended a spawn is only knowable by no further turn arriving, and a
-   ceiling can only ever be crossed by a spawn that is still producing turns.
-   Only a prompt count the provider actually reported may move the total —
-   substituted estimates and retry-doubled counts are refused here for exactly
-   the reasons `context-window-drift.mjs` refuses them as capacity evidence. A
-   model that declares no `autoCompact` has no derived ceiling and is counted
-   but never condemned; do not give it one by guessing. Both demotion paths log
-   unconditionally and record the turn and token counts in the proofs file, so
-   `control subagents status` and the tray can say what happened.
-6. Local settings still never manufacture a v2 claim. The only writers of
-   promotion evidence are the probe worker and the router's observation of
-   real traffic; an unreadable proofs file promotes nothing, and a hidden or
-   switched-off slug stays v1 whatever evidence it carries.
-7. `control subagents verify [SLUG ...]` re-researches explicitly (foreground,
-   ~2 requests per candidate); with no slugs it sweeps the enabled list.
-   Select-all and mode changes never trigger probes — a sweep across every
-   provider is quota the operator must ask for.
-8. Machine-local proofs are exactly that. Shipping a default to every
-   installer still requires the full native collaboration proof and a registry
-   change (below); never edit the checked-in `config/` tree because one
-   machine's probe passed.
+   `checking` until the verdict lands. A passing probe records `candidate`; it
+   does **not** advertise v2. A worker that dies without a verdict records a
+   failure, and a stale `checking` record is retryable. Explicit registry-v1
+   routes are settled decisions and are never re-opened by this local probe;
+   registry-v2 routes need no compatibility probe.
+2. `multi-agent-proofs.json` is diagnostic application evidence only. Local
+   `candidate`, and legacy `experimental` / `proven`, records cannot change the
+   catalog's `multi_agent_version`, managed agent definitions, or any client
+   route. `applySubagentProofs` deliberately returns the registry capabilities
+   unchanged. An unreadable proofs file therefore authorizes and promotes
+   nothing.
+3. The compatibility probe is not the native collaboration proof. It does not
+   exercise Codex's encrypted child payload relay, a marker-return spawn, or a
+   same-thread follow-up. A successful ordinary chat/tool request must never be
+   presented as evidence that the model can hold the native v2 child role.
+4. Only the exact checked-in registry route may assert v2. The route's slug,
+   provider, and upstream model must match an accepted artifact under
+   `v2_agent/`, and the accepted artifact and `multiAgentVersion: "v2"` change
+   land in the same pull request. CI enforces the implication in both
+   directions for every post-workflow promotion. Six exact Kimi/Grok route
+   identities certified before the artifact gate are grandfathered; changing
+   any part of one identity loses that exception.
+5. `control subagents verify [SLUG ...]` re-researches explicitly (foreground,
+   about two requests per unknown candidate); with no slugs it sweeps the
+   enabled list. Select-all and mode changes never trigger probes. Provider,
+   model, and family auto-policies are explicit standing consent for matching
+   newly configured unknown routes; they still produce only candidates.
+6. Machine-local evidence is exactly that. Never edit checked-in `config/`
+   because one machine's probe passed. Complete the redacted application,
+   reproduce the two native child checks with a spendable account, and review
+   the exact provider route before shipping a v2 claim to every installer.
 
 ### Ship a model to every installer
 
@@ -1653,13 +1611,13 @@ purpose.
 - A test that isolates the state directory must isolate `CODEX_HOME` with it.
   `MODEL_ROUTER_STATE_DIR` and `CODEX_ROUTER_STATE_DIR` do not redirect
   `CODEX_AGENTS_DIR`, which is `$CODEX_HOME/agents`, and `src/catalog.mjs`
-  prunes that directory to whatever the state it just read promotes to `v2`.
+  prunes that directory to the exact registry-v2 routes the state it just read
+  leaves enabled and visible.
   Point the state at a scratch directory while inheriting the real home and the
   run deletes the operator's own routed agent definitions — every model
-  promoted by a local capability proof rather than by the shipped registry —
-  while `multi-agent-settings.json` and `multi-agent-proofs.json`, which live in
-  the scratch state, survive intact to report the models as still enabled. The
-  operator sees subagents that reset themselves after an unrelated command.
+  selected in the real state can disappear from that scratch publication —
+  while `multi-agent-settings.json` and `multi-agent-proofs.json` live in the
+  scratch state. The operator sees subagents reset after an unrelated command.
   `test/state-owner.test.mjs` pins this: no test file may spawn the catalog
   without setting `CODEX_HOME`.
 

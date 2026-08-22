@@ -2959,6 +2959,7 @@ struct RouterModel: Decodable, Identifiable {
   let provider: String
   let enabled: Bool
   let multiAgentVersion: String?
+  let subagentCertification: String?
   let visible: Bool?
   let reasoningLevels: [String]?
   var id: String { slug }
@@ -4806,12 +4807,12 @@ private struct TrayView: View {
                         title: model.displayName,
                         detail: subagentDetail(for: model),
                         isOn: Binding(
-                          get: { isSubagent(model) },
+                          get: { subagentToggleOn(model) },
                           set: { enabled in
                             store.setSubagentModel(model.slug, enabled: enabled)
                           }
                         ),
-                        disabled: !isPickerVisible(model)
+                        disabled: subagentToggleDisabled(model)
                       )
                       if isSubagent(model) {
                         subagentStatusTags(for: model)
@@ -6279,13 +6280,53 @@ private struct TrayView: View {
       Set(settings?.subagents.enabled ?? [])
     }
 
-    // Keep a selected candidate checked while its capability probe runs. The
-    // backend, not this UI state, decides when it is actually advertised as v2.
+    private func subagentCertification(for model: RouterModel) -> String {
+      if let certification = model.subagentCertification { return certification }
+      if model.multiAgentVersion == "v2" { return "v2" }
+      if model.multiAgentVersion == "v1" { return "v1" }
+      return "unknown"
+    }
+
+    private func isKnownV1(_ model: RouterModel) -> Bool {
+      subagentCertification(for: model) == "v1"
+    }
+
+    private func isCertifiedV2(_ model: RouterModel) -> Bool {
+      subagentCertification(for: model) == "v2"
+    }
+
+    private func isCertificationCandidate(_ model: RouterModel) -> Bool {
+      guard subagentCertification(for: model) == "unknown" else { return false }
+      guard let status = settings?.subagents.proofs?[model.slug]?.status else { return false }
+      return ["candidate", "experimental", "proven"].contains(status)
+    }
+
+    // Status tags, effort controls, and enabled counts must reflect only the
+    // capability Codex receives. A selected compatibility-test candidate is
+    // not a usable subagent until the exact registry route is certified v2.
     private func isSubagent(_ model: RouterModel) -> Bool {
       if !isPickerVisible(model) { return false }
       let authoritative = !disabledSubagentSet.contains(model.slug)
-        && (model.multiAgentVersion == "v2" || selectedSubagentSet.contains(model.slug))
+        && isCertifiedV2(model)
       return store.subagentModelEnabled(model.slug, authoritative: authoritative)
+    }
+
+    // Unknown routes use the same row to request their one-time compatibility
+    // test. Keep that request checked while it runs (and after a failure so it
+    // can be switched off before retrying), but never feed it to isSubagent.
+    private func subagentToggleOn(_ model: RouterModel) -> Bool {
+      if isCertifiedV2(model) { return isSubagent(model) }
+      if !isPickerVisible(model) || isKnownV1(model) || isCertificationCandidate(model) {
+        return false
+      }
+      let authoritative = selectedSubagentSet.contains(model.slug)
+      return store.subagentModelEnabled(model.slug, authoritative: authoritative)
+    }
+
+    private func subagentToggleDisabled(_ model: RouterModel) -> Bool {
+      if !isPickerVisible(model) { return true }
+      if isCertifiedV2(model) { return false }
+      return isKnownV1(model) || isCertificationCandidate(model)
     }
 
     // Codex chooses which model a child runs on; this chooses how hard it
@@ -6342,17 +6383,21 @@ private struct TrayView: View {
 
     private func subagentDetail(for model: RouterModel) -> String {
       if !isPickerVisible(model) { return routerLocalized("Hidden from picker — show it below to use it here") }
-      if let proof = settings?.subagents.proofs?[model.slug] {
+      if isKnownV1(model) { return routerLocalized("v1 only") }
+      if !isCertifiedV2(model), let proof = settings?.subagents.proofs?[model.slug] {
         if proof.status == "checking" { return routerLocalized("Checking…") }
+        if isCertificationCandidate(model) {
+          return routerLocalized("Certification candidate")
+        }
         if proof.status == "failed" {
           return proof.reason ?? routerLocalized("Error")
         }
       }
-      if model.multiAgentVersion == "v2" && isSubagent(model) {
+      if isCertifiedV2(model) && isSubagent(model) {
         let effort = settings?.subagents.efforts?[model.slug] ?? routerLocalized("Default")
         return "\(routerLocalized("Proven v2")) · \(effort.capitalized) \(routerLocalized("thinking"))"
       }
-      if model.multiAgentVersion == "v2" { return routerLocalized("Proven v2") }
+      if isCertifiedV2(model) { return routerLocalized("Proven v2") }
       return routerLocalized("Not selected")
     }
 

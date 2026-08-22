@@ -65,6 +65,17 @@ test("classifyRoutedFailure swaps on OpenCode FreeUsageLimitError", () => {
   assert.deepEqual(verdict, { swap: true, reason: "out_of_usage" });
 });
 
+test("classifyRoutedFailure recognizes the observed Z.ai five-hour window message", () => {
+  const verdict = classifyRoutedFailure({
+    status: 429,
+    bodyText: quotaBody(
+      "Usage limit reached for 5 hour. Your limit will reset at 2026-08-21 04:40:42.",
+    ),
+    now: NOW,
+  });
+  assert.deepEqual(verdict, { swap: true, reason: "out_of_usage" });
+});
+
 test("classifyRoutedFailure swaps on 402 whatever the body says", () => {
   const verdict = classifyRoutedFailure({ status: 402, bodyText: "{}", now: NOW });
   assert.deepEqual(verdict, { swap: true, reason: "out_of_usage" });

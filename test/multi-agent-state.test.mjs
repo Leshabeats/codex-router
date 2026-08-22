@@ -131,7 +131,7 @@ test("selected mode retains only registry-proven v2 claims", () => {
   );
 });
 
-test("effective capabilities include machine-local proofs and respect exclusions", () => {
+test("effective capabilities ignore machine-local proofs and respect exclusions", () => {
   const models = [
     { slug: "opencode-go/deepseek-v4-pro" },
     { slug: "opencode-go/deepseek-v4-flash" },
@@ -155,7 +155,7 @@ test("effective capabilities include machine-local proofs and respect exclusions
   assert.deepEqual(
     resolved.map((model) => [model.slug, model.multiAgentVersion]),
     [
-      ["opencode-go/deepseek-v4-pro", "v2"],
+      ["opencode-go/deepseek-v4-pro", undefined],
       ["opencode-go/deepseek-v4-flash", "v1"],
       ["kimi-oauth/k3", "v2"],
     ],

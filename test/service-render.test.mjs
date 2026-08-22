@@ -452,9 +452,10 @@ test(
       const run = (command) =>
         JSON.parse(serviceCommand("service-windows.mjs", "win32", testRoot, command));
 
-      // schtasks.exe and powershell.exe are absent off Windows, and every call
-      // to them is best effort, so only the generated files are exercised here.
-      assert.equal(run("install").installed, true);
+      // schtasks.exe and powershell.exe are absent off Windows. The launchers
+      // are still generated, but the service is not truthfully reported as
+      // installed when no Task Scheduler definition exists.
+      assert.equal(run("install").installed, false);
       assert.equal(existsSync(wrapperPath), true);
       assert.equal(existsSync(launcherPath), true);
       assert.equal(statSync(wrapperPath).mode & 0o777, 0o600);
@@ -467,7 +468,7 @@ test(
       assert.match(bytes.toString("utf16le").slice(1), /^Option Explicit\r\n/);
 
       // Reinstalling over an existing pair overwrites instead of failing.
-      assert.equal(run("install").installed, true);
+      assert.equal(run("install").installed, false);
       assert.equal(readFileSync(launcherPath).equals(bytes), true);
 
       assert.equal(run("uninstall").installed, false);
@@ -600,9 +601,10 @@ test(
         powershellFail: "Register-ScheduledTask",
       });
       const result = runWindowsService(testRoot, "install", { PATH: stubs.path });
-      // Still best effort: the launchers are written and the caller retries.
+      // Still best effort: the launchers are written and the caller retries,
+      // but no surviving task must be reported as installed.
       assert.equal(result.status, 0, result.stderr);
-      assert.equal(JSON.parse(result.stdout).installed, true);
+      assert.equal(JSON.parse(result.stdout).installed, false);
 
       const calls = stubs.calls();
       assert.ok(calls.some((line) => line.includes("/Query")));

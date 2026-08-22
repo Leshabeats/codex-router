@@ -2,9 +2,11 @@ import http from "node:http";
 
 import {
   applyKeepAliveTimeouts,
+  endStreamedResponse,
   formatErrorChain,
   HOP_BY_HOP_HEADERS,
   httpErrorStatus,
+  installGracefulShutdown,
   pipeResponse,
   readRequestBody,
   reportListenFailure,
@@ -550,6 +552,25 @@ function normalizeBody(buffer, contentType, route) {
     const error = new Error(`Model ${model.gatewayModel} does not support ${route}.`);
     error.status = 400;
     throw error;
+  }
+
+  // OpenAI Chat Completions providers place terminal usage in a final empty
+  // choices chunk only when the caller opts into it. Keep this normalization
+  // on the provider's Chat Completions surface: Responses and Anthropic
+  // endpoints have different stream contracts, and a provider that declares
+  // either protocol must not receive an OpenAI-only stream_options field.
+  if (
+    route === "/chat/completions" &&
+    payload.stream === true &&
+    (provider.protocol === undefined || provider.protocol === "openai")
+  ) {
+    const streamOptions = payload.stream_options;
+    payload.stream_options = {
+      ...(streamOptions && typeof streamOptions === "object" && !Array.isArray(streamOptions)
+        ? streamOptions
+        : {}),
+      include_usage: true,
+    };
   }
 
   payload.model = model.upstreamModel;
@@ -1127,7 +1148,9 @@ const server = http.createServer((request, response) => {
         },
       });
     } else if (!response.writableEnded) {
-      response.destroy();
+      endStreamedResponse(response, {
+        message: "The API-provider forwarder lost the upstream response stream.",
+      });
     }
   });
 });
@@ -1138,6 +1161,4 @@ server.listen(LISTEN_PORT, LISTEN_HOST, () => {
   console.error("[api-forwarder] listening");
 });
 
-for (const signal of ["SIGINT", "SIGTERM"]) {
-  process.on(signal, () => server.close(() => process.exit(0)));
-}
+installGracefulShutdown(server, { label: "api-forwarder" });

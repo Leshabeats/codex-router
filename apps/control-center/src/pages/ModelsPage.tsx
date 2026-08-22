@@ -55,14 +55,24 @@ function catalogEligible(entry: ProviderDirectoryEntry): boolean {
   return Boolean(entry.setup?.configured) && !NO_LIVE_CATALOG.has(entry.id);
 }
 
+function subagentCertification(model: RouterModel): "v1" | "v2" | "unknown" | string {
+  return model.subagentCertification
+    ?? (model.multiAgentVersion === "v2" ? "v2" : model.multiAgentVersion === "v1" ? "v1" : "unknown");
+}
+
 function subagentEnabled(target: RouterTarget, slug: string, settings = target.modelSettings?.subagents): boolean {
   if (!settings) return false;
   if (settings.disabled.includes(slug)) return false;
-  if (settings.mode === "all") return true;
-  if (settings.mode === "proven") {
-    return target.models.find((model) => model.slug === slug)?.multiAgentVersion === "v2";
+  const model = target.models.find((entry) => entry.slug === slug);
+  if (!model || model.visible === false) return false;
+  // Certified routes remain active unless explicitly disabled; selected mode
+  // does not silently turn off every other registry-v2 route. For an unknown
+  // route, a selected-mode entry means only that its compatibility test was
+  // requested — it never becomes an active subagent here.
+  if (subagentCertification(model) === "v2") {
+    return true;
   }
-  return settings.enabled.includes(slug);
+  return settings.mode === "selected" && settings.enabled.includes(slug);
 }
 
 function nativeClientManaged(model: RouterModel): boolean {
@@ -142,7 +152,7 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
   const pickerStates = useMemo(() => new Map(models.map((model) => [model.slug, model.visible])), [models]);
   const subagentStates = useMemo(() => new Map(models.map((model) => [
     model.slug,
-    model.multiAgentVersion === "v2" && Boolean(target && subagentEnabled(target, model.slug, subagentSettings)),
+    Boolean(target && subagentEnabled(target, model.slug, subagentSettings)),
   ])), [models, subagentSettings, target]);
   const subagentEffortStates = useMemo(() => new Map(models.map((model) => [
     model.slug,
@@ -451,9 +461,27 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
                         {entry.visibleModels.length ? (
                           <div className="pm-model-list" role="list" aria-label={`${entry.displayName} models`}>
                             {entry.visibleModels.map((model) => {
-                              const eligible = model.multiAgentVersion === "v2";
+                              const certification = subagentCertification(model);
+                              const certified = certification === "v2";
+                              const knownV1 = certification === "v1";
+                              const proof = subagentSettings?.proofs?.[model.slug];
+                              const checking = !certified && !knownV1 && proof?.status === "checking";
+                              // Older releases wrote experimental/proven after
+                              // the local probe. Those records are diagnostic
+                              // candidates now; none is a repository v2
+                              // certificate or a reason to re-spend quota.
+                              const candidate = !certified && !knownV1 && ["candidate", "experimental", "proven"].includes(proof?.status ?? "");
+                              const eligible = certified;
                               const maker = brandForModel(model);
-                              const selectedAsSubagent = eligible && optimisticSubagents.value(model.slug, subagentEnabled(target, model.slug, subagentSettings));
+                              const selectedInSettings = optimisticSubagents.value(
+                                model.slug,
+                                Boolean(target && subagentEnabled(target, model.slug, subagentSettings)),
+                              );
+                              // Only a repository-certified v2 model is a usable
+                              // subagent. A local probe may show progress, but it
+                              // must never make this switch look enabled.
+                              const selectedAsSubagent = certified && selectedInSettings;
+                              const testActive = !certified && !knownV1 && !candidate && selectedInSettings;
                               const effortOptions = model.reasoningLevels ?? [];
                               const subagentEffort = optimisticSubagentEfforts.value(
                                 model.slug,
@@ -469,14 +497,17 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
                                     <span>{formatContext(model.contextWindow)}</span>
                                     <span>{model.inputModalities?.includes("image") ? "Text + image" : "Text"}</span>
                                     {model.isFree ? <Badge tone="success">Free</Badge> : null}
-                                    <Badge tone={eligible ? "accent" : "neutral"}>{eligible ? "v2 relay" : "v1 relay"}</Badge>
+                                    <Badge tone={eligible ? "accent" : proof?.status === "failed" && !knownV1 ? "danger" : "neutral"}>
+                                      {eligible ? "v2 relay" : knownV1 ? "v1 only" : checking ? "Checking compatibility" : candidate ? "Certification candidate" : proof?.status === "failed" ? "Compatibility failed" : "Untested"}
+                                    </Badge>
                                     {selectedAsSubagent ? <Badge tone="accent">Subagent</Badge> : null}
                                     {selectedAsSubagent && effortOptions.length ? <Badge tone="neutral">{effortLabel(subagentEffort)} thinking</Badge> : null}
                                   </div>
                                   <div className="pm-model-controls">
                                     <div className="pm-model-control"><span>Picker</span><Toggle checked={optimisticPicker.value(model.slug, model.visible)} disabled={!api || nativeClientManaged(model)} label={nativeClientManaged(model) ? `${model.displayName} is managed by Codex` : `Show ${model.displayName} in picker`} onChange={(checked) => void updatePicker(model.slug, checked)} /></div>
-                                    <div className="pm-subagent-controls" title={eligible ? "Expose as a native v2 subagent and choose its thinking effort" : "This model uses the conservative v1 relay"}>
-                                      <div className="pm-model-control"><span>Subagent</span><Toggle checked={selectedAsSubagent} disabled={!api || !eligible} label={`Use ${model.displayName} as subagent`} onChange={(checked) => void updateSubagent(model.slug, checked)} /></div>
+                                    <div className="pm-subagent-controls" title={certified ? "Expose this certified v2 model as a subagent" : knownV1 ? "This model is certified v1 and is not retested automatically" : checking ? "Testing low-cost compatibility; this does not enable v2" : candidate ? "Awaiting a reviewed native v2 certification" : "Run the one-time low-cost compatibility test"}>
+                                      <div className="pm-model-control"><span>{certified ? "Subagent" : knownV1 ? "v1 only" : "Test v2"}</span><Toggle checked={certified ? selectedAsSubagent : testActive} disabled={!api || candidate || knownV1} label={certified ? `Use ${model.displayName} as subagent` : knownV1 ? `${model.displayName} is certified v1` : `Test ${model.displayName} for v2 compatibility`} onChange={(checked) => void updateSubagent(model.slug, checked)} /></div>
+                                      {!certified && !knownV1 && proof?.status === "failed" && proof.reason ? <small className="pm-subagent-proof-error" title={proof.reason}>Test failed</small> : null}
                                       {eligible && effortOptions.length ? (
                                         <label className="pm-model-effort">
                                           <span>Thinking</span>

@@ -21,7 +21,22 @@ import {
   TARGET,
 } from "./paths.mjs";
 import { serviceProxyEnvironment } from "./proxy-environment.mjs";
-import { assertServiceWriteIsolated } from "./service-write-guard.mjs";
+import {
+  skipServiceManagerCall,
+  assertServiceWriteIsolated,
+} from "./service-write-guard.mjs";
+
+// Only this platform's own module can reach this machine's service manager.
+// Run anywhere else -- the cross-platform render tests drive all three modules
+// on one host -- launchctl is absent or a test's own stub.
+const HOST_MANAGED = process.platform === "darwin";
+
+// Reads stay live. Skipping `print` as well made `loaded()` answer "nothing is
+// there" for every caller, which changed what the doctor reports about the
+// service and, through it, what else the doctor goes on to do -- CI caught
+// that as two unrelated Windows tests failing on their own cleanup. Only the
+// verbs that change launchd's registration are skipped.
+const MUTATING_VERBS = new Set(["bootout", "bootstrap", "disable", "enable", "kickstart"]);
 
 const command = process.argv[2] || "status";
 const effectivePlatform = process.env.CODEX_ROUTER_SERVICE_PLATFORM || process.platform;
@@ -119,7 +134,11 @@ ${environmentEntries()}
 `;
 }
 
+
 function run(args, options = {}) {
+  if (MUTATING_VERBS.has(args[0]) && skipServiceManagerCall({ hostManaged: HOST_MANAGED })) {
+    return "";
+  }
   return execFileSync(launchctl, args, {
     encoding: "utf8",
     timeout: 15_000,
@@ -139,6 +158,9 @@ function loaded(targetService = service) {
 }
 
 function bootout(targetService = service) {
+  // Before `loaded`, not after: the loop below polls until the job is gone,
+  // and the job it would see is this machine's own.
+  if (skipServiceManagerCall({ hostManaged: HOST_MANAGED })) return;
   const description = loaded(targetService);
   if (!description) return;
   try {
@@ -177,6 +199,7 @@ function writePlist() {
 }
 
 function bootstrap() {
+  if (skipServiceManagerCall({ hostManaged: HOST_MANAGED })) return;
   if (!existsSync(LAUNCH_AGENT_PATH)) {
     throw new Error(`LaunchAgent is not installed at ${LAUNCH_AGENT_PATH}.`);
   }
@@ -216,6 +239,11 @@ if (command === "render") {
     })}\n`,
   );
 } else if (command === "install") {
+  // Before anything, including the bootout below: an install that is going to
+  // be refused for writing outside its fixture must not first unload the
+  // machine's running service. writePlist re-checks; the guard is a pure
+  // predicate.
+  guardPlistWrite();
   bootout();
   // Only safe here. launchd opens StandardOutPath before it execs the service,
   // so a rotation performed by the started process renames a file the process

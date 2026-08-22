@@ -321,6 +321,8 @@ enum RouterHindiText {
     "5-hour limit": "5-घंटे की सीमा",
     "Hidden from picker — show it below to use it here": "पिकर से छिपा है — यहाँ उपयोग करने के लिए इसे नीचे दिखाएँ",
     "Proven v2": "सत्यापित v2",
+    "v1 only": "केवल v1",
+    "Certification candidate": "प्रमाणीकरण उम्मीदवार",
     "Not selected": "चयनित नहीं",
     "Apply the checked-out router revision, then run the Codex doctor": "चेक-आउट किया गया राउटर संस्करण लागू करें, फिर Codex doctor चलाएँ",
     "Run the Codex doctor and repair managed router files": "Codex doctor चलाएँ और प्रबंधित राउटर फ़ाइलें ठीक करें",

@@ -321,6 +321,8 @@ enum RouterJapaneseText {
     "5-hour limit": "5 時間の上限",
     "Hidden from picker — show it below to use it here": "ピッカーから非表示 — ここで使用するには下で表示してください",
     "Proven v2": "検証済み v2",
+    "v1 only": "v1 のみ",
+    "Certification candidate": "認定候補",
     "Not selected": "未選択",
     "Apply the checked-out router revision, then run the Codex doctor": "チェックアウト済みのルーターリビジョンを適用してから Codex doctor を実行",
     "Run the Codex doctor and repair managed router files": "Codex doctor を実行し、管理対象のルーターファイルを修復",
