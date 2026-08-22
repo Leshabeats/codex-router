@@ -358,6 +358,114 @@ export function applyKeepAliveTimeouts(server) {
   return server;
 }
 
+// A restart is the one shutdown this service performs on purpose -- publishing
+// a curated model, a repair from the desktop app, a reinstall -- and until now
+// it was indistinguishable from a crash to whatever was mid-turn. The old
+// handler was `server.close(() => process.exit(0))`, and `close` waits for
+// every connection still carrying a request, so a streaming turn held the
+// process open past `start.mjs`'s kill window and the router was SIGKILLed
+// with its sockets open. A killed socket is an RST: the chunked body loses its
+// terminator and Codex reports the whole turn as
+// `stream disconnected before completion: error decoding response body`, which
+// names neither the restart nor the router. Adding a model should not read as
+// a network fault.
+//
+// So: stop accepting, let anything already in flight finish inside a bounded
+// window, and then end what is left the way every other mid-stream failure
+// here ends -- a terminal SSE `error` frame and a clean close, never a reset.
+// The window is short because the process is going away regardless; it exists
+// so the turns that were about to finish do, not to hold a restart open.
+const configuredShutdownDrainMs = Number(
+  process.env.MODEL_ROUTER_SHUTDOWN_DRAIN_MS || 2_000,
+);
+export const SHUTDOWN_DRAIN_MS =
+  Number.isFinite(configuredShutdownDrainMs) && configuredShutdownDrainMs >= 0
+    ? configuredShutdownDrainMs
+    : 2_000;
+
+// Ending a response only queues its last bytes; the socket still has to drain
+// them. Destroying connections the instant the frames are written would undo
+// the whole point of writing them, so allow a short flush before forcing the
+// remaining sockets down.
+export const SHUTDOWN_FLUSH_MS = 1_000;
+
+const SHUTDOWN_MESSAGE = "The local router is restarting; retry the request.";
+
+export function installGracefulShutdown(
+  server,
+  {
+    label,
+    signals = ["SIGINT", "SIGTERM"],
+    drainMs = SHUTDOWN_DRAIN_MS,
+    flushMs = SHUTDOWN_FLUSH_MS,
+    exit = (code) => process.exit(code),
+  } = {},
+) {
+  const live = new Set();
+  // Registered as a second 'request' listener, so it observes every request
+  // the handler passed to `createServer` receives without wrapping it.
+  server.on("request", (_request, response) => {
+    live.add(response);
+    response.once("close", () => live.delete(response));
+  });
+  let shuttingDown = false;
+  const shutdown = () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    let exited = false;
+    let drainTimer;
+    let flushTimer;
+    const finish = () => {
+      if (exited) return;
+      exited = true;
+      if (drainTimer) clearTimeout(drainTimer);
+      if (flushTimer) clearTimeout(flushTimer);
+      exit(0);
+    };
+    server.close(finish);
+    // Idle keep-alive sockets are held for two minutes by design
+    // (KEEPALIVE_TIMEOUT_MS), and `close` alone leaves them to expire on their
+    // own schedule. Drop them now: nothing is riding on them.
+    server.closeIdleConnections?.();
+    if (live.size > 0) {
+      console.error(
+        `[${label}] shutting down with ${live.size} request(s) in flight; draining for up to ${drainMs}ms`,
+      );
+    }
+    // The response tracker can already be empty while Node still considers an
+    // aborted request active. In that state server.close() waits for the
+    // two-minute keep-alive timeout, so the bounded backstop is required even
+    // when there is no response left to terminate.
+    drainTimer = setTimeout(() => {
+      for (const response of live) {
+        // A response whose head is still unsent can still say what happened
+        // with a status; one already streaming cannot, and takes the terminal
+        // error frame instead.
+        if (response.headersSent) {
+          endStreamedResponse(response, { message: SHUTDOWN_MESSAGE });
+        } else {
+          writeJson(response, 503, {
+            error: { type: "local_router_restarting", message: SHUTDOWN_MESSAGE },
+          });
+        }
+      }
+      // `close` settles once those final writes drain and the sockets end,
+      // which is the ordinary path. The backstop is for a peer that stops
+      // reading and would otherwise hold the process open.
+      flushTimer = setTimeout(() => {
+        server.closeAllConnections?.();
+        finish();
+      }, flushMs);
+      flushTimer.unref();
+    }, drainMs);
+    // A normal idle close or a drain that empties early calls finish through
+    // server.close's callback and clears this timer.
+    drainTimer.unref();
+  };
+  for (const signal of signals) process.on(signal, shutdown);
+  return server;
+}
+
 // A `listen` that fails emits `'error'`, and with no handler Node rethrows it
 // from the event loop: the log gets `node:events:487 / throw er; // Unhandled
 // 'error' event` and a libuv stack, with the *label of the process that died
@@ -469,6 +577,24 @@ function isEventStream(response) {
   return String(response.getHeader("content-type") || "")
     .toLowerCase()
     .includes("text/event-stream");
+}
+
+// Headers handed straight to `writeHead` are written to the socket without
+// being cached, so `getHeader` cannot see them -- and `isEventStream` above,
+// which every terminal error frame is gated on, reads exactly that cache. An
+// SSE route that named its content type only in `writeHead` therefore ended
+// mid-turn with no error event at all: a short stream indistinguishable from
+// a completed one, which is the silent corruption the framing exists to
+// prevent. Seat the content type through `setHeader` first (`writeHead` merges
+// over it) so the head is both written and visible.
+export function writeEventStreamHead(response, status = 200, headers = {}) {
+  response.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  response.writeHead(status, {
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+    ...headers,
+  });
+  return response;
 }
 
 export async function finishResponse(response) {

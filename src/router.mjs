@@ -25,8 +25,10 @@ import {
   formatErrorChain,
   HOP_BY_HOP_HEADERS,
   httpErrorStatus,
+  installGracefulShutdown,
   pipeResponse,
   readRequestBody,
+  writeEventStreamHead,
   writeJson,
   writeStreamErrorEvent,
 } from "./http-utils.mjs";
@@ -1835,11 +1837,7 @@ function writeCompactionSse(response, model, summary) {
     ["response.output_item.done", { output_index: 0, item }],
     ["response.completed", { response: completed }],
   ];
-  response.writeHead(200, {
-    "Content-Type": "text/event-stream; charset=utf-8",
-    "Cache-Control": "no-cache",
-    Connection: "keep-alive",
-  });
+  writeEventStreamHead(response);
   events.forEach(([type, data], sequence) => {
     response.write(
       `event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: sequence, ...data })}\n\n`,
@@ -3416,6 +3414,4 @@ server.listen(LISTEN_PORT, LISTEN_HOST, () => {
   console.error("[codex-router] listening");
 });
 
-for (const signal of ["SIGINT", "SIGTERM"]) {
-  process.on(signal, () => server.close(() => process.exit(0)));
-}
+installGracefulShutdown(server, { label: "codex-router" });
