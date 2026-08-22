@@ -2,9 +2,11 @@ import http from "node:http";
 
 import {
   applyKeepAliveTimeouts,
+  endStreamedResponse,
   formatErrorChain,
   HOP_BY_HOP_HEADERS,
   httpErrorStatus,
+  installGracefulShutdown,
   pipeResponse,
   readRequestBody,
   reportListenFailure,
@@ -1146,7 +1148,9 @@ const server = http.createServer((request, response) => {
         },
       });
     } else if (!response.writableEnded) {
-      response.destroy();
+      endStreamedResponse(response, {
+        message: "The API-provider forwarder lost the upstream response stream.",
+      });
     }
   });
 });
@@ -1157,6 +1161,4 @@ server.listen(LISTEN_PORT, LISTEN_HOST, () => {
   console.error("[api-forwarder] listening");
 });
 
-for (const signal of ["SIGINT", "SIGTERM"]) {
-  process.on(signal, () => server.close(() => process.exit(0)));
-}
+installGracefulShutdown(server, { label: "api-forwarder" });

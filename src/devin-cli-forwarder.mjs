@@ -5,8 +5,10 @@ import { fileURLToPath } from "node:url";
 
 import {
   applyKeepAliveTimeouts,
+  endStreamedResponse,
   formatErrorChain,
   httpErrorStatus,
+  installGracefulShutdown,
   readRequestBody,
   reportListenFailure,
   requireInternalAuth,
@@ -302,7 +304,9 @@ if (isMain) {
           },
         });
       } else if (!response.writableEnded) {
-        response.destroy();
+        endStreamedResponse(response, {
+          message: "The Devin CLI forwarder lost the upstream response stream.",
+        });
       }
     });
   });
@@ -313,7 +317,5 @@ if (isMain) {
     console.error("[devin-cli] listening");
   });
 
-  for (const signal of ["SIGINT", "SIGTERM"]) {
-    process.on(signal, () => server.close(() => process.exit(0)));
-  }
+  installGracefulShutdown(server, { label: "devin-cli" });
 }

@@ -11,6 +11,7 @@ import {
   toGenerateRequest,
 } from "./commandcode-generate.mjs";
 import { GenerateTranslator, readGenerateEvents } from "./commandcode-stream.mjs";
+import { writeEventStreamHead } from "./http-utils.mjs";
 import { VERSION } from "./version.mjs";
 
 // The registry points Command Code at `https://api.commandcode.ai/provider/v1`
@@ -44,14 +45,6 @@ function errorBody(status, raw) {
       message,
     },
   };
-}
-
-function writeHead(response, contentType) {
-  response.writeHead(200, {
-    "Content-Type": contentType,
-    "Cache-Control": "no-cache",
-    Connection: "keep-alive",
-  });
 }
 
 /**
@@ -130,7 +123,7 @@ export async function relayCommandCodeGenerate({
     return outcome(200);
   }
 
-  writeHead(response, "text/event-stream");
+  writeEventStreamHead(response);
   for await (const event of readGenerateEvents(upstream.body)) {
     const chunk = translator.push(event);
     if (chunk) response.write(chunk);
