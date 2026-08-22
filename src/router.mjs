@@ -118,7 +118,6 @@ import {
 import { VERSION } from "./version.mjs";
 import { nativeSessionHeaders } from "./codex-native-session.mjs";
 import {
-  createLoopbackProbeDispatcher,
   installStableFetchTransport,
   loopbackProbeFetch,
 } from "./fetch-transport.mjs";
@@ -772,7 +771,6 @@ function catalogModels() {
 // Shared across every /health request so a polling companion collapses into
 // one probe per service per window instead of three per poll.
 const healthCache = createHealthCache({ staleWhileRevalidate: true });
-const loopbackProbeDispatcher = createLoopbackProbeDispatcher();
 
 function serviceHealth(url) {
   return healthCache(url, () => probeService(url));
@@ -780,14 +778,12 @@ function serviceHealth(url) {
 
 async function probeService(url) {
   try {
-    const response = await loopbackProbeFetch(
-      url,
-      {
-        headers: { Authorization: `Bearer ${INTERNAL_KEY}` },
-        signal: AbortSignal.timeout(3_000),
-      },
-      loopbackProbeDispatcher,
-    );
+    // No dispatcher argument: `loopbackProbeFetch` owns one shared probe pool
+    // for the process, so this cannot fork a second one.
+    const response = await loopbackProbeFetch(url, {
+      headers: { Authorization: `Bearer ${INTERNAL_KEY}` },
+      signal: AbortSignal.timeout(3_000),
+    });
     const raw = await response.json().catch(() => undefined);
     const payload = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
     return { ...payload, reachable: response.ok };

@@ -10,6 +10,7 @@ import {
   createLoopbackProbeDispatcher,
   fetchDispatcherOptions,
   installStableFetchTransport,
+  loopbackProbeDispatcher,
   loopbackProbeFetch,
 } from "../src/fetch-transport.mjs";
 
@@ -53,11 +54,31 @@ test("the router disables HTTP/2 on its process-wide fetch dispatcher", () => {
 
   assert.equal(created.length, 1);
   assert.equal(dispatcher.kind, "direct");
-  assert.deepEqual(created[0].options, fetchDispatcherOptions());
-  assert.equal(created[0].options.allowH2, false);
-  assert.equal("connections" in created[0].options, false);
+  assert.deepEqual(created[0].options, { allowH2: false, pipelining: 1 });
   assert.equal(dispatcher, created[0]);
   assert.deepEqual(installed, [dispatcher]);
+});
+
+// Every outbound provider request shares this pool. Holding idle sockets
+// longer than an upstream does hands the next POST a half-closed connection
+// that surfaces as UND_ERR_SOCKET, and Undici will not retry it -- so the
+// process-wide pool keeps Undici's own 4s default and only the loopback
+// probe pool, which talks to our own server, raises it.
+test("the process-wide pool does not hold idle sockets past the undici default", () => {
+  const { created } = installFakeTransport({});
+
+  assert.equal("keepAliveTimeout" in created[0].options, false);
+  assert.equal("connections" in created[0].options, false);
+
+  const probe = createLoopbackProbeDispatcher({
+    AgentClass: class {
+      constructor(options) {
+        this.options = options;
+      }
+    },
+    environment: {},
+  });
+  assert.equal(probe.options.keepAliveTimeout, 10_000);
 });
 
 test("the router uses the environment proxy dispatcher only with explicit opt-in", () => {
@@ -257,4 +278,54 @@ test("loopback probes use undici fetch so a separate Agent is accepted", async (
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
+});
+
+// A default parameter that called the factory built a new Agent -- a whole
+// connection pool -- on every probe, and the router polls /health continuously.
+test("repeated loopback probes share one dispatcher", async () => {
+  const server = http.createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ ok: true }));
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const seen = [];
+  const original = loopbackProbeDispatcher();
+  try {
+    const port = server.address().port;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const response = await loopbackProbeFetch(`http://127.0.0.1:${port}/health`, {
+        signal: AbortSignal.timeout(2_000),
+      });
+      await response.json();
+      seen.push(loopbackProbeDispatcher());
+    }
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+
+  assert.equal(seen.length, 3);
+  for (const dispatcher of seen) assert.equal(dispatcher, original);
+  // The accessor returns the one singleton; the factory still makes new pools,
+  // which is what the default parameter used to do on every single probe.
+  const separate = createLoopbackProbeDispatcher();
+  try {
+    assert.notEqual(original, separate);
+  } finally {
+    await separate.close();
+  }
+});
+
+// Importing the module must not open a pool; only a probe should.
+test("the shared probe dispatcher is built on first use, not at import", () => {
+  const source = readFileSync(path.join(SRC_DIR, "fetch-transport.mjs"), "utf8");
+  assert.match(source, /let sharedProbeDispatcher;/);
+  assert.match(source, /sharedProbeDispatcher \?\?= createLoopbackProbeDispatcher\(\)/);
+  assert.doesNotMatch(
+    source,
+    /^(const|let) \w+ = createLoopbackProbeDispatcher\(\)/m,
+    "a module-level call would open a connection pool for every importer",
+  );
 });

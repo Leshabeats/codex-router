@@ -1,7 +1,6 @@
 import { Agent, EnvHttpProxyAgent, fetch as undiciFetch, setGlobalDispatcher } from "undici";
 
 import { environmentHttpProxyConfigured } from "./proxy-environment.mjs";
-import { KEEPALIVE_TIMEOUT_MS } from "./http-utils.mjs";
 
 // Node 26's bundled fetch negotiates HTTP/2 by default. A live router process
 // observed its pooled session remain destroyed after ERR_HTTP2_INVALID_SESSION,
@@ -14,13 +13,18 @@ import { KEEPALIVE_TIMEOUT_MS } from "./http-utils.mjs";
 // whole generation. Do not cap `connections`: Undici's HTTP/1.1 pool is
 // unbounded by default, and one router plane serves every installed client.
 // A numeric ceiling queues the next turn once it fills and recreates
-// "waiting for network". Keep idle sockets as long as the router server so
-// Codex's 90s client pool is not handed a dead connection.
+// "waiting for network".
+//
+// Leave `keepAliveTimeout` at Undici's 4s default. This pool is shared by
+// every outbound provider request, and an upstream that idle-closes without
+// advertising `Keep-Alive: timeout=` hands back a half-closed socket once we
+// hold connections longer than it does -- surfacing as UND_ERR_SOCKET on a
+// POST Undici will not retry. Only the loopback probe pool below, whose one
+// origin is our own server, raises it.
 export function fetchDispatcherOptions() {
   return {
     allowH2: false,
     pipelining: 1,
-    keepAliveTimeout: KEEPALIVE_TIMEOUT_MS,
   };
 }
 
@@ -66,6 +70,17 @@ export function createLoopbackProbeDispatcher({
   });
 }
 
-export function loopbackProbeFetch(url, init = {}, dispatcher = createLoopbackProbeDispatcher()) {
+// One pool for the whole process. Building the Agent in a default parameter
+// made a fresh connection pool on every probe instead, so each `/health` poll
+// left another dispatcher -- and its sockets -- behind with nothing to close
+// them. Created on first use so importing this module opens nothing.
+let sharedProbeDispatcher;
+
+export function loopbackProbeDispatcher() {
+  sharedProbeDispatcher ??= createLoopbackProbeDispatcher();
+  return sharedProbeDispatcher;
+}
+
+export function loopbackProbeFetch(url, init = {}, dispatcher = loopbackProbeDispatcher()) {
   return undiciFetch(url, { ...init, dispatcher });
 }

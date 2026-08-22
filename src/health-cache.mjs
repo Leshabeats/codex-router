@@ -35,7 +35,10 @@ export function createHealthCache({
     // their own probe, so a burst of polls costs one request, not one each.
     if (fresh) {
       if (canServeStale(existing)) return Promise.resolve(existing.lastValue);
-      return existing.promise;
+      // A refresh that threw leaves the value behind but no promise: its own
+      // settled promise resolves to that snapshot, and replaying it here would
+      // hand back an answer older than `maxStaleMs`. Fall through and probe.
+      if (existing.promise) return existing.promise;
     }
     if (existing?.promise && existing.refreshing) {
       if (canServeStale(existing)) return Promise.resolve(existing.lastValue);
@@ -60,11 +63,23 @@ export function createHealthCache({
       })
       .catch((error) => {
         const current = entries.get(key);
-        if (staleWhileRevalidate && current?.lastValue !== undefined) {
+        // The last answer may stand in for a failed refresh only while it is
+        // inside the same `maxStaleMs` bound the nonblocking paths enforce.
+        // Without that check a probe that starts throwing pins `/health` to
+        // whatever it last saw, so a gateway that died an hour ago keeps
+        // reporting reachable for as long as the process lives. `lastValueAt`
+        // deliberately is not touched: the snapshot does not get younger
+        // because a probe failed, and this bound is what expires it.
+        if (canServeStale(current)) {
           entries.set(key, {
-            ...current,
-            refreshing: false,
             at: now(),
+            lastValueAt: current.lastValueAt,
+            // Drop the settled promise rather than caching it as this entry's
+            // answer: it resolves to the snapshot above, and the fresh-window
+            // short circuit would replay it past `maxStaleMs`.
+            promise: undefined,
+            lastValue: current.lastValue,
+            refreshing: false,
           });
           return current.lastValue;
         }
