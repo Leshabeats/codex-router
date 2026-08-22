@@ -46,10 +46,10 @@ export function ServiceHealthPanel({ health, compact = false, onOpen, onRepair, 
             aria-controls="service-health-details"
             onClick={() => setDetailsOpen((open) => !open)}
           >
-          <span className="service-health-summary-copy">
-            <strong>Service health</strong>
-            <small>{attention ? "A local dependency needs attention." : "Router and local dependencies."}</small>
-          </span>
+            <span className="service-health-summary-copy">
+              <strong>Service health</strong>
+              <small>{attention ? "A local dependency needs attention." : "Router and local dependencies."}</small>
+            </span>
             <ChevronDown className={detailsOpen ? "is-open" : undefined} aria-hidden size={15} strokeWidth={1.7} />
           </button>
           <div className="service-health-header-actions">
@@ -61,13 +61,14 @@ export function ServiceHealthPanel({ health, compact = false, onOpen, onRepair, 
             ) : null}
           </div>
         </div>
-        {detailsOpen ? (
-          <div id="service-health-details" className="service-health-details">
+        {/* Kept mounted and `hidden` rather than unmounted: the toggle's
+            aria-controls has to resolve to a real element in both states, and
+            `hidden` is what tells assistive tech the region is collapsed. */}
+        <div id="service-health-details" className="service-health-details" hidden={!detailsOpen}>
           <div className="service-health-list" role="list" aria-label="Router service health">
             {rows.map((row) => <ServiceHealthRowView key={row.id} row={row} />)}
           </div>
-          </div>
-        ) : null}
+        </div>
       </div>
     </section>
   );

@@ -1399,20 +1399,34 @@ final class RouterStore: ObservableObject {
     }
   }
 
-  func reloadProviderCatalog(_ provider: String) async {
-    guard !providerCatalogLoading.contains(provider) else { return }
-    providerCatalogLoading.insert(provider)
-    defer { providerCatalogLoading.remove(provider) }
+  /// `refresh` re-asks the provider; without it the router answers from its
+  /// stored list, so opening a provider costs no round trip and still works
+  /// offline. That is the same split `discoverProviderModels` makes in
+  /// apps/control-center/electron/ipc.mjs, and the reason the decoded
+  /// `cached`/`stale` fields exist at all.
+  func reloadProviderCatalog(_ provider: String, refresh: Bool = false) async {
+    let providerID: String
+    do {
+      providerID = try ProviderCatalogInput.validatedProviderID(provider)
+    } catch {
+      message = "\(provider): \(error.localizedDescription)"
+      return
+    }
+    guard !providerCatalogLoading.contains(providerID) else { return }
+    providerCatalogLoading.insert(providerID)
+    defer { providerCatalogLoading.remove(providerID) }
     do {
       let output = try await runRouterScript(
         "model-discovery.mjs",
-        arguments: [provider, "--refresh", "--json"]
+        arguments: [providerID, "--json"] + (refresh ? ["--refresh"] : []),
+        timeout: RouterScriptWatchdog.discoveryTimeout
       )
       let catalog = try JSONDecoder().decode(ProviderModelCatalog.self, from: output)
-      providerCatalogs[provider] = catalog
-      message = "\(catalog.discovered.count) current \(provider) models loaded. Select the ones to add below."
+      providerCatalogs[providerID] = catalog
+      let origin = catalog.cached == true ? "saved" : "current"
+      message = "\(catalog.discovered.count) \(origin) \(providerID) models loaded. Select the ones to add below."
     } catch {
-      message = "\(provider): \(error.localizedDescription)"
+      message = "\(providerID): \(error.localizedDescription)"
     }
   }
 
@@ -1422,29 +1436,47 @@ final class RouterStore: ObservableObject {
       .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
     guard !providers.isEmpty, providerCatalogLoading.isEmpty else { return }
     for provider in providers {
-      await reloadProviderCatalog(provider.id)
+      // The button says "Reload", so this one is the explicit re-ask. Every
+      // other entry point is cache-first.
+      await reloadProviderCatalog(provider.id, refresh: true)
     }
     message = "Reloaded current models for \(providers.count) provider\(providers.count == 1 ? "" : "s")."
   }
 
   func addProviderCatalogModels(_ provider: String, modelIDs: [String]) async {
-    let unique = Array(Set(modelIDs)).sorted()
-    guard !unique.isEmpty, unique.count <= 200, !providerCatalogLoading.contains(provider) else { return }
-    providerCatalogLoading.insert(provider)
+    // Model ids arrive from the provider's own HTTP response and end up in a
+    // single comma-separated `--models` argument, so they are validated to the
+    // same shape Electron's `addProviderModels` enforces before any of them is
+    // allowed to reach curation.
+    let providerID: String
+    let unique: [String]
+    do {
+      providerID = try ProviderCatalogInput.validatedProviderID(provider)
+      unique = try ProviderCatalogInput.validatedModelIDs(modelIDs)
+    } catch {
+      message = "\(provider): \(error.localizedDescription)"
+      return
+    }
+    guard !providerCatalogLoading.contains(providerID) else { return }
+    providerCatalogLoading.insert(providerID)
     do {
       // Curation repeats a live discovery before committing, then atomically
       // republishes every installed client. Never turn a cached list directly
       // into routes that may already have been withdrawn upstream.
-      _ = try await runRouterScript("curate-models.mjs", arguments: [
-        provider, "--models", unique.joined(separator: ","), "--refresh", "--apply",
-      ])
+      _ = try await runRouterScript(
+        "curate-models.mjs",
+        arguments: [providerID, "--models", unique.joined(separator: ","), "--refresh", "--apply"],
+        timeout: RouterScriptWatchdog.catalogMutationTimeout
+      )
       await refresh()
-      providerCatalogLoading.remove(provider)
-      await reloadProviderCatalog(provider)
-      message = "\(unique.count) \(provider) model\(unique.count == 1 ? "" : "s") added. Restart Codex to refresh its picker."
+      providerCatalogLoading.remove(providerID)
+      // Curation just re-asked upstream and rewrote the stored list, so the
+      // cache-first read here is the fresh answer without a second round trip.
+      await reloadProviderCatalog(providerID)
+      message = "\(unique.count) \(providerID) model\(unique.count == 1 ? "" : "s") added. Restart Codex to refresh its picker."
     } catch {
-      providerCatalogLoading.remove(provider)
-      message = "\(provider): \(error.localizedDescription)"
+      providerCatalogLoading.remove(providerID)
+      message = "\(providerID): \(error.localizedDescription)"
     }
   }
 
@@ -2650,7 +2682,11 @@ final class RouterStore: ObservableObject {
   // not expose. Keep the allow-list here: provider ids and model ids are data,
   // never a command path, and the tray must not become an arbitrary script
   // launcher just to mirror Electron's catalog controls.
-  private func runRouterScript(_ script: String, arguments: [String]) async throws -> Data {
+  private func runRouterScript(
+    _ script: String,
+    arguments: [String],
+    timeout: TimeInterval
+  ) async throws -> Data {
     guard ["model-discovery.mjs", "curate-models.mjs"].contains(script) else {
       throw RouterError("Unsupported Model Router script.")
     }
@@ -2676,11 +2712,28 @@ final class RouterStore: ObservableObject {
       task.standardOutput = output
       task.standardError = errors
       try task.run()
+      // Drain both pipes before waiting. A provider list easily exceeds the
+      // 64KB pipe buffer, and a child blocked on a full pipe never exits, so
+      // waiting first would deadlock even without a hostile endpoint.
       let stdoutReader = Task.detached { output.fileHandleForReading.readDataToEndOfFile() }
       let stderrReader = Task.detached { errors.fileHandleForReading.readDataToEndOfFile() }
+      // A provider that accepts the connection and then never answers would
+      // otherwise park `waitUntilExit` forever, and with it the caller's
+      // `defer` that clears the loading flag -- which permanently disables
+      // both catalog buttons for the rest of the app's life. Terminating the
+      // child closes the pipes, so the readers finish and the wait returns.
+      let watchdog = RouterScriptWatchdog(task: task)
+      watchdog.arm(after: timeout)
       task.waitUntilExit()
+      watchdog.disarm()
       let stdout = await stdoutReader.value
       let stderr = await stderrReader.value
+      if watchdog.didTimeOut {
+        throw RouterError(
+          "\(script) did not answer within \(Int(timeout.rounded())) seconds and was stopped. "
+            + "The provider may be unreachable; try again."
+        )
+      }
       guard task.terminationStatus == 0 else {
         let detail = String(data: stderr, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
         throw RouterError(detail?.isEmpty == false ? detail! : "Model Router command failed.")
@@ -2770,6 +2823,75 @@ struct RouterActiveRequest: Decodable, Identifiable, Equatable {
   let agentNickname: String?
   let isSubagent: Bool?
   let startedAt: Double
+}
+
+/// Bounds a child `Process` so a wedged provider cannot hold the tray's
+/// catalog UI hostage. `arm` schedules a SIGTERM, escalating to SIGKILL if the
+/// child ignores it, and `disarm` cancels the timer once the process is gone.
+/// The `finished` flag is what makes `disarm` safe: it is set under the same
+/// lock the watchdog takes, so a timer firing during teardown cannot signal a
+/// process the caller has already reaped.
+final class RouterScriptWatchdog: @unchecked Sendable {
+  /// Electron's discovery budget (`{ timeoutMs: 45_000 }` in
+  /// apps/control-center/electron/ipc.mjs). One provider HTTP round trip.
+  static let discoveryTimeout: TimeInterval = 45
+  /// Electron's `CATALOG_MUTATION_TIMEOUT_MS` (330_000). Curation waits on a
+  /// cross-process publish lock and rebuilds every installed client, so it
+  /// gets the same long budget rather than a discovery-sized one.
+  static let catalogMutationTimeout: TimeInterval = 330
+  /// Grace period between SIGTERM and SIGKILL, for a child that traps TERM.
+  static let terminationGrace: TimeInterval = 5
+
+  private let task: Process
+  private let lock = NSLock()
+  private var finished = false
+  private var timedOut = false
+  private var timer: DispatchWorkItem?
+
+  init(task: Process) { self.task = task }
+
+  var didTimeOut: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return timedOut
+  }
+
+  func arm(after timeout: TimeInterval) {
+    let item = DispatchWorkItem { [weak self] in self?.fire() }
+    lock.lock()
+    timer = item
+    lock.unlock()
+    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout, execute: item)
+  }
+
+  func disarm() {
+    lock.lock()
+    finished = true
+    let item = timer
+    timer = nil
+    lock.unlock()
+    item?.cancel()
+  }
+
+  private func fire() {
+    lock.lock()
+    guard !finished, task.isRunning else {
+      lock.unlock()
+      return
+    }
+    timedOut = true
+    let pid = task.processIdentifier
+    task.terminate()
+    lock.unlock()
+    guard pid > 0 else { return }
+    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + Self.terminationGrace) { [weak self] in
+      guard let self else { return }
+      self.lock.lock()
+      defer { self.lock.unlock() }
+      guard !self.finished, self.task.isRunning else { return }
+      kill(pid, SIGKILL)
+    }
+  }
 }
 
 private struct RouterError: LocalizedError {
@@ -3608,8 +3730,102 @@ struct ProviderSetupState: Decodable, Identifiable, Equatable {
   // provider endpoint to interrogate or are owned by the client/runtime.
   // Showing a Load button for them would promise a request that discovery
   // correctly refuses.
+  //
+  // The authority is `NO_LIVE_CATALOG` in
+  // apps/control-center/src/pages/ModelsPage.tsx. ProviderCatalogTests reads
+  // that file and fails if the two ever diverge.
+  static let liveModelCatalogExclusions: Set<String> = [
+    "openai", "local", "lmstudio", "custom", "devin-cli", "anthropic-api",
+  ]
+
   var supportsLiveModelCatalog: Bool {
-    !["openai", "local", "lmstudio", "custom", "devin-cli", "anthropic-api"].contains(id)
+    !Self.liveModelCatalogExclusions.contains(id)
+  }
+}
+
+/// The Swift half of the catalog input contract that
+/// `apps/control-center/electron/ipc.mjs` enforces for the same two scripts.
+/// Both surfaces hand provider-supplied ids straight to `curate-models.mjs`,
+/// so both have to agree on what an id may contain.
+///
+/// There is no shell here -- `Process` runs `/usr/bin/env` with an argv array
+/// -- so this is not about command injection. It is about the wire format:
+/// `--models` takes one comma-separated list, so a single id containing a
+/// comma silently becomes two ids the user never selected, and a leading `-`
+/// would be read as another flag.
+enum ProviderCatalogInput {
+  /// Mirrors `MODEL_SLUG` in ipc.mjs: `^[A-Za-z0-9][A-Za-z0-9._/:+-]{0,200}$`.
+  static let maxModelIDLength = 201
+  /// Mirrors `PROVIDER_ID` in ipc.mjs: `^[a-z0-9][a-z0-9-]{0,80}$`.
+  static let maxProviderIDLength = 81
+  /// Mirrors the 1...200 array bound ipc.mjs puts on `addProviderModels`.
+  static let maxModelIDCount = 200
+
+  private static let asciiAlphanumerics = Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
+  private static let modelIDBody = asciiAlphanumerics.union("._/:+-")
+  private static let providerIDBody = Set("abcdefghijklmnopqrstuvwxyz0123456789-")
+  private static let providerIDHead = Set("abcdefghijklmnopqrstuvwxyz0123456789")
+
+  static func isValidModelID(_ value: String) -> Bool {
+    matches(value, head: asciiAlphanumerics, body: modelIDBody, maxLength: maxModelIDLength)
+  }
+
+  static func isValidProviderID(_ value: String) -> Bool {
+    matches(value, head: providerIDHead, body: providerIDBody, maxLength: maxProviderIDLength)
+  }
+
+  private static func matches(
+    _ value: String,
+    head: Set<Character>,
+    body: Set<Character>,
+    maxLength: Int
+  ) -> Bool {
+    guard let first = value.first, head.contains(first) else { return false }
+    guard value.count <= maxLength else { return false }
+    return value.dropFirst().allSatisfy { body.contains($0) }
+  }
+
+  enum Failure: LocalizedError, Equatable {
+    case emptySelection
+    case tooManyModels(Int)
+    case invalidModelID(String)
+    case duplicateModelID
+    case invalidProviderID(String)
+
+    var errorDescription: String? {
+      switch self {
+      case .emptySelection, .tooManyModels:
+        return "Choose between 1 and \(ProviderCatalogInput.maxModelIDCount) provider models."
+      case .invalidModelID(let id):
+        return "Model id is invalid: \(id)"
+      case .duplicateModelID:
+        return "Provider model ids must be unique."
+      case .invalidProviderID(let id):
+        return "Provider is invalid: \(id)"
+      }
+    }
+  }
+
+  /// Rejects, rather than silently repairs, a selection Electron would refuse.
+  /// Deduplicating here would hide a catalog that served the same id twice.
+  static func validatedModelIDs(_ modelIDs: [String]) throws -> [String] {
+    guard !modelIDs.isEmpty else { throw Failure.emptySelection }
+    guard modelIDs.count <= maxModelIDCount else { throw Failure.tooManyModels(modelIDs.count) }
+    var seen = Set<String>()
+    for id in modelIDs {
+      let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard isValidModelID(trimmed) else { throw Failure.invalidModelID(id) }
+      guard seen.insert(trimmed).inserted else { throw Failure.duplicateModelID }
+    }
+    return modelIDs
+      .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+      .sorted()
+  }
+
+  static func validatedProviderID(_ provider: String) throws -> String {
+    let trimmed = provider.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard isValidProviderID(trimmed) else { throw Failure.invalidProviderID(provider) }
+    return trimmed
   }
 }
 
@@ -5140,7 +5356,14 @@ private struct TrayView: View {
               provider: provider,
               catalog: store.providerCatalogs[provider.id],
               isLoading: store.providerCatalogLoading.contains(provider.id),
-              onReload: { Task { await store.reloadProviderCatalog(provider.id) } },
+              // Any catalog run in flight -- including a bulk reload started
+              // from the picker panel -- freezes every row. Otherwise a user
+              // can stack concurrent `Process` runs and starve the pipe
+              // readers draining them.
+              isBusy: !store.providerCatalogLoading.isEmpty,
+              onReload: { refresh in
+                Task { await store.reloadProviderCatalog(provider.id, refresh: refresh) }
+              },
               onAdd: { models in Task { await store.addProviderCatalogModels(provider.id, modelIDs: models) } }
             )
           }
@@ -6703,7 +6926,10 @@ private struct TrayView: View {
     let provider: ProviderSetupState
     let catalog: ProviderModelCatalog?
     let isLoading: Bool
-    let onReload: () -> Void
+    let isBusy: Bool
+    /// `true` re-asks the provider. The first load is cache-first; only an
+    /// explicit Reload spends a round trip.
+    let onReload: (Bool) -> Void
     let onAdd: ([String]) -> Void
 
     @State private var query = ""
@@ -6726,11 +6952,17 @@ private struct TrayView: View {
               .foregroundStyle(routerMutedStrong)
           }
           Spacer()
-          Button(isLoading ? routerLocalized("Loading models") : routerLocalized(catalog == nil ? "Load models" : "Reload models"), action: onReload)
-            .buttonStyle(.borderless)
-            .font(.system(size: 9, weight: .medium))
-            .foregroundStyle(routerMint)
-            .disabled(isLoading)
+          Button(
+            isLoading
+              ? routerLocalized("Loading models")
+              : routerLocalized(catalog == nil ? "Load models" : "Reload models")
+          ) {
+            onReload(catalog != nil)
+          }
+          .buttonStyle(.borderless)
+          .font(.system(size: 9, weight: .medium))
+          .foregroundStyle(routerMint)
+          .disabled(isLoading || isBusy)
         }
 
         if let catalog {
@@ -6764,7 +6996,7 @@ private struct TrayView: View {
                     .toggleStyle(.checkbox)
                     .controlSize(.mini)
                     .frame(width: 14)
-                    .disabled(isLoading)
+                    .disabled(isLoading || isBusy)
                   }
                   Text(model)
                     .font(.system(size: 8, design: .monospaced))
@@ -6794,7 +7026,7 @@ private struct TrayView: View {
 
           if !selected.isEmpty {
             HStack(spacing: 8) {
-              Text("\(selected.count) \(routerLocalized("selected"))")
+              Text(routerFormat("%d selected", selected.count))
                 .font(.system(size: 8))
                 .foregroundStyle(routerMutedStrong)
               Spacer()
@@ -6804,7 +7036,7 @@ private struct TrayView: View {
               .buttonStyle(.borderless)
               .font(.system(size: 9, weight: .medium))
               .foregroundStyle(routerMint)
-              .disabled(isLoading)
+              .disabled(isLoading || isBusy)
             }
           }
         }
@@ -6816,12 +7048,18 @@ private struct TrayView: View {
       }
     }
 
+    // One format string rather than number + noun fragments glued together:
+    // a translator can move the nouns around the numbers, which concatenation
+    // makes impossible and which reads wrong in Arabic.
     private var catalogDetail: String {
       guard let catalog else { return routerLocalized("Load the current list from this provider.") }
-      let available = catalog.discovered.count
-      let added = catalog.registered.count
       let freshness = catalog.cached == true ? routerLocalized("saved list") : routerLocalized("live list")
-      return "\(available) \(routerLocalized("models")) · \(added) \(routerLocalized("added")) · \(freshness)"
+      return routerFormat(
+        "%d models · %d added · %@",
+        catalog.discovered.count,
+        catalog.registered.count,
+        freshness
+      )
     }
   }
 

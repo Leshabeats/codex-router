@@ -850,6 +850,10 @@ textarea::placeholder {
   border-top: 1px solid var(--line);
 }
 
+/* The collapsed region stays mounted so the toggle's aria-controls resolves;
+   this keeps `hidden` authoritative if the rule above ever gains a display. */
+.service-health-details[hidden] { display: none; }
+
 .service-health-list {
   display: grid;
 }
