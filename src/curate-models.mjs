@@ -465,6 +465,21 @@ async function main() {
     return;
   }
   if (wantsApply) {
+    // An auto-policy is standing, provider/family-scoped consent to verify a
+    // newly curated model. This runs only after the overlay is published: the
+    // worker imports a fresh registry and can route the new slug immediately.
+    const addedModels = nextMine.filter((model) => !curated.has(model.upstreamModel));
+    if (addedModels.length) {
+      const { matchingSubagentAutoPolicyModels } = await import("./subagent-auto-policy.mjs");
+      const matching = matchingSubagentAutoPolicyModels(addedModels);
+      if (matching.length) {
+        const { spawnDetachedVerification } = await import("./subagent-verify.mjs");
+        spawnDetachedVerification(
+          matching.map((model) => model.slug),
+          { deferCandidateResolution: true },
+        );
+      }
+    }
     process.stdout.write("Curated models are live. Fully quit and reopen the app to refresh its picker.\n");
   } else {
     process.stdout.write("Run ./bin/install to regenerate routes and the picker catalog.\n");

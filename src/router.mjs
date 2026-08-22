@@ -1952,38 +1952,13 @@ function requireCodexTransport(request, response) {
   return true;
 }
 
-// A model in the experimental subagent window earns its durable proof — or
-// its demotion — from real traffic: Codex marks child turns with
-// x-openai-subagent, so the first clean completion of one settles "this model
-// can hold the child role" without a dedicated probe session. Structural
-// rejections demote (400/422, the shape a schema or encrypted-payload refusal
-// takes); transient failures — 429s, 5xx, disconnects — prove nothing either
-// way and leave the window open. No line here is QUIET-gated: a promotion or
-// demotion that happens silently is how a picker entry becomes unexplainable.
-//
-// What the promotion claims is exactly one HTTP turn, and the log line has to
-// say so. A child agent makes many turns — one per tool-call round trip — and
-// this observer sees each of them separately; it never sees the agent loop
-// that strings them together, so "the child reached done" is not a fact
-// available here. An operator who read the old "subagent proven … completed a
-// live child turn" as *the delegated work finished* was reading a promise the
-// router cannot make (issue #257).
-//
-// The two halves of that issue meet here, and both are about the gate rather
-// than the thresholds. The gate used to be `awaitingSpawnProof`, true only for
-// `experimental` — so the instant turn one promoted a slug this function
-// stopped looking at it, and a hard 400/422 on turn two was discarded along
-// with everything else. That made the *oldest* observation win over the
-// newest, which no comment ever argued for. The gate is now revocability, so a
-// slug keeps being watched for as long as this machine's traffic is what the
-// v2 advertisement rests on; promotion alone stays scoped to the experimental
-// window, because a first clean turn is only news once.
-//
-// Watching a `proven` slug is also what makes the convergence signal usable. A
-// looping child emits 200s forever, so no status-shaped branch could ever fire
-// for it; the evidence is instead how much of its own budget one spawn burns
-// without stopping, accounted per child thread in subagent-turns.mjs against
-// the model's declared auto-compact limit.
+// Older releases advertised a locally probed route as experimental and then
+// refined that record from `x-openai-subagent` traffic. Keep observing only
+// those historical experimental records so upgrades preserve useful evidence,
+// but never treat the result as catalog authority: local traffic can neither
+// promote nor demote the exact checked-in registry certificate. A 400/422 is
+// useful negative application evidence; transient failures prove nothing. A
+// clean 200 proves only one HTTP turn completed, not that a delegated task did.
 
 function observeSubagentOutcome(request, route, status, options = {}) {
   if (!route) return;
@@ -1996,8 +1971,8 @@ function observeSubagentOutcome(request, route, status, options = {}) {
       recordSpawnFailure(route.slug, { reason, ...detail });
       forgetChildSpawn(spawnId);
       console.error(
-        `[codex-router] subagent demoted: ${route.slug} ${reason}; ` +
-          "it stays v1 until 'control subagents verify' passes again",
+        `[codex-router] legacy subagent evidence rejected: ${route.slug} ${reason}; ` +
+          "the route still requires a reviewed repository v2 certificate",
       );
     };
     if (status === 400 || status === 422) {
@@ -2013,8 +1988,8 @@ function observeSubagentOutcome(request, route, status, options = {}) {
     if (awaitingSpawnProof(route.slug, proofs)) {
       recordSpawnObserved(route.slug, { status });
       console.error(
-        `[codex-router] subagent child role verified: ${route.slug} served a live child turn; ` +
-          "the model holds the child role on the wire, which is not a claim the child finished its task",
+        `[codex-router] legacy subagent evidence observed: ${route.slug} served one child HTTP turn; ` +
+          "this remains diagnostic and is not a repository v2 certificate",
       );
     }
     const spawn = observeChildTurn({

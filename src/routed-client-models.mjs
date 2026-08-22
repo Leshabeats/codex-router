@@ -65,10 +65,10 @@ export function routedClientModels() {
   const picker = modelPickerSnapshot();
   const hidden = new Set(picker.hidden);
   const visible = new Set(picker.visible);
-  // The same machine-local capability proofs the Codex catalog honors: a model
-  // this machine verified as a subagent is one everywhere the proven set is
-  // consumed, or a client's tool-subagent preset silently disagrees with the
-  // picker about which children exist.
+  // Keep every client on the same registry-certified capabilities. Local
+  // stream/tool probe records are passed through for compatibility with the
+  // proof overlay API, but applySubagentProofs deliberately treats them as
+  // diagnostic application evidence and never promotes a route to v2.
   const selected = applySubagentProofs(
     selectedConfiguredListedModels().filter((model) => {
       const slug = String(model.slug);

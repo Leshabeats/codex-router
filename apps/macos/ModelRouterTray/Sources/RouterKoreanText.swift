@@ -321,6 +321,8 @@ enum RouterKoreanText {
     "5-hour limit": "5시간 한도",
     "Hidden from picker — show it below to use it here": "선택기에서 숨겨짐 — 여기서 사용하려면 아래에서 표시하세요",
     "Proven v2": "검증된 v2",
+    "v1 only": "v1 전용",
+    "Certification candidate": "인증 후보",
     "Not selected": "선택되지 않음",
     "Apply the checked-out router revision, then run the Codex doctor": "체크아웃된 라우터 리비전을 적용한 뒤 Codex doctor를 실행합니다",
     "Run the Codex doctor and repair managed router files": "Codex doctor를 실행하고 관리되는 라우터 파일을 복구합니다",
