@@ -23,15 +23,7 @@ import {
 } from "./service-process.mjs";
 import { protectPrivateFile } from "./file-security.mjs";
 import { serviceProxyEnvironment } from "./proxy-environment.mjs";
-import {
-  skipServiceManagerCall,
-  assertServiceWriteIsolated,
-} from "./service-write-guard.mjs";
-
-// Only this platform's own module can reach this machine's service manager.
-// Run anywhere else -- the cross-platform render tests drive all three modules
-// on one host -- schtasks is absent or a test's own stub.
-const HOST_MANAGED = process.platform === "win32";
+import { assertServiceWriteIsolated } from "./service-write-guard.mjs";
 
 const effectivePlatform = process.env.CODEX_ROUTER_SERVICE_PLATFORM || process.platform;
 const command = process.argv[2] || "status";
@@ -124,7 +116,6 @@ function launcher() {
 }
 
 function schtasks(args, options = {}) {
-  if (skipServiceManagerCall({ hostManaged: HOST_MANAGED })) return "";
   return execFileSync("schtasks.exe", args, {
     encoding: "utf8",
     stdio: options.quiet ? ["ignore", "ignore", "ignore"] : ["ignore", "pipe", "pipe"],

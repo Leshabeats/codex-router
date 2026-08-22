@@ -21,15 +21,7 @@ import {
   TARGET_DISPLAY_NAME,
 } from "./paths.mjs";
 import { serviceProxyEnvironment } from "./proxy-environment.mjs";
-import {
-  skipServiceManagerCall,
-  assertServiceWriteIsolated,
-} from "./service-write-guard.mjs";
-
-// Only this platform's own module can reach this machine's service manager.
-// Run anywhere else -- the cross-platform render tests drive all three modules
-// on one host -- systemctl is absent or a test's own stub.
-const HOST_MANAGED = process.platform === "linux";
+import { assertServiceWriteIsolated } from "./service-write-guard.mjs";
 
 const effectivePlatform = process.env.CODEX_ROUTER_SERVICE_PLATFORM || process.platform;
 const command = process.argv[2] || "status";
@@ -114,9 +106,7 @@ WantedBy=default.target
 `;
 }
 
-
 function systemctl(args, options = {}) {
-  if (skipServiceManagerCall({ hostManaged: HOST_MANAGED })) return "";
   return execFileSync("systemctl", ["--user", ...args], {
     encoding: "utf8",
     stdio: options.quiet ? ["ignore", "ignore", "ignore"] : ["ignore", "pipe", "pipe"],

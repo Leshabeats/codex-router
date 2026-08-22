@@ -38,16 +38,25 @@ export function assertServiceWriteIsolated(
 // a definition that no longer existed. The router stayed dead until someone
 // reinstalled it by hand, with nothing tying it back to a test run.
 //
-// So under the test runner a service-manager call is skipped rather than made.
+// So under the test runner a call that would change the machine's own service
+// registration is skipped rather than made.
 // Refusing loudly was the first attempt and it was wrong: the damaging call is
 // indistinguishable from a legitimate one at the call site, so every existing
 // test would have had to opt out of a thing it never asked for, and the ones
 // that did not would fail for reasons unrelated to what they test. There is
 // nothing to remember this way.
 //
-// Reads are skipped too, not just the mutating verbs. `bootout` polls `print`
-// to confirm the job stopped; leaving that live has it watch the machine's own
-// job, which is still running and never will stop, until it times out.
+// Reads stay live. Skipping them too had `loaded()` answer "nothing is there"
+// for every caller, which changed what the doctor reports about the service
+// and, through it, what else the doctor does -- CI caught that as two
+// unrelated Windows tests failing in their own cleanup. Callers that poll a
+// read after a skipped mutation bail out before the loop instead.
+//
+// Only launchd is covered here. systemd and Task Scheduler have the identical
+// hole -- both are addressed by unit and task name, neither of which a test
+// can redirect -- but the fix could not be verified on this machine, and two
+// attempts at it broke CI on platforms it was not written for. Worth doing
+// separately, on a host that can actually run it.
 export function serviceManagerDisabled(env = process.env) {
   return env.CODEX_ROUTER_SKIP_LAUNCHCTL === "1"
     || env.MODEL_ROUTER_SKIP_SERVICE_MANAGER === "1";
