@@ -81,6 +81,14 @@ export function userModelIdentity({ providerId, upstreamId, metadata }) {
   };
 }
 
+// The picker text a curated entry carries until someone gives it a better
+// one. Exported so curation can tell "nobody has written a description here"
+// apart from a description the user edited, the same way the untouched
+// DEFAULT_CONTEXT_WINDOW/DEFAULT_AUTO_COMPACT pair marks untuned sizing.
+export function defaultUserModelDescription(providerId) {
+  return `User-curated ${providerId} model; conservative default metadata that can be edited in the user model file.`;
+}
+
 export function userModelEntry({ providerId, upstreamId, requestProfile, priority, metadata }) {
   const identity = userModelIdentity({ providerId, upstreamId, metadata });
   const entry = {
@@ -89,7 +97,7 @@ export function userModelEntry({ providerId, upstreamId, requestProfile, priorit
     provider: providerId,
     listed: true,
     displayName: officialModelDisplayName(providerId, upstreamId) || `${upstreamId} (curated)`,
-    description: `User-curated ${providerId} model; conservative default metadata that can be edited in the user model file.`,
+    description: defaultUserModelDescription(providerId),
     priority,
     defaultEffort: "high",
     reasoningLevels: [{ effort: "high", description: "Adaptive reasoning" }],

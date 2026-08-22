@@ -9,6 +9,7 @@ import {
   DEFAULT_AUTO_COMPACT,
   DEFAULT_CONTEXT_WINDOW,
   USER_MODELS_PATH,
+  defaultUserModelDescription,
   readUserModels,
   userModelEntry,
   userModelIdentity,
@@ -18,6 +19,7 @@ import {
   curationPrimaryProviderId,
   curationProviderIds,
   curatedModelContextLength,
+  curatedModelDescription,
   curatedModelProviderId,
 } from "./opencode-curation.mjs";
 import {
@@ -190,12 +192,29 @@ export function normalizeCurationModels(models, providerId) {
     const documented = curatedSizing(
       curatedModelContextLength(providerId, model.upstreamModel),
     );
-    const sized =
+    const upgradeSizing =
       documented &&
       routed.contextWindow === DEFAULT_CONTEXT_WINDOW &&
-      routed.autoCompact === DEFAULT_AUTO_COMPACT
-        ? { ...routed, ...documented }
-        : routed;
+      routed.autoCompact === DEFAULT_AUTO_COMPACT;
+    // The stock description says the entry carries conservative defaults, so
+    // it stops being true the moment the sizing is upgraded. Replace it with
+    // the sourcing note only while it is still the untouched stock string;
+    // anything the user wrote there is theirs.
+    const documentedDescription = curatedModelDescription(providerId, model.upstreamModel);
+    const upgradeDescription =
+      upgradeSizing &&
+      documentedDescription &&
+      // An entry rerouted onto the Responses variant still carries the stock
+      // string naming the provider it was curated under, so accept either.
+      (routed.description === defaultUserModelDescription(routed.provider) ||
+        routed.description === defaultUserModelDescription(model.provider));
+    const sized = upgradeSizing
+      ? {
+          ...routed,
+          ...documented,
+          ...(upgradeDescription ? { description: documentedDescription } : {}),
+        }
+      : routed;
     const existing = normalized.get(model.upstreamModel);
     if (!existing || model.provider === targetProvider) {
       normalized.set(model.upstreamModel, sized);
@@ -380,6 +399,14 @@ async function main() {
     const documented = curatedSizing(curatedModelContextLength(providerId, id));
     const sizing = advertised || documented;
     if (sizing) Object.assign(metadata, sizing);
+    // A documented window is not a conservative default, and this repository
+    // records where such a number came from in the entry's own description
+    // rather than only in a source comment. The live catalog's own figure
+    // needs no note; it is first-hand and already labeled "advertised".
+    if (!advertised && documented) {
+      const description = curatedModelDescription(providerId, id);
+      if (description) metadata.description = description;
+    }
     if (!interactive) return Object.keys(metadata).length > 0 ? metadata : undefined;
     process.stdout.write(`\nMetadata for ${id} (Enter keeps the default):\n`);
     const suggested = sizing?.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
@@ -393,6 +420,9 @@ async function main() {
       const sizing = curatedSizing(context);
       if (!sizing) throw new Error(`Invalid context window: ${rawContext}`);
       Object.assign(metadata, sizing);
+      // The sourcing note describes the documented figure. The user just
+      // replaced it, so the note no longer matches what is stored.
+      if (context !== documented?.contextWindow) delete metadata.description;
     }
     if (confirm(`  Does ${id} accept image input?`)) {
       metadata.inputModalities = ["text", "image"];

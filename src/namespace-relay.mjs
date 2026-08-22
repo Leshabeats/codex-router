@@ -78,6 +78,33 @@ function availableCustomToolName(nativeName, visibleNames) {
   return `${stem}_${suffix}`;
 }
 
+// A custom tool's `format` is the model's only specification of the freeform
+// payload it must emit: Codex ships apply_patch's V4A dialect as a lark
+// grammar and describes the format nowhere else. A function tool has no
+// grammar slot, so dropping `format.definition` on the way through would hand
+// the model a bare "raw input" string and leave any model that has not
+// memorised V4A emitting patches Codex cannot parse. Carry the definition in
+// the bridged description instead -- that is the one field every
+// function-tool provider does put in front of the model.
+export function bridgedCustomToolDescription(tool) {
+  const sections = [];
+  if (typeof tool?.description === "string" && tool.description.trim()) {
+    sections.push(tool.description.trim());
+  }
+  const format = tool?.format;
+  const definition = typeof format?.definition === "string" ? format.definition.trim() : "";
+  if (definition) {
+    const syntax = typeof format?.syntax === "string" && format.syntax.trim()
+      ? format.syntax.trim()
+      : "grammar";
+    sections.push(
+      `The \`${CUSTOM_TOOL_INPUT_PROPERTY}\` string is freeform text, not JSON, and must parse ` +
+        `against this ${syntax} grammar:\n\n${definition}`,
+    );
+  }
+  return sections.length ? sections.join("\n\n") : undefined;
+}
+
 // OpenCode accepts ordinary JSON-schema function tools but rejects OpenAI's
 // freeform `type: "custom"` definition. Codex exposes apply_patch only in that
 // native form. Present the same raw-patch contract as one required string
@@ -130,10 +157,11 @@ export function bridgeCustomTools(
           tool?.type === "custom" ? nativeToProvider.get(tool.name) : undefined;
         if (!providerName) return tool;
         changedTools = true;
+        const description = bridgedCustomToolDescription(tool);
         return {
           type: "function",
           name: providerName,
-          ...(typeof tool.description === "string" ? { description: tool.description } : {}),
+          ...(description ? { description } : {}),
           parameters: {
             type: "object",
             properties: {

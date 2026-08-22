@@ -153,7 +153,11 @@ export function migrateModelVisibility(replacements) {
     const sourceSeeded = seeded.has(from);
     if (!sourceHidden && !sourceVisible && !sourceSeeded) continue;
 
-    const destinationDecided = seeded.has(to);
+    // `seeded` records decisions this code made; a hand-edited state file can
+    // name the destination in `visible` or `hidden` without it. Either listing
+    // is a decision, and `writePickerState` drops a slug from `visible` when it
+    // is also hidden, so overwriting one here can silently lose an explicit show.
+    const destinationDecided = seeded.has(to) || visible.has(to) || hidden.has(to);
     hidden.delete(from);
     visible.delete(from);
     seeded.delete(from);

@@ -26,10 +26,12 @@ const {
   await import("../src/curate-models.mjs");
 const {
   curatedModelContextLength,
+  curatedModelDescription,
   curatedModelProviderId,
   curationProviderIds,
 } = await import("../src/opencode-curation.mjs");
-const { userModelEntry } = await import("../src/user-models.mjs");
+const { defaultUserModelDescription, userModelEntry } =
+  await import("../src/user-models.mjs");
 process.argv = savedArgv;
 process.exitCode = 0;
 
@@ -600,4 +602,106 @@ test("curation publishes through the overlay finalizer, never the installer", ()
     "curate-models.mjs must not spawn processes to publish curated models",
   );
   assert.match(source, /applyModelOverlayPublication/);
+});
+
+// A documented window is the one place this repository departs from
+// "conservative default", so it has to say where the number came from. The
+// checked-in precedent is config/zai/coding/glm-5.3.json, whose description
+// records the probe that justified 1M. Curated entries have the same field.
+test("a documented OpenCode Free window ships with the sourcing that justifies it", () => {
+  for (const id of ["muse-spark-1.2-contributor-free", "x-preview-f-free"]) {
+    const description = curatedModelDescription("opencode-free", id);
+    assert.equal(typeof description, "string", `${id} has no sourcing note`);
+    // Naming the figure, and naming what published it, is the whole point.
+    const window = curatedModelContextLength("opencode-free", id);
+    assert.ok(
+      description.includes(window.toLocaleString("en-US")),
+      `${id} note omits its own window`,
+    );
+    assert.match(description, /models\.dev/);
+    assert.match(description, /free id/);
+  }
+  // Every other free id keeps the conservative default and earns no note.
+  assert.equal(curatedModelDescription("opencode-free", "mimo-v2.5-free"), undefined);
+  assert.equal(curatedModelDescription("fireworks", "x-preview-f-free"), undefined);
+});
+
+test("the Responses variant resolves the same sourcing as its base provider", () => {
+  assert.equal(
+    curatedModelDescription("opencode-free-responses", "muse-spark-1.2-contributor-free"),
+    curatedModelDescription("opencode-free", "muse-spark-1.2-contributor-free"),
+  );
+});
+
+test("upgrading an untuned window replaces the note that called it a default", () => {
+  const defaultOx = userModelEntry({
+    providerId: "opencode-free",
+    upstreamId: "x-preview-f-free",
+    priority: 149,
+  });
+  assert.equal(defaultOx.description, defaultUserModelDescription("opencode-free"));
+  const [sized] = normalizeCurationModels([defaultOx], "opencode-free");
+  assert.equal(sized.contextWindow, 1_000_000);
+  assert.equal(sized.description, curatedModelDescription("opencode-free", "x-preview-f-free"));
+
+  // A description the operator wrote is theirs; the sizing upgrade still runs.
+  const annotated = { ...defaultOx, description: "My own note." };
+  const [keptNote] = normalizeCurationModels([annotated], "opencode-free");
+  assert.equal(keptNote.description, "My own note.");
+  assert.equal(keptNote.contextWindow, 1_000_000);
+
+  // A tuned window is not upgraded, so its description is not rewritten either.
+  const tuned = { ...defaultOx, autoCompact: 100_000 };
+  assert.strictEqual(normalizeCurationModels([tuned], "opencode-free")[0], tuned);
+});
+
+test("scripted OpenCode Free curation stores the documented window and its sourcing", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "curate-opencode-free-sourcing-"));
+  const file = path.join(dir, "user-models.json");
+  const fixture = path.join(dir, "models.json");
+  const oxId = "x-preview-f-free";
+  const otherId = "mimo-v2.5-free";
+  writeFileSync(fixture, JSON.stringify({ data: [{ id: oxId }, { id: otherId }] }));
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [
+        path.join(root, "src", "curate-models.mjs"),
+        "opencode-free",
+        "--models",
+        `${oxId},${otherId}`,
+        "--fixture",
+        fixture,
+        "--no-apply",
+      ],
+      {
+        cwd: root,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          CODEX_HOME: path.join(dir, "codex"),
+          MODEL_ROUTER_STATE_DIR: dir,
+          MODEL_ROUTER_USER_MODELS: file,
+          MODEL_ROUTER_MODEL_PICKER_STATE: path.join(dir, "model-picker.json"),
+          OPENCODE_API_KEY: "",
+          OPENCODE_GO_API_KEY: "",
+        },
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const stored = JSON.parse(readFileSync(file, "utf8"));
+    const ox = stored.models.find((model) => model.upstreamModel === oxId);
+    assert.equal(ox.contextWindow, 1_000_000);
+    assert.equal(ox.autoCompact, 850_000);
+    assert.equal(ox.description, curatedModelDescription("opencode-free", oxId));
+    // autoCompact has to leave room for the published 131,072 output limit, or
+    // compaction never fires early enough to keep a completion inside the window.
+    assert.ok(ox.contextWindow - ox.autoCompact >= 131_072);
+
+    const other = stored.models.find((model) => model.upstreamModel === otherId);
+    assert.equal(other.contextWindow, 131072);
+    assert.equal(other.description, defaultUserModelDescription("opencode-free"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

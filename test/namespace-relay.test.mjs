@@ -1296,6 +1296,32 @@ test("OpenCode input repair preserves collaboration text and inherited images", 
   assert.equal(compatible[0].content[1].detail, "auto");
 });
 
+// Codex ships apply_patch as a custom tool whose lark grammar is the only
+// place the V4A patch dialect is written down: the native definition carries
+// no description at all. A fixture with a permissive `start: /.+/` and a
+// friendly description would pass while the bridge threw the real spec away,
+// so use the shape Codex actually sends.
+const V4A_GRAMMAR = [
+  "start: begin_patch hunk+ end_patch",
+  'begin_patch: "*** Begin Patch" LF',
+  'end_patch: "*** End Patch" LF?',
+  "",
+  "hunk: add_hunk | delete_hunk | update_hunk",
+  'add_hunk: "*** Add File: " filename LF add_line+',
+  'delete_hunk: "*** Delete File: " filename LF',
+  'update_hunk: "*** Update File: " filename LF change_move? change?',
+  "filename: /(.+)/",
+  'add_line: "+" /(.+)/ LF -> line',
+  "",
+  'change_move: "*** Move to: " filename LF',
+  "change: (change_context | change_line)+ eof_line?",
+  'change_context: ("@@" | "@@ " /(.+)/) LF',
+  'change_line: ("+" | "-" | " ") /(.+)/ LF',
+  'eof_line: "*** End of File" LF',
+  "",
+  "%import common.LF",
+].join("\n");
+
 test("custom-tool bridge maps apply_patch definitions and paired history losslessly", () => {
   const namespaces = new Map();
   const patch = "*** Begin Patch\n*** Update File: seed.txt\n@@\n-before\n+after\n*** End Patch";
@@ -1311,8 +1337,7 @@ test("custom-tool bridge maps apply_patch definitions and paired history lossles
       {
         type: "custom",
         name: "apply_patch",
-        description: "Apply a patch.",
-        format: { type: "grammar", syntax: "lark", definition: "start: /.+/" },
+        format: { type: "grammar", syntax: "lark", definition: V4A_GRAMMAR },
       },
       ordinary,
     ],
@@ -1332,6 +1357,10 @@ test("custom-tool bridge maps apply_patch definitions and paired history lossles
   );
   assert.deepEqual(bridged.tools[0].parameters.required, ["input"]);
   assert.equal(bridged.tools[0].format, undefined);
+  // A function tool has no grammar slot, so the definition has to survive in
+  // the description or the model is told nothing about the patch format.
+  assert.ok(bridged.tools[0].description.includes(V4A_GRAMMAR));
+  assert.match(bridged.tools[0].description, /lark grammar/);
   assert.deepEqual(bridged.tools[1], ordinary);
   assert.deepEqual(bridged.toolChoice, { type: "function", name: "apply_patch" });
   assert.deepEqual(bridged.input[0], {
@@ -1477,4 +1506,147 @@ test("one-byte fragmented SSE preserves escaped and multibyte custom input", asy
   assert.doesNotMatch(output, /response\.function_call_arguments/);
   assert.match(output, /event: response\.custom_tool_call_input\.delta/);
   assert.match(output, /event: response\.custom_tool_call_input\.done/);
+});
+
+test("a bridged custom tool without a grammar carries only what it was given", () => {
+  const namespaces = new Map();
+  const described = bridgeCustomTools(
+    [{ type: "custom", name: "apply_patch", description: "Apply a patch." }],
+    [],
+    namespaces,
+  );
+  assert.equal(described.tools[0].description, "Apply a patch.");
+
+  const bare = bridgeCustomTools([{ type: "custom", name: "apply_patch" }], [], new Map());
+  assert.equal("description" in bare.tools[0], false);
+});
+
+test("a bridged custom tool keeps its description above the grammar", () => {
+  const namespaces = new Map();
+  const bridged = bridgeCustomTools(
+    [
+      {
+        type: "custom",
+        name: "apply_patch",
+        description: "Apply a patch.",
+        format: { type: "grammar", syntax: "lark", definition: V4A_GRAMMAR },
+      },
+    ],
+    [],
+    namespaces,
+  );
+  const { description } = bridged.tools[0];
+  assert.ok(description.startsWith("Apply a patch.\n\n"));
+  assert.ok(description.endsWith(V4A_GRAMMAR));
+  assert.match(description, /`input` string is freeform text, not JSON/);
+});
+
+// Known gap, pinned rather than repaired: a model that ignores the bridged
+// `{ input: "..." }` schema opens as a custom_tool_call and closes as a
+// function_call, because the close events only convert when the accumulated
+// arguments actually parse. Codex is left with a mismatched pair and no input
+// events at all. Choosing the recovery semantics -- surface the raw text as
+// the patch and let apply_patch reject it, or refuse to convert the open --
+// is a behavior decision, not a cleanup; this test exists so that decision
+// cannot be made by accident.
+test("malformed bridged arguments close a custom_tool_call as a function_call", async () => {
+  const namespaces = new Map();
+  bridgeCustomTools([{ type: "custom", name: "apply_patch" }], [], namespaces);
+  const argumentsText = JSON.stringify({ patch: "*** Begin Patch\n*** End Patch" });
+  const events = [
+    {
+      type: "response.output_item.added",
+      item: {
+        type: "function_call",
+        id: "fc_bad",
+        call_id: "call_bad",
+        name: "apply_patch",
+        arguments: "",
+      },
+    },
+    { type: "response.function_call_arguments.delta", item_id: "fc_bad", delta: argumentsText },
+    { type: "response.function_call_arguments.done", item_id: "fc_bad", arguments: argumentsText },
+    {
+      type: "response.output_item.done",
+      item: {
+        type: "function_call",
+        id: "fc_bad",
+        call_id: "call_bad",
+        name: "apply_patch",
+        arguments: argumentsText,
+      },
+    },
+  ];
+  const source = events
+    .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+    .join("");
+  const transform = new NamespaceToolCallTransform(namespaces, "text/event-stream");
+  const output = await collect(Readable.from([Buffer.from(source, "utf8")]).pipe(transform));
+  const payloads = output
+    .split(/\n\n/)
+    .filter(Boolean)
+    .map((block) => JSON.parse(block.split("\n").find((line) => line.startsWith("data: ")).slice(6)));
+
+  assert.deepEqual(
+    payloads.map((event) => event.type),
+    [
+      "response.output_item.added",
+      "response.function_call_arguments.done",
+      "response.output_item.done",
+    ],
+  );
+  assert.equal(payloads[0].item.type, "custom_tool_call");
+  assert.equal(payloads[2].item.type, "function_call");
+  assert.equal(
+    payloads.some((event) => event.type.startsWith("response.custom_tool_call_input.")),
+    false,
+  );
+});
+
+test("a well-formed bridged call closes as the custom_tool_call it opened", async () => {
+  const namespaces = new Map();
+  bridgeCustomTools([{ type: "custom", name: "apply_patch" }], [], namespaces);
+  const patch = "*** Begin Patch\n*** End Patch";
+  const argumentsText = JSON.stringify({ input: patch });
+  const events = [
+    {
+      type: "response.output_item.added",
+      item: {
+        type: "function_call",
+        id: "fc_ok",
+        call_id: "call_ok",
+        name: "apply_patch",
+        arguments: "",
+      },
+    },
+    { type: "response.function_call_arguments.delta", item_id: "fc_ok", delta: argumentsText },
+    { type: "response.function_call_arguments.done", item_id: "fc_ok", arguments: argumentsText },
+    {
+      type: "response.output_item.done",
+      item: {
+        type: "function_call",
+        id: "fc_ok",
+        call_id: "call_ok",
+        name: "apply_patch",
+        arguments: argumentsText,
+      },
+    },
+  ];
+  const source = events
+    .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+    .join("");
+  const transform = new NamespaceToolCallTransform(namespaces, "text/event-stream");
+  const output = await collect(Readable.from([Buffer.from(source, "utf8")]).pipe(transform));
+  const payloads = output
+    .split(/\n\n/)
+    .filter(Boolean)
+    .map((block) => JSON.parse(block.split("\n").find((line) => line.startsWith("data: ")).slice(6)));
+
+  assert.equal(payloads[0].item.type, "custom_tool_call");
+  assert.equal(payloads.at(-1).item.type, "custom_tool_call");
+  assert.equal(payloads.at(-1).item.input, patch);
+  assert.equal(
+    payloads.some((event) => event.type === "response.custom_tool_call_input.done"),
+    true,
+  );
 });
