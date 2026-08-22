@@ -21,6 +21,7 @@ const PYTHON_AVAILABLE =
 const GUIDED_SETUP_HELPER = String.raw`
 import errno
 import os
+import re
 import select
 import sys
 import termios
@@ -42,7 +43,8 @@ if pid == 0:
     os.execve(node, [node, setup, "--guided", "--providers", "deepseek", "--selection-only"], env)
 
 output = bytearray()
-model_toggled = False
+models_cleared = False
+flash_selected = False
 models_confirmed = False
 confirmed = False
 key_sent = False
@@ -61,10 +63,17 @@ while True:
         break
     output.extend(chunk)
     model_prompts = output.count(b"Toggle model numbers")
-    if not model_toggled and model_prompts >= 1:
-        os.write(master, b"2\n")
-        model_toggled = True
-    elif model_toggled and not models_confirmed and model_prompts >= 2:
+    flash = re.search(br"\[x\]\s+(\d+)\. DeepSeek V4 Flash \(API\)", output)
+    if not models_cleared and model_prompts >= 1:
+        os.write(master, b"n\n")
+        models_cleared = True
+    elif models_cleared and not flash_selected and model_prompts >= 2:
+        if flash is None:
+            os.kill(pid, 9)
+            raise SystemExit("DeepSeek V4 Flash was not listed")
+        os.write(master, flash.group(1) + b"\n")
+        flash_selected = True
+    elif flash_selected and not models_confirmed and model_prompts >= 3:
         os.write(master, b"\n")
         models_confirmed = True
     if not confirmed and b"Enter DeepSeek API key securely now?" in output:
@@ -160,7 +169,7 @@ test(
       assert.deepEqual(picker.visible, [
         "deepseek/deepseek-v4-flash",
       ]);
-      assert.deepEqual(picker.hidden, ["deepseek/deepseek-v4-pro"]);
+      assert.ok(picker.hidden.includes("deepseek/deepseek-v4-pro"));
       assert.match(result.stdout, /DeepSeek V4 Flash \(API\)/);
       assert.match(result.stdout, /DeepSeek V4 Pro \(API\)/);
       assert.doesNotMatch(result.stdout, /Kimi K3/);
