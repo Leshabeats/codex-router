@@ -5291,14 +5291,14 @@ test("a turn with no image reaches a text-only model untouched", async () => {
   }
 });
 
-test("a live child turn settles an experimental subagent's proof", async () => {
+test("a live child turn refines a legacy experimental subagent diagnostic", async () => {
   const proofsPath = path.join(
     mkdtempSync(path.join(os.tmpdir(), "subagent-proofs-e2e-")),
     "multi-agent-proofs.json",
   );
-  // Three models in the experimental window: one will prove itself, one will
-  // be rejected structurally, one completes a turn that carries no subagent
-  // marker and must stay untouched.
+  // Three legacy experimental records: one gets positive diagnostic evidence,
+  // one is rejected structurally, and an unmarked turn stays untouched. None
+  // of these records can change the registry's v2 authority.
   writeFileSync(
     proofsPath,
     JSON.stringify({
@@ -5350,13 +5350,13 @@ test("a live child turn settles an experimental subagent's proof", async () => {
   try {
     await waitFor(`${routerBase(routerPort)}/models`, router);
 
-    // A clean completion of a marked child turn is the durable proof.
+    // A clean completion refines the legacy record, but is not certification.
     const proven = await childTurn("deepseek/deepseek-v4-pro", {
       "x-openai-subagent": "review-child",
     });
     assert.equal(proven.status, 200);
 
-    // A structural rejection of a marked child turn is the demotion.
+    // A structural rejection becomes negative diagnostic evidence.
     const rejected = await childTurn("deepseek/deepseek-v4-flash", {
       "x-openai-subagent": "review-child",
     });
@@ -5394,8 +5394,8 @@ test("a live child turn settles an experimental subagent's proof", async () => {
 test("ordinary child traffic does not mutate a legacy local proven record", async () => {
   const stateDir = mkdtempSync(path.join(os.tmpdir(), "subagent-demote-e2e-"));
   const proofsPath = path.join(stateDir, "multi-agent-proofs.json");
-  // Both already carry the durable proof: this is the state the old observer
-  // stopped looking at.
+  // Both carry legacy positive evidence. It remains readable but has no
+  // authority over the registry certificate.
   writeFileSync(
     proofsPath,
     JSON.stringify({

@@ -360,9 +360,10 @@ function routerCallerKey() {
  */
 export function subagentPreset() {
   const { models } = dshRoutedModels();
-  // The same proven set Codex's native spawn overrides draw from: a model
-  // marked `multiAgentVersion: "v2"` has been through the collaboration probe,
-  // and the user has not switched it off.
+  // The same repository-certified set Codex's native spawn overrides draw
+  // from: a v2 route has an accepted native-collaboration application (or an
+  // exact pre-workflow grandfathered identity), and the user has not switched
+  // it off. Machine-local compatibility probes never enter this set.
   const eligible = subagentEligibleModels(models, readMultiAgentSettings());
   const chosen = dshDefaultModel(eligible.length ? eligible : models);
   return {

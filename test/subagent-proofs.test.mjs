@@ -68,17 +68,17 @@ test("a candidate never supplies a locally revocable v2 claim", () => {
   assert.equal(awaitingSpawnProof(slug), false);
   assert.equal(spawnProofRevocable(slug), false);
 
-  // The counts that condemned it travel with the record, so `control subagents
+  // The counts that rejected it travel with the record, so `control subagents
   // status` and the tray can say how much of a spawn it took.
-  const demoted = recordSpawnFailure(slug, {
+  const rejected = recordSpawnFailure(slug, {
     status: 200,
     reason: "one child spawn ran 6 turns without converging",
     turns: 6,
     newInputTokens: 2_100,
   });
-  assert.equal(demoted.status, "failed");
-  assert.equal(demoted.spawn.turns, 6);
-  assert.equal(demoted.spawn.newInputTokens, 2_100);
+  assert.equal(rejected.status, "failed");
+  assert.equal(rejected.spawn.turns, 6);
+  assert.equal(rejected.spawn.newInputTokens, 2_100);
   assert.equal(
     spawnProofRevocable(slug),
     false,
@@ -145,7 +145,7 @@ test("verification skips reviewed v1/v2 models, unknown slugs, and settled candi
   recordProbeResult("deepseek/deepseek-v4-pro", { ok: true, checks: [] });
   const candidates = subagentVerificationCandidates([
     "kimi-oauth/k3", // registry v2: shipped with the full native proof
-    "deepseek/deepseek-v4-pro", // already experimental locally
+    "deepseek/deepseek-v4-pro", // already a settled local candidate
     "deepseek/deepseek-v4-flash", // real, unproven: the one that needs research
     "not-a/model", // unknown slugs cannot be probed
     "deepseek/deepseek-v4-flash", // duplicates collapse
@@ -254,24 +254,20 @@ test("a plan-entitlement refusal defers every model it gated, condemning none", 
   assert.equal(subagentProofSnapshot()[slug], undefined);
 });
 
-// Issue #257: an operator watched "subagent proven: <slug> completed a live
-// child turn" and read it as the child finishing the work it was delegated.
-// The observer sees one HTTP turn — a child makes one per tool-call round trip
-// and the loop stringing them together is Codex's — so the promotion cannot
-// mean that, and the line it prints has to scope its own claim. Guarded at the
-// source because the wording *is* the fix: nothing else in the process states
-// what `proven` promises to the person reading the router log.
-test("the subagent promotion log line claims the wire role, not a finished task", () => {
+// Historical child traffic remains useful application evidence, but the log
+// must say it is diagnostic rather than implying a local v2 promotion or a
+// finished delegated task.
+test("the legacy child-observation log does not claim local v2 authority", () => {
   const source = readFileSync(new URL("../src/router.mjs", import.meta.url), "utf8");
   const start = source.indexOf("function observeSubagentOutcome");
-  assert.ok(start > 0, "observeSubagentOutcome moved; re-point this guard at the promotion path");
+  assert.ok(start > 0, "observeSubagentOutcome moved; re-point this guard at the observation path");
   // Scoped to the one function, so an unrelated router line cannot satisfy it.
   const body = source.slice(start).split(/\r?\n\}/)[0];
-  assert.match(body, /child role verified/);
-  assert.match(body, /not a claim the child finished its task/);
+  assert.match(body, /legacy subagent evidence observed/);
+  assert.match(body, /remains diagnostic and is not a repository v2 certificate/);
   assert.doesNotMatch(
     body,
-    /subagent proven/,
-    "the promotion line claims more than one observed turn proves",
+    /subagent (?:proven|promoted)/,
+    "the observation line must not claim local registry authority",
   );
 });

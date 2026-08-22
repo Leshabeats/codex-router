@@ -363,6 +363,125 @@ test("control refuses to enable a repository-certified v1 model as a v2 subagent
   }
 });
 
+test("a disabled repository-certified native v2 model can be turned back on", () => {
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "control-subagent-native-v2-"));
+  const slug = "gpt-5.6-luna";
+  const env = {
+    ...process.env,
+    CODEX_HOME: stateDir,
+    MODEL_ROUTER_TARGET: "codex",
+    MODEL_ROUTER_STATE_DIR: stateDir,
+  };
+  writeFileSync(
+    path.join(stateDir, "native-models.json"),
+    `${JSON.stringify({ models: [{
+      slug,
+      display_name: "GPT-5.6-Luna",
+      visibility: "list",
+      multi_agent_version: "v1",
+    }] })}\n`,
+    { mode: 0o600 },
+  );
+  writeFileSync(
+    path.join(stateDir, "merged-models.json"),
+    `${JSON.stringify({ models: [{ slug, multi_agent_version: "v1" }] })}\n`,
+    { mode: 0o600 },
+  );
+  writeFileSync(
+    path.join(stateDir, "multi-agent-settings.json"),
+    `${JSON.stringify({ version: 2, mode: "selected", enabled: [], disabled: [slug] })}\n`,
+    { mode: 0o600 },
+  );
+  try {
+    const snapshot = probe("codex", [], [], {
+      nativeModels: [{
+        slug,
+        display_name: "GPT-5.6-Luna",
+        visibility: "list",
+        multi_agent_version: "v1",
+      }],
+      subagentSettings: { mode: "selected", enabled: [], disabled: [slug] },
+    });
+    const row = snapshot.models.find((model) => model.slug === slug);
+    assert.equal(row.multiAgentVersion, "v1");
+    assert.equal(row.subagentCertification, "v2");
+
+    const state = JSON.parse(execFileSync(
+      process.execPath,
+      [path.join(root, "src", "control.mjs"), "subagents", "set", slug, "on"],
+      { cwd: root, encoding: "utf8", env, stdio: "pipe" },
+    ));
+    assert.deepEqual(state.disabled, []);
+    assert.deepEqual(state.enabled, [slug]);
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("an unknown native route is not mistaken for the merged catalog's conservative v1", () => {
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "control-subagent-native-unknown-"));
+  const slug = "gpt-native-candidate";
+  const env = {
+    ...process.env,
+    CODEX_HOME: stateDir,
+    MODEL_ROUTER_TARGET: "codex",
+    MODEL_ROUTER_STATE_DIR: stateDir,
+  };
+  writeFileSync(
+    path.join(stateDir, "native-models.json"),
+    `${JSON.stringify({ models: [{ slug, visibility: "list" }] })}\n`,
+    { mode: 0o600 },
+  );
+  writeFileSync(
+    path.join(stateDir, "merged-models.json"),
+    `${JSON.stringify({ models: [{ slug, multi_agent_version: "v1" }] })}\n`,
+    { mode: 0o600 },
+  );
+  try {
+    const state = JSON.parse(execFileSync(
+      process.execPath,
+      [path.join(root, "src", "control.mjs"), "subagents", "set", slug, "on"],
+      { cwd: root, encoding: "utf8", env, stdio: "pipe" },
+    ));
+    assert.deepEqual(state.enabled, [slug]);
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("control can test an uncertified route despite its conservative merged-catalog v1", () => {
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "control-subagent-unknown-"));
+  const slug = "deepseek/deepseek-v4-flash";
+  const env = {
+    ...process.env,
+    MODEL_ROUTER_TARGET: "codex",
+    MODEL_ROUTER_STATE_DIR: stateDir,
+  };
+  writeFileSync(
+    path.join(stateDir, "merged-models.json"),
+    `${JSON.stringify({ models: [{ slug, multi_agent_version: "v1" }] })}\n`,
+    { mode: 0o600 },
+  );
+  // A settled candidate prevents this command-level regression test from
+  // launching the detached, quota-spending probe worker.
+  writeFileSync(
+    path.join(stateDir, "multi-agent-proofs.json"),
+    `${JSON.stringify({ version: 1, proofs: { [slug]: { status: "candidate" } } })}\n`,
+    { mode: 0o600 },
+  );
+  try {
+    const state = JSON.parse(execFileSync(
+      process.execPath,
+      [path.join(root, "src", "control.mjs"), "subagents", "set", slug, "on"],
+      { cwd: root, encoding: "utf8", env, stdio: "pipe" },
+    ));
+    assert.equal(state.mode, "selected");
+    assert.deepEqual(state.enabled, [slug]);
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
 test("control toggles tool-result aging without a router restart", () => {
   const stateDir = mkdtempSync(path.join(os.tmpdir(), "control-tool-result-aging-"));
   const env = {

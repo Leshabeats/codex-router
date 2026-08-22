@@ -21,6 +21,7 @@ import {
   deriveBaseInstructions,
   mergeNativeCatalogs,
   mergeNativeModel,
+  nativeSubagentCertification,
   promoteNativeMultiAgent,
   routedCatalogConfigured,
   routedModel,
@@ -1033,6 +1034,7 @@ test("proven subagent mode still promotes upstream-verified v2-backend slugs", (
 
 test("an upstream-verified slug still honours disabled and picker-hidden", () => {
   const native = [{ slug: "gpt-5.6-luna", visibility: "list", multi_agent_version: "v1" }];
+  assert.equal(nativeSubagentCertification(native[0]), "v2");
   const promoted = promoteNativeMultiAgent(
     native,
     { mode: "proven", enabled: [], disabled: ["gpt-5.6-luna"] },

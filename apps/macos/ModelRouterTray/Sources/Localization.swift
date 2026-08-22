@@ -452,6 +452,8 @@ enum RouterChineseText {
     "5-hour limit": "5 小时限制",
     "Hidden from picker — show it below to use it here": "已从选择器隐藏 — 请在下方显示后才能使用",
     "Proven v2": "已验证 v2",
+    "v1 only": "仅支持 v1",
+    "Certification candidate": "认证候选",
     "Not selected": "未选择",
     "Apply the checked-out router revision, then run the Codex doctor": "应用已检出的路由版本，然后运行 Codex doctor",
     "Run the Codex doctor and repair managed router files": "运行 Codex doctor 并修复受管理的路由文件",

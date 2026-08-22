@@ -321,6 +321,8 @@ enum RouterArabicText {
     "5-hour limit": "حد 5 ساعات",
     "Hidden from picker — show it below to use it here": "مخفي من المنتقي — أظهره أدناه لاستخدامه هنا",
     "Proven v2": "v2 متحقق منه",
+    "v1 only": "v1 فقط",
+    "Certification candidate": "مرشح للاعتماد",
     "Not selected": "غير محدد",
     "Apply the checked-out router revision, then run the Codex doctor": "تطبيق نسخة الموجّه المسحوبة ثم تشغيل Codex doctor",
     "Run the Codex doctor and repair managed router files": "تشغيل Codex doctor وإصلاح ملفات الموجّه المُدارة",

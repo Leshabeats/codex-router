@@ -782,34 +782,41 @@ function startPanel() {
     // test, while explicit v1 routes are never re-promoted locally.
     const subagentModels = enabledModels;
     const subagentGroups = groupModels(subagentModels);
+    const subagentCertification = (model) =>
+      model.subagentCertification ??
+      (model.multiAgentVersion === "v2" ? "v2" : model.multiAgentVersion === "v1" ? "v1" : "unknown");
+    const isCertifiedV2 = (model) => subagentCertification(model) === "v2";
     const isSubagentOn = (model) =>
       model.visible === false
         ? false
         : !disabledSubagents.has(model.slug) &&
-          model.multiAgentVersion === "v2";
+          isCertifiedV2(model);
     const subagentRow = (model) => {
         const checked = isSubagentOn(model);
         const proof = subagentProofs[model.slug];
-        const certification = model.subagentCertification || (model.multiAgentVersion === "v2" ? "v2" : "unknown");
+        const certification = subagentCertification(model);
+        const certified = certification === "v2";
         const knownV1 = certification === "v1";
-        const testActive = !knownV1 && model.multiAgentVersion !== "v2" &&
-          (proof?.status === "checking" || (!proof?.status || proof.status === "failed") && selectedSubagents.has(model.slug));
+        const checking = !certified && !knownV1 && proof?.status === "checking";
+        const candidate = !certified && !knownV1 && ["candidate", "experimental", "proven"].includes(proof?.status);
+        const testActive = !certified && !knownV1 && !candidate &&
+          selectedSubagents.has(model.slug);
         const badge = model.visible === false
           ? t("models.hidden")
-          : proof?.status === "checking"
-            ? t("status.working")
+          : certified
+            ? t("models.provenV2")
             : knownV1
               ? "v1 only"
-            : proof?.status === "candidate"
+            : checking
+              ? t("status.working")
+            : candidate
               ? "Certification candidate"
             : proof?.status === "failed"
               ? `${t("status.error")}: ${proof.reason || t("models.untested")}`
-              : model.multiAgentVersion === "v2"
-                ? t("models.provenV2")
-                : t("models.untested");
+              : t("models.untested");
         return `<label class="model-setting-row">
           <span><strong>${escapeHtml(model.displayName)}</strong><small>${escapeHtml(badge)}</small></span>
-          <span class="provider-check"><input type="checkbox" data-command="set_subagent_model" data-subagent="${escapeHtml(model.slug)}" aria-label="${escapeHtml(model.multiAgentVersion === "v2" ? t("models.useModelAria", { model: model.displayName }) : knownV1 ? `${model.displayName} is certified v1` : `Test ${model.displayName} for v2 compatibility`)}"${model.multiAgentVersion === "v2" ? (checked ? " checked" : "") : (testActive ? " checked" : "")}${state.modelSettingsBusy || model.visible === false || knownV1 || proof?.status === "checking" || proof?.status === "candidate" ? " disabled" : ""}></span>
+          <span class="provider-check"><input type="checkbox" data-command="set_subagent_model" data-subagent="${escapeHtml(model.slug)}" aria-label="${escapeHtml(certified ? t("models.useModelAria", { model: model.displayName }) : knownV1 ? `${model.displayName} is certified v1` : `Test ${model.displayName} for v2 compatibility`)}"${certified ? (checked ? " checked" : "") : (testActive ? " checked" : "")}${state.modelSettingsBusy || model.visible === false || knownV1 || candidate ? " disabled" : ""}></span>
         </label>`;
       };
 

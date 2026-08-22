@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { pickerCommandArgs } from "./control-args.mjs";
-import { promoteNativeMultiAgent } from "./catalog.mjs";
+import { nativeSubagentCertification, promoteNativeMultiAgent } from "./catalog.mjs";
 import {
   applyModelOverlayPublication,
   transactModelOverlayMutation,
@@ -120,16 +120,20 @@ function nativeCodexModels(
         .map((model) => String(model?.slug || ""))
         .filter(Boolean),
     );
-    return promoteNativeMultiAgent(
+    const nativeModels = withNativeContextVariants(
       // The capture holds what Codex published; the extended-window variants
       // are the router's own additions to the same group, and the tray is
       // where they are switched on, so they have to be drawn here too. The
       // catalog build derives them from this same list, so the rows the
       // operator sees and the entries Codex reads cannot drift apart.
-      withNativeContextVariants(
-        Array.isArray(parsed.models) ? parsed.models : [],
-        { enabled: contextVariants },
-      ),
+      Array.isArray(parsed.models) ? parsed.models : [],
+      { enabled: contextVariants },
+    );
+    const certificationBySlug = new Map(
+      nativeModels.map((model) => [model.slug, nativeSubagentCertification(model) || "unknown"]),
+    );
+    return promoteNativeMultiAgent(
+      nativeModels,
       subagentSettings,
       hiddenModels,
     )
@@ -145,7 +149,7 @@ function nativeCodexModels(
         // probe consumers; a false marker identifies synthesized variants.
         ...(nativeBaseSlugs.has(model.slug) ? {} : { nativeClientManaged: false }),
         multiAgentVersion: model.multi_agent_version || "v1",
-        subagentCertification: subagentCertification(model),
+        subagentCertification: certificationBySlug.get(model.slug) || "unknown",
         // Base native entries belong to Codex's own catalog.  A router picker
         // overlay must not make them disappear; synthesized context variants
         // remain router-managed and can still be switched off explicitly.
@@ -229,14 +233,14 @@ async function emitProbe() {
   // Local proof records are surfaced for status only. They never alter the
   // registry capability sent to Codex.
   const { applySubagentProofs } = await import("./subagent-proofs.mjs");
-  const provenListedModels = applySubagentProofs(
+  const effectiveListedModels = applySubagentProofs(
     LISTED_MODELS,
     subagentSettings.proofs,
     { hidden: hiddenModels },
   );
   // The tray groups models by provider to build its rows, so protocol
   // variants report their canonical family id: one opencode Go row, not three.
-  const routedModels = provenListedModels.map((model) => ({
+  const routedModels = effectiveListedModels.map((model) => ({
     slug: model.slug,
     displayName: model.displayName,
     provider: canonicalProviderId(model.provider),
@@ -1045,6 +1049,36 @@ async function knownModelSlug(slug) {
 }
 
 async function knownModelSubagentVersion(slug) {
+  // Routed-model certification belongs to the registry. The merged Codex
+  // catalog deliberately serializes an unknown route as conservative v1, so
+  // consulting it first would mislabel every still-uncertified route as a
+  // reviewed v1 verdict and make the compatibility-test workflow unreachable.
+  const { MODEL_BY_SLUG } = await import("./model-registry.mjs");
+  const registryModel = MODEL_BY_SLUG.get(slug);
+  if (registryModel) return registryModel.multiAgentVersion;
+
+  // Native models do not live in the routed registry. Read their undemoted
+  // capture before the merged catalog: a disabled certified route is
+  // deliberately serialized there as v1, but the operator must still be able
+  // to turn it back on. This helper also carries the repository-pinned Luna
+  // certificate and the parent-only verdict for context variants.
+  try {
+    const { NATIVE_CATALOG_PATH } = await import("./paths.mjs");
+    const parsed = JSON.parse(readFileSync(NATIVE_CATALOG_PATH, "utf8"));
+    const model = Array.isArray(parsed.models)
+      ? parsed.models.find((candidate) => String(candidate?.slug) === slug)
+      : undefined;
+    // Finding the route is itself decisive: an omitted version is genuinely
+    // unknown and must stay eligible for the compatibility workflow. Falling
+    // through to the effective merged catalog would turn that unknown into
+    // its conservative serialized v1 and make the UI's Test action fail.
+    if (model) return nativeSubagentCertification(model);
+  } catch {
+    // Fall back to the merged catalog when the original capture is absent.
+  }
+
+  // Retain compatibility with installations that have a merged catalog but
+  // no native capture. This is conservative: an effective v1 remains v1.
   try {
     const { MERGED_CATALOG_PATH } = await import("./paths.mjs");
     const parsed = JSON.parse(readFileSync(MERGED_CATALOG_PATH, "utf8"));
@@ -1055,10 +1089,9 @@ async function knownModelSubagentVersion(slug) {
       return model.multi_agent_version;
     }
   } catch {
-    // Fall back to the checked-in registry for fresh installs.
+    // A missing or damaged merged catalog proves no native v1/v2 verdict.
   }
-  const { MODEL_BY_SLUG } = await import("./model-registry.mjs");
-  return MODEL_BY_SLUG.get(slug)?.multiAgentVersion;
+  return undefined;
 }
 
 async function nativeCodexBaseSlugs() {
@@ -1181,7 +1214,7 @@ async function handleSubagents(action, value, flag, rest = []) {
     }
     setMultiAgentModel(value, flag === "on");
     // Selection is the assignment: switching a model on hands it to the
-    // capability probe. Detached, because this command answers a tray toggle
+    // compatibility probe. Detached, because this command answers a tray toggle
     // and cannot sit on a live network round-trip; the proofs snapshot shows
     // "checking" until the worker records a verdict and republishes.
     if (flag === "on") {

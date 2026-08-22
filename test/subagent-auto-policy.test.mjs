@@ -9,6 +9,7 @@ process.env.MODEL_ROUTER_SUBAGENT_AUTO_POLICY = path.join(stateDir, "policies.js
 
 const {
   matchingSubagentAutoPolicyModels,
+  modelMatchesSubagentAutoPolicy,
   readSubagentAutoPolicies,
   setSubagentAutoPolicy,
   SUBAGENT_AUTO_POLICY_PATH,
@@ -20,6 +21,11 @@ const models = [
   { slug: "qwen-plan/qwen3.8-max", provider: "qwen-plan", upstreamModel: "qwen3.8-max" },
   { slug: "commandcode/qwen3.8-max", provider: "commandcode", upstreamModel: "Qwen/Qwen3.8-Max" },
   { slug: "kimi-api/kimi-k3", provider: "kimi-api", upstreamModel: "kimi-k3" },
+  {
+    slug: "opencode-go-messages/kimi-k2.5",
+    provider: "opencode-go-messages",
+    upstreamModel: "kimi-k2.5",
+  },
 ];
 
 test("provider, model, and family policies match independently", () => {
@@ -33,6 +39,16 @@ test("provider, model, and family policies match independently", () => {
     "qwen-plan/qwen3.8-max",
     "commandcode/qwen3.8-max",
   ]);
+});
+
+test("provider policies include protocol variants of the same credential family", () => {
+  assert.equal(
+    modelMatchesSubagentAutoPolicy(models.at(-1), {
+      kind: "provider",
+      value: "opencode-go",
+    }),
+    true,
+  );
 });
 
 test("policy removal withdraws only that standing permission", () => {

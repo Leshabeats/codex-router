@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { writePrivateJson } from "./file-security.mjs";
 import { STATE_DIR } from "./paths.mjs";
+import { canonicalProviderId } from "./provider-selection.mjs";
 
 // Policies are an operator's standing permission to spend the small
 // compatibility-probe budget for unknown models that match a route or family.
@@ -83,7 +84,9 @@ export function setSubagentAutoPolicy(kind, value, enabled, filePath = SUBAGENT_
 export function modelMatchesSubagentAutoPolicy(model, policy) {
   if (!model?.slug || !policy) return false;
   if (policy.kind === "model") return String(model.slug) === policy.value;
-  if (policy.kind === "provider") return String(model.provider) === policy.value;
+  if (policy.kind === "provider") {
+    return canonicalProviderId(String(model.provider)) === canonicalProviderId(policy.value);
+  }
   if (policy.kind === "family") {
     const family = normalized(policy.value);
     return [model.slug, model.displayName, model.upstreamModel]

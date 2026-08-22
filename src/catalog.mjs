@@ -734,6 +734,19 @@ function sortCatalogModels(models) {
 // model. That avoids turning a UI toggle into an unreviewed v2 assertion.
 const NATIVE_V2_BACKEND_SLUGS = new Set(["gpt-5.6-luna"]);
 
+// Keep the repository/upstream verdict separate from the effective catalog
+// value. Hiding or disabling a certified native route correctly publishes it
+// as v1, but that opt-out must not erase the certificate the control surfaces
+// need in order to let the operator turn it back on.
+export function nativeSubagentCertification(model) {
+  const slug = String(model?.slug || "");
+  if (NATIVE_CONTEXT_VARIANT_SLUGS.includes(slug)) return "v1";
+  if (NATIVE_V2_BACKEND_SLUGS.has(slug)) return "v2";
+  return model?.multi_agent_version === "v2" || model?.multi_agent_version === "v1"
+    ? model.multi_agent_version
+    : undefined;
+}
+
 export function promoteNativeMultiAgent(models, settings, hidden = new Set()) {
   const enabled = new Set(settings.enabled || []);
   const disabled = new Set(settings.disabled || []);
@@ -749,7 +762,7 @@ export function promoteNativeMultiAgent(models, settings, hidden = new Set()) {
     if (hidden.has(slug) || disabled.has(slug)) {
       return { ...model, multi_agent_version: "v1" };
     }
-    if (NATIVE_V2_BACKEND_SLUGS.has(slug)) {
+    if (nativeSubagentCertification(model) === "v2") {
       return { ...model, multi_agent_version: "v2" };
     }
     // Deliberately do not use `mode` / `enabled` to promote a native model.
@@ -861,10 +874,10 @@ function main() {
   const pickerState = modelPickerSnapshot();
   const visibleModels = new Set(pickerState.visible);
   const multiAgentSettings = readMultiAgentSettings();
-  // Demotions first, then this machine's own recorded proofs. Settings still
-  // never manufacture a v2 claim — a promotion here traces to a live probe
-  // or an observed spawn in `multi-agent-proofs.json` — and a slug the
-  // operator hid or switched off stays v1 whatever evidence it carries.
+  // Settings can disable a certified route, but machine-local proof records
+  // are diagnostic only: neither a compatibility probe nor an observed child
+  // turn may manufacture a v2 claim. That capability belongs to the exact
+  // checked-in registry route and its reviewed v2_agent application.
   const allMultiAgentModels = applyMultiAgentCapabilities(
     selectedModels,
     multiAgentSettings,

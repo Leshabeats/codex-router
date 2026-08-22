@@ -30,8 +30,10 @@ or a vendor's generic claim that its API supports tools.
 
 ## Submit an application
 
-1. Copy `_template/` to `v2_agent/<provider>/<model>/`; directory names use
-   lowercase letters, digits, `.`, `_`, and `-`.
+1. Copy `_template/` to `v2_agent/<provider>/<slug-model>/`; both directory
+   names use lowercase letters, digits, `.`, `_`, and `-`. The second segment
+   is the routed slug segment, not necessarily the upstream model ID. Record
+   that exact upstream ID in `proof.json` even when it contains `/` or `:`.
 2. Record stable metadata and redacted outcome summaries in `proof.md` and
    `proof.json`. Do not commit API keys, bearer capabilities, raw prompts,
    decrypted payloads, or provider response bodies.
@@ -46,3 +48,9 @@ or a vendor's generic claim that its API supports tools.
 CI validates the artifact shape and refuses evidence that looks like a
 credential. It cannot run billable native Codex delegation on behalf of an
 account, so human reproduction remains required.
+
+CI also enforces the registry/application relationship in both directions:
+an accepted application must bind one exact checked-in v2 route, and every new
+checked-in v2 route must have its accepted application. Six exact Kimi/Grok
+route identities certified before this artifact workflow are grandfathered;
+changing their slug, provider, or upstream model removes that exception.
