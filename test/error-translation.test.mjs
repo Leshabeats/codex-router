@@ -165,6 +165,41 @@ test("a 401 from an OAuth provider says sign in again, not re-run setup", () => 
   assert.ok(!payload.error.message.includes("codex-router setup"));
 });
 
+// Captured from a live opencode-free outage: OpenCode Zen answered 401 with
+// its ModelError while serving an anonymous free model. The provider holds no
+// credential, so advising a setup re-run sends the operator looking for
+// something that does not exist.
+test("a 401 from an anonymous provider never advises refreshing credentials", () => {
+  const payload = translateGatewayError({
+    status: 401,
+    bodyText: JSON.stringify({
+      type: "error",
+      error: { type: "ModelError", message: "Model  is not supported" },
+    }),
+    modelName: "Ox Alpha Free",
+    providerName: "opencode",
+    providerKind: "openai-compatible",
+    providerAuthMode: "anonymous",
+  });
+  assert.equal(
+    payload.error.message,
+    "opencode serves Ox Alpha Free anonymously, so there is no stored credential to refresh. opencode rejected this request on its free route; the free catalog and limits change without notice, so retry later or switch models. (HTTP 401: Model  is not supported)",
+  );
+  assert.equal(payload.error.type, "authentication_error");
+  assert.ok(!payload.error.message.includes("codex-router setup"));
+});
+
+test("an anonymous provider without the auth mode keeps the credential wording", () => {
+  const payload = translateGatewayError({
+    status: 401,
+    bodyText: JSON.stringify({ error: { message: "invalid api key" } }),
+    modelName: "DeepSeek V4 Pro",
+    providerName: "deepseek",
+    providerKind: "openai-compatible",
+  });
+  assert.match(payload.error.message, /Re-run codex-router setup/);
+});
+
 // Captured from a live Kimi OAuth 403: an exhausted plan arrives on the same
 // status as a rejected session, so the body has to win. Telling the user to
 // sign in again would send them through a login that cannot fix anything.
