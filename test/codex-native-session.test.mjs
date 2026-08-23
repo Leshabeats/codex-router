@@ -10,13 +10,19 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { test } from "node:test";
+import { test, after } from "node:test";
 
 const home = mkdtempSync(path.join(os.tmpdir(), "native-session-"));
 const authPath = path.join(home, "auth.json");
 process.env.MODEL_ROUTER_CODEX_AUTH = authPath;
 process.env.MODEL_ROUTER_STATE_DIR = path.join(home, "state");
 delete process.env.CODEX_ROUTER_NATIVE_SESSION_FALLBACK;
+
+// Every test shares one fixture home; take it down once the file finishes so
+// repeated runs do not accumulate temp roots.
+after(() => {
+  rmSync(home, { recursive: true, force: true });
+});
 
 const {
   nativeSessionSharingEnabled,
