@@ -7,11 +7,14 @@ import { fileURLToPath } from "node:url";
 
 import {
   applyKeepAliveTimeouts,
+  endStreamedResponse,
   formatErrorChain,
   httpErrorStatus,
+  installGracefulShutdown,
   readRequestBody,
   reportListenFailure,
   requireInternalAuth,
+  writeEventStreamHead,
   writeJson,
 } from "./http-utils.mjs";
 import { PORTS } from "./paths.mjs";
@@ -578,8 +581,7 @@ async function handleChatCompletions(request, response) {
 
   const startStream = () => {
     if (!wantsStream || streamStarted) return;
-    response.writeHead(200, {
-      "Content-Type": "text/event-stream",
+    writeEventStreamHead(response, 200, {
       "Cache-Control": "no-cache",
       Connection: "keep-alive",
     });
@@ -807,7 +809,9 @@ if (isMain) {
           },
         });
       } else if (!response.writableEnded) {
-        response.destroy();
+        endStreamedResponse(response, {
+          message: "The Grok OAuth forwarder lost the upstream response stream.",
+        });
       }
     });
   });
@@ -818,7 +822,5 @@ if (isMain) {
     console.error("[grok-oauth] listening");
   });
 
-  for (const signal of ["SIGINT", "SIGTERM"]) {
-    process.on(signal, () => server.close(() => process.exit(0)));
-  }
+  installGracefulShutdown(server, { label: "grok-oauth" });
 }

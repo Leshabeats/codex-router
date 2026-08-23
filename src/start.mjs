@@ -14,6 +14,7 @@ import {
   TARGET,
   loopback,
 } from "./paths.mjs";
+import { SHUTDOWN_DRAIN_MS, SHUTDOWN_FLUSH_MS } from "./http-utils.mjs";
 import { waitForHealth as pollHealth } from "./health-probe.mjs";
 import { gatewaySupervisorLimits, superviseGateway } from "./gateway-supervisor.mjs";
 import { writeLiteLlmConfig } from "./litellm-config.mjs";
@@ -212,6 +213,15 @@ function waitForHealth(label, url, headers = {}, timeoutMs = 30_000, expectedSer
   });
 }
 
+// Each child answers SIGTERM by draining what is in flight for up to
+// SHUTDOWN_DRAIN_MS and then ending those responses cleanly, so this backstop
+// has to outlast that. It used to fire at three seconds flat, which killed a
+// router still holding a streaming turn open -- and a SIGKILLed socket is an
+// RST, which Codex reports as `error decoding response body` rather than as
+// the restart it was. Derive the deadline from the drain so the two cannot
+// drift apart; the margin covers the exit itself.
+const SIGKILL_AFTER_MS = SHUTDOWN_DRAIN_MS + SHUTDOWN_FLUSH_MS + 2_000;
+
 function stopChildren() {
   if (shuttingDown) return;
   shuttingDown = true;
@@ -222,7 +232,7 @@ function stopChildren() {
     for (const child of children) {
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
     }
-  }, 3_000).unref();
+  }, SIGKILL_AFTER_MS).unref();
 }
 
 const FRONTEND = { script: "router.mjs", service: "codex-router", label: "Codex router" };

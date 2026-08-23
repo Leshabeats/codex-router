@@ -272,6 +272,69 @@ test("translates Chat Completions to Grok Responses and back (text + tools)", as
   }
 });
 
+test("emits one terminal SSE error when the upstream stream fails mid-turn", async () => {
+  const backend = await mockBackend((_req, res) => {
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    res.write(sse([{ type: "response.output_text.delta", delta: "partial" }]));
+    // A real socket failure makes fetch's body reader reject after the first
+    // chunk, exercising the forwarder's top-level HTTP error handler.
+    setImmediate(() => res.destroy());
+  });
+  const port = await openPort();
+  const dir = mkdtempSync(path.join(os.tmpdir(), "grok-oauth-midstream-error-"));
+  const child = startForwarder(port, backend.port, writeSession(dir));
+  try {
+    await waitHealth(`http://127.0.0.1:${port}`, child);
+    const result = await new Promise((resolve, reject) => {
+      const req = http.request(
+        {
+          hostname: "127.0.0.1",
+          port,
+          path: "/v1/chat/completions",
+          method: "POST",
+          headers: {
+            ...auth,
+            "Content-Length": Buffer.byteLength(
+              JSON.stringify({
+                model: "grok-4.6",
+                messages: [{ role: "user", content: "continue" }],
+                stream: true,
+              }),
+            ),
+          },
+        },
+        (response) => {
+          let body = "";
+          response.setEncoding("utf8");
+          response.on("data", (chunk) => {
+            body += chunk;
+          });
+          response.once("error", reject);
+          response.once("aborted", () => reject(new Error("forwarder response was aborted")));
+          response.once("end", () => resolve({ status: response.statusCode, body }));
+        },
+      );
+      req.once("error", reject);
+      req.end(
+        JSON.stringify({
+          model: "grok-4.6",
+          messages: [{ role: "user", content: "continue" }],
+          stream: true,
+        }),
+      );
+    });
+    assert.equal(result.status, 200);
+    assert.match(result.body, /"content":"partial"/);
+    assert.equal((result.body.match(/event: error/g) || []).length, 1);
+    assert.match(result.body, /local_router_stream_failed/);
+    assert.doesNotMatch(result.body, /data: \[DONE\]/);
+  } finally {
+    await stop(child);
+    await new Promise((r) => backend.server.close(r));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("streams xAI reasoning deltas as chat reasoning_content", async () => {
   const backend = await mockBackend(async (req, res) => {
     res.writeHead(200, { "Content-Type": "text/event-stream" });

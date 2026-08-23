@@ -79,6 +79,16 @@ export function renderLiteLlmConfig() {
     // fix a rejected credential. Relay the provider's real status instead.
     "router_settings:",
     "  disable_cooldowns: true",
+    // Z.ai Coding Plan reports a five-hour account quota as HTTP 429. LiteLLM
+    // otherwise retries that same exhausted plan twice before the outer router
+    // can inspect the provider body and classify it as out_of_usage. Scope the
+    // override to Coding Plan model groups only: pay-per-token Z.ai and every
+    // other provider retain LiteLLM's normal transient rate-limit behavior.
+    "  model_group_retry_policy:",
+    ...MODELS.filter(({ provider }) => provider === "zai-coding").flatMap((model) => [
+      `    ${model.gatewayModel}:`,
+      "      RateLimitErrorRetries: 0",
+    ]),
     "",
     "general_settings:",
     "  disable_spend_logs: true",
