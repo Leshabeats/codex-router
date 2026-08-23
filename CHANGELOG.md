@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- **The harness caller key is written where a current harness reads it.**
+  DeepSeek Harness moved `.credentials.yaml` to a `version`/`refs` envelope
+  around the reference map, and the router only knew the flat root map the
+  older builds used -- so on a current harness it wrote `CODEX_ROUTER_CALLER_KEY`
+  one level too high, the harness resolved the route's `apiKeyEnv` under `refs`,
+  found nothing, and every turn came back 401 with no diagnostic anywhere
+  (reported in #351 by @jepgambardella). Both shapes are now written in place,
+  and neither is converted into the other: `refs` present settles it, `version`
+  without `refs` settles it the other way -- that is a current harness on its
+  first install, the case where guessing wrong is silent -- and a document with
+  no references at all adopts the current shape. A new reference follows the
+  indentation the envelope already uses for its siblings rather than assuming
+  two spaces, since a mixed-indent block is not YAML any parser reads back and
+  the file holds every adapter's key, not only ours. Removing the reference
+  prunes a `refs:` it emptied, exactly as removing the route prunes an emptied
+  `providers:`, so uninstall restores the document byte for byte. `status`
+  resolves the credential through the same decision the writer makes, so it can
+  no longer report one the harness cannot read. A reference an older build left
+  at the root of an enveloped document is moved rather than copied, so uninstall
+  no longer leaves a second copy of the caller key behind. Anything that is not
+  a reference map in either shape -- a nested mapping at the root, a nested
+  mapping inside `refs`, an inline `refs` -- is still refused with the file
+  untouched.
+
 - **The Grok OAuth forwarder is health-checked, and a dependency the router
   did not name is no longer reported as unknown.** `/health` probed the Kimi
   OAuth forwarder, the API forwarder, and the gateway, but never the Grok
