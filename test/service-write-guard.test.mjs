@@ -328,10 +328,23 @@ test(
 
 test(
   "without the flag the same install still drives systemd",
-  { skip: process.platform === "win32" && "the recorder stub needs a POSIX shell" },
+  {
+    skip:
+      (process.platform === "win32" && "the recorder stub needs a POSIX shell")
+      || (process.platform === "linux"
+        && "on systemd's own host the guard suppresses the call regardless of the flag"),
+  },
   () => {
     // The control. Without it the test above passes just as well against an
     // install that never called systemctl in the first place.
+    //
+    // It can only run where this module is driven away from its own platform.
+    // `skipServiceManagerCall` returns true for `NODE_TEST_CONTEXT && hostManaged`
+    // before it ever looks at the flag, and `HOST_MANAGED` is
+    // `process.platform === "linux"` -- so on the ubuntu job every mutation is
+    // suppressed whatever the flag says, which is precisely the protection this
+    // change adds. macOS is where the flag is the only thing suppressing the
+    // call, so that is where the control means anything.
     const fixture = mkdtempSync(path.join(os.tmpdir(), "codex-router-systemd-live-"));
     try {
       const recorder = systemctlRecorder(fixture);
