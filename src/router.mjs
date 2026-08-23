@@ -2966,6 +2966,7 @@ async function handleResponses(request, response, requestUrl) {
               ? "Ollama"
               : provider?.ownedBy || provider?.displayName || route.provider,
           providerKind: provider?.kind,
+          providerAuthMode: provider?.authMode,
           retryAfterSeconds: Number.isFinite(retryAfterSeconds)
             ? retryAfterSeconds
             : undefined,
