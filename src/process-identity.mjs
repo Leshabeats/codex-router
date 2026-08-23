@@ -1,5 +1,7 @@
 import { spawnSync } from "node:child_process";
 
+const WINDOWS_PROCESS_PROBE_TIMEOUT_MS = 5_000;
+
 // A PID alone is not an identity: the operating system reuses them, and a
 // router that remembers only a number can eventually send a signal to whatever
 // inherited it. Pair the PID with the process's start time and executable, and
@@ -20,7 +22,11 @@ export function processStartIdentity(
       const result = spawn(
         "powershell.exe",
         ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
-        { encoding: "utf8", windowsHide: true },
+        {
+          encoding: "utf8",
+          windowsHide: true,
+          timeout: WINDOWS_PROCESS_PROBE_TIMEOUT_MS,
+        },
       );
       return result.status === 0 ? String(result.stdout || "").trim() || undefined : undefined;
     }
@@ -52,7 +58,11 @@ export function processCommandLine(
         const result = spawn(
           "powershell.exe",
           ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
-          { encoding: "utf8", windowsHide: true },
+          {
+            encoding: "utf8",
+            windowsHide: true,
+            timeout: WINDOWS_PROCESS_PROBE_TIMEOUT_MS,
+          },
         );
         const value = String(result.stdout || "").trim();
         if (result.status === 0 && value) return value;
