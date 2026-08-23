@@ -551,7 +551,18 @@ to ship tested support to every installer.
    advertises for that model (`modelContextLengths` in
    `src/model-discovery.mjs`), because `autoCompact` is derived from it and an
    understated window makes Codex compact a session that had the room. Only a
-   model the catalog sizes in silence falls back to 131072. An entry curated
+   model the catalog sizes in silence falls back to 131072.
+   OpenCode Zen's anonymous catalog publishes ids and nothing else, so its free
+   models are sized and laddered from `src/opencode-curation.mjs`, which
+   records OpenCode's own published `limit` and `reasoning_options` for each
+   *free id* along with the sourcing. A documented window is stored only when
+   the 0.85 auto-compact ratio still reserves that id's published
+   `limit.output`; otherwise the id keeps 131072 and its description says the
+   window is unknown, because a window a full-length completion can overrun
+   fails the turn outright. An id OpenCode documents nothing usable for keeps
+   the stock "conservative default metadata" description, which is how a
+   stored entry says every value in it is a default rather than an advertised
+   capability. An explicit `--efforts` always wins over a documented ladder. An entry curated
    before this landed keeps its stored window — an additive run never rewrites
    existing metadata — so repair it by editing `user-models.json` or by
    `--remove`-ing and re-curating the model. An optional `availabilityNux` string on a model becomes

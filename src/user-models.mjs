@@ -21,6 +21,34 @@ export const USER_MODELS_PATH =
 export const DEFAULT_CONTEXT_WINDOW = 131072;
 export const DEFAULT_AUTO_COMPACT = 110000;
 
+// The effort ladder a curated entry carries until something documents a real
+// one. A single level is not a claim that the model has one effort: it is the
+// only value every OpenAI-compatible route is guaranteed to accept, so it is
+// the conservative default the same way DEFAULT_CONTEXT_WINDOW is. Exported so
+// curation can tell "nobody documented this model's efforts" apart from a
+// ladder a user or a provider's own catalog supplied (#352).
+export const DEFAULT_EFFORT = "high";
+export const DEFAULT_REASONING_LEVELS = Object.freeze([
+  Object.freeze({ effort: DEFAULT_EFFORT, description: "Adaptive reasoning" }),
+]);
+
+export function defaultUserModelReasoning() {
+  return {
+    defaultEffort: DEFAULT_EFFORT,
+    reasoningLevels: DEFAULT_REASONING_LEVELS.map((level) => ({ ...level })),
+  };
+}
+
+// True while an entry still holds exactly the untouched default ladder. The
+// sizing pair plays the same role for the context window: it is the evidence
+// curation had no model-specific answer, not a value the operator chose.
+export function hasDefaultUserModelReasoning(entry) {
+  return (
+    entry?.defaultEffort === DEFAULT_EFFORT &&
+    JSON.stringify(entry?.reasoningLevels) === JSON.stringify(DEFAULT_REASONING_LEVELS)
+  );
+}
+
 // Curation may adjust presentation, sizing, and effort metadata only;
 // identity and routing fields always come from the provider id and the
 // discovered model id.
@@ -99,8 +127,7 @@ export function userModelEntry({ providerId, upstreamId, requestProfile, priorit
     displayName: officialModelDisplayName(providerId, upstreamId) || `${upstreamId} (curated)`,
     description: defaultUserModelDescription(providerId),
     priority,
-    defaultEffort: "high",
-    reasoningLevels: [{ effort: "high", description: "Adaptive reasoning" }],
+    ...defaultUserModelReasoning(),
     contextWindow: DEFAULT_CONTEXT_WINDOW,
     autoCompact: DEFAULT_AUTO_COMPACT,
     inputModalities: ["text"],
