@@ -250,6 +250,34 @@ npm install -g @xai-official/grok
 grok login --oauth
 ```
 
+Antigravity OAuth uses the router's own browser sign-in and the Google AI
+Pro/Ultra entitlement on the signed-in account. It needs neither a Gemini API
+key nor a separate Antigravity CLI. Signing in and enabling are separate so a
+re-authentication never replaces the rest of the provider selection:
+
+Antigravity OAuth requires an integration client secret. Set
+`ANTIGRAVITY_CLIENT_SECRET` in the environment used for installation and
+sign-in; the generated background-service definition preserves it for token
+refreshes. The command fails before opening Google consent when it is absent.
+
+```sh
+export ANTIGRAVITY_CLIENT_SECRET='your-integration-client-secret'
+./bin/model-router codex providers login antigravity-oauth
+./bin/model-router codex providers enable antigravity-oauth
+```
+
+On Windows PowerShell, use the matching wrapper:
+
+```powershell
+$env:ANTIGRAVITY_CLIENT_SECRET = 'your-integration-client-secret'
+.\model-router.ps1 codex providers login antigravity-oauth
+.\model-router.ps1 codex providers enable antigravity-oauth
+```
+
+The credential stays in the router's owner-only state directory. This is an
+unofficial compatibility route over Google's internal Antigravity service,
+not a public Gemini API contract, so availability and wire behavior can change.
+
 MiMo (Xiaomi API) uses Xiaomi's official OpenAI-compatible endpoint at
 `https://api.xiaomimimo.com/v1`. Unlike MiMo reseller routes, the direct API
 serves `mimo-v2.5` and `mimo-v2.5-pro` through the standard

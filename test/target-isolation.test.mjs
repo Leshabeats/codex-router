@@ -38,6 +38,7 @@ test("codex owns the default port block", () => {
     api: 4203,
     grokOauth: 4208,
     devinCli: 4210,
+    antigravityOauth: 4212,
   });
 });
 
@@ -61,8 +62,9 @@ test("operators can keep an explicitly configured legacy block during migration"
       },
     ),
   );
-  // The Devin CLI forwarder postdates the legacy block, so an operator
-  // migrating from it never pinned that port and keeps the current default.
+  // The Devin CLI and Antigravity OAuth forwarders postdate the legacy block,
+  // so an operator migrating from it never pinned those ports and keeps the
+  // current defaults.
   assert.deepEqual(ports, {
     gateway: 4100,
     oauth: 4101,
@@ -70,6 +72,7 @@ test("operators can keep an explicitly configured legacy block during migration"
     api: 4103,
     grokOauth: 4108,
     devinCli: 4210,
+    antigravityOauth: 4212,
   });
 });
 

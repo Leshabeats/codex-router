@@ -44,7 +44,7 @@ user.
 3. Never ask the user to paste OAuth tokens or API keys into chat, command
    arguments, logs, environment snippets, or tracked files.
 4. Determine which provider IDs the user requested: `anthropic-api`,
-   `kimi-oauth`, `kimi-api`, `kimi-api-cn`, `deepseek`, `grok-oauth`, `grok-api`, `qwen-plan`,
+   `kimi-oauth`, `antigravity-oauth`, `kimi-api`, `kimi-api-cn`, `deepseek`, `grok-oauth`, `grok-api`, `qwen-plan`,
    `zai-coding`, `ollama-cloud`, `minimax-token-plan`, `meta`, `clinepass`, and/or
    `opencode-go`
    (shown to users as "opencode Go/Zen"; its `opencode-go-messages`,
@@ -87,7 +87,11 @@ user.
    Copilot requires a fine-grained PAT with the Copilot Requests permission;
    never read or copy the official Copilot CLI credential store. Command
    Command Code is API-key-only: invoke `bin/model-router codex provider-key
-   commandcode set` in a PTY so the hidden prompt receives the value directly.
+    commandcode set` in a PTY so the hidden prompt receives the value directly.
+   For Antigravity OAuth, require `ANTIGRAVITY_CLIENT_SECRET` in the installer
+   environment, disclose that sign-in may provision a Google Cloud project for
+   the account when none exists, then run `bin/model-router codex providers
+   login antigravity-oauth`; never ask the user to paste the secret into chat.
    A key does not mean every account may use the Provider API: the Go plan is
    refused with "Your Go plan doesn't include API access". GOAT, Pro, Max, Team,
    and Provider plans do have API access and meter against their own credits.
