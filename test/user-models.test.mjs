@@ -7,9 +7,13 @@ import { test } from "node:test";
 const stateDir = mkdtempSync(path.join(os.tmpdir(), "user-models-test-"));
 process.env.CODEX_ROUTER_STATE_DIR = stateDir;
 
-const { userModelEntry, readUserModels, writeUserModels, USER_MODELS_PATH } = await import(
-  "../src/user-models.mjs"
-);
+const {
+  userModelEntry,
+  readUserModels,
+  writeUserModels,
+  hasDefaultUserModelReasoning,
+  USER_MODELS_PATH,
+} = await import("../src/user-models.mjs");
 
 test("userModelEntry fills conservative picker metadata", () => {
   const entry = userModelEntry({
@@ -233,4 +237,45 @@ test("registry merges valid user models and skips collisions", async () => {
     registry.MODEL_BY_SLUG.get("deepseek/deepseek-standalone-search").searchTool,
     { mode: "standalone" },
   );
+});
+
+
+// Curation has to be able to tell "nobody documented this model's efforts"
+// apart from a ladder somebody chose, the same way the untouched
+// 131072/110000 pair marks untuned sizing. Without that distinction an upgrade
+// path cannot add a published ladder without risking an operator's own (#352).
+test("a defaulted effort ladder is distinguishable from a chosen one", () => {
+  const stock = userModelEntry({
+    providerId: "ollama-cloud",
+    upstreamId: "gpt-oss:120b",
+    priority: 101,
+  });
+  assert.equal(hasDefaultUserModelReasoning(stock), true);
+  assert.equal(stock.defaultEffort, "high");
+  assert.deepEqual(stock.reasoningLevels, [{ effort: "high", description: "Adaptive reasoning" }]);
+
+  const chosen = userModelEntry({
+    providerId: "ollama-cloud",
+    upstreamId: "gpt-oss:120b",
+    priority: 101,
+    metadata: {
+      defaultEffort: "high",
+      reasoningLevels: [
+        { effort: "low", description: "Quick reasoning" },
+        { effort: "high", description: "Deep reasoning" },
+      ],
+    },
+  });
+  assert.equal(hasDefaultUserModelReasoning(chosen), false);
+
+  // A single high level someone worded differently is still theirs.
+  assert.equal(
+    hasDefaultUserModelReasoning({
+      defaultEffort: "high",
+      reasoningLevels: [{ effort: "high", description: "My own wording" }],
+    }),
+    false,
+  );
+  assert.equal(hasDefaultUserModelReasoning({}), false);
+  assert.equal(hasDefaultUserModelReasoning(undefined), false);
 });
