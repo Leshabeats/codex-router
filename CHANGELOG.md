@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **The macOS tray can load a provider's current model list and curate from
+  it.** A new Provider catalogs panel asks any configured provider that
+  supports live discovery for the models it serves right now, marks the ones
+  already routed, and adds a selection through the same `curate-models.mjs`
+  path the desktop app uses -- so the tray no longer has to hand people back
+  to a terminal to pick up a model their provider shipped after install. The
+  first open is answered from the router's stored list, so it costs no round
+  trip and works offline; only Reload re-asks upstream. Model ids coming back
+  from a provider are held to the same slug rule the Electron app enforces
+  before any of them reaches curation, and every discovery or curation run is
+  bounded by the Electron timeouts, so a provider that accepts the connection
+  and never answers can no longer wedge the panel's buttons for the rest of
+  the session. The panel is translated in all six tray languages.
+
 - **An update no longer empties the picker on a pre-allowlist install.** The
   routed picker became an allowlist in `v0.4.0-beta.4`; on an install written
   by an older build, every routed model was absent from `seeded` rather than
