@@ -360,6 +360,9 @@ const UNSUPPORTED_SCHEMA_KEYWORDS = Object.freeze([
   "readOnly",
   "writeOnly",
   "deprecated",
+  "__proto__",
+  "constructor",
+  "prototype",
 ]);
 
 // Antigravity's protobuf-backed schema layer rejects annotations and

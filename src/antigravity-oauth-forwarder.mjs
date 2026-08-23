@@ -226,7 +226,6 @@ async function fetchWithHeaderTimeout(endpoint, { accessToken, serializedBody, s
       ),
     );
   }, UPSTREAM_HEADER_TIMEOUT_MS);
-  timer.unref?.();
   try {
     return await fetchImpl(
       `${endpoint.replace(/\/$/, "")}/v1internal:streamGenerateContent?alt=sse`,
