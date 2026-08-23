@@ -2,8 +2,6 @@ import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
-import lockfile from "proper-lockfile";
-
 import {
   ANTIGRAVITY_CLIENT_ID,
   ANTIGRAVITY_TOKEN_URL,
@@ -108,6 +106,10 @@ async function withTokenLock(run) {
   const target = lockTarget();
   let release;
   try {
+    // Setup imports the read-only status path before it installs this package's
+    // Node dependencies. Load the lock implementation only when a credential
+    // mutation actually needs it, after setup has ensured dependencies exist.
+    const { default: lockfile } = await import("proper-lockfile");
     mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
     writeFileSync(target, "", { flag: "a", mode: 0o600 });
     protectPrivateFile(target);
