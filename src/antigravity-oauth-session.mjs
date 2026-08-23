@@ -65,7 +65,9 @@ export function validateAntigravityToken(value) {
     expires_at: expiresAt,
     expires_in: expiresIn,
     project_id: typeof value.project_id === "string" ? value.project_id : "",
-    project_source: value.project_source === "managed" ? "managed" : undefined,
+    project_source: value.project_source === "managed" || value.project_source === "fallback"
+      ? value.project_source
+      : undefined,
     project_checked_at: Number.isFinite(projectCheckedAt) ? projectCheckedAt : undefined,
     tier_id: typeof value.tier_id === "string" && value.tier_id ? value.tier_id : undefined,
     email: typeof value.email === "string" ? value.email : undefined,

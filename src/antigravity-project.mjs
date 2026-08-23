@@ -223,14 +223,28 @@ export async function resolveAntigravityProject(accessToken, options = {}) {
   return (await discoverAntigravityProject(accessToken, { allowOnboard: true, ...options })).projectId;
 }
 
-function alreadyResolved(session) {
-  if (session.project_id) {
+function alreadyResolved(session, nowMs) {
+  if (session.project_id && session.project_source !== "fallback") {
     return {
       projectId: session.project_id,
       source: "managed",
       tierId: session.tier_id,
       checkedAt: session.project_checked_at,
     };
+  }
+  // A fallback is a recorded absence, not a project. Re-deriving it on every
+  // turn would hammer discovery for an account that has none, so the same TTL
+  // that bounds a real answer also bounds how often the absence is retried --
+  // and inside that window the caller is told plainly rather than routed
+  // through a project that does not exist.
+  if (
+    session.project_source === "fallback" &&
+    Number.isFinite(session.project_checked_at) &&
+    nowMs - session.project_checked_at < PROJECT_CACHE_TTL_MS
+  ) {
+    throw projectUnavailable(
+      "The Antigravity Google Cloud project is not available; re-run sign-in to provision one.",
+    );
   }
   return undefined;
 }
@@ -240,7 +254,10 @@ async function persistProjectContext(session, context) {
     if (latest.refresh_token !== session.refresh_token) return undefined;
     return {
       ...latest,
-      project_id: context.projectId,
+      // A fallback records that discovery produced nothing usable. Writing its
+      // placeholder id would make the next `alreadyResolved` treat it as a
+      // managed project and route through it.
+      project_id: context.source === "managed" ? context.projectId : "",
       project_source: context.source,
       project_checked_at: context.checkedAt,
       tier_id: context.tierId,
@@ -260,10 +277,16 @@ export async function ensureAntigravityProject(
     timeoutMs = 15_000,
     signal,
     allowOnboard = false,
+    forceFallbackRefresh = false,
   } = {},
 ) {
   const nowMs = now();
-  const resolved = alreadyResolved(session);
+  // An explicit retry is the one caller allowed past the fallback TTL: it has
+  // already failed a turn and is asking for a fresh answer, not a cached
+  // absence.
+  const refreshFallback = forceFallbackRefresh && session.project_source === "fallback";
+  if (refreshFallback) invalidateAntigravityProjectCache(session.refresh_token);
+  const resolved = refreshFallback ? undefined : alreadyResolved(session, nowMs);
   if (resolved) return { session, ...resolved };
 
   const refreshToken = session.refresh_token;
@@ -281,6 +304,7 @@ export async function ensureAntigravityProject(
         timeoutMs,
         signal,
         allowOnboard,
+        forceFallbackRefresh,
       });
     }
     return { session: saved, ...cached.context };
@@ -301,6 +325,7 @@ export async function ensureAntigravityProject(
         timeoutMs,
         signal,
         allowOnboard,
+        forceFallbackRefresh,
       });
     }
     return { session: saved, ...context };
@@ -338,6 +363,7 @@ export async function ensureAntigravityProject(
       timeoutMs,
       signal,
       allowOnboard,
+      forceFallbackRefresh,
     });
   }
   return { session: saved, ...context };

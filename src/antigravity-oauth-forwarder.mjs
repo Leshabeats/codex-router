@@ -462,6 +462,9 @@ async function handleChatCompletions(request, response) {
     const session = await ensureFreshAntigravitySession({ force, signal: controller.signal });
     return ensureAntigravityProject(session, {
       signal: controller.signal,
+      // `force` is the retry path: the previous attempt failed, so a recorded
+      // fallback must not be replayed from inside its TTL.
+      forceFallbackRefresh: force,
     });
   };
 

@@ -22,6 +22,7 @@ import {
   serviceProcessOwns,
 } from "./service-process.mjs";
 import { protectPrivateFile } from "./file-security.mjs";
+import { antigravityClientSecretEnvironment } from "./antigravity-oauth-constants.mjs";
 import { serviceProxyEnvironment } from "./proxy-environment.mjs";
 import {
   skipServiceManagerCall,
@@ -74,9 +75,6 @@ function wrapper() {
     MODEL_ROUTER_GROK_OAUTH_PORT: String(PORTS.grokOauth),
     MODEL_ROUTER_DEVIN_CLI_PORT: String(PORTS.devinCli),
     MODEL_ROUTER_ANTIGRAVITY_OAUTH_PORT: String(PORTS.antigravityOauth),
-    ...(process.env.ANTIGRAVITY_CLIENT_SECRET
-      ? { ANTIGRAVITY_CLIENT_SECRET: process.env.ANTIGRAVITY_CLIENT_SECRET }
-      : {}),
     CODEX_HOME,
     CODEX_ROUTER_STATE_DIR: STATE_DIR,
     CODEX_ROUTER_QUIET: "1",
@@ -85,6 +83,7 @@ function wrapper() {
     CODEX_ROUTER_PORT: String(PORTS.router),
     CODEX_ROUTER_API_PORT: String(PORTS.api),
     ...serviceProxyEnvironment(),
+    ...antigravityClientSecretEnvironment(),
     // The LiteLLM gateway is a Python process. Force UTF-8 output so its
     // startup banner and logs do not crash on Windows systems whose default
     // ANSI/OEM code page is not UTF-8 (e.g. Russian cp1251), where Python

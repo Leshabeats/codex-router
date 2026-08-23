@@ -20,6 +20,7 @@ import {
   STATE_DIR,
   TARGET,
 } from "./paths.mjs";
+import { antigravityClientSecretEnvironment } from "./antigravity-oauth-constants.mjs";
 import { serviceProxyEnvironment } from "./proxy-environment.mjs";
 import {
   skipServiceManagerCall,
@@ -75,9 +76,6 @@ function environmentEntries() {
     MODEL_ROUTER_GROK_OAUTH_PORT: String(PORTS.grokOauth),
     MODEL_ROUTER_DEVIN_CLI_PORT: String(PORTS.devinCli),
     MODEL_ROUTER_ANTIGRAVITY_OAUTH_PORT: String(PORTS.antigravityOauth),
-    ...(process.env.ANTIGRAVITY_CLIENT_SECRET
-      ? { ANTIGRAVITY_CLIENT_SECRET: process.env.ANTIGRAVITY_CLIENT_SECRET }
-      : {}),
     CODEX_HOME,
     CODEX_ROUTER_STATE_DIR: STATE_DIR,
     KIMI_CODEX_STATE_DIR: STATE_DIR,
@@ -88,6 +86,7 @@ function environmentEntries() {
     CODEX_ROUTER_PORT: String(PORTS.router),
     CODEX_ROUTER_API_PORT: String(PORTS.api),
     ...serviceProxyEnvironment(),
+    ...antigravityClientSecretEnvironment(),
     ...(process.env.CODEX_ROUTER_SOURCE_ROOT
       ? { CODEX_ROUTER_SOURCE_ROOT: SOURCE_ROOT }
       : {}),
