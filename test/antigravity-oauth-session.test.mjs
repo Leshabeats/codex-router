@@ -215,6 +215,43 @@ test("retries transient refresh failures and honors Retry-After", async () => {
   );
 });
 
+test("caps an excessive refresh Retry-After delay", async () => {
+  const delays = [];
+  await withToken(
+    {
+      access_token: "old",
+      refresh_token: "refresh",
+      expires_at: 2_000_000_000,
+      expires_in: 3600,
+      project_id: "p",
+    },
+    async () => {
+      let attempts = 0;
+      const session = await ensureFreshAntigravitySession({
+        force: true,
+        now: () => 1_999_999_999_000,
+        random: () => 0,
+        delayImpl: async (milliseconds) => delays.push(milliseconds),
+        fetchImpl: async () => {
+          attempts += 1;
+          if (attempts === 1) {
+            return new Response("{}", {
+              status: 503,
+              headers: { "Content-Type": "application/json", "Retry-After": "86400" },
+            });
+          }
+          return new Response(JSON.stringify({ access_token: "new", expires_in: 3600 }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        },
+      });
+      assert.equal(session.access_token, "new");
+      assert.deepEqual(delays, [30_000]);
+    },
+  );
+});
+
 test("recovers a concurrently replaced credential instead of tombstoning it", async () => {
   await withToken(
     {

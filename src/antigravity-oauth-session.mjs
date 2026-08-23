@@ -14,6 +14,7 @@ import { STATE_DIR } from "./paths.mjs";
 
 const REFRESH_THRESHOLD_SECONDS = 60;
 const RETRYABLE_REFRESH_STATUSES = new Set([429, 500, 502, 503, 504]);
+const MAX_REFRESH_RETRY_DELAY_MS = 30_000;
 const refreshInFlight = new Map();
 
 export function antigravityTokenPath() {
@@ -215,11 +216,18 @@ function retryDelay(response, attempt, now, random) {
   const retryAfter = response?.headers?.get?.("retry-after");
   if (retryAfter) {
     const seconds = Number(retryAfter);
-    if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1_000;
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return Math.min(seconds * 1_000, MAX_REFRESH_RETRY_DELAY_MS);
+    }
     const date = Date.parse(retryAfter);
-    if (Number.isFinite(date)) return Math.max(0, date - now());
+    if (Number.isFinite(date)) {
+      return Math.min(Math.max(0, date - now()), MAX_REFRESH_RETRY_DELAY_MS);
+    }
   }
-  return 2 ** attempt * 1_000 + Math.floor(random() * 250);
+  return Math.min(
+    2 ** attempt * 1_000 + Math.floor(random() * 250),
+    MAX_REFRESH_RETRY_DELAY_MS,
+  );
 }
 
 async function refreshAntigravityToken(
