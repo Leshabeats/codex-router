@@ -1650,3 +1650,94 @@ test("a well-formed bridged call closes as the custom_tool_call it opened", asyn
     true,
   );
 });
+
+// Moonshot accepts a `$ref` only when it points into `#/$defs/`, and the Codex
+// App connector pack ships sibling-property pointers -- Wego `_flights_search`
+// points `inboundTotalDurationRange` at its own sibling `priceRange`. The
+// rejection fails the whole request, so the kimi route inlines those pointers
+// before relaying (issue #353).
+function connectorNamespace() {
+  return {
+    type: "namespace",
+    name: "wego",
+    tools: [
+      {
+        name: "_flights_search",
+        inputSchema: {
+          type: "object",
+          properties: {
+            filters: {
+              type: "object",
+              properties: {
+                priceRange: {
+                  type: "object",
+                  properties: { min: { type: "number" }, max: { type: "number" } },
+                  required: ["min"],
+                },
+                inboundTotalDurationRange: {
+                  $ref: "#/properties/filters/properties/priceRange",
+                },
+              },
+            },
+          },
+        },
+      },
+    ],
+  };
+}
+
+function siblingRefs(value, found = []) {
+  if (Array.isArray(value)) {
+    for (const entry of value) siblingRefs(entry, found);
+    return found;
+  }
+  if (!value || typeof value !== "object") return found;
+  for (const [key, entry] of Object.entries(value)) {
+    if (key === "$ref" && typeof entry === "string" && !entry.startsWith("#/$defs/")) {
+      found.push(entry);
+    } else siblingRefs(entry, found);
+  }
+  return found;
+}
+
+test("the kimi route relays connector tools with no sibling ref left", () => {
+  const { tools } = flattenNamespaceTools([connectorNamespace()]);
+  const relayed = repairToolSchemaRoots(tools, { inlineForeignRefs: true });
+  const parameters = relayed[0].parameters;
+  assert.deepEqual(siblingRefs(parameters), []);
+  const inbound = parameters.properties.filters.properties.inboundTotalDurationRange;
+  assert.deepEqual(Object.keys(inbound.properties), ["min", "max"]);
+  assert.deepEqual(inbound.required, ["min"]);
+  // The client's native declaration is not the provider-facing copy and stays
+  // exactly as Codex sent it.
+  const native = relayed[0].inputSchema.properties.filters.properties;
+  assert.equal(
+    native.inboundTotalDurationRange.$ref,
+    "#/properties/filters/properties/priceRange",
+  );
+});
+
+// The negative control is the point of the gate: every provider that accepts
+// these pointers today must keep the byte-identical payload it already gets.
+test("a provider that never asked for inlining keeps its tools by identity", () => {
+  const { tools } = flattenNamespaceTools([connectorNamespace()]);
+  assert.equal(repairToolSchemaRoots(tools), tools);
+  assert.deepEqual(siblingRefs(tools[0].parameters), [
+    "#/properties/filters/properties/priceRange",
+  ]);
+});
+
+test("the kimi route still copies nothing when no tool carries a foreign ref", () => {
+  const tools = [
+    {
+      type: "function",
+      name: "ordinary",
+      parameters: {
+        type: "object",
+        properties: { window: { $ref: "#/$defs/range" } },
+        $defs: { range: { type: "object" } },
+      },
+    },
+  ];
+  assert.equal(repairToolSchemaRoots(tools, { inlineForeignRefs: true }), tools);
+});
