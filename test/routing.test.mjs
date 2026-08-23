@@ -3067,6 +3067,8 @@ test("API forwarder routes Ollama Cloud models without unsupported parameters", 
       ["ollama-cloud-glm-5-2", "glm-5.2", "minimal", "none"],
       ["ollama-cloud-glm-5-2", "glm-5.2", "bogus", "high"],
       ["ollama-cloud-kimi-k2-7-code", "kimi-k2.7-code", "high", "high"],
+      ["ollama-cloud-kimi-k3", "kimi-k3:cloud", "low", "low"],
+      ["ollama-cloud-kimi-k3", "kimi-k3:cloud", "max", "max"],
     ]) {
       const response = await fetch(
         `http://127.0.0.1:${forwarderPort}/v1/chat/completions`,
