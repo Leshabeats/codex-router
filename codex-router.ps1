@@ -263,19 +263,58 @@ switch ($Command) {
     # -- bypassing the source-fingerprint skip that `install` uses -- then
     # restart whichever companion Task Scheduler already supervises.
     if ($Action -eq "rebuild") {
-      if (Get-Command cargo -ErrorAction SilentlyContinue) {
-        & (Join-Path $Root "scripts\build-desktop-tray.ps1") -BinaryOnly
-        if ($LASTEXITCODE -ne 0) { throw "Desktop companion build failed." }
-        & node (Join-Path $Root "src\install-plan.mjs") record-tray | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-          Write-Warning "Could not stamp the companion build; the next update will rebuild it."
+      # A running companion keeps its Tauri or Electron binary open, and
+      # Windows refuses to overwrite a file another process holds. Building in
+      # place over a live tray fails every time, leaving the old companion in
+      # place (or broken). So a rebuild stops the supervised task before it
+      # builds, and restores the previous instance best-effort if the build or
+      # install afterwards fails.
+      $TrayWasRunning = $false
+      try {
+        $TrayState = (& node (Join-Path $Root "src\tray-service.mjs") status | Out-String)
+        if ($LASTEXITCODE -eq 0) {
+          $TrayWasRunning = ($TrayState | ConvertFrom-Json).loaded -eq $true
         }
-        Invoke-RouterNode "src\tray-service.mjs" @("install")
-      } else {
-        Write-Output "Cargo is not on PATH; rebuilding the Electron companion instead."
-        & (Join-Path $Root "scripts\build-electron-companion.ps1") | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "Electron companion build failed." }
-        Invoke-RouterNode "src\tray-service.mjs" @("install-electron")
+      } catch {
+        # An unreadable status is not a reason to build over a running tray;
+        # stopping first is safe either way, so just record nothing.
+        $TrayWasRunning = $false
+      }
+      try {
+        # `stop` is a no-op for an absent or idle task. Only a scheduler
+        # failure it cannot classify aborts the rebuild.
+        Invoke-RouterNode "src\tray-service.mjs" @("stop")
+      } catch {
+        if ($TrayWasRunning) { throw }
+      }
+      try {
+        if (Get-Command cargo -ErrorAction SilentlyContinue) {
+          & (Join-Path $Root "scripts\build-desktop-tray.ps1") -BinaryOnly
+          if ($LASTEXITCODE -ne 0) { throw "Desktop companion build failed." }
+          & node (Join-Path $Root "src\install-plan.mjs") record-tray | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Could not stamp the companion build; the next update will rebuild it."
+          }
+          Invoke-RouterNode "src\tray-service.mjs" @("install")
+        } else {
+          Write-Output "Cargo is not on PATH; rebuilding the Electron companion instead."
+          & (Join-Path $Root "scripts\build-electron-companion.ps1") | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "Electron companion build failed." }
+          Invoke-RouterNode "src\tray-service.mjs" @("install-electron")
+        }
+      } catch {
+        if ($TrayWasRunning) {
+          # The tray this rebuild replaced is gone or half-replaced and STOPPED.
+          # Bring the still-on-disk companion back so the machine is not left
+          # trayless by a failed update.
+          try {
+            Invoke-RouterNode "src\tray-service.mjs" @("start")
+            Write-Warning "Companion rebuild failed; the previous companion was restarted."
+          } catch {
+            Write-Warning "Companion rebuild failed and the previous companion could not be restarted: $($_.Exception.Message)"
+          }
+        }
+        throw
       }
       Write-Output "Companion rebuilt, installed, and started."
       exit 0

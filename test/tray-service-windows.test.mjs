@@ -99,8 +99,43 @@ test("tray uninstall verifies that Task Scheduler removed the task", () => {
     source.indexOf('command === "stop"'),
   );
   assert.match(uninstall, /schtasks\(\["\/Delete"/);
-  assert.match(uninstall, /if \(taskExists\(\)\)[\s\S]*?throw/);
+  // A task the scheduler still cannot enumerate must fail the uninstall, never
+  // report success as "missing".
+  assert.match(uninstall, /if \(taskExists\(\) === "exists"\)[\s\S]*?throw/);
+  assert.match(uninstall, /if \(existence === "error"\)[\s\S]*?did not answer whether the tray task was removed/);
   assert.doesNotMatch(uninstall, /catch \{\s*\/\/ The task may not exist/);
+});
+
+test("task query returns a tri-state answer, not a silent false", () => {
+  const source = readFileSync(path.join(root, "src", "tray-service-windows.mjs"), "utf8");
+  const task = source.slice(
+    source.indexOf("function taskExists("),
+    source.indexOf("function sleep("),
+  );
+  // The positive, negative, and indeterminate outcomes are returned as distinct
+  // literals rather than collapsed to a boolean false.
+  assert.match(task, /return sawError \? "error" : "missing"/);
+  assert.match(task, /"exists"/);
+  assert.match(task, /"missing"/);
+  // Only the culture-invariant "task not found" FullyQualifiedErrorId may count
+  // as missing; a timeout/denial/scheduler outage must become "error".
+  assert.match(task, /CmdletizationQuery_NotFound_TaskName/);
+  // Both PowerShell hosts are consulted before a host failure is treated as
+  // indeterminate rather than as an absent task.
+  assert.match(task, /for \(const executable of \["powershell\.exe", "pwsh\.exe"\]\)/);
+});
+
+test("a scheduler failure is never treated as a missing task while stopping", () => {
+  const source = readFileSync(path.join(root, "src", "tray-service-windows.mjs"), "utf8");
+  const wait = source.slice(
+    source.indexOf("function waitForTaskState("),
+    source.indexOf("function endTask("),
+  );
+  assert.match(wait, /existence === "missing"/);
+  assert.match(wait, /if \(action === "stop"\) return "missing"/);
+  // An indeterminate query is reported, not swallowed into a "missing" answer.
+  assert.match(wait, /existence === "error"[\s\S]*?did not answer/);
+  assert.match(wait, /uninstall would report[\s\S]*?success it did not earn/);
 });
 
 test("tray status reports the registered action and reads task state once", () => {
@@ -161,6 +196,33 @@ test("tray rebuild registers the artifact it just built", () => {
   assert.match(rebuild, /tray-service\.mjs" @\("install"\)/);
   assert.match(rebuild, /tray-service\.mjs" @\("install-electron"\)/);
   assert.doesNotMatch(rebuild, /tray-service\.mjs" @\("restart"\)/);
+  // Windows locks running tray binaries, so the supervised task is stopped
+  // BEFORE the in-place build, and a failed rebuild restores the old instance.
+  const stopBeforeBuild = rebuild.indexOf('tray-service.mjs" @("stop")');
+  const build = rebuild.indexOf("build-desktop-tray.ps1");
+  assert.ok(stopBeforeBuild >= 0 && stopBeforeBuild < build,
+    "the running tray must be stopped before the in-place build");
+  assert.match(rebuild, /\$TrayWasRunning\s*=\s*\$/);
+  assert.match(rebuild, /tray-service\.mjs" @\("start"\)/);
+  assert.match(rebuild, /Companion rebuild failed/);
+});
+
+test("PowerShell children that emit parsed text pin their output encoding to UTF-8", () => {
+  const source = readFileSync(path.join(root, "src", "tray-service-windows.mjs"), "utf8");
+  // OEM-encoded Console.Out corrupts a localized profile path before Node's
+  // `encoding: "utf8"` sees it, which made status report appPresent:false on a
+  // healthy tray and reject a valid deploy.
+  const pin = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8";
+  const pinWithin = (functionName) => {
+    const start = source.indexOf(`function ${functionName}(`);
+    assert.ok(start >= 0, `${functionName} must still exist`);
+    // Every PowerShell child that writes text for Node to parse pins UTF-8
+    // near the top of its script body, before emitting the parsed output.
+    return source.slice(start, start + 900).includes(pin);
+  };
+  assert.ok(pinWithin("taskState"), "taskState must pin UTF-8 before its output");
+  assert.ok(pinWithin("registeredTaskAction"), "registeredTaskAction must pin UTF-8");
+  assert.ok(pinWithin("taskExists"), "taskExists must pin UTF-8");
 });
 
 test("tray repair validates the task and grants only its current principal control", () => {

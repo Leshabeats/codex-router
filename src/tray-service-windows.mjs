@@ -115,13 +115,45 @@ function installTask(action = trayTaskAction()) {
   }
 }
 
+// Tri-state: "exists" | "missing" | "error". The boolean answer cannot
+// distinguish "not installed" from "Task Scheduler itself would not say".
+// `schtasks` names a missing task with a *localized* line ("ERROR: The system
+// cannot find the file specified."), so its text cannot be classified the way
+// callers need -- but Get-ScheduledTask reports the miss with a
+// culture-invariant FullyQualifiedErrorId. A timeout, access-denied, or
+// scheduler-down outcome raises that ID to a different value and is reported
+// as "error", never as a missing task.
 function taskExists(timeoutMs = TASK_COMMAND_TIMEOUT_MS) {
-  try {
-    schtasks(["/Query", "/TN", TRAY_TASK_NAME], { quiet: true, timeoutMs });
-    return true;
-  } catch {
-    return false;
+  const script = [
+    "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
+    'try { Get-ScheduledTask -TaskName $env:CODEX_ROUTER_TRAY_TASK -ErrorAction Stop | Out-Null; "[exists]" } catch { if ($_.FullyQualifiedErrorId -like "CmdletizationQuery_NotFound_TaskName,*") { "[missing]" } else { "[error]" } }',
+  ].join("; ");
+  const perHostTimeout = Math.max(50, Math.floor(timeoutMs / 2));
+  // 5.1 and 7 can disagree about the current user's task reads, so both hosts
+  // are consulted before a host-level failure is reported as indeterminate.
+  let sawError = false;
+  for (const executable of ["powershell.exe", "pwsh.exe"]) {
+    try {
+      const value = execFileSync(
+        executable,
+        ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+        {
+          encoding: "utf8",
+          env: { ...process.env, CODEX_ROUTER_TRAY_TASK: TRAY_TASK_NAME },
+          stdio: ["ignore", "pipe", "ignore"],
+          timeout: perHostTimeout,
+          windowsHide: true,
+        },
+      ).trim().toLowerCase();
+      if (value === "[exists]") return "exists";
+      if (value === "[missing]") return "missing";
+      sawError = true;
+    } catch {
+      // A non-answering host is indeterminate, not evidence of an absent task.
+      sawError = true;
+    }
   }
+  return sawError ? "error" : "missing";
 }
 
 function sleep(milliseconds) {
@@ -132,8 +164,12 @@ function taskState(timeoutMs = TASK_COMMAND_TIMEOUT_MS) {
   // `schtasks` output is localized ("En ejecución" on Spanish Windows), so a
   // regex on its text reads a running task as stopped. Task Scheduler's own
   // State property is an enum that renders the same in every locale.
+  // PowerShell 5.1 writes `[Console]::Out` in the OEM console encoding, so a
+  // Task Name that contains non-ASCII bytes would corrupt stdout before Node
+  // decodes it as UTF-8. Pin the child's output encoding so the JSON/text we
+  // parse actually round-trips.
   const script =
-    "try { [Console]::Out.Write((Get-ScheduledTask -TaskName $env:CODEX_ROUTER_TRAY_TASK).State.ToString()) } catch { exit 1 }";
+    "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; try { [Console]::Out.Write((Get-ScheduledTask -TaskName $env:CODEX_ROUTER_TRAY_TASK).State.ToString()) } catch { exit 1 }";
   const perHostTimeout = Math.max(50, Math.floor(timeoutMs / 2));
   for (const executable of ["powershell.exe", "pwsh.exe"]) {
     try {
@@ -157,6 +193,7 @@ function taskState(timeoutMs = TASK_COMMAND_TIMEOUT_MS) {
 
 function registeredTaskAction() {
   const script = [
+    "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
     "$task = Get-ScheduledTask -TaskName $env:CODEX_ROUTER_TRAY_TASK -ErrorAction Stop",
     "$action = @($task.Actions)[0]",
     "if ($null -eq $action) { exit 1 }",
@@ -194,9 +231,18 @@ function waitForTaskState(predicate, timeoutMs, action) {
     const probeTimeout = Math.min(TASK_COMMAND_TIMEOUT_MS, remaining);
     const state = taskState(probeTimeout);
     if (state !== undefined && predicate(state)) return state;
-    if (state === undefined && !taskExists(Math.min(TASK_COMMAND_TIMEOUT_MS, Math.max(50, deadline - Date.now())))) {
-      if (action === "stop") return "missing";
-      throw new Error(`The tray task disappeared while waiting for it to ${action}.`);
+    if (state === undefined) {
+      const existence = taskExists(Math.min(TASK_COMMAND_TIMEOUT_MS, Math.max(50, deadline - Date.now())));
+      if (existence === "missing") {
+        if (action === "stop") return "missing";
+        throw new Error(`The tray task disappeared while waiting for it to ${action}.`);
+      }
+      if (existence === "error") {
+        // An unreadable scheduler is not a missing task: a stop would return
+        // early on a task that is still there, and an uninstall would report
+        // success it did not earn.
+        throw new Error(`Task Scheduler did not answer while waiting for the tray to ${action}.`);
+      }
     }
     if (Date.now() >= deadline) {
       throw new Error(`The tray task did not ${action} within ${timeoutMs}ms.`);
@@ -297,7 +343,14 @@ if (command === "render" || command === "render-task") {
     `${JSON.stringify({ installed: true, ...electronTaskAction() })}\n`,
   );
 } else if (command === "status") {
-  const installed = taskExists();
+  const existence = taskExists();
+  if (existence === "error") {
+    // An indeterminate scheduler answer must not read as absence: deploy
+    // verification would reject a healthy tray, and the operator sees
+    // "appPresent:false" for a binary that is present. Surface it honestly.
+    throw new Error("Task Scheduler did not answer whether the tray task is registered.");
+  }
+  const installed = existence === "exists";
   const taskStatus = installed ? taskState() : undefined;
   const action = installed ? registeredTaskAction() : undefined;
   const companionPath = action?.execute || (!installed ? builtCompanionPath() : undefined);
@@ -326,14 +379,18 @@ if (command === "render" || command === "render-task") {
     // Missing is already the requested state. A task that still exists means
     // Task Scheduler rejected the deletion, which must not be reported as a
     // successful uninstall.
-    if (taskExists()) {
+    if (taskExists() === "exists") {
       const failure = new Error("Task Scheduler did not remove the tray task.");
       failure.cause = error;
       throw failure;
     }
   }
-  if (taskExists()) {
+  const existence = taskExists();
+  if (existence === "exists") {
     throw new Error("Task Scheduler still reports the tray task after deletion.");
+  }
+  if (existence === "error") {
+    throw new Error("Task Scheduler did not answer whether the tray task was removed.");
   }
   process.stdout.write(`${JSON.stringify({ installed: false })}\n`);
 } else if (command === "stop") {
@@ -343,8 +400,12 @@ if (command === "render" || command === "render-task") {
   // start and restart. A tray that was quit by hand is not running, so both
   // reduce to asking Task Scheduler for a fresh instance.
   requireBuiltCompanion();
-  if (!taskExists()) {
+  const existence = taskExists();
+  if (existence === "missing") {
     throw new Error(`The tray task is not installed. Run: control tray enable`);
+  }
+  if (existence === "error") {
+    throw new Error("Task Scheduler did not answer whether the tray task is registered.");
   }
   if (command === "restart") endTask();
   startTask();
