@@ -875,6 +875,9 @@ final class RouterStore: ObservableObject {
     "clinepass": "ClinePass",
     "chutes": "Chutes",
     "orca": "OrcaRouter",
+    "venice": "Venice",
+    "nousresearch": "Nous",
+    "openrouter": "OpenRouter",
   ]
 
   static func shortName(forRegistryProvider provider: RouterProviderInfo) -> String {

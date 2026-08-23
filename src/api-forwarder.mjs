@@ -118,26 +118,28 @@ function ollamaCloudEffort(value) {
   return "high";
 }
 
-// Z.ai documents reasoning_effort per model, not per vendor: GLM-5.2 answers
-// to high/max, and GLM-5.3 adds a low tier (low/high/max, max the upstream
-// default). So the accepted rungs travel with the model, and the requested
-// effort is clamped onto the ladder its own registry entry declares instead of
-// onto a fixed two-tier map -- otherwise GLM-5.3's low tier could never be
-// reached. Codex's top rungs always mean "as deep as this model goes"; anything
-// else takes the nearest declared rung at or below it, and a request under the
-// model's floor lands on that floor. An absent or unknown value is treated as
-// "high", which is what the two-tier map sent before this generalization.
-const GLM_EFFORT_LADDER = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+// Some upstreams document reasoning_effort per model rather than per vendor:
+// GLM-5.2 answers to high/max, GLM-5.3 adds a low tier (low/high/max, max the
+// upstream default), and Ox Alpha publishes low/high/max on most routes but
+// low/medium/high on Venice. So the accepted rungs travel with the model, and
+// the requested effort is clamped onto the ladder its own registry entry
+// declares instead of onto a fixed map -- otherwise GLM-5.3's low tier could
+// never be reached. Codex's top rungs always mean "as deep as this model
+// goes"; anything else takes the nearest declared rung at or below it, and a
+// request under the model's floor lands on that floor. An absent or unknown
+// value is treated as "high", which is what the two-tier map sent before this
+// generalization.
+const EFFORT_LADDER = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 
-function glmEffort(value, levels) {
+function declaredEffort(value, levels) {
   const declared = levels
-    .filter((effort) => GLM_EFFORT_LADDER.includes(effort))
-    .sort((left, right) => GLM_EFFORT_LADDER.indexOf(left) - GLM_EFFORT_LADDER.indexOf(right));
+    .filter((effort) => EFFORT_LADDER.includes(effort))
+    .sort((left, right) => EFFORT_LADDER.indexOf(left) - EFFORT_LADDER.indexOf(right));
   if (!declared.length) return undefined;
   if (["xhigh", "max", "ultra"].includes(value)) return declared.at(-1);
-  const requested = GLM_EFFORT_LADDER.indexOf(value);
-  const ceiling = requested === -1 ? GLM_EFFORT_LADDER.indexOf("high") : requested;
-  const atOrBelow = declared.filter((effort) => GLM_EFFORT_LADDER.indexOf(effort) <= ceiling);
+  const requested = EFFORT_LADDER.indexOf(value);
+  const ceiling = requested === -1 ? EFFORT_LADDER.indexOf("high") : requested;
+  const atOrBelow = declared.filter((effort) => EFFORT_LADDER.indexOf(effort) <= ceiling);
   return atOrBelow.at(-1) || declared[0];
 }
 
@@ -729,7 +731,7 @@ function normalizeBody(buffer, contentType, route) {
     // list is what goes stale when a route is added.
     const levels = (model.reasoningLevels || []).map((level) => level.effort);
     if (levels.length > 1) {
-      payload.reasoning_effort = glmEffort(payload.reasoning_effort, levels);
+      payload.reasoning_effort = declaredEffort(payload.reasoning_effort, levels);
     } else {
       delete payload.reasoning_effort;
     }
@@ -808,6 +810,28 @@ function normalizeBody(buffer, contentType, route) {
     delete payload.reasoning_effort;
     payload.thinking = { type: "adaptive" };
     payload.reasoning_split = true;
+  } else if (model.requestProfile === "ox-alpha") {
+    // Ox Alpha always thinks, and every route validates reasoning_effort
+    // against the rungs its own catalog publishes -- an off-ladder value comes
+    // back as HTTP 400 "This model always engages in thinking and cannot be
+    // disabled" rather than being ignored. The rungs are not the same
+    // everywhere (low/high/max on OpenCode, OpenRouter, Command Code and Nous
+    // Portal; low/medium/high on Venice), and Codex can send any rung it
+    // knows: an installation older than 0.143 has no `max` in its enum at all,
+    // so the catalog clamps this model's default down to `xhigh` and that is
+    // what arrives here. Clamping onto the entry's own declared ladder is what
+    // keeps both of those cases off the 400.
+    if (payload.reasoning_effort !== undefined) {
+      const effort = declaredEffort(
+        payload.reasoning_effort,
+        (model.reasoningLevels || []).map((level) => level.effort),
+      );
+      if (effort) payload.reasoning_effort = effort;
+      else delete payload.reasoning_effort;
+    }
+    // Absent means the upstream's own default, which is the top rung. The
+    // routes document no `thinking` switch, and thinking cannot be turned off.
+    delete payload.thinking;
   } else if (model.requestProfile === "auto-tool-choice") {
     // Some models call tools happily under "auto" but reject being forced to,
     // the way DeepSeek and Qwen do in thinking mode. Their vendor profiles
