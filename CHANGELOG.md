@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Homebrew installs can reach every command again.** The formula's PATH shim
+  exec'd `bin/model-router codex`, whose fixed whitelist has no entry for
+  `curate-models`, `discover-models`, `refresh-catalog`, `test-model`,
+  `support-bundle`, or `control` -- so a packaged user had no way to add a
+  custom provider's models, and a bare `codex-router` or `codex-router --help`
+  printed `model-router`'s usage instead of the packaged command list. The shim
+  now dispatches through `bin/codex-router`, which exists for exactly this
+  case. `post_install` gets its own private entry point, because
+  `bin/codex-router` refuses `install` by design. Reported in #334.
+
 - **GLM-5.3 on opencode Go serves its real 1M context.** The entry still
   carried 200,000/180,000 -- the GLM-5.1 lineage default that #244 established
   is wrong for 5.3, where a live probe accepted 990,020 prompt tokens. Both
