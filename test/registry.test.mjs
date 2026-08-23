@@ -183,8 +183,15 @@ test("provider registry exposes configured API and OAuth model families", () => 
   assert.equal(PROVIDERS.get("opencode-go").baseUrl, "https://opencode.ai/zen/go/v1");
   assert.equal(PROVIDERS.get("opencode-go-messages").baseUrl, "https://opencode.ai/zen/go/v1");
   assert.equal(PROVIDERS.get("opencode-go-responses").baseUrl, "https://opencode.ai/zen/go/v1");
+  assert.equal(PROVIDERS.get("opencode-zen").baseUrl, "https://opencode.ai/zen/v1");
+  assert.equal(PROVIDERS.get("opencode-zen").baseUrlEnv, "OPENCODE_ZEN_BASE_URL");
+  assert.equal(PROVIDERS.get("opencode-zen").protocol, undefined);
   assert.equal(PROVIDERS.get("opencode-go-messages").protocol, "anthropic");
   assert.equal(PROVIDERS.get("opencode-go-responses").protocol, "openai-responses");
+  const goMuse = MODEL_BY_SLUG.get("opencode-go-responses/muse-spark-1.2-contributor");
+  assert.equal(goMuse.provider, "opencode-go-responses");
+  assert.equal(goMuse.upstreamModel, "muse-spark-1.2-contributor");
+  assert.equal(goMuse.gatewayModel, "opencode-go-responses-muse-spark-1-2-contributor");
   assert.equal(PROVIDERS.get("commandcode").baseUrl, "https://api.commandcode.ai/provider/v1");
   assert.equal(PROVIDERS.get("commandcode-messages").baseUrl, "https://api.commandcode.ai/provider/v1");
   assert.equal(PROVIDERS.get("commandcode-messages").protocol, "anthropic");
@@ -199,6 +206,8 @@ test("provider registry exposes configured API and OAuth model families", () => 
   assert.equal(PROVIDERS.get("opencode-go").variantOf, undefined);
   assert.equal(PROVIDERS.get("opencode-go-messages").variantOf, "opencode-go");
   assert.equal(PROVIDERS.get("opencode-go-responses").variantOf, "opencode-go");
+  assert.equal(PROVIDERS.get("opencode-zen").variantOf, "opencode-go");
+  assert.equal(PROVIDERS.has("opencode-zen-responses"), false);
   assert.equal(PROVIDERS.get("commandcode").variantOf, undefined);
   assert.equal(PROVIDERS.get("commandcode-messages").variantOf, "commandcode");
   assert.equal(
@@ -261,10 +270,40 @@ test("provider registry exposes configured API and OAuth model families", () => 
   assert.equal(chutes.credential.file, "chutes-api-key.secret");
   assert.deepEqual(chutes.credential.keychainServices, ["codex-router-chutes"]);
   assert.equal(LISTED_MODELS.some(({ provider }) => provider === "chutes"), false);
+  const nanoGpt = PROVIDERS.get("nano-gpt");
+  assert.equal(nanoGpt.baseUrl, "https://nano-gpt.com/api/v1");
+  assert.equal(nanoGpt.baseUrlEnv, "NANOGPT_API_BASE_URL");
+  assert.deepEqual(nanoGpt.credential.environment, ["NANOGPT_API_KEY"]);
+  assert.equal(nanoGpt.credential.file, "nano-gpt-api-key.secret");
+  assert.deepEqual(nanoGpt.credential.keychainServices, ["codex-router-nano-gpt"]);
+  assert.equal(LISTED_MODELS.some(({ provider }) => provider === "nano-gpt"), false);
+  const venice = PROVIDERS.get("venice");
+  assert.equal(venice.baseUrl, "https://api.venice.ai/api/v1");
+  assert.equal(venice.baseUrlEnv, "VENICE_API_BASE_URL");
+  assert.deepEqual(venice.credential.environment, ["VENICE_API_KEY"]);
+  assert.equal(venice.credential.file, "venice-api-key.secret");
+  assert.deepEqual(venice.credential.keychainServices, ["codex-router-venice"]);
+  assert.equal(LISTED_MODELS.some(({ provider }) => provider === "venice"), false);
   const opencodeFree = PROVIDERS.get("opencode-free");
+  const opencodeFreeResponses = PROVIDERS.get("opencode-free-responses");
   assert.equal(opencodeFree.authMode, "anonymous");
   assert.equal(opencodeFree.baseUrl, "https://opencode.ai/zen/v1");
   assert.equal(opencodeFree.credential, undefined);
+  assert.equal(opencodeFreeResponses.variantOf, "opencode-free");
+  assert.equal(opencodeFreeResponses.protocol, "openai-responses");
+  assert.equal(opencodeFreeResponses.authMode, "anonymous");
+  assert.equal(opencodeFreeResponses.baseUrl, "https://opencode.ai/zen/v1");
+  assert.equal(opencodeFreeResponses.baseUrlEnv, undefined);
+  assert.equal(opencodeFreeResponses.credential, undefined);
+  assert.equal(opencodeFreeResponses.anonymousModelPolicy, "explicit-models");
+  assert.deepEqual(opencodeFreeResponses.anonymousModels, [
+    "muse-spark-1.2-contributor-free",
+  ]);
+  assert.equal(anonymousModelAllowed(opencodeFreeResponses, "muse-spark-1.2-contributor-free"), true);
+  assert.equal(anonymousModelAllowed(opencodeFreeResponses, "x-preview-f-free"), false);
+  assert.equal(anonymousModelAllowed(opencodeFreeResponses, "big-pickle"), false);
+  assert.equal(anonymousModelAllowed(opencodeFreeResponses, "arbitrary-free"), false);
+  assert.equal(anonymousModelAllowed(opencodeFreeResponses, "muse-spark-1.2"), false);
   assert.equal(anonymousModelAllowed(opencodeFree, "big-pickle"), true);
   assert.equal(anonymousModelAllowed(opencodeFree, "mimo-v2.5-free"), true);
   assert.equal(anonymousModelAllowed(opencodeFree, "glm-5.1"), false);
@@ -581,6 +620,24 @@ test("DeepSeek V4 Flash Vision Exp advertises only verified direct-API capabilit
   assert.ok(API_MODELS.includes(model));
 });
 
+test("GLM-5.3 on OpenCode Go carries the 1M GLM-5.3 window, not GLM-5.1's 200K", () => {
+  const model = MODEL_BY_SLUG.get("opencode-go/glm-5.3");
+  assert.equal(model?.contextWindow, 1_000_000);
+  assert.equal(model?.autoCompact, 900_000);
+  // The sibling GLM entries on this same gateway already serve 1,048,576, so
+  // the gateway does not clamp the family; 1M stays conservative against them.
+  for (const sibling of ["opencode-go/glm-5.1", "opencode-go/glm-5.2"]) {
+    assert.ok(
+      MODEL_BY_SLUG.get(sibling)?.contextWindow >= model.contextWindow,
+      `${sibling} should not serve less than glm-5.3`,
+    );
+  }
+  // Standalone search stays off: docs/HOW-IT-WORKS.md requires per-route
+  // verification that the upstream preserves tool/function-call history, and
+  // no probe of the opencode Go relay has been recorded.
+  assert.equal(model?.searchTool, undefined);
+});
+
 test("GLM-5.3 Coding Plan opts in to GPT-5.6 behavior, concise execution, and standalone search", () => {
   const model = MODEL_BY_SLUG.get("zai-coding/glm-5.3");
   assert.equal(model?.behaviorTemplate, "gpt-5.6-sol");
@@ -717,6 +774,10 @@ test("LiteLLM configuration is generated from every registry route", () => {
   assert.match(
     rendered,
     /model: "openai\/responses\/opencode-go-responses-gpt-5-6-luna"/,
+  );
+  assert.match(
+    rendered,
+    /model: "openai\/responses\/opencode-go-responses-muse-spark-1-2-contributor"/,
   );
   assert.equal(
     MODELS.some((model) => model.provider === "github-copilot"),
@@ -1002,6 +1063,60 @@ test("credential-free endpoints are allowlisted addresses, at the provider and a
     });
     assert.equal(redirected.status, 1);
     assert.match(redirected.stderr, /anonymous provider opencode-free must use its fixed official endpoint/);
+
+    const redirectedResponses = load((registry) => {
+      registry.providers = registry.providers.map((provider) =>
+        provider.id === "opencode-free-responses"
+          ? { ...provider, baseUrl: "https://example.com/v1" }
+          : provider,
+      );
+    });
+    assert.equal(redirectedResponses.status, 1);
+    assert.match(
+      redirectedResponses.stderr,
+      /anonymous provider opencode-free-responses must use its fixed official endpoint/,
+    );
+
+    const invalidAllowlist = load((registry) => {
+      registry.providers = registry.providers.map((provider) =>
+        provider.id === "opencode-free-responses"
+          ? { ...provider, anonymousModels: [] }
+          : provider,
+      );
+    });
+    assert.equal(invalidAllowlist.status, 1);
+    assert.match(
+      invalidAllowlist.stderr,
+      /anonymous provider opencode-free-responses requires a valid anonymousModels allowlist/,
+    );
+
+    const wrongPolicy = load((registry) => {
+      registry.providers = registry.providers.map((provider) =>
+        provider.id === "opencode-free-responses"
+          ? { ...provider, anonymousModelPolicy: "opencode-console" }
+          : provider,
+      );
+    });
+    assert.equal(wrongPolicy.status, 1);
+    assert.match(
+      wrongPolicy.stderr,
+      /may declare anonymousModels only with explicit-models policy/,
+    );
+
+    const wrongResponseModel = load((registry) => {
+      registry.models.push({
+        slug: "opencode-free-responses/x-preview-f-free",
+        gatewayModel: "opencode-free-responses-x-preview-f-free",
+        upstreamModel: "x-preview-f-free",
+        provider: "opencode-free-responses",
+        listed: true,
+      });
+    });
+    assert.equal(wrongResponseModel.status, 1);
+    assert.match(
+      wrongResponseModel.stderr,
+      /anonymous provider opencode-free-responses only accepts its documented free-model ids/,
+    );
 
     const keyed = load((registry) => {
       registry.providers = registry.providers.map((provider) =>

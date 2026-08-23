@@ -33,7 +33,10 @@ import {
   writeStreamErrorEvent,
 } from "./http-utils.mjs";
 import { EmptyCompletionGuard } from "./empty-completion-guard.mjs";
-import { zaiResponsesCompatTransform } from "./zai-responses-compat.mjs";
+import {
+  ZaiResponsesCompatTransform,
+  zaiResponsesCompatTransform,
+} from "./zai-responses-compat.mjs";
 import {
   MERGED_CATALOG_PATH,
   NATIVE_CATALOG_PATH,
@@ -60,10 +63,14 @@ import {
 import { fetchWithRetry } from "./upstream-retry.mjs";
 import {
   NamespaceToolCallTransform,
+  agentMessagesAsUserMessages,
+  bridgeCustomTools,
+  downgradeOriginalImageDetail,
   flattenNamespacedHistory,
   flattenNamespaceTools,
   flattenToolSearchHistory,
   repairToolSchemaRoots,
+  stripSearchContentTypes,
 } from "./namespace-relay.mjs";
 import { collaborationToolAvailable, pendingInterruptTargets } from "./subagent-completion.mjs";
 import {
@@ -119,7 +126,10 @@ import {
 } from "./tool-result-aging-state.mjs";
 import { VERSION } from "./version.mjs";
 import { nativeSessionHeaders } from "./codex-native-session.mjs";
-import { installStableFetchTransport } from "./fetch-transport.mjs";
+import {
+  installStableFetchTransport,
+  loopbackProbeFetch,
+} from "./fetch-transport.mjs";
 
 installStableFetchTransport();
 
@@ -308,6 +318,23 @@ function parseBody(buffer) {
     wrapped.status = 400;
     throw wrapped;
   }
+}
+
+// Large Codex turns parse several megabytes of JSON on the event loop. Yield
+// first so an already-accepted GET /health can answer instead of sitting
+// behind that parse and looking like a dead router to the tray.
+async function parseBodyAsync(buffer) {
+  await new Promise((resolve) => setImmediate(resolve));
+  return parseBody(buffer);
+}
+
+function bindClientAbort(request, response, onAbort) {
+  const abort = () => onAbort();
+  request.once("aborted", abort);
+  response.once("close", () => {
+    if (!response.writableEnded) abort();
+  });
+  if (request.aborted || response.destroyed) abort();
 }
 
 function decodeBody(body, contentEncoding) {
@@ -519,6 +546,24 @@ function normalizeAutoToolChoice(payload, route) {
   ) {
     payload.tool_choice = "auto";
   }
+}
+
+// The documented Zen Free pair has two different wire contracts: Ox uses Chat
+// Completions and Muse Contributor Free uses Responses. Their observed strict
+// tool/input limitations do not establish a contract for paid Zen, Go, or any
+// other free model, so keep this compatibility boundary exact.
+function needsZenFreeToolCompatibility(route) {
+  const providerId = providerForModel(route)?.id;
+  return (
+    (providerId === "opencode-free" && route.upstreamModel === "x-preview-f-free") ||
+    (providerId === "opencode-free-responses" &&
+      route.upstreamModel === "muse-spark-1.2-contributor-free")
+  );
+}
+
+function zenFreeCompatibleInput(input, route) {
+  if (!needsZenFreeToolCompatibility(route)) return input;
+  return downgradeOriginalImageDetail(agentMessagesAsUserMessages(input));
 }
 
 function nativeTarget(pathname, search = "") {
@@ -752,7 +797,7 @@ function catalogModels() {
 
 // Shared across every /health request so a polling companion collapses into
 // one probe per service per window instead of three per poll.
-const healthCache = createHealthCache();
+const healthCache = createHealthCache({ staleWhileRevalidate: true });
 
 function serviceHealth(url) {
   return healthCache(url, () => probeService(url));
@@ -760,7 +805,9 @@ function serviceHealth(url) {
 
 async function probeService(url) {
   try {
-    const response = await fetch(url, {
+    // No dispatcher argument: `loopbackProbeFetch` owns one shared probe pool
+    // for the process, so this cannot fork a second one.
+    const response = await loopbackProbeFetch(url, {
       headers: { Authorization: `Bearer ${INTERNAL_KEY}` },
       signal: AbortSignal.timeout(3_000),
     });
@@ -1696,7 +1743,15 @@ function compactionAttempts(route, aged) {
 // turn -- a compaction that fails ends the session just as hard, because the
 // conversation cannot get under its context limit without one.
 async function summarizeWith(request, payload, route, aged, signal) {
-  const bridged = await bridgeVisionInput(aged.input, route, request);
+  const compatibleInput = zenFreeCompatibleInput(aged.input, route);
+  const providerInput = needsZenFreeToolCompatibility(route)
+    ? bridgeCustomTools([], compatibleInput, new Map()).input
+    : compatibleInput;
+  const bridged = await bridgeVisionInput(
+    providerInput,
+    route,
+    request,
+  );
   const body = {
     ...payload,
     model: route.gatewayModel,
@@ -2039,7 +2094,11 @@ function observeSubagentOutcome(request, route, status, options = {}) {
 async function buildRoutedRequest({ request, payload, route, agedInput }) {
   let namespacesFlattened = false;
   let flattenedNamespaces = new Map();
-  const bridged = await bridgeVisionInput(agedInput, route, request);
+  const bridged = await bridgeVisionInput(
+    zenFreeCompatibleInput(agedInput, route),
+    route,
+    request,
+  );
   // `bridgeVisionInput` returns its argument unchanged when there is no image
   // to read, and `carryReasoningThroughInput` writes into the array it is
   // given -- so without this copy the first build would rewrite the shared
@@ -2114,7 +2173,26 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
     // too, on the tools alone, without flattening anything.
     tools = repairToolSchemaRoots(tools);
   }
+  if (needsZenFreeToolCompatibility(route)) {
+    // Ox reaches Chat Completions after namespace flattening while Muse reaches
+    // Responses with native namespaces. Run the same recursive-ref repair
+    // after both protocol branches so neither wire shape can bypass it.
+    tools = repairToolSchemaRoots(tools, { nonRecursive: true });
+    tools = stripSearchContentTypes(tools);
+  }
   let routedInput = input;
+  let routedToolChoice = payload.tool_choice;
+  if (needsZenFreeToolCompatibility(route)) {
+    const customTools = bridgeCustomTools(
+      tools,
+      routedInput,
+      flattenedNamespaces,
+      routedToolChoice,
+    );
+    tools = customTools.tools;
+    routedInput = customTools.input;
+    routedToolChoice = customTools.toolChoice;
+  }
   if (chatCompletionsProvider) {
     const searchHistory = flattenToolSearchHistory(
       routedInput,
@@ -2135,6 +2213,7 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
     model: route.gatewayModel,
     input: routedInput,
   };
+  if (routedToolChoice !== payload.tool_choice) routed.tool_choice = routedToolChoice;
   // Codex chooses a child's model; this is where an operator gets to choose its
   // depth. Applied only to turns Codex marked as a child, so a parent
   // conversation on the same model is untouched -- running one model
@@ -2179,9 +2258,12 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
     flattenedNamespaces,
     // Close finished children the parent left Working. Only when the
     // collaboration toolset is actually available on this turn.
-    pendingInterrupts: pendingInterruptTargets(input, {
-      namespaces: flattenedNamespaces,
-    }),
+    pendingInterrupts: pendingInterruptTargets(
+      needsZenFreeToolCompatibility(route) ? agedInput : input,
+      {
+        namespaces: flattenedNamespaces,
+      },
+    ),
   };
 }
 
@@ -2354,11 +2436,16 @@ async function handleResponses(request, response, requestUrl) {
   let finalStatus;
   let activityStatus;
   let usageRecorded = false;
+  const controller = new AbortController();
+  bindClientAbort(request, response, () => {
+    clientGone = true;
+    controller.abort();
+  });
   try {
     if (!requireCodexTransport(request, response)) return;
     const encoded = await readRequestBody(request);
     const body = decodeBody(encoded, request.headers["content-encoding"]);
-    const payload = parseBody(body);
+    const payload = await parseBodyAsync(body);
     requestedModel = typeof payload.model === "string" ? payload.model : "";
     let registeredRoute =
       MODEL_BY_SLUG.get(requestedModel) ??
@@ -2407,18 +2494,6 @@ async function handleResponses(request, response, requestUrl) {
       route &&
       Array.isArray(payload.input) &&
       payload.input.at(-1)?.type === "compaction_trigger";
-
-    const controller = new AbortController();
-    request.once("aborted", () => {
-      clientGone = true;
-      controller.abort();
-    });
-    response.once("close", () => {
-      if (!response.writableEnded) {
-        clientGone = true;
-        controller.abort();
-      }
-    });
 
     if (route && (compactV1 || compactV2)) {
       const compaction = await handleRoutedCompaction(
@@ -2746,10 +2821,20 @@ async function handleResponses(request, response, requestUrl) {
             : undefined,
       });
       const transforms = [usageObserver];
-      const zaiCompat = route
+      let envelopeCompat = route
         ? zaiResponsesCompatTransform(route.provider, contentType)
         : undefined;
-      if (zaiCompat) transforms.push(zaiCompat);
+      // LiteLLM's Ox Chat -> Responses bridge can start assistant text after
+      // reasoning without its message envelope. Keep that repair exact.
+      if (
+        !envelopeCompat &&
+        route?.provider === "opencode-free" &&
+        route.upstreamModel === "x-preview-f-free" &&
+        String(contentType).toLowerCase().includes("text/event-stream")
+      ) {
+        envelopeCompat = new ZaiResponsesCompatTransform();
+      }
+      if (envelopeCompat) transforms.push(envelopeCompat);
       // Restore flattened namespace calls for routed chat-completions providers,
       // and inject missing finished-child interrupts for both routed and native
       // multi-agent parents (San Francisco uses native GPT).
@@ -3125,6 +3210,11 @@ async function handleNativeRequest(request, response, requestUrl, defaultModel) 
   const activity = beginRequestActivity();
   let clientGone = false;
   let requestedModel = defaultModel;
+  const controller = new AbortController();
+  bindClientAbort(request, response, () => {
+    clientGone = true;
+    controller.abort();
+  });
   try {
     if (!requireCodexTransport(request, response)) return;
     // Image and web-search turns are native-only; an idle install refuses
@@ -3135,25 +3225,13 @@ async function handleNativeRequest(request, response, requestUrl, defaultModel) 
     }
     const encoded = await readRequestBody(request);
     const body = decodeBody(encoded, request.headers["content-encoding"]);
-    const payload = parseBody(body);
+    const payload = await parseBodyAsync(body);
     requestedModel =
       typeof payload.model === "string" ? payload.model : defaultModel;
     activity.setRoute({
       provider: "openai",
       model: requestedModel,
       ...activityMetadataFromHeaders(request.headers),
-    });
-
-    const controller = new AbortController();
-    request.once("aborted", () => {
-      clientGone = true;
-      controller.abort();
-    });
-    response.once("close", () => {
-      if (!response.writableEnded) {
-        clientGone = true;
-        controller.abort();
-      }
     });
 
     const headers = nativeHeaders(request);

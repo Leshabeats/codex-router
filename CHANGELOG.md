@@ -37,6 +37,42 @@
   because one screen of models cannot answer for the providers it never
   showed.
 
+- **Concurrent Codex turns no longer stall `/health` and the next request.**
+  Loopback liveliness probes use a separate dispatcher so they cannot queue
+  behind long-lived SSE sockets, and `/health` serves a recent probe result
+  immediately while a slow LiteLLM liveliness check refreshes in the
+  background. The snapshot is still bounded: once it is older than 15s the
+  next `/health` waits for a live probe, so a tray-less `doctor` cannot
+  inherit an hours-old "reachable". Probe GETs use undici's own `fetch` with
+  that extra Agent (Node's builtin `fetch` rejects an npm-undici dispatcher)
+  and the same `NODE_USE_ENV_PROXY` selection as routed traffic. The
+  process-wide HTTP/1.1 pool stays unbounded -- a numeric `connections` cap
+  would queue later turns across every installed client. Disconnect handlers
+  are registered before the `JSON.parse` yield so a canceled turn cannot
+  start an upstream fetch. The tray was reporting Starting and Codex
+  "waiting for network" with two or three in-flight turns even though the
+  router was still generating.
+
+- **Homebrew installs can reach every command again.** The formula's PATH shim
+  exec'd `bin/model-router codex`, whose fixed whitelist has no entry for
+  `curate-models`, `discover-models`, `refresh-catalog`, `test-model`,
+  `support-bundle`, or `control` -- so a packaged user had no way to add a
+  custom provider's models, and a bare `codex-router` or `codex-router --help`
+  printed `model-router`'s usage instead of the packaged command list. The shim
+  now dispatches through `bin/codex-router`, which exists for exactly this
+  case. `post_install` gets its own private entry point, because
+  `bin/codex-router` refuses `install` by design. Reported in #334.
+
+- **GLM-5.3 on opencode Go serves its real 1M context.** The entry still
+  carried 200,000/180,000 -- the GLM-5.1 lineage default that #244 established
+  is wrong for 5.3, where a live probe accepted 990,020 prompt tokens. Both
+  Z.ai GLM-5.3 entries were corrected then; this opencode Go entry was missed,
+  so a session was compacting at 180K against a model that serves a million.
+  Its GLM-5.1 and GLM-5.2 siblings on the same gateway already declare
+  1,048,576, so 1,000,000/900,000 stays conservative against the relay.
+  Standalone web search stays off for this route until the opencode Go relay
+  is verified to preserve tool/function-call history.
+
 - **Grok 4.6 can select Codex's native image viewer.** xAI stopped without a
   function call when the tool was named `view_image`, even when selection was
   required. The Grok OAuth boundary now presents that tool as `inspect_image`
