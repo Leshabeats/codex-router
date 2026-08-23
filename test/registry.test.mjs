@@ -261,6 +261,20 @@ test("provider registry exposes configured API and OAuth model families", () => 
   assert.equal(chutes.credential.file, "chutes-api-key.secret");
   assert.deepEqual(chutes.credential.keychainServices, ["codex-router-chutes"]);
   assert.equal(LISTED_MODELS.some(({ provider }) => provider === "chutes"), false);
+  const nanoGpt = PROVIDERS.get("nano-gpt");
+  assert.equal(nanoGpt.baseUrl, "https://nano-gpt.com/api/v1");
+  assert.equal(nanoGpt.baseUrlEnv, "NANOGPT_API_BASE_URL");
+  assert.deepEqual(nanoGpt.credential.environment, ["NANOGPT_API_KEY"]);
+  assert.equal(nanoGpt.credential.file, "nano-gpt-api-key.secret");
+  assert.deepEqual(nanoGpt.credential.keychainServices, ["codex-router-nano-gpt"]);
+  assert.equal(LISTED_MODELS.some(({ provider }) => provider === "nano-gpt"), false);
+  const venice = PROVIDERS.get("venice");
+  assert.equal(venice.baseUrl, "https://api.venice.ai/api/v1");
+  assert.equal(venice.baseUrlEnv, "VENICE_API_BASE_URL");
+  assert.deepEqual(venice.credential.environment, ["VENICE_API_KEY"]);
+  assert.equal(venice.credential.file, "venice-api-key.secret");
+  assert.deepEqual(venice.credential.keychainServices, ["codex-router-venice"]);
+  assert.equal(LISTED_MODELS.some(({ provider }) => provider === "venice"), false);
   const opencodeFree = PROVIDERS.get("opencode-free");
   assert.equal(opencodeFree.authMode, "anonymous");
   assert.equal(opencodeFree.baseUrl, "https://opencode.ai/zen/v1");
@@ -579,6 +593,24 @@ test("DeepSeek V4 Flash Vision Exp advertises only verified direct-API capabilit
   assert.equal(model.supportsReasoningSummaries, true);
   assert.equal(endpointForModel(model), PROVIDERS.get("deepseek"));
   assert.ok(API_MODELS.includes(model));
+});
+
+test("GLM-5.3 on OpenCode Go carries the 1M GLM-5.3 window, not GLM-5.1's 200K", () => {
+  const model = MODEL_BY_SLUG.get("opencode-go/glm-5.3");
+  assert.equal(model?.contextWindow, 1_000_000);
+  assert.equal(model?.autoCompact, 900_000);
+  // The sibling GLM entries on this same gateway already serve 1,048,576, so
+  // the gateway does not clamp the family; 1M stays conservative against them.
+  for (const sibling of ["opencode-go/glm-5.1", "opencode-go/glm-5.2"]) {
+    assert.ok(
+      MODEL_BY_SLUG.get(sibling)?.contextWindow >= model.contextWindow,
+      `${sibling} should not serve less than glm-5.3`,
+    );
+  }
+  // Standalone search stays off: docs/HOW-IT-WORKS.md requires per-route
+  // verification that the upstream preserves tool/function-call history, and
+  // no probe of the opencode Go relay has been recorded.
+  assert.equal(model?.searchTool, undefined);
 });
 
 test("GLM-5.3 Coding Plan opts in to GPT-5.6 behavior, concise execution, and standalone search", () => {
