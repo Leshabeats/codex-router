@@ -104,6 +104,16 @@ test("tray uninstall verifies that Task Scheduler removed the task", () => {
   assert.match(uninstall, /if \(taskExists\(\) === "exists"\)[\s\S]*?throw/);
   assert.match(uninstall, /if \(existence === "error"\)[\s\S]*?did not answer whether the tray task was removed/);
   assert.doesNotMatch(uninstall, /catch \{\s*\/\/ The task may not exist/);
+  // endTask() can throw when the scheduler is unreadable; that must not block
+  // the /Delete attempt that is the actual uninstall.
+  assert.match(uninstall, /catch \{[\s\S]*?Best effort stop/);
+  const endTaskTry = uninstall.indexOf("try {");
+  const endTaskCall = uninstall.indexOf("endTask()");
+  const deleteCall = uninstall.indexOf('schtasks(["/Delete"');
+  assert.ok(
+    endTaskTry >= 0 && endTaskCall > endTaskTry && endTaskCall < deleteCall,
+    "endTask must be isolated so /Delete always runs",
+  );
 });
 
 test("task query returns a tri-state answer, not a silent false", () => {
@@ -145,6 +155,46 @@ test("tray status reports the registered action and reads task state once", () =
   assert.match(source, /const companionPath = action\?\.execute/);
   assert.match(source, /const taskStatus = installed \? taskState\(\) : undefined/);
   assert.doesNotMatch(source, /loaded: installed && taskRunning\(\)/);
+});
+
+test("status stays a JSON exit-0 document when Task Scheduler is unreadable", () => {
+  // With no scheduler hosts reachable (empty PATH forces both PowerShell
+  // hosts to fail), taskExists() returns "error" and status must print
+  // parseable JSON and exit 0. It used to throw, which emptied stdout and
+  // broke every caller that parses status JSON.
+  const result = trayService("status", { env: { PATH: "" } });
+  assert.equal(result.status, 0, result.stderr);
+  const doc = JSON.parse(result.stdout);
+  assert.equal(doc.supported, true);
+  assert.equal(doc.state, "unknown");
+  assert.equal(doc.loaded, false);
+  assert.match(result.stdout, /"why":/);
+});
+
+test("tray mutations are guarded so a test run never touches the scheduler", () => {
+  const source = readFileSync(path.join(root, "src", "tray-service-windows.mjs"), "utf8");
+  assert.match(source, /skipServiceManagerCall/);
+  assert.match(source, /const HOST_MANAGED = process\.platform === "win32"/);
+  // Queries stay live while every scheduler mutation consults the guard.
+  assert.match(source, /if \(options\.mutating && skipServiceManagerCall/);
+  assert.match(source, /function installTask\([\s\S]*?skipServiceManagerCall/);
+  assert.match(source, /function endTask\(\)[\s\S]*?skipServiceManagerCall/);
+  assert.match(source, /function startTask\(\)[\s\S]*?skipServiceManagerCall/);
+  // /End, /Run and /Delete are the three direct writes through schtasks; all
+  // three must be marked mutating so the guard can skip them under test.
+  assert.match(source, /\/End"[\s\S]*?mutating: true/);
+  assert.match(source, /\/Run"[\s\S]*?mutating: true/);
+  assert.match(source, /\/Delete"[\s\S]*?mutating: true/);
+});
+
+test("tray Task Scheduler timeouts match service-windows.mjs's single larger value", () => {
+  const source = readFileSync(path.join(root, "src", "tray-service-windows.mjs"), "utf8");
+  assert.match(source, /const TASK_COMMAND_TIMEOUT_MS = 15_000;/);
+  // The windows service manager uses 15_000 for the identical Get-ScheduledTask
+  // read, so the tray must not abort install/start/restart/uninstall on a slow
+  // cold-start powershell the way a 4 s budget did. The per-host split still
+  // keeps each PowerShell host within its share.
+  assert.match(source, /const perHostTimeout = Math\.max\(50, Math\.floor\(timeoutMs \/ 2\)\)/);
 });
 
 test("tray registration leaves its interactive principal able to update the task", () => {
@@ -230,11 +280,27 @@ test("tray repair validates the task and grants only its current principal contr
   assert.match(script, /"repair"/);
   assert.match(script, /function Get-ValidatedTrayTask/);
   assert.match(script, /principal is not the current user/);
-  assert.match(script, /action is not this checkout's tray companion/);
-  assert.match(script, /CODEX_ROUTER_TRAY_REPAIR_SID/);
+  // A task registered from another checkout must still be recognized by shape,
+  // so a dev user whose task points at %LOCALAPPDATA% is not rejected.
+  assert.doesNotMatch(script, /this checkout's tray companion/);
+  assert.match(script, /not a Codex Router tray companion/);
   assert.match(script, /RawSecurityDescriptor/);
   assert.match(script, /SetSecurityDescriptor\([^\n]+0x10\)/);
+  // The elevated PowerShell host must be named absolutely so ShellExecuteEx
+  // cannot resolve a CWD/PATH shadow, and the working directory pinned to
+  // SystemRoot so the elevated child runs from an unwritable directory.
+  assert.match(script, /System32\\WindowsPowerShell\\v1\.0\\powershell\.exe/);
+  assert.match(script, /Start-Process[^\n]+-FilePath \$ElevatedPowerShell/);
   assert.match(script, /Start-Process[^\n]+-Verb RunAs[^\n]+-Wait[^\n]+-WindowStyle Hidden/);
+  assert.match(script, /-WorkingDirectory \$env:SystemRoot/);
+  assert.doesNotMatch(script, /Start-Process[^\n]+\-FilePath "powershell\.exe"/);
+  // The validated values travel inside the -EncodedCommand payload, not the
+  // process environment: env vars do not survive ShellExecuteEx ->
+  // CreateProcessAsUser, so the elevated side must not read them.
+  assert.doesNotMatch(script, /CODEX_ROUTER_TRAY_REPAIR_TASK/);
+  assert.match(script, /ConvertTo-RepairLiteral/);
+  assert.match(script, /__TRAY_EXECUTE__/);
+  assert.match(script, /-EncodedCommand/);
   assert.match(script, /if \(-not \(Test-TrayTaskFullControl/);
   assert.doesNotMatch(script, /icacls|takeown/i);
 });

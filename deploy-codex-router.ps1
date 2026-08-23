@@ -168,7 +168,21 @@ if ($PSCmdlet.ShouldProcess($installDir, "copy router source")) {
     "release",
     "release-local"
   )
-  & robocopy @RobocopyArguments
+  # From PowerShell 7.4, $PSNativeCommandUseErrorActionPreference defaults to
+  # true, so under $ErrorActionPreference = "Stop" a robocopy that copied files
+  # (exit 1 is normal success) would terminate before we could read its
+  # meaning -- the 0-7 convention below is exactly what this script has to
+  # honor. Disable it around the call only, then restore, so the rest of the
+  # script keeps its strict error semantics. On Windows PowerShell 5.1 the
+  # preference does not exist; saving it still yields $null and restoring $null
+  # changes nothing, so the call is left harmless there too.
+  $SavedNativeUseErrorActionPref = $PSNativeCommandUseErrorActionPreference
+  $PSNativeCommandUseErrorActionPreference = $false
+  try {
+    & robocopy @RobocopyArguments
+  } finally {
+    $PSNativeCommandUseErrorActionPreference = $SavedNativeUseErrorActionPref
+  }
   $CopyExitCode = $LASTEXITCODE
   if ($CopyExitCode -gt 7) { throw "robocopy failed with exit code $CopyExitCode." }
   Update-DeployManifest $CurrentDeployFiles

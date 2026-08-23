@@ -12,6 +12,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 
 import { SOURCE_ROOT, TRAY_TASK_NAME } from "./paths.mjs";
+import { skipServiceManagerCall } from "./service-write-guard.mjs";
 import {
   desktopTrayBinary,
   electronBinary,
@@ -28,14 +29,29 @@ const TRAY_BINARY = desktopTrayBinary(effectivePlatform, SOURCE_ROOT);
 const TASK_STOP_TIMEOUT_MS = 10_000;
 const TASK_START_TIMEOUT_MS = 10_000;
 const TASK_STATE_POLL_MS = 250;
-const TASK_COMMAND_TIMEOUT_MS = 4_000;
+// Matches service-windows.mjs's TASK_STATE_TIMEOUT_MS (15s) for the identical
+// call. A cold powershell.exe running the ScheduledTasks CDXML cmdlets is
+// routinely 1.5-3s and slower under install load or on a domain; a stricter
+// budget made a single slow Get-ScheduledTask abort install/start/restart.
+// The per-host split below keeps either PowerShell host's share of the budget.
+const TASK_COMMAND_TIMEOUT_MS = 15_000;
 const TASK_FULL_CONTROL_MASK = 0x1f01ff;
+
+// Task Scheduler mutations must never run from a test run on a Windows dev
+// box (a stray `npm test` would otherwise register/start a real tray task and
+// rewrite its DACL). Reads stay live, so status still answers truthfully.
+const HOST_MANAGED = process.platform === "win32";
 
 if (effectivePlatform !== "win32" && !renderCommands.has(command)) {
   throw new Error("The Task Scheduler tray manager runs on Windows only.");
 }
 
 function schtasks(args, options = {}) {
+  // Only mutable calls consult the guard; queries stay live so status can
+  // still report whether the named task exists.
+  if (options.mutating && skipServiceManagerCall({ hostManaged: HOST_MANAGED })) {
+    return "";
+  }
   return execFileSync("schtasks.exe", args, {
     encoding: "utf8",
     windowsHide: true,
@@ -62,6 +78,10 @@ export function electronTaskAction() {
 // exit as the task finishing, so quitting stays quit until the next logon --
 // the same conditional-KeepAlive intent the macOS agent spells out.
 function installTask(action = trayTaskAction()) {
+  // Register-ScheduledTask is a second Task Scheduler path, independent of
+  // schtasks(). Keep it behind the same mutation guard so a test run cannot
+  // register or replace the developer's real task.
+  if (skipServiceManagerCall({ hostManaged: HOST_MANAGED })) return;
   const script = [
     "$principalSid = ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value)",
     // Only passed when there is one: `-Argument ""` registers an empty
@@ -252,8 +272,12 @@ function waitForTaskState(predicate, timeoutMs, action) {
 }
 
 function endTask() {
+  // A skipped `/End` (test run) means no mutation happened, so there is
+  // nothing to wait for -- polling an absent host would spend the full
+  // deadline on a question that cannot be answered.
+  if (skipServiceManagerCall({ hostManaged: HOST_MANAGED })) return;
   try {
-    schtasks(["/End", "/TN", TRAY_TASK_NAME], { quiet: true });
+    schtasks(["/End", "/TN", TRAY_TASK_NAME], { quiet: true, mutating: true });
   } catch {
     // Missing or already idle: the state the caller asked for either way.
   }
@@ -261,7 +285,8 @@ function endTask() {
 }
 
 function startTask() {
-  schtasks(["/Run", "/TN", TRAY_TASK_NAME], { quiet: true });
+  if (skipServiceManagerCall({ hostManaged: HOST_MANAGED })) return;
+  schtasks(["/Run", "/TN", TRAY_TASK_NAME], { quiet: true, mutating: true });
   waitForTaskState((state) => state === "running", TASK_START_TIMEOUT_MS, "start");
 }
 
@@ -345,26 +370,41 @@ if (command === "render" || command === "render-task") {
 } else if (command === "status") {
   const existence = taskExists();
   if (existence === "error") {
-    // An indeterminate scheduler answer must not read as absence: deploy
-    // verification would reject a healthy tray, and the operator sees
-    // "appPresent:false" for a binary that is present. Surface it honestly.
-    throw new Error("Task Scheduler did not answer whether the tray task is registered.");
+    // An indeterminate scheduler answer must not read as either success or a
+    // missing task. `status` cannot refuse here: a non-zero exit broke callers
+    // that parse its JSON (and made the Windows-dispatch test pass vacuously on
+    // empty stdout). Emit a tri-state document instead: installed is not
+    // asserted, and the distinct "unknown" state plus `why` surface the
+    // unreadable scheduler honestly.
+    const companionPath = builtCompanionPath();
+    process.stdout.write(
+      `${JSON.stringify({
+        installed: false,
+        supported: true,
+        loaded: false,
+        appPresent: Boolean(companionPath && existsSync(companionPath)),
+        state: "unknown",
+        path: companionPath,
+        why: "Task Scheduler did not answer whether the tray task is registered.",
+      })}\n`,
+    );
+  } else {
+    const installed = existence === "exists";
+    const taskStatus = installed ? taskState() : undefined;
+    const action = installed ? registeredTaskAction() : undefined;
+    const companionPath = action?.execute || (!installed ? builtCompanionPath() : undefined);
+    const loaded = installed && taskStatus === "running";
+    process.stdout.write(
+      `${JSON.stringify({
+        installed,
+        supported: true,
+        loaded,
+        appPresent: Boolean(companionPath && existsSync(companionPath)),
+        state: loaded ? "running" : "stopped",
+        path: companionPath,
+      })}\n`,
+    );
   }
-  const installed = existence === "exists";
-  const taskStatus = installed ? taskState() : undefined;
-  const action = installed ? registeredTaskAction() : undefined;
-  const companionPath = action?.execute || (!installed ? builtCompanionPath() : undefined);
-  const loaded = installed && taskStatus === "running";
-  process.stdout.write(
-    `${JSON.stringify({
-      installed,
-      supported: true,
-      loaded,
-      appPresent: Boolean(companionPath && existsSync(companionPath)),
-      state: loaded ? "running" : "stopped",
-      path: companionPath,
-    })}\n`,
-  );
 } else if (command === "install") {
   requireBuiltTray();
   endTask();
@@ -372,9 +412,17 @@ if (command === "render" || command === "render-task") {
   startTask();
   process.stdout.write(`${JSON.stringify({ installed: true, path: TRAY_BINARY })}\n`);
 } else if (command === "uninstall") {
-  endTask();
+  // A scheduler that cannot answer a stop must not block the real uninstall:
+  // endTask failing here only means the wait could not be satisfied, and the
+  // deletion below -- plus the verification that follows -- is what decides
+  // whether the task is actually gone.
   try {
-    schtasks(["/Delete", "/TN", TRAY_TASK_NAME, "/F"], { quiet: true });
+    endTask();
+  } catch {
+    // Best effort stop; continue to the /Delete attempt.
+  }
+  try {
+    schtasks(["/Delete", "/TN", TRAY_TASK_NAME, "/F"], { quiet: true, mutating: true });
   } catch (error) {
     // Missing is already the requested state. A task that still exists means
     // Task Scheduler rejected the deletion, which must not be reported as a

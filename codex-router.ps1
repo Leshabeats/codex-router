@@ -59,19 +59,30 @@ function Get-ValidatedTrayTask {
     [Environment]::ExpandEnvironmentVariables([string]$TaskAction.Execute)
   )
   $Argument = [string]$TaskAction.Arguments
-  $TauriExecute = [IO.Path]::GetFullPath(
-    (Join-Path $Root "apps\desktop\src-tauri\target\release\codex-router-desktop.exe")
+
+  # A task registered by an installed copy (%LOCALAPPDATA%\codex-router) points
+  # at that root, while `tray repair` is often run from a developer checkout's
+  # $PSScriptRoot. Requiring the action to equal *this* checkout would reject
+  # exactly the person reaching for repair. So the action is recognized by the
+  # *shape* of a real companion -- the Tauri release binary, or the Electron
+  # runtime plus its app directory -- rather than by which root registered it.
+  # The principal/interactive/single-action checks above still stop repair of an
+  # arbitrary scheduled task.
+  $TauriAction = $Execute.EndsWith(
+    "apps\desktop\src-tauri\target\release\codex-router-desktop.exe",
+    [StringComparison]::OrdinalIgnoreCase
+  ) -and [string]::IsNullOrWhiteSpace($Argument)
+  $ElectronAction = $Execute.EndsWith(
+    "apps\electron\node_modules\electron\dist\electron.exe",
+    [StringComparison]::OrdinalIgnoreCase
+  ) -and (
+    $Argument.Trim().Trim('"').EndsWith(
+      "apps\electron",
+      [StringComparison]::OrdinalIgnoreCase
+    )
   )
-  $ElectronExecute = [IO.Path]::GetFullPath(
-    (Join-Path $Root "apps\electron\node_modules\electron\dist\electron.exe")
-  )
-  $ElectronDirectory = [IO.Path]::GetFullPath((Join-Path $Root "apps\electron"))
-  $TauriAction = [string]::Equals($Execute, $TauriExecute, [StringComparison]::OrdinalIgnoreCase) -and
-    [string]::IsNullOrWhiteSpace($Argument)
-  $ElectronAction = [string]::Equals($Execute, $ElectronExecute, [StringComparison]::OrdinalIgnoreCase) -and
-    [string]::Equals($Argument.Trim().Trim('"'), $ElectronDirectory, [StringComparison]::OrdinalIgnoreCase)
   if (-not ($TauriAction -or $ElectronAction)) {
-    throw "Refusing to repair '$TaskName': its action is not this checkout's tray companion."
+    throw "Refusing to repair '$TaskName': its action is not a Codex Router tray companion (codex-router-desktop.exe or the Electron app)."
   }
 
   return [pscustomobject]@{
@@ -112,29 +123,39 @@ function Repair-TrayTaskPermissions {
     return
   }
 
-  # The elevated side reads only fixed environment fields, validates the task
-  # again to close the UAC race, and changes its DACL through Task Scheduler's
-  # supported COM API. The tray process itself remains Interactive/Limited.
+  # The validated values are the only data the elevated side needs, but they
+  # cannot cross the UAC boundary: Start-Process -Verb RunAs goes through
+  # ShellExecuteEx -> AppInfo -> CreateProcessAsUser, which rebuilds the child
+  # environment from the elevated token, so `$env:CODEX_ROUTER_TRAY_REPAIR_*`
+  # would be empty inside the elevated process. Instead the four values are
+  # embedded as literals in the -EncodedCommand payload, and the elevated side
+  # re-reads the task and compares its principal and action against them --
+  # the same TOCTOU closure as before, with no process-environment handoff.
+  foreach ($Field in "Name", "Sid", "Execute", "Argument") {
+    if ([string]::IsNullOrWhiteSpace([string]$Validated.$Field)) {
+      throw "Refusing to repair the tray task: validated $Field is empty."
+    }
+  }
   $ElevatedScript = @'
 $ErrorActionPreference = "Stop"
 function Resolve-RepairSid([string]$Identity) {
   try { return ([Security.Principal.SecurityIdentifier]::new($Identity)).Value }
   catch { return ([Security.Principal.NTAccount]::new($Identity)).Translate([Security.Principal.SecurityIdentifier]).Value }
 }
-$scheduled = Get-ScheduledTask -TaskName $env:CODEX_ROUTER_TRAY_REPAIR_TASK -ErrorAction Stop
+$scheduled = Get-ScheduledTask -TaskName __TRAY_TASK__ -ErrorAction Stop
 $actions = @($scheduled.Actions)
 if ($actions.Count -ne 1) { throw "Tray task action changed before repair." }
 $principalSid = Resolve-RepairSid ([string]$scheduled.Principal.UserId)
-if ($principalSid -ne $env:CODEX_ROUTER_TRAY_REPAIR_SID -or
-    -not [string]::Equals([string]$actions[0].Execute, $env:CODEX_ROUTER_TRAY_REPAIR_EXECUTE, [StringComparison]::OrdinalIgnoreCase) -or
-    -not [string]::Equals([string]$actions[0].Arguments, $env:CODEX_ROUTER_TRAY_REPAIR_ARGUMENT, [StringComparison]::Ordinal)) {
+if ($principalSid -ne __TRAY_SID__ -or
+    -not [string]::Equals([string]$actions[0].Execute, __TRAY_EXECUTE__, [StringComparison]::OrdinalIgnoreCase) -or
+    -not [string]::Equals([string]$actions[0].Arguments, __TRAY_ARGUMENT__, [StringComparison]::Ordinal)) {
   throw "Tray task identity changed before repair."
 }
 $service = New-Object -ComObject "Schedule.Service"
 $service.Connect()
-$registered = $service.GetFolder("\").GetTask($env:CODEX_ROUTER_TRAY_REPAIR_TASK)
+$registered = $service.GetFolder("\").GetTask(__TRAY_TASK__)
 $descriptor = [Security.AccessControl.RawSecurityDescriptor]::new($registered.GetSecurityDescriptor(7))
-$sid = [Security.Principal.SecurityIdentifier]::new($env:CODEX_ROUTER_TRAY_REPAIR_SID)
+$sid = [Security.Principal.SecurityIdentifier]::new(__TRAY_SID__)
 $fullControl = 0x1f01ff
 $hasFullControl = $false
 foreach ($ace in $descriptor.DiscretionaryAcl) {
@@ -162,27 +183,38 @@ if (-not $hasFullControl) {
   $registered.SetSecurityDescriptor($descriptor.GetSddlForm($sections), 0x10)
 }
 '@
-  $SavedTask = $env:CODEX_ROUTER_TRAY_REPAIR_TASK
-  $SavedSid = $env:CODEX_ROUTER_TRAY_REPAIR_SID
-  $SavedExecute = $env:CODEX_ROUTER_TRAY_REPAIR_EXECUTE
-  $SavedArgument = $env:CODEX_ROUTER_TRAY_REPAIR_ARGUMENT
-  try {
-    $env:CODEX_ROUTER_TRAY_REPAIR_TASK = $Validated.Name
-    $env:CODEX_ROUTER_TRAY_REPAIR_SID = $Validated.Sid
-    $env:CODEX_ROUTER_TRAY_REPAIR_EXECUTE = $Validated.Execute
-    $env:CODEX_ROUTER_TRAY_REPAIR_ARGUMENT = $Validated.Argument
-    $Encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($ElevatedScript))
-    $Process = Start-Process -FilePath "powershell.exe" -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList @(
-      "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", $Encoded
-    )
-    if ($Process.ExitCode -ne 0) {
-      throw "Elevated tray permission repair failed with exit code $($Process.ExitCode)."
-    }
-  } finally {
-    $env:CODEX_ROUTER_TRAY_REPAIR_TASK = $SavedTask
-    $env:CODEX_ROUTER_TRAY_REPAIR_SID = $SavedSid
-    $env:CODEX_ROUTER_TRAY_REPAIR_EXECUTE = $SavedExecute
-    $env:CODEX_ROUTER_TRAY_REPAIR_ARGUMENT = $SavedArgument
+  # `Replace` substitutes only after the single-quoted here-string is
+  # assembled, so the embedded script's own `$...` stays verbatim; each value
+  # is wrapped in single quotes (doubling any embedded quote) so it becomes a
+  # string literal in the payload, never executable text.
+  function ConvertTo-RepairLiteral([string]$Value) {
+    return "'" + $Value.Replace("'", "''") + "'"
+  }
+  $ElevatedScript = $ElevatedScript.Replace(
+    "__TRAY_TASK__", (ConvertTo-RepairLiteral ([string]$Validated.Name)))
+  $ElevatedScript = $ElevatedScript.Replace(
+    "__TRAY_SID__", (ConvertTo-RepairLiteral ([string]$Validated.Sid)))
+  $ElevatedScript = $ElevatedScript.Replace(
+    "__TRAY_EXECUTE__", (ConvertTo-RepairLiteral ([string]$Validated.Execute)))
+  $ElevatedScript = $ElevatedScript.Replace(
+    "__TRAY_ARGUMENT__", (ConvertTo-RepairLiteral ([string]$Validated.Argument)))
+
+  # Name the host absolutely because -Verb RunAs forces ShellExecuteEx, whose
+  # search order includes the current working directory and every PATH entry;
+  # an unelevated attacker who can drop a powershell.exe there would otherwise
+  # get it launched behind the UAC prompt, fully elevated. Pin the working
+  # directory to SystemRoot so the elevated child runs from a directory no
+  # attacker can write.
+  $ElevatedPowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+  if (-not (Test-Path -LiteralPath $ElevatedPowerShell -PathType Leaf)) {
+    throw "Cannot locate the elevated PowerShell host at $ElevatedPowerShell."
+  }
+  $Encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($ElevatedScript))
+  $Process = Start-Process -FilePath $ElevatedPowerShell -Verb RunAs -Wait -PassThru -WindowStyle Hidden -WorkingDirectory $env:SystemRoot -ArgumentList @(
+    "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", $Encoded
+  )
+  if ($Process.ExitCode -ne 0) {
+    throw "Elevated tray permission repair failed with exit code $($Process.ExitCode)."
   }
   if (-not (Test-TrayTaskFullControl $Validated.Name $Validated.Sid)) {
     throw "Task Scheduler still denies the current user control of the tray task."
@@ -256,6 +288,7 @@ switch ($Command) {
       throw "Unknown tray action '$Action'. Choose: install, status, start, stop, restart, uninstall, rebuild, repair."
     }
     if ($Action -eq "repair") {
+      Write-Output "Repairing the tray task's permissions. If repair is needed, the companion will then be rebuilt or reinstalled (a small step), re-registered, and started by Task Scheduler at every logon."
       Repair-TrayTaskPermissions
       $Action = "install"
     }
