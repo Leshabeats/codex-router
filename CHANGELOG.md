@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **MiniMax M3 no longer shows its chain of thought as assistant text.** The
+  Token Plan route asked for adaptive thinking but not `reasoning_split`, so
+  MiniMax embedded the reasoning in `content` as literal `<think>...</think>`
+  markup, which every client that does not know the vendor format rendered as
+  ordinary output. Requesting the split moves it to `reasoning_content`, which
+  this router already relays as reasoning. Verified against api.minimax.io: the
+  same prompt leaks `<think>` into `content` without the flag and carries a
+  populated `reasoning_content` with it. Reported in #333 by @moryk87.
+
 - **The harness caller key is written where a current harness reads it.**
   DeepSeek Harness moved `.credentials.yaml` to a `version`/`refs` envelope
   around the reference map, and the router only knew the flat root map the
