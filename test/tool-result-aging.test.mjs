@@ -41,6 +41,29 @@ test("ages a large consumed result while preserving its call pairing and recover
   );
 });
 
+test("ordinary aging keeps exact head and tail bytes without pressure shaping", () => {
+  const value = [
+    "progress 10%\rprogress 20%",
+    ...Array.from({ length: 5_000 }, (_, index) => `distinct line ${index}`),
+    "tail old\rtail final",
+  ].join("\n");
+  const input = [
+    call("old", "exec_command"),
+    output("old", value),
+    { type: "message", role: "assistant", content: "I used that result." },
+    ...Array.from({ length: 4 }, (_, index) => [
+      call(`new-${index}`),
+      output(`new-${index}`, "small"),
+    ]).flat(),
+  ];
+
+  const result = ageToolResults(input, { tokenMaxxing: false });
+  assert.equal(result.stats.toolResultsAged, 1);
+  assert.equal(result.stats.toolResultsShaped, 0);
+  assert.match(result.input[1].output, /progress 10%\rprogress 20%/u);
+  assert.match(result.input[1].output, /tail old\rtail final/u);
+});
+
 test("keeps the newest four result items byte-for-byte intact", () => {
   const value = "x".repeat(40_000);
   const input = Array.from({ length: 4 }, (_, index) => [

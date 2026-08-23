@@ -182,15 +182,14 @@ function shapedResult(value, toolName) {
 function resultReceipt(value, toolName) {
   const bytes = Buffer.byteLength(value, "utf8");
   const digest = createHash("sha256").update(value, "utf8").digest("hex");
-  const preview = shapeToolResult(value);
   return [
     `[Older tool result compacted by Codex Router after the model acted on it: ${bytes} bytes, sha256:${digest}.`,
     `${recoveryInstruction(toolName)} if exact or omitted content is needed. The original result remains in Codex; only this routed copy was compacted.]`,
     "",
     "--- beginning of original result ---",
-    safeHead(preview),
+    safeHead(value),
     "--- omitted middle of original result ---",
-    safeTail(preview),
+    safeTail(value),
     "--- end of original result ---",
   ].join("\n");
 }

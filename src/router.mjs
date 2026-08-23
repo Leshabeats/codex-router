@@ -2395,23 +2395,64 @@ async function buildRoutedRequest({ request, payload, route, agedInput, tokenMax
   };
 }
 
+// Normalize once, but decide pressure and age from that pristine normalized
+// input for every route that may actually serve the turn. Collaboration
+// payloads are still carried as `encrypted_content` in the caller's body and
+// become model-visible text during normalization, so estimating the original
+// bytes would discount precisely the payload the routed model will read.
+//
+// Pressure is route-specific as well: failover candidates can have very
+// different auto-compaction budgets. Re-running the deterministic aging pass
+// on a hop keeps the destination's threshold honest without ever shaping an
+// already-shaped copy.
+async function prepareRoutedRequest({
+  request,
+  payload,
+  route,
+  normalizedInput,
+  agingEnabled,
+}) {
+  const tokenMaxxing = agingEnabled && tokenMaxxingActive({
+    enabled: true,
+    estimatedTokens: estimateInputTokens(
+      JSON.stringify({ ...payload, input: normalizedInput }),
+      { contextWindow: route.contextWindow },
+    ),
+    autoCompact: route.autoCompact,
+  });
+  const aged = ageToolResults(normalizedInput, {
+    enabled: agingEnabled,
+    tokenMaxxing,
+  });
+  const built = await buildRoutedRequest({
+    request,
+    payload,
+    route,
+    agedInput: aged.input,
+    tokenMaxxing,
+  });
+  return {
+    ...built,
+    agedInput: aged.input,
+    toolResultAging: aged.stats,
+  };
+}
+
 // The models this turn could be moved to, best first. Deliberately computed
 // only after a failure is already known: `selectedConfiguredListedModels()`
 // probes every provider's credential synchronously and spawns
 // `/usr/bin/security` per keychain service on macOS, which would cost every
 // healthy turn about 250ms of blocked event loop for nothing.
-function failoverCandidates({ route, routedBody, agedInput, flattenedNamespaces, chain }) {
+function failoverCandidates({ route, agedInput, flattenedNamespaces, chain }) {
   const hidden = readHiddenModels();
   return rankFailoverCandidates(
     selectedConfiguredListedModels().filter((model) => !hidden.has(model.slug)),
     {
       from: route,
-      // The bytes this turn was about to send. `estimateInputTokens` errs high
-      // by design, which is the safe direction here: a candidate that cannot
-      // hold the conversation would answer the quota failure with a
-      // context-window rejection, which is a strictly worse turn than the one
-      // it replaced.
-      estimatedTokens: estimateInputTokens(routedBody),
+      // Context fit is checked after rebuilding the request for each
+      // destination below. Using this route's body here can reject a candidate
+      // whose lower pressure threshold would shape that same conversation into
+      // its smaller window.
       needsImage: inputHasImage(agedInput),
       // Only a turn that can actually spawn children needs a model that has
       // been through the collaboration proof. A child answering its own turn
@@ -2419,6 +2460,15 @@ function failoverCandidates({ route, routedBody, agedInput, flattenedNamespaces,
       needsMultiAgentV2: collaborationToolAvailable(flattenedNamespaces),
       chain,
     },
+  );
+}
+
+function routedRequestFits(route, body) {
+  const estimatedTokens = estimateInputTokens(body);
+  return (
+    !Number.isFinite(estimatedTokens) ||
+    !Number.isFinite(route?.contextWindow) ||
+    route.contextWindow >= estimatedTokens
   );
 }
 
@@ -2452,18 +2502,17 @@ async function attemptModelFailover({
   payload,
   route,
   agedInput,
-  routedBody,
   flattenedNamespaces,
   verdict,
   status,
   signal,
-  tokenMaxxing,
+  normalizedInput,
+  agingEnabled,
 }) {
   const settings = readFailoverSettings();
   if (!settings.enabled) return undefined;
   const candidates = failoverCandidates({
     route,
-    routedBody,
     agedInput,
     flattenedNamespaces,
     chain: settings.chain,
@@ -2485,13 +2534,17 @@ async function attemptModelFailover({
     let built;
     let upstream;
     try {
-      built = await buildRoutedRequest({
+      built = await prepareRoutedRequest({
         request,
         payload,
         route: model,
-        agedInput,
-        tokenMaxxing,
+        normalizedInput,
+        agingEnabled,
       });
+      if (!routedRequestFits(model, built.body)) {
+        logFailover(route, model, verdict.reason, status, "context-too-small");
+        continue;
+      }
       upstream = await fetch(built.target, {
         method: "POST",
         headers: built.headers,
@@ -2556,7 +2609,6 @@ async function handleResponses(request, response, requestUrl) {
   let usage;
   let estimatedInputTokens;
   let toolResultAging;
-  let tokenMaxxing = false;
   let pendingInterrupts = [];
   let emptyCompletion = false;
   let emptyCompletionRetried = false;
@@ -2668,9 +2720,11 @@ async function handleResponses(request, response, requestUrl) {
     let namespacesFlattened = false;
     let flattenedNamespaces = new Map();
     // The route-independent half of the input, computed once. Failing the turn
-    // over to another model rebuilds only the route-dependent half against
-    // these exact items, so the encrypted-payload relay and the aging pass are
-    // paid for once however many models the turn ends up asking.
+    // over to another model rebuilds pressure shaping from these pristine
+    // normalized items, so an encrypted-payload relay is paid for once while
+    // every destination gets its own auto-compaction threshold.
+    let normalizedInput;
+    let agingEnabled = false;
     let agedInput;
     // Adopts a rebuilt request for a different model. Everything downstream --
     // the response transforms, the prompt-token estimate, the empty-completion
@@ -2683,6 +2737,8 @@ async function handleResponses(request, response, requestUrl) {
       namespacesFlattened = built.namespacesFlattened;
       flattenedNamespaces = built.flattenedNamespaces;
       pendingInterrupts = built.pendingInterrupts;
+      agedInput = built.agedInput;
+      toolResultAging = built.toolResultAging;
       target = built.target;
       headers = built.headers;
       routedBody = built.body;
@@ -2694,30 +2750,21 @@ async function handleResponses(request, response, requestUrl) {
       });
     };
     if (route) {
-      const normalized = await normalizeRoutedAgentInput(
+      normalizedInput = await normalizeRoutedAgentInput(
         request,
         payload.input,
         controller.signal,
       );
-      const agingEnabled = toolResultAgingEnabled();
-      tokenMaxxing = tokenMaxxingActive({
-        enabled: agingEnabled,
-        estimatedTokens: estimateInputTokens(body, { contextWindow: route.contextWindow }),
-        autoCompact: route.autoCompact,
-      });
-      const aged = ageToolResults(normalized, {
-        enabled: agingEnabled,
-        tokenMaxxing,
-      });
-      toolResultAging = aged.stats;
-      agedInput = aged.input;
-      const built = await buildRoutedRequest({
+      agingEnabled = toolResultAgingEnabled();
+      const built = await prepareRoutedRequest({
         request,
         payload,
         route,
-        agedInput,
-        tokenMaxxing,
+        normalizedInput,
+        agingEnabled,
       });
+      toolResultAging = built.toolResultAging;
+      agedInput = built.agedInput;
       namespacesFlattened = built.namespacesFlattened;
       flattenedNamespaces = built.flattenedNamespaces;
       pendingInterrupts = built.pendingInterrupts;
@@ -2735,23 +2782,30 @@ async function handleResponses(request, response, requestUrl) {
       if (cooled) {
         const [next] = failoverCandidates({
           route,
-          routedBody,
           agedInput,
           flattenedNamespaces,
           chain: settings.chain,
         });
         if (next) {
-          logFailover(route, next.model, `cooled_until_${cooled.until}`, "not-sent", "swapped");
-          adoptRoute(
-            next.model,
-            await buildRoutedRequest({
-              request,
-              payload,
-              route: next.model,
-              agedInput,
-              tokenMaxxing,
-            }),
-          );
+          const candidate = await prepareRoutedRequest({
+            request,
+            payload,
+            route: next.model,
+            normalizedInput,
+            agingEnabled,
+          });
+          if (routedRequestFits(next.model, candidate.body)) {
+            logFailover(route, next.model, `cooled_until_${cooled.until}`, "not-sent", "swapped");
+            adoptRoute(next.model, candidate);
+          } else {
+            logFailover(
+              route,
+              next.model,
+              `cooled_until_${cooled.until}`,
+              "not-sent",
+              "context-too-small",
+            );
+          }
         }
       }
     } else {
@@ -2855,12 +2909,12 @@ async function handleResponses(request, response, requestUrl) {
           payload,
           route,
           agedInput,
-          routedBody,
           flattenedNamespaces,
           verdict,
           status: upstream.status,
           signal: controller.signal,
-          tokenMaxxing,
+          normalizedInput,
+          agingEnabled,
         });
         if (moved) {
           // The attempt that failed is still a turn that happened and still

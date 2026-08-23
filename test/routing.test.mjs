@@ -5817,6 +5817,62 @@ test("token maxxing shapes the newest result and injects terse instructions only
   }
 });
 
+test("token maxxing counts collaboration payloads after they become model-visible", async () => {
+  const gatewayBodies = [];
+  const gateway = await mockServer(async (request, response) => {
+    gatewayBodies.push(await bodyJson(request));
+    json(response, 200, { output: [{ type: "message", role: "assistant", content: "ok" }] });
+  });
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "routing-token-maxxing-agent-"));
+  writeFileSync(
+    path.join(stateDir, "tool-result-aging.json"),
+    JSON.stringify({ version: 1, enabled: true, nativeEnabled: false }),
+  );
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_QUIET: "1",
+    MODEL_ROUTER_STATE_DIR: stateDir,
+  });
+  const payloadText = "repeated delegated payload\n".repeat(100_000);
+  const input = [
+    {
+      type: "message",
+      role: "user",
+      content: [
+        { type: "input_text", text: "Message Type: NEW_TASK\nPayload:" },
+        { type: "encrypted_content", encrypted_content: payloadText },
+      ],
+    },
+  ];
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const response = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer CODEX_CALLER_SECRET",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "deepseek/deepseek-v4-pro",
+        stream: false,
+        instructions: "Base instructions.",
+        input,
+      }),
+    });
+    assert.equal(response.status, 200, await response.text());
+    assert.equal(gatewayBodies.length, 1);
+    assert.equal(gatewayBodies[0].input[0].content.at(-1).text, payloadText);
+    assert.match(gatewayBodies[0].instructions, /## Context pressure mode/u);
+  } finally {
+    await stopChild(router);
+    await closeServer(gateway.server);
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
 test("tool-result aging kill switch forwards the same large output", async () => {
   const gatewayBodies = [];
   const gateway = await mockServer(async (request, response) => {
