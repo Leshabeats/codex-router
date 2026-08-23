@@ -9,6 +9,7 @@ import {
   privateFileIsProtected,
   protectPrivateFile,
   writePrivateJson,
+  writePrivateFile,
 } from "../src/file-security.mjs";
 
 test("private JSON state uses one owner-only atomic writer", () => {
@@ -163,6 +164,57 @@ test(
         ).trim(),
       );
       assert.equal(privateFileIsProtected(target), true, JSON.stringify(snapshot));
+      assert.equal(snapshot.protected, true);
+      assert.deepEqual(snapshot.rules, [
+        {
+          identity: snapshot.currentSid,
+          type: "Allow",
+          rights: "FullControl",
+          inherited: false,
+        },
+      ]);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+// writePrivateFile's whole Windows path rests on the rename carrying the
+// temporary file's ACL onto the target. If a future move ever crosses a volume
+// (or the temp stops being a same-directory sibling), the destination would
+// inherit the destination folder's DACL and hardening would silently vanish.
+// This guards that the production writer leaves exactly one hardened file at
+// the destination, not just that protectPrivateFile works standalone.
+test(
+  "Windows writePrivateFile leaves the atomic-rename target protected",
+  { skip: process.platform !== "win32" },
+  () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "codex-router-write-protected-"));
+    const target = path.join(directory, "state.json");
+    try {
+      writePrivateFile(target, "secret\n");
+      assert.equal(privateFileIsProtected(target), true);
+
+      const snapshot = JSON.parse(
+        execFileSync(
+          "powershell.exe",
+          [
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            [
+              "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
+              "$acl = [System.IO.File]::GetAccessControl($env:CODEX_ROUTER_PRIVATE_FILE)",
+              "$identity = [Security.Principal.WindowsIdentity]::GetCurrent()",
+              "$rawRules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))",
+              "$rules = @($rawRules | ForEach-Object { [pscustomobject]@{ identity = $_.IdentityReference.Value; type = $_.AccessControlType.ToString(); rights = $_.FileSystemRights.ToString(); inherited = $_.IsInherited } })",
+              "[pscustomobject]@{ protected = $acl.AreAccessRulesProtected; currentSid = $identity.User.Value; rules = $rules } | ConvertTo-Json -Compress -Depth 4",
+            ].join("; "),
+          ],
+          { encoding: "utf8", env: { ...process.env, CODEX_ROUTER_PRIVATE_FILE: target } },
+        ).trim(),
+      );
       assert.equal(snapshot.protected, true);
       assert.deepEqual(snapshot.rules, [
         {
