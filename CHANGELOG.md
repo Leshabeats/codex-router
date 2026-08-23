@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **Kimi OAuth sessions survive the Codex App connector pack.** Moonshot
+  accepts a tool-schema `$ref` only when it points into `#/$defs/` and rejects
+  the whole request -- not the one tool -- over anything else, so the
+  sibling-property pointers connector tools ship (Wego `_flights_search` points
+  `inboundTotalDurationRange` at its own sibling `priceRange`) turned every
+  `kimi-oauth` App session into an HTTP 400 on its first message (issue #353).
+  The relay now inlines those pointers for the kimi route: the node is replaced
+  by the schema the client itself pointed at, with any constraint declared
+  beside the `$ref` still winning, and `#/$defs/` pointers left exactly as they
+  are. A pointer that cannot be resolved is left alone rather than guessed at,
+  a cyclic schema stops at the edge that would close the cycle, and an
+  expansion that outgrows its byte budget falls back to the original schema
+  rather than shipping a duplicated one. Every other provider keeps the payload
+  it gets today -- the inlining is scoped to the provider the rejection was
+  reproduced on.
+
 - **The macOS tray can load a provider's current model list and curate from
   it.** A new Provider catalogs panel asks any configured provider that
   supports live discovery for the models it serves right now, marks the ones

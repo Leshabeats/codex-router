@@ -199,6 +199,134 @@ export function nonRecursiveToolSchema(schema) {
   return cloneWithoutClosingRefs(schema, closing);
 }
 
+// Moonshot validates every `$ref` a tool schema carries and accepts only
+// pointers into `#/$defs/`, rejecting the whole request -- not the one tool --
+// over anything else. Codex App connector tools break that rule routinely: Wego
+// `_flights_search` points one property at a *sibling* property,
+// `#/properties/filters/properties/priceRange`, so a kimi session that never
+// searches a flight still dies on its first message (issue #353).
+//
+// Inlining replaces such a node with its resolved target merged under the
+// node's own siblings. Nothing is invented: the target is the schema the client
+// itself pointed at, and a `description` or `default` declared beside the `$ref`
+// still wins over whatever the target says. `#/$defs/` pointers are left exactly
+// as they are -- they are the form Moonshot asks for, and expanding them would
+// only grow the payload.
+//
+// Three bounds keep the walk finite. `seen` holds the refs on the current
+// expansion path, so a self-referential or mutually recursive schema stops at
+// the edge that would close the cycle and keeps that one `$ref` rather than
+// expanding forever. MAX_DEPTH caps how many ref hops a single path may take.
+// MAX_INLINE_DEPTH caps structural nesting so a pathological schema cannot
+// exhaust the JavaScript call stack.
+//
+// An unresolvable pointer -- an anchor, a dangling path, a target this module
+// cannot traverse -- is left alone. Guessing at it or deleting it would change
+// what the tool accepts, and the client may well have meant something the
+// upstream resolves for itself.
+//
+// Expanding a shared ref DAG can grow exponentially, which is why the cycle
+// repair above deliberately does not do it. Two budgets make it affordable
+// here: expansions are counted while walking, and the finished copy is measured
+// once. Exceeding either returns the *original* schema, so the worst case is
+// the rejection this repair exists to avoid rather than a multi-megabyte tool
+// list. Copy-on-write throughout: a schema with no foreign ref keeps identity,
+// and the client's object is never mutated.
+const DEFS_REF_PREFIX = "#/$defs/";
+const MAX_INLINE_DEPTH = 32;
+const MAX_INLINE_EXPANSIONS = 512;
+const MAX_INLINE_BYTES = 256 * 1024;
+
+function inlineChildRefs(node, root, state, seen, depth, refDepth) {
+  let next = node;
+  const replace = (key, value) => {
+    if (next === node) next = { ...node };
+    next[key] = value;
+  };
+  const inlineChild = (schema) =>
+    isPlainObject(schema) ? inlineNodeRefs(schema, root, state, seen, depth + 1, refDepth) : schema;
+
+  // `dependencies` is draft-07's mixed map: array values list property names
+  // rather than schemas, and `inlineChild` passes those through untouched.
+  for (const keyword of [...REF_SCHEMA_MAP_KEYWORDS, "dependencies"]) {
+    const schemas = node[keyword];
+    if (!isPlainObject(schemas)) continue;
+    let changed = false;
+    const rewritten = {};
+    for (const [name, schema] of Object.entries(schemas)) {
+      const inlined = inlineChild(schema);
+      if (inlined !== schema) changed = true;
+      rewritten[name] = inlined;
+    }
+    if (changed) replace(keyword, rewritten);
+  }
+
+  for (const keyword of [...REF_SCHEMA_ARRAY_KEYWORDS, ...REF_SCHEMA_CHILD_KEYWORDS]) {
+    const schemas = node[keyword];
+    if (Array.isArray(schemas)) {
+      let changed = false;
+      const rewritten = schemas.map((schema) => {
+        const inlined = inlineChild(schema);
+        if (inlined !== schema) changed = true;
+        return inlined;
+      });
+      if (changed) replace(keyword, rewritten);
+      continue;
+    }
+    if (!isPlainObject(schemas)) continue;
+    const inlined = inlineChild(schemas);
+    if (inlined !== schemas) replace(keyword, inlined);
+  }
+
+  return next;
+}
+
+function inlineNodeRefs(node, root, state, seen, depth, refDepth) {
+  if (!isPlainObject(node) || depth > MAX_INLINE_DEPTH || state.exceeded) return node;
+  const ref = node.$ref;
+  const expandable =
+    typeof ref === "string" &&
+    !ref.startsWith(DEFS_REF_PREFIX) &&
+    !seen.has(ref) &&
+    refDepth < MAX_DEPTH;
+  const target = expandable ? resolveRef(ref, root) : undefined;
+  if (!isPlainObject(target)) return inlineChildRefs(node, root, state, seen, depth, refDepth);
+
+  state.expansions += 1;
+  if (state.expansions > MAX_INLINE_EXPANSIONS) {
+    state.exceeded = true;
+    return node;
+  }
+  seen.add(ref);
+  // The target takes the node's place rather than nesting inside it, so the
+  // structural depth does not grow; the ref hop is what is charged.
+  const expanded = inlineNodeRefs(target, root, state, seen, depth, refDepth + 1);
+  seen.delete(ref);
+  if (state.exceeded) return node;
+  state.inlined = true;
+  const { $ref: _inlined, ...siblings } = node;
+  // Only the siblings still need walking: the target came back already inlined,
+  // and re-walking it would re-expand the very edges `seen` just protected.
+  return { ...expanded, ...inlineChildRefs(siblings, root, state, seen, depth, refDepth) };
+}
+
+function jsonByteLength(value) {
+  try {
+    return Buffer.byteLength(JSON.stringify(value) ?? "");
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+export function inlineForeignRefs(schema) {
+  if (!isPlainObject(schema)) return schema;
+  const state = { expansions: 0, exceeded: false, inlined: false };
+  const inlined = inlineNodeRefs(schema, schema, state, new Set(), 0, 0);
+  if (state.exceeded || !state.inlined || inlined === schema) return schema;
+  if (jsonByteLength(inlined) > MAX_INLINE_BYTES) return schema;
+  return inlined;
+}
+
 // Every object-typed leaf reachable from `schema` through unions and local
 // refs. `seen` guards the self-referential `$defs` Codex generates.
 function objectBranches(schema, root, seen, depth = 0) {
