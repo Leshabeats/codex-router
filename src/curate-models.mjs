@@ -10,6 +10,7 @@ import {
   DEFAULT_CONTEXT_WINDOW,
   USER_MODELS_PATH,
   defaultUserModelDescription,
+  hasDefaultUserModelReasoning,
   readUserModels,
   userModelEntry,
   userModelIdentity,
@@ -21,6 +22,7 @@ import {
   curatedModelContextLength,
   curatedModelDescription,
   curatedModelProviderId,
+  curatedModelReasoningLevels,
 } from "./opencode-curation.mjs";
 import {
   applyModelOverlayPublication,
@@ -189,29 +191,44 @@ export function normalizeCurationModels(models, providerId) {
           }),
           provider: targetProvider,
         };
+    // The untouched generic sizing pair is the one signal that nobody has been
+    // inside this entry by hand. Every documented value below is gated on it,
+    // so an operator who tuned the window keeps their whole entry byte for
+    // byte -- including an effort ladder they may have edited beside it.
+    const untuned =
+      routed.contextWindow === DEFAULT_CONTEXT_WINDOW &&
+      routed.autoCompact === DEFAULT_AUTO_COMPACT;
     const documented = curatedSizing(
       curatedModelContextLength(providerId, model.upstreamModel),
     );
-    const upgradeSizing =
-      documented &&
-      routed.contextWindow === DEFAULT_CONTEXT_WINDOW &&
-      routed.autoCompact === DEFAULT_AUTO_COMPACT;
+    const upgradeSizing = Boolean(documented) && untuned;
+    // The same upgrade for the effort ladder: high-only is what curation
+    // stores when nothing documents the model's efforts, so replacing it with
+    // a published ladder is finishing the job, not overruling a choice. A
+    // ladder that is no longer the stock one was chosen by someone.
+    const documentedEfforts = curatedModelReasoningLevels(providerId, model.upstreamModel);
+    const efforts = documentedEfforts
+      ? parseEfforts(documentedEfforts.join(","))
+      : undefined;
+    const upgradeEfforts =
+      Boolean(efforts) && untuned && hasDefaultUserModelReasoning(routed);
     // The stock description says the entry carries conservative defaults, so
-    // it stops being true the moment the sizing is upgraded. Replace it with
+    // it stops being true the moment any of them is upgraded. Replace it with
     // the sourcing note only while it is still the untouched stock string;
     // anything the user wrote there is theirs.
     const documentedDescription = curatedModelDescription(providerId, model.upstreamModel);
     const upgradeDescription =
-      upgradeSizing &&
+      (upgradeSizing || upgradeEfforts) &&
       documentedDescription &&
       // An entry rerouted onto the Responses variant still carries the stock
       // string naming the provider it was curated under, so accept either.
       (routed.description === defaultUserModelDescription(routed.provider) ||
         routed.description === defaultUserModelDescription(model.provider));
-    const sized = upgradeSizing
+    const sized = upgradeSizing || upgradeEfforts
       ? {
           ...routed,
-          ...documented,
+          ...(upgradeSizing ? documented : {}),
+          ...(upgradeEfforts ? efforts : {}),
           ...(upgradeDescription ? { description: documentedDescription } : {}),
         }
       : routed;
@@ -399,14 +416,32 @@ async function main() {
     const documented = curatedSizing(curatedModelContextLength(providerId, id));
     const sizing = advertised || documented;
     if (sizing) Object.assign(metadata, sizing);
-    // A documented window is not a conservative default, and this repository
-    // records where such a number came from in the entry's own description
-    // rather than only in a source comment. The live catalog's own figure
-    // needs no note; it is first-hand and already labeled "advertised".
-    if (!advertised && documented) {
-      const description = curatedModelDescription(providerId, id);
-      if (description) metadata.description = description;
+    // OpenCode publishes an effort ladder per free id where the route has one,
+    // and the id-only Zen catalog carries none -- so without this every free
+    // model ships the single conservative `high` level whatever it supports
+    // (#352). An explicit --efforts is the operator speaking and still wins.
+    const documentedEfforts = curatedModelReasoningLevels(providerId, id);
+    if (!flagEfforts && documentedEfforts) {
+      Object.assign(metadata, parseEfforts(documentedEfforts.join(",")) || {});
     }
+    // A documented window or effort ladder is not a conservative default, and
+    // this repository records where such a value came from in the entry's own
+    // description rather than only in a source comment. The same note names
+    // the capabilities that stayed unknown, so the stored entry says which of
+    // its values are real and which are still defaults. The live catalog's own
+    // figure needs no note; it is first-hand and already labeled "advertised".
+    let omitContextNote = Boolean(advertised);
+    let omitReasoningNote = Boolean(flagEfforts);
+    const describe = () => {
+      if (!documented && !documentedEfforts) return;
+      const description = curatedModelDescription(providerId, id, {
+        omitContextNote,
+        omitReasoningNote,
+      });
+      if (description) metadata.description = description;
+      else delete metadata.description;
+    };
+    describe();
     if (!interactive) return Object.keys(metadata).length > 0 ? metadata : undefined;
     process.stdout.write(`\nMetadata for ${id} (Enter keeps the default):\n`);
     const suggested = sizing?.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
@@ -421,19 +456,26 @@ async function main() {
       if (!sizing) throw new Error(`Invalid context window: ${rawContext}`);
       Object.assign(metadata, sizing);
       // The sourcing note describes the documented figure. The user just
-      // replaced it, so the note no longer matches what is stored.
-      if (context !== documented?.contextWindow) delete metadata.description;
+      // replaced it, so that clause no longer matches what is stored.
+      if (context !== documented?.contextWindow) omitContextNote = true;
     }
     if (confirm(`  Does ${id} accept image input?`)) {
       metadata.inputModalities = ["text", "image"];
     }
     if (!flagEfforts) {
+      const ladder = metadata.reasoningLevels?.map((level) => level.effort).join(",") || "high";
       const rawEfforts = promptLine(
         "  Reasoning efforts, comma-separated from " +
-          `${Object.keys(EFFORT_DESCRIPTIONS).join(",")} [high]`,
+          `${Object.keys(EFFORT_DESCRIPTIONS).join(",")} [${ladder}${
+            documentedEfforts ? ", documented" : ""
+          }]`,
       ).trim();
-      if (rawEfforts) Object.assign(metadata, parseEfforts(rawEfforts) || {});
+      if (rawEfforts) {
+        Object.assign(metadata, parseEfforts(rawEfforts) || {});
+        omitReasoningNote = true;
+      }
     }
+    describe();
     return Object.keys(metadata).length > 0 ? metadata : undefined;
   };
 
