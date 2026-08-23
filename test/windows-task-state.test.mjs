@@ -37,11 +37,17 @@ test("parses the authoritative instance count, result, and launcher liveness", a
 
 test("a dead launcher process is reported as not alive", async () => {
   const execFile = (_e, _a, _o, callback) => callback(null, "1|267014|0\n");
-  assert.deepEqual(await windowsScheduledTaskState({ execFile }), {
-    instanceCount: 1,
-    lastTaskResult: 267014,
-    launcherAlive: false,
-  });
+  // Pinned like every other query test: off Windows the platform
+  // short-circuit would return undefined and the assertion would pass
+  // without reaching the parser this test exists to cover.
+  assert.deepEqual(
+    await windowsScheduledTaskState({ execFile, platform: "win32" }),
+    {
+      instanceCount: 1,
+      lastTaskResult: 267014,
+      launcherAlive: false,
+    },
+  );
 });
 
 test("query failures and malformed output stay inconclusive", async () => {
