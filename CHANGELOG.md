@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **Private state files are hardened with a canonical owner-only ACL on
+  Windows.** The previous Windows path asked `GetAccessControl` about the
+  file's existing DACL and then edited it with `SetAccessRuleProtection` and
+  `RemoveAccessRuleSpecific`, so a file whose DACL was already non-canonical
+  could make it throw (or silently keep foreign ACEs), the exact drift an
+  install or `doctor --fix` is meant to repair. Windows hardening now builds a
+  fresh, empty `FileSecurity`, replaces the DACL outright with a single
+  current-identity FullControl Allow rule and inheritance cleared, and skips
+  persisting owner/group so it needs only `WRITE_DAC` and cannot fail where an
+  `icacls /inheritance:r /grant:r` path would have succeeded. A hardening
+  failure now exits non-zero with the PowerShell diagnosis on stderr instead of
+  masquerading as success.
+
 - **MiniMax M3 no longer shows its chain of thought as assistant text.** The
   Token Plan route asked for adaptive thinking but not `reasoning_split`, so
   MiniMax embedded the reasoning in `content` as literal `<think>...</think>`
@@ -174,6 +187,32 @@
   1,048,576, so 1,000,000/900,000 stays conservative against the relay.
   Standalone web search stays off for this route until the opencode Go relay
   is verified to preserve tool/function-call history.
+- **External-model compaction now carries evidence-backed `kcr2`
+  checkpoints.** The router assigns stable `U/C/R/A` source IDs before tool
+  results are aged, accepts only a bounded structured source selection from the
+  summarizing model, and derives the trusted section from redacted original
+  excerpts and machine-readable tool outcomes. Model prose remains explicitly
+  unverified; missing, fabricated, or misclassified references are rejected;
+  unresolved unknowns survive repeated compaction; and replay tells the next
+  model to re-read mutable state before changing it. New checkpoints are capped
+  at 96 KiB after final JSON serialization, with a 32 KiB recent tail. Existing
+  source IDs and counters are rejected unless they are positive safe integers;
+  the source catalog sent to the model has its own 96 KiB JSON limit, and only
+  IDs actually present in that catalog can be selected. Wrapped provider output
+  is accepted only when it contains exactly one contract-valid JSON object and
+  is no larger than 256 KiB. The latest two user messages are reserved in both
+  the source catalog and recent tail. The v1 compact endpoint now replays at
+  most those two complete ordinary user messages before the checkpoint instead
+  of carrying every short historical instruction that fits its character
+  budget; a message that does not fit is never replayed as an unmarked fragment.
+  Responses `reasoning` output is now treated only as a draft: KCR2 parses the
+  final `message` instead of concatenating both channels and mistaking their
+  separate JSON objects for an ambiguous answer. Existing `kcr1` payloads and
+  old v1 plain-summary messages still replay but are labeled
+  `UNVERIFIED_LEGACY_SUMMARY`. Checkpoint excerpts reuse the managed
+  caller-URL redactor and remove recognized GitHub token prefixes before they
+  reach either the source catalog or serialized checkpoint. Native OpenAI
+  requests still forward their encrypted compaction bytes unchanged.
 
 - **Grok 4.6 can select Codex's native image viewer.** xAI stopped without a
   function call when the tool was named `view_image`, even when selection was
