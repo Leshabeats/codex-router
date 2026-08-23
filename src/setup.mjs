@@ -5,6 +5,7 @@ import path from "node:path";
 
 import { detectLegacyInstallations, applyKnownMigrations, rollbackLatestMigration } from "./legacy-migration.mjs";
 import { grokOAuthStatus } from "./grok-oauth-status.mjs";
+import { antigravityOAuthStatus } from "./antigravity-oauth-status.mjs";
 import { LISTED_MODELS, PROVIDERS, providerNeedsNoKey } from "./model-registry.mjs";
 import { ensureNodeDependencies, isNodeDependencyFailure } from "./node-dependency-install.mjs";
 import { effectiveVisibleModels, setModelSelection } from "./model-picker-state.mjs";
@@ -206,6 +207,7 @@ function providerConfigured(provider) {
   if (provider.kind === "oauth") {
     if (provider.id === "kimi-oauth") return kimiOAuthStatus().configured;
     if (provider.id === "grok-oauth") return grokOAuthStatus().configured;
+    if (provider.id === "antigravity-oauth") return antigravityOAuthStatus().configured;
     return false;
   }
   return providerNeedsNoKey(provider)
@@ -310,16 +312,38 @@ function run(command, commandArgs, options = {}) {
   return result.status ?? 1;
 }
 
-function configureProvider(provider) {
+function oauthSetupHint(provider) {
+  if (provider.id === "grok-oauth") return "run `grok login --oauth`";
+  if (provider.id === "antigravity-oauth") {
+    const command = process.platform === "win32"
+      ? ".\\codex-router.ps1 providers login antigravity-oauth"
+      : "./bin/providers login antigravity-oauth";
+    return `run \`${command}\``;
+  }
+  return "run `kimi login`";
+}
+
+async function configureProvider(provider) {
   if (providerConfigured(provider)) return;
   if (!guided) {
     const setup =
       provider.kind === "oauth"
-        ? "sign in with the provider's official CLI"
+        ? oauthSetupHint(provider)
         : `run \`./bin/provider-key ${provider.id} set\``;
     throw incomplete(`${provider.displayName} is selected but not configured; ${setup} first.`);
   }
   if (provider.kind === "oauth") {
+    if (provider.id === "antigravity-oauth") {
+      if (!confirm(`Open a browser to sign in to ${provider.displayName} now?`)) {
+        throw incomplete(`${provider.displayName} sign-in was cancelled.`);
+      }
+      const { signInAntigravity } = await import("./antigravity-oauth-onboarding.mjs");
+      await signInAntigravity();
+      if (!providerConfigured(provider)) {
+        throw incomplete(`${provider.displayName} sign-in did not produce a usable credential.`);
+      }
+      return;
+    }
     let cli = oauthCliPath(provider.id);
     if (!cli) {
       if (!confirm(`Install the official ${provider.displayName} CLI with npm now?`)) {
@@ -459,7 +483,7 @@ async function main() {
   for (const id of providers) {
     const provider = PROVIDERS.get(id);
     try {
-      configureProvider(provider);
+      await configureProvider(provider);
     } catch (error) {
       if (!guided) throw error;
       // The leniency above is about credential prompts. A dependency install
@@ -614,7 +638,7 @@ async function main() {
         pendingCredentials
           .map(({ provider }) => {
             if (provider.kind === "oauth") {
-              return `  ${provider.displayName}: sign in with the provider's official CLI\n`;
+              return `  ${provider.displayName}: ${oauthSetupHint(provider)}\n`;
             }
             const key = `./bin/provider-key ${provider.id} set`;
             return `  ${provider.displayName}: ${key}\n`;

@@ -34,6 +34,10 @@ test("provider registry exposes configured API and OAuth model families", () => 
     LISTED_MODELS.map((model) => model.slug),
     [
       "anthropic-api/claude-opus-4.8",
+      "antigravity-oauth/gemini-3.1-pro",
+      "antigravity-oauth/gemini-3.5-flash",
+      "antigravity-oauth/gemini-3.6-flash",
+      "antigravity-oauth/gemini-3.7-flash",
       "clinepass/deepseek-v4-flash",
       "clinepass/deepseek-v4-pro",
       "clinepass/glm-5.2",
@@ -76,6 +80,7 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "commandcode/minimax-m3",
       "commandcode/muse-spark-1.2",
       "commandcode/nemotron-3-ultra",
+      "commandcode/ox-alpha",
       "commandcode/qwen3.7-flash",
       "commandcode/qwen3.7-max",
       "commandcode/qwen3.7-plus",
@@ -97,6 +102,7 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "meta/muse-spark-1.2-contributor",
       "meta/muse-spark-1.2",
       "minimax-token-plan/minimax-m3",
+      "nousresearch/ox-alpha",
       "ollama-cloud/deepseek-v4-flash",
       "ollama-cloud/deepseek-v4-pro",
       "ollama-cloud/glm-5.2",
@@ -114,6 +120,7 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "opencode-go/kimi-k3",
       "opencode-go/mimo-v2.5-pro",
       "opencode-go/mimo-v2.5",
+      "opencode-go/ox-alpha",
       "opencode-go-messages/minimax-m2.7",
       "opencode-go-messages/minimax-m3",
       "opencode-go-messages/qwen3.6-plus",
@@ -122,6 +129,8 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "opencode-go-messages/qwen3.8-max",
       "opencode-go-responses/gpt-5.6-luna",
       "opencode-go-responses/muse-spark-1.2-contributor",
+      "opencode-free/ox-alpha",
+      "openrouter/ox-alpha",
       "qwen-plan/deepseek-v4-flash-0731",
       "qwen-plan/deepseek-v4-pro-0813",
       "qwen-plan/deepseek-v4-pro",
@@ -131,6 +140,7 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "qwen-plan/qwen3.7-plus",
       "qwen-plan/qwen3.8-max-preview",
       "qwen-plan/qwen3.8-max",
+      "venice/ox-alpha",
       "xiaomi-mimo/mimo-v2.5-pro",
       "xiaomi-mimo/mimo-v2.5",
       "zai-api/glm-4.7",
@@ -283,7 +293,15 @@ test("provider registry exposes configured API and OAuth model families", () => 
   assert.deepEqual(venice.credential.environment, ["VENICE_API_KEY"]);
   assert.equal(venice.credential.file, "venice-api-key.secret");
   assert.deepEqual(venice.credential.keychainServices, ["codex-router-venice"]);
-  assert.equal(LISTED_MODELS.some(({ provider }) => provider === "venice"), false);
+  // Venice arrived as catalog-only, and stayed that way until Ox Alpha was
+  // checked in for it. It now ships exactly that one entry -- the picker is not
+  // empty once a key is stored, and everything else on Venice still has to be
+  // curated -- so this asserts the entry rather than merely that something is
+  // listed, which would also pass if a curation bug leaked extra models in.
+  assert.deepEqual(
+    LISTED_MODELS.filter(({ provider }) => provider === "venice").map(({ slug }) => slug),
+    ["venice/ox-alpha"],
+  );
   const opencodeFree = PROVIDERS.get("opencode-free");
   const opencodeFreeResponses = PROVIDERS.get("opencode-free-responses");
   assert.equal(opencodeFree.authMode, "anonymous");

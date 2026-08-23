@@ -13,6 +13,11 @@ import {
 } from "../src/desktop-panel.mjs";
 import { commandRefused, readOnlyCapabilities } from "../apps/desktop/ui/model.mjs";
 
+test("desktop OAuth commands allow the browser flow its full timeout", () => {
+  const command = COMMANDS.connect_oauth({ provider: "antigravity-oauth" });
+  assert.ok(command.timeoutMs >= 10 * 60_000);
+});
+
 // The panel is served by the router, so these drive the real handler over a
 // real socket rather than calling it in-process: the routing, the headers and
 // the JSON contract are the parts a browser actually depends on.
