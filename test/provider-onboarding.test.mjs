@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -170,6 +170,27 @@ test("removing an absent API key reports no change instead of failing", () => {
     );
     assert.equal(result.status, 0, result.stderr);
     assert.equal(JSON.parse(result.stdout).removal.removedFiles, 0);
+  } finally {
+    rmSync(testRoot, { recursive: true, force: true });
+  }
+});
+
+test("provider-key remove awaits removal and reports the deleted credential", () => {
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "provider-key-await-remove-"));
+  const stateDir = path.join(testRoot, "state");
+  const keyPath = path.join(stateDir, "deepseek-api-key.secret");
+  try {
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(keyPath, "test-provider-key\n", { mode: 0o600 });
+    const result = spawnSync(
+      process.execPath,
+      [path.join(root, "src", "provider-key.mjs"), "deepseek", "remove"],
+      { cwd: root, encoding: "utf8", env: isolatedEnvironment(testRoot) },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(existsSync(keyPath), false);
+    assert.match(result.stdout, /Removed 1 managed DeepSeek API key file/);
+    assert.doesNotMatch(result.stdout, /No managed DeepSeek API key file exists/);
   } finally {
     rmSync(testRoot, { recursive: true, force: true });
   }

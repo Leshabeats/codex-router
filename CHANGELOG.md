@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+- **Ox Alpha ships on six routes.** The stealth 1M-context reasoning model is
+  now checked in for `opencode-free` (no key), `opencode-go`, `openrouter`,
+  `commandcode`, `nousresearch`, and `venice`, each under the upstream id that
+  provider's own live catalog publishes. All six advertise 1,048,576 tokens
+  with 131,072 of output, text+image input, and a low/high/max effort ladder
+  defaulting to max — the model always thinks, and its upstream refuses any
+  other rung by name ("please use low, high, or max"). Venice's catalog
+  advertises a fourth rung the model rejects; the model wins, and the
+  disagreement is written down rather than silently resolved. A new `ox-alpha`
+  request profile clamps the requested effort onto those three rungs, which is
+  load-bearing rather than defensive: a Codex older than 0.143 has no `max` in
+  its enum, so the catalog sends the clamped `xhigh` and every turn would
+  otherwise 400. Only the credential-free route carries curated announcement
+  copy; the other five use the automatic announcement once their provider is
+  credentialed.
+
+- **Venice and Nous Research (Hermes) are new API-key providers.** Both are
+  selectable through `install.sh --providers`, `providers enable`, and the
+  tray, both ship a provider mark, and both are covered by `doctor`. Venice
+  carries a plan note because a free Venice account has no API entitlement at
+  all — API access needs a Pro subscription, a funded USD balance, or staked
+  VVV that grants VCU.
+
+- **The tray and control center show what these subscriptions have left.**
+  Venice's `api_keys/rate_limits` route is wired into `provider-usage`, so the
+  tray reports all three pools that can fund a request (USD, VCU, and the daily
+  DIEM allowance) plus the API tier, instead of showing a zero to someone whose
+  VCU balance is full. OpenRouter now reports its per-key spend cap from
+  `/api/v1/key`, adding the account-wide credit pool when the stored key is a
+  management key and keeping the per-key numbers when it is not. Nous Portal
+  publishes no credits route at all, so it degrades to its subscription page
+  and observed router traffic rather than inventing a number.
+
 - **Private state files are hardened with a canonical owner-only ACL on
   Windows.** The previous Windows path asked `GetAccessControl` about the
   file's existing DACL and then edited it with `SetAccessRuleProtection` and

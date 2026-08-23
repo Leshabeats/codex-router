@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 
 const CONTROL_TIMEOUT_MS = 120_000;
 const CATALOG_MUTATION_TIMEOUT_MS = 330_000;
+const OAUTH_LOGIN_TIMEOUT_MS = 11 * 60_000;
 
 const SELF_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -78,6 +79,7 @@ export const COMMANDS = {
   install_provider_cli: ({ provider }) => ({ args: ["install-cli", requireProvider(provider)] }),
   connect_oauth: ({ provider }) => ({
     args: ["login", requireProvider(provider)],
+    timeoutMs: OAUTH_LOGIN_TIMEOUT_MS,
     then: ["providers", "--json"],
   }),
   save_api_key: ({ provider, apiKey }) => {
