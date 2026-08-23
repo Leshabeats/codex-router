@@ -20,7 +20,6 @@ import {
   CHECKPOINT_WARNING,
   decodeCompaction,
   encodeCheckpoint,
-  KCR1_PREFIX,
   LEGACY_V1_SUMMARY_PREFIX,
 } from "../src/compaction-checkpoint.mjs";
 import { openPort } from "./port-pool.mjs";
@@ -1512,7 +1511,10 @@ test("router synthesizes routed compaction and safely replays it to native model
       sources: latestRequirements,
     };
 
-    const filteredReplay = await routed([
+    // A routed turn renders a kcr2 boundary in place. Rewriting pre-boundary
+    // history is the held-back bridging half, so every original item still
+    // reaches the provider exactly as the client sent it.
+    const replayed = await routed([
       ...historicalUsers,
       { type: "compaction", encrypted_content: encodeCheckpoint(replayCheckpoint) },
       {
@@ -1521,22 +1523,26 @@ test("router synthesizes routed compaction and safely replays it to native model
         content: [{ type: "input_text", text: "continue after kcr2" }],
       },
     ]);
-    assert.equal(filteredReplay.status, 200);
-    const filteredInput = gatewayRequests.at(-1).body.input;
+    assert.equal(replayed.status, 200);
+    const replayedInput = gatewayRequests.at(-1).body.input;
+    assert.equal(replayedInput.length, historicalUsers.length + 2);
     assert.deepEqual(
-      filteredInput.slice(0, 2).map((item) => item.content[0].text),
-      ["historical user 128", "historical user 129"],
+      replayedInput.slice(0, 2).map((item) => item.content[0].text),
+      ["historical user 001", "historical user 002"],
     );
-    assert.match(filteredInput[2].content[0].text, /BEGIN_CODEX_ROUTER_CHECKPOINT_V2/u);
-    assert.equal(filteredInput[3].content[0].text, "continue after kcr2");
-    assert.equal(filteredInput.length, 4);
+    assert.match(replayedInput.at(-2).content[0].text, /BEGIN_CODEX_ROUTER_CHECKPOINT_V2/u);
+    assert.equal(replayedInput.at(-1).content[0].text, "continue after kcr2");
 
+    // An opaque OpenAI-native compaction token is still never forwarded to a
+    // routed provider, and a routed turn never spends an extra upstream call
+    // trying to reconstruct what it hides.
     const nativeBoundary = {
       type: "compaction",
       id: "cmp_openai_native",
       encrypted_content: "gAAAAAOpenAINativeBridgeToken1234567890",
     };
-    const bridgeInput = [
+    const beforeNative = gatewayRequests.length;
+    const nativeBoundaryReplay = await routed([
       ...historicalUsers,
       nativeBoundary,
       {
@@ -1544,62 +1550,13 @@ test("router synthesizes routed compaction and safely replays it to native model
         role: "user",
         content: [{ type: "input_text", text: "continue after native compaction" }],
       },
-    ];
-    const beforeBridge = gatewayRequests.length;
-    const bridgeHeaders = {
-      ...headers,
-      "Thread-Id": "11111111-2222-4333-8444-555555555555",
-    };
-    const nativeBridge = await routed(bridgeInput, {}, bridgeHeaders);
-    assert.equal(nativeBridge.status, 200);
-    assert.equal(gatewayRequests.length - beforeBridge, 2, "first bridge summarizes then answers");
-    const bridgedInput = gatewayRequests.at(-1).body.input;
-    assert.equal(bridgedInput[0].content[0].text, "historical user 001");
-    assert.match(bridgedInput[1].content[0].text, /BEGIN_CODEX_ROUTER_CHECKPOINT_V2/u);
-    assert.equal(bridgedInput[2].content[0].text, "continue after native compaction");
-    assert.equal(bridgedInput.length, 3);
-    assert.doesNotMatch(JSON.stringify(bridgedInput), /gAAAAAOpenAINativeBridgeToken/u);
-    const bridgedCheckpoint = checkpointFromCompactResponse({ output: [bridgedInput[1]] });
-    assert.ok(
-      bridgedCheckpoint.orientation.unknowns.some((entry) =>
-        entry.includes("OpenAI native compaction content is opaque"),
-      ),
-    );
-
-    const beforeCacheHit = gatewayRequests.length;
-    const cachedBridge = await routed(bridgeInput, {}, bridgeHeaders);
-    assert.equal(cachedBridge.status, 200);
-    assert.equal(gatewayRequests.length - beforeCacheHit, 1, "cached bridge only answers");
-
-    const concurrentBoundary = {
-      ...nativeBoundary,
-      id: "cmp_openai_native_concurrent",
-      encrypted_content: "gAAAAAConcurrentNativeBridgeToken1234567890",
-    };
-    const concurrentInput = [
-      ...historicalUsers,
-      concurrentBoundary,
-      {
-        type: "message",
-        role: "user",
-        content: [{ type: "input_text", text: "continue concurrently" }],
-      },
-    ];
-    const beforeConcurrent = gatewayRequests.length;
-    const concurrentRequests = await Promise.all(
-      [1, 2].map(() =>
-        routed(concurrentInput, {}, {
-          ...headers,
-          "Thread-Id": "66666666-7777-4888-8999-000000000000",
-        }),
-      ),
-    );
-    assert.deepEqual(concurrentRequests.map((response) => response.status), [200, 200]);
-    assert.equal(
-      gatewayRequests.length - beforeConcurrent,
-      3,
-      "concurrent requests share one bridge generation and send two answers",
-    );
+    ]);
+    assert.equal(nativeBoundaryReplay.status, 200);
+    assert.equal(gatewayRequests.length - beforeNative, 1, "a routed turn is one upstream call");
+    const nativeInput = gatewayRequests.at(-1).body.input;
+    assert.doesNotMatch(JSON.stringify(nativeInput), /gAAAAAOpenAINativeBridgeToken/u);
+    assert.match(nativeInput.at(-2).content[0].text, /compacted in an unreadable format/u);
+    assert.equal(nativeInput.at(-1).content[0].text, "continue after native compaction");
 
     const repeatedV1 = await compact(crowdedV1Body.output);
     assert.equal(repeatedV1.status, 200);
@@ -1719,117 +1676,6 @@ test("router synthesizes routed compaction and safely replays it to native model
   }
 });
 
-test("history bridge fails open and upgrades legacy summaries without trusting them", async () => {
-  const gatewayRequests = [];
-  const validContract = JSON.stringify({
-    objective: "Continue only from visible evidence.",
-    requirement_refs: ["U001"],
-    attempt_refs: [],
-    observation_refs: [],
-    unverified: [],
-    unknowns: [],
-    blockers: [],
-    next_step: "Re-read current state.",
-  });
-  const responses = ["not a checkpoint", "native request continued", validContract, "legacy request continued"];
-  const gateway = await mockServer(async (request, response) => {
-    gatewayRequests.push({ body: await bodyJson(request) });
-    const text = responses[gatewayRequests.length - 1] || "unexpected request";
-    json(response, 200, {
-      id: `resp-${gatewayRequests.length}`,
-      object: "response",
-      status: "completed",
-      output: [
-        {
-          type: "message",
-          role: "assistant",
-          content: [{ type: "output_text", text }],
-        },
-      ],
-    });
-  });
-  const routerPort = await openPort();
-  const router = run("router.mjs", {
-    CODEX_ROUTER_PORT: String(routerPort),
-    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
-    CODEX_ROUTER_QUIET: "1",
-  });
-  const headers = {
-    Authorization: "Bearer CODEX_CALLER_SECRET",
-    "Content-Type": "application/json",
-  };
-  try {
-    await waitFor(`${routerBase(routerPort)}/models`, router);
-    const native = await fetch(`${routerBase(routerPort)}/responses`, {
-      method: "POST",
-      headers: { ...headers, "Thread-Id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" },
-      body: JSON.stringify({
-        model: "deepseek/deepseek-v4-pro",
-        input: [
-          {
-            type: "message",
-            role: "user",
-            content: [{ type: "input_text", text: "visible request before native compaction" }],
-          },
-          { type: "compaction", encrypted_content: "gAAAAAFailOpenNativeToken1234567890" },
-          {
-            type: "message",
-            role: "user",
-            content: [{ type: "input_text", text: "continue after failed bridge" }],
-          },
-        ],
-      }),
-    });
-    assert.equal(native.status, 200);
-    assert.equal(gatewayRequests.length, 2);
-    const failOpenInput = JSON.stringify(gatewayRequests[1].body.input);
-    assert.match(failOpenInput, /visible request before native compaction/u);
-    assert.match(failOpenInput, /continue after failed bridge/u);
-    assert.match(failOpenInput, /compacted in an unreadable format/u);
-
-    const legacySummary = "A model previously claimed deployment succeeded.";
-    const legacy = await fetch(`${routerBase(routerPort)}/responses`, {
-      method: "POST",
-      headers: { ...headers, "Thread-Id": "ffffffff-1111-4222-8333-444444444444" },
-      body: JSON.stringify({
-        model: "deepseek/deepseek-v4-pro",
-        input: [
-          {
-            type: "message",
-            role: "user",
-            content: [{ type: "input_text", text: "visible request before legacy compaction" }],
-          },
-          {
-            type: "compaction",
-            encrypted_content: KCR1_PREFIX + Buffer.from(legacySummary, "utf8").toString("base64"),
-          },
-          {
-            type: "message",
-            role: "user",
-            content: [{ type: "input_text", text: "continue after legacy compaction" }],
-          },
-        ],
-      }),
-    });
-    assert.equal(legacy.status, 200);
-    assert.equal(gatewayRequests.length, 4);
-    const upgradedInput = gatewayRequests[3].body.input;
-    assert.equal(upgradedInput[0].content[0].text, "visible request before legacy compaction");
-    assert.match(upgradedInput[1].content[0].text, /BEGIN_CODEX_ROUTER_CHECKPOINT_V2/u);
-    assert.equal(upgradedInput[2].content[0].text, "continue after legacy compaction");
-    assert.equal(upgradedInput.length, 3);
-    const checkpoint = checkpointFromCompactResponse({ output: [upgradedInput[1]] });
-    assert.ok(
-      checkpoint.orientation.unverified.some((entry) =>
-        entry.text.includes(`UNVERIFIED_LEGACY_SUMMARY: ${legacySummary}`),
-      ),
-    );
-  } finally {
-    await stopChild(router);
-    await closeServer(gateway.server);
-  }
-});
-
 test("compaction never treats reasoning as final text and falls back to chat content", async () => {
   let requestCount = 0;
   const contract = (objective) => JSON.stringify({
@@ -1862,6 +1708,25 @@ test("compaction never treats reasoning as final text and falls back to chat con
       json(response, 200, {
         id: "chat-summary",
         choices: [{ message: { content: contract("Chat fallback final answer.") } }],
+      });
+      return;
+    }
+    if (requestCount === 4) {
+      // A Responses-shaped provider whose output items carry no `type` -- the
+      // common chat-completions-to-Responses shim shape. Its answer must still
+      // be read, and its reasoning must still lose.
+      json(response, 200, {
+        id: "untyped-item-summary",
+        object: "response",
+        output: [
+          {
+            type: "reasoning",
+            content: [{ type: "output_text", text: contract("REASONING STILL LOSES") }],
+          },
+          {
+            content: [{ type: "output_text", text: contract("Untyped item final answer.") }],
+          },
+        ],
       });
       return;
     }
@@ -1923,6 +1788,13 @@ test("compaction never treats reasoning as final text and falls back to chat con
     assert.deepEqual(topLevel.source_refs.requirements, ["U001"]);
     assert.equal(topLevel.orientation.objective, "Top-level final answer.");
     assert.doesNotMatch(JSON.stringify(topLevel), /MESSAGE MUST NOT WIN/u);
+
+    // Requiring `type === "message"` made this provider contribute nothing and
+    // compact to an empty checkpoint while still reporting ok.
+    const untyped = await compact();
+    assert.deepEqual(untyped.source_refs.requirements, ["U001"]);
+    assert.equal(untyped.orientation.objective, "Untyped item final answer.");
+    assert.doesNotMatch(JSON.stringify(untyped), /REASONING STILL LOSES/u);
   } finally {
     await stopChild(router);
     await closeServer(gateway.server);
@@ -7198,7 +7070,7 @@ test("Zen Free Muse and Ox bridge custom tools across JSON, history, SSE, and er
       });
       return;
     }
-    if (inputText.includes("CONTEXT CHECKPOINT COMPACTION")) {
+    if (inputText.includes("lossy continuation checkpoint")) {
       if (
         body.input.some((item) =>
           ["custom_tool_call", "custom_tool_call_output"].includes(item?.type),
@@ -7231,7 +7103,23 @@ test("Zen Free Muse and Ox bridge custom tools across JSON, history, SSE, and er
           {
             type: "message",
             role: "assistant",
-            content: [{ type: "output_text", text: "custom history compacted" }],
+            content: [
+              {
+                type: "output_text",
+                // KCR2 only trusts a contract-shaped answer; free prose is
+                // recorded as an invalid-output checkpoint instead.
+                text: JSON.stringify({
+                  objective: "custom history compacted",
+                  requirement_refs: ["U001"],
+                  attempt_refs: ["C001"],
+                  observation_refs: ["R001"],
+                  unverified: [],
+                  unknowns: [],
+                  blockers: [],
+                  next_step: "Continue the patch.",
+                }),
+              },
+            ],
           },
         ],
         usage: { input_tokens: 30, output_tokens: 3, total_tokens: 33 },
@@ -7549,6 +7437,7 @@ test("Zen Free Muse and Ox bridge custom tools across JSON, history, SSE, and er
     assert.equal(compacted.status, 200, router.testErrors());
     const compactedPayload = await compacted.json();
     assert.equal(compactedPayload.output.at(-1).role, "user");
+    assert.ok(compactedPayload.output.at(-1).content[0].text.startsWith(CHECKPOINT_WARNING));
     assert.match(compactedPayload.output.at(-1).content[0].text, /custom history compacted/);
     const compactRequest = gatewayRequests[beforeCompaction];
     assert.equal(compactRequest.model, museGatewayModel);

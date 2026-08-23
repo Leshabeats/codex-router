@@ -196,16 +196,7 @@
   final `message` instead of concatenating both channels and mistaking their
   separate JSON objects for an ambiguous answer. Existing `kcr1` payloads and
   old v1 plain-summary messages still replay but are labeled
-  `UNVERIFIED_LEGACY_SUMMARY`. On routed requests, a native OpenAI encrypted
-  compaction item now acts as an automatic history boundary: the router creates
-  KCR2 once from the original messages still visible before it, records the
-  unreadable earlier history as unknown, and continues the current turn without
-  asking for a manual compact. Valid KCR2 boundaries then remove unrelated
-  pre-boundary history while preserving at most two fully matched requirements
-  and every post-boundary item. Failed or evidence-free bridge generation keeps
-  the original history. A bounded 24-hour in-memory cache (64 entries, 8 MiB)
-  deduplicates identical and concurrent bridge work without retaining the
-  native ciphertext or full transcript. Checkpoint excerpts reuse the managed
+  `UNVERIFIED_LEGACY_SUMMARY`. Checkpoint excerpts reuse the managed
   caller-URL redactor and remove recognized GitHub token prefixes before they
   reach either the source catalog or serialized checkpoint. Native OpenAI
   requests still forward their encrypted compaction bytes unchanged.

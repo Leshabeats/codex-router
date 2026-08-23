@@ -251,20 +251,15 @@ transcript.
 Existing `kcr1:` payloads and the plain continuation messages emitted by the old
 v1 compact endpoint remain readable for compatibility, but replay labels their
 model-written text `UNVERIFIED_LEGACY_SUMMARY`. Native OpenAI compaction items
-remain opaque and byte-preserved on native OpenAI requests. When a routed model
-first receives one, the router treats it only as a history boundary and creates
-a KCR2 checkpoint from original messages that are still visible before that
-boundary. The opaque content is never decoded or promoted to evidence, and the
-checkpoint records that earlier OpenAI-compacted history is unknown. A usable
-checkpoint then replaces pre-boundary history with at most two fully matched
-user requirements, the rendered KCR2, and all post-boundary items. Generation
-failure or a checkpoint with no trusted user requirement fails open: the router
-keeps the original input and follows its existing unreadable-compaction path.
-The generated KCR2 is cached in memory by thread and boundary fingerprint for up
-to 24 hours (64 entries and 8 MiB); concurrent requests share the same
-generation. The cache stores neither complete transcripts nor opaque OpenAI
-payloads. A router restart simply causes the first routed request to generate
-the bridge again. Conversations with no compaction boundary remain unchanged.
+remain opaque and byte-preserved on native OpenAI requests; they are never
+decoded or promoted to evidence.
+
+Routed turns that carry a native OpenAI compaction item are unchanged by this
+work: the router does not yet build a checkpoint from them, and continues to
+follow its existing unreadable-compaction path. Bridging that boundary means
+generating a checkpoint on an ordinary turn, which puts summarization work --
+and its provider call -- on the request path, so it is deliberately held back
+for its own change rather than landing behind the checkpoint format.
 
 Standalone `/images/generations` and `/images/edits` requests always pass through
 to the native OpenAI Codex backend with filtered Codex authentication headers.

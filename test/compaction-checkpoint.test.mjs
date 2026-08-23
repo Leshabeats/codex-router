@@ -3,7 +3,6 @@ import test from "node:test";
 
 import {
   CHECKPOINT_WARNING,
-  checkpointWithUnknown,
   COMPACTION_PROMPT,
   decodeCompaction,
   encodeCheckpoint,
@@ -12,11 +11,9 @@ import {
   KCR2_PREFIX,
   LEGACY_V1_SUMMARY_PREFIX,
   LEGACY_WARNING,
-  latestHistoryBoundary,
   prepareCompaction,
   renderCheckpoint,
   renderCompactionValue,
-  rewriteHistoryFromCheckpoint,
 } from "../src/compaction-checkpoint.mjs";
 
 function message(role, text) {
@@ -719,103 +716,54 @@ test("decodes kcr2 and labels kcr1 as unverified legacy material", () => {
   assert.match(renderCompactionValue(legacy), /old model summary/u);
 });
 
-test("rewrites retained history to referenced requirements, kcr2, and post-boundary input", () => {
-  const historical = Array.from({ length: 129 }, (_, index) =>
-    message("user", `historical user ${String(index + 1).padStart(3, "0")}`),
-  );
-  const prepared = prepareCompaction(historical);
-  const checkpoint = finalizeCheckpoint(
-    modelSummary({
-      requirement_refs: ["U128", "U129"],
-      attempt_refs: [],
-      observation_refs: [],
-    }),
-    prepared,
-  );
-  const input = [
-    ...historical,
-    { type: "compaction", encrypted_content: encodeCheckpoint(checkpoint) },
-    message("user", "continue after compaction"),
+
+test("encoding degrades to a minimal checkpoint instead of throwing", () => {
+  // A compaction has nowhere to retry: throwing out of the encode step turns
+  // it into a 5xx, and a failed compaction ends the session. Every shape
+  // normalizedCheckpoint rejects must still produce a readable kcr2 value.
+  const base = {
+    version: 2,
+    orientation: {
+      objective: "",
+      unverified: [],
+      unknowns: [],
+      blockers: [],
+      next_step: "",
+    },
+    source_refs: { requirements: [], attempts: [], observations: [] },
+    sources: {},
+    recent_tail: [],
+    recent_tail_truncated: false,
+  };
+  const rejected = [
+    // Missing counters object.
+    base,
+    // Counters present but not positive safe integers.
+    { ...base, counters: { U: 0, A: 1, C: 1, R: 1 } },
+    // Unparseable recent_tail source id.
+    { ...base, counters: { U: 1, A: 1, C: 1, R: 1 }, recent_tail: [{ id: "Z999" }] },
+    // No checkpoint at all, which is what finalizeCheckpoint returns when
+    // normalization of its own result fails.
+    undefined,
   ];
-  const boundary = latestHistoryBoundary(input);
-  const rewritten = rewriteHistoryFromCheckpoint(input, boundary, checkpoint);
-
-  assert.equal(boundary.kind, "checkpoint");
-  assert.notStrictEqual(rewritten.input, input);
-  const texts = rewritten.input.map((item) => item.content[0].text);
-  assert.deepEqual(texts.slice(0, 2), ["historical user 128", "historical user 129"]);
-  assert.match(texts[2], new RegExp(CHECKPOINT_WARNING.slice(0, 16), "u"));
-  assert.equal(texts[3], "continue after compaction");
-});
-
-test("keeps only complete referenced requirements inside the replay budget", () => {
-  const older = message("user", "older active requirement");
-  const newest = message("user", "x".repeat(80_001));
-  const prepared = prepareCompaction([older, newest]);
-  const checkpoint = finalizeCheckpoint(
-    modelSummary({
-      requirement_refs: ["U001", "U002"],
-      attempt_refs: [],
-      observation_refs: [],
-    }),
-    prepared,
-  );
-  const input = [
-    older,
-    newest,
-    { type: "compaction", encrypted_content: encodeCheckpoint(checkpoint) },
-    message("user", "new turn"),
-  ];
-  const rewritten = rewriteHistoryFromCheckpoint(
-    input,
-    latestHistoryBoundary(input),
-    checkpoint,
-  );
-
-  assert.notStrictEqual(rewritten.input, input);
-  assert.equal(rewritten.input.length, 2);
-  assert.match(rewritten.input[0].content[0].text, /"truncated": true/u);
-  assert.equal(rewritten.input[1].content[0].text, "new turn");
-});
-
-test("fails open without trusted user requirements and classifies legacy and opaque boundaries", () => {
-  const checkpoint = finalizeCheckpoint(
-    modelSummary({ requirement_refs: [], attempt_refs: [], observation_refs: [] }),
-    prepareCompaction([message("assistant", "No user requirement exists.")]),
-  );
-  const input = [
-    message("user", "do not discard me"),
-    { type: "compaction", encrypted_content: encodeCheckpoint(checkpoint) },
-  ];
-  const rewritten = rewriteHistoryFromCheckpoint(
-    input,
-    latestHistoryBoundary(input),
-    checkpoint,
-  );
-  assert.strictEqual(rewritten.input, input);
-
-  const legacyValue = KCR1_PREFIX + Buffer.from("legacy summary", "utf8").toString("base64");
-  assert.equal(
-    latestHistoryBoundary([{ type: "compaction", encrypted_content: legacyValue }]).kind,
-    "legacy",
-  );
-  assert.equal(
-    latestHistoryBoundary([{ type: "compaction", encrypted_content: "gAAAAAopaque" }]).kind,
-    "opaque",
-  );
-  assert.equal(
-    latestHistoryBoundary([{ type: "compaction", encrypted_content: "kcr2:broken" }]).kind,
-    "invalid",
-  );
-});
-
-test("adds deterministic unknowns without duplicating them", () => {
-  const checkpoint = finalizeCheckpoint(
-    modelSummary({ attempt_refs: [], observation_refs: [] }),
-    prepareCompaction([message("user", "Continue from visible evidence.")]),
-  );
-  const unknown = "Earlier OpenAI native compaction content is opaque to external models.";
-  const once = checkpointWithUnknown(checkpoint, unknown);
-  const twice = checkpointWithUnknown(once, unknown);
-  assert.equal(twice.orientation.unknowns.filter((entry) => entry === unknown).length, 1);
+  for (const checkpoint of rejected) {
+    let encoded;
+    assert.doesNotThrow(() => {
+      encoded = encodeCheckpoint(checkpoint);
+    });
+    assert.ok(encoded.startsWith(KCR2_PREFIX));
+    const decoded = decodeCompaction(encoded);
+    assert.equal(decoded.kind, "checkpoint");
+    assert.ok(
+      decoded.checkpoint.orientation.unknowns.some((entry) =>
+        entry.includes("could not encode a checkpoint"),
+      ),
+      "the degraded checkpoint says what was lost",
+    );
+    // Rendering degrades the same way, so the v1 replay path never emits a
+    // bare "unreadable format" line for a checkpoint this router produced.
+    const rendered = renderCheckpoint(checkpoint);
+    assert.match(rendered, /BEGIN_CODEX_ROUTER_CHECKPOINT_V2/u);
+    assert.match(rendered, /could not encode a checkpoint/u);
+  }
 });

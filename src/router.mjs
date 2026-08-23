@@ -18,19 +18,15 @@ import {
 } from "./caller-auth.mjs";
 import {
   CHECKPOINT_WARNING,
-  checkpointWithUnknown,
   COMPACTION_PROMPT,
-  decodeCompaction,
   encodeCheckpoint,
   finalizeCheckpoint,
   isRouterCompactionValue,
-  latestHistoryBoundary,
   LEGACY_V1_SUMMARY_PREFIX,
   LEGACY_WARNING,
   prepareCompaction,
   renderCheckpoint,
   renderCompactionValue,
-  rewriteHistoryFromCheckpoint,
 } from "./compaction-checkpoint.mjs";
 import { handlePanelRequest, isPanelRoute } from "./desktop-panel.mjs";
 import { handleGeminiRequest, isGeminiRoute } from "./gemini-surface.mjs";
@@ -223,12 +219,6 @@ const AGENT_PAYLOAD_CACHE_MAX_BYTES = 8 * 1024 * 1024;
 const AGENT_PAYLOAD_CACHE_MAX_ENTRIES = 256;
 const agentPayloadCache = new Map();
 let agentPayloadCacheBytes = 0;
-const HISTORY_BRIDGE_CACHE_TTL_MS = 24 * 60 * 60 * 1_000;
-const HISTORY_BRIDGE_CACHE_MAX_BYTES = 8 * 1024 * 1024;
-const HISTORY_BRIDGE_CACHE_MAX_ENTRIES = 64;
-const historyBridgeCache = new Map();
-const historyBridgeInFlight = new Map();
-let historyBridgeCacheBytes = 0;
 
 let requestSequence = 0;
 const activeRequests = new Map();
@@ -1109,67 +1099,6 @@ function rememberAgentPayload(encrypted, plaintext) {
   }
 }
 
-function historyBridgeKey(request, boundary, prefixInput) {
-  const hash = createHash("sha256");
-  hash.update(boundary.kind);
-  hash.update("\0");
-  const threadId = ["thread-id", "session-id", "session_id"]
-    .map((name) => request.headers[name])
-    .find((value) => typeof value === "string" && value.length > 0);
-  if (threadId) {
-    hash.update(threadId.slice(0, 512));
-    hash.update("\0");
-  }
-  if (typeof boundary.value === "string") hash.update(boundary.value);
-  else if (typeof boundary.summary === "string") hash.update(boundary.summary);
-  if (!threadId && typeof boundary.value !== "string") {
-    hash.update("\0");
-    hash.update(JSON.stringify(prefixInput));
-  }
-  return hash.digest("base64url");
-}
-
-function cachedHistoryBridge(key) {
-  const entry = historyBridgeCache.get(key);
-  if (!entry) return undefined;
-  if (entry.expiresAt <= Date.now()) {
-    historyBridgeCache.delete(key);
-    historyBridgeCacheBytes -= entry.bytes;
-    return undefined;
-  }
-  const decoded = decodeCompaction(entry.encoded);
-  if (decoded?.kind !== "checkpoint") {
-    historyBridgeCache.delete(key);
-    historyBridgeCacheBytes -= entry.bytes;
-    return undefined;
-  }
-  historyBridgeCache.delete(key);
-  historyBridgeCache.set(key, entry);
-  return decoded.checkpoint;
-}
-
-function rememberHistoryBridge(key, checkpoint) {
-  const encoded = encodeCheckpoint(checkpoint);
-  const bytes = Buffer.byteLength(encoded, "utf8");
-  const existing = historyBridgeCache.get(key);
-  if (existing) historyBridgeCacheBytes -= existing.bytes;
-  historyBridgeCache.set(key, {
-    encoded,
-    bytes,
-    expiresAt: Date.now() + HISTORY_BRIDGE_CACHE_TTL_MS,
-  });
-  historyBridgeCacheBytes += bytes;
-  while (
-    historyBridgeCache.size > HISTORY_BRIDGE_CACHE_MAX_ENTRIES ||
-    historyBridgeCacheBytes > HISTORY_BRIDGE_CACHE_MAX_BYTES
-  ) {
-    const oldestKey = historyBridgeCache.keys().next().value;
-    const oldest = historyBridgeCache.get(oldestKey);
-    historyBridgeCache.delete(oldestKey);
-    historyBridgeCacheBytes -= oldest?.bytes || 0;
-  }
-}
-
 async function relayEncryptedAgentPayload(request, item, encrypted, signal) {
   const cached = cachedAgentPayload(encrypted);
   if (cached !== undefined) return cached;
@@ -1775,6 +1704,9 @@ function compactOutput(input, checkpoint) {
       selected.push(value);
       remaining -= value.length;
     } else {
+      // A message that does not fit is not replayed as an unmarked fragment
+      // that reads like a complete request. It is not lost either: it is
+      // retained inside the bounded checkpoint, flagged `truncated`.
       break;
     }
   }
@@ -1785,27 +1717,66 @@ function compactOutput(input, checkpoint) {
   ];
 }
 
+// Output item types that are never the model's contract answer. Reasoning is
+// a draft the provider exposes separately; the rest are tool traffic. Naming
+// what to refuse -- rather than requiring `type === "message"` -- keeps a
+// routed provider whose Responses-shaped items omit `type` or carry a vendor
+// tag from silently contributing nothing to a compaction.
+const NON_ANSWER_OUTPUT_TYPES = new Set([
+  "reasoning",
+  "function_call",
+  "function_call_output",
+  "custom_tool_call",
+  "custom_tool_call_output",
+  "local_shell_call",
+  "local_shell_call_output",
+  "computer_call",
+  "computer_call_output",
+  "tool_search_call",
+  "tool_search_output",
+  "web_search_call",
+  "file_search_call",
+  "image_generation_call",
+  "code_interpreter_call",
+  "mcp_call",
+  "mcp_list_tools",
+  "mcp_approval_request",
+  "compaction",
+  "compaction_trigger",
+]);
+
+function outputItemText(item) {
+  const text = [];
+  for (const part of Array.isArray(item?.content) ? item.content : []) {
+    if (
+      ["output_text", "text"].includes(part?.type) &&
+      typeof part.text === "string" &&
+      part.text.length > 0
+    ) {
+      text.push(part.text);
+    }
+  }
+  return text;
+}
+
 function extractResponseText(payload) {
   if (typeof payload?.output_text === "string" && payload.output_text.length > 0) {
     return payload.output_text;
   }
-  const text = [];
-  for (const item of Array.isArray(payload?.output) ? payload.output : []) {
-    // Responses providers expose private reasoning separately from the final
-    // assistant message. Only the message is the model's contract answer;
-    // reasoning, tool items, and unknown output types are drafts or metadata.
-    if (item?.type !== "message") continue;
-    for (const part of Array.isArray(item?.content) ? item.content : []) {
-      if (
-        ["output_text", "text"].includes(part?.type) &&
-        typeof part.text === "string" &&
-        part.text.length > 0
-      ) {
-        text.push(part.text);
-      }
-    }
-  }
-  if (text.length > 0) return text.join("\n");
+  const output = Array.isArray(payload?.output) ? payload.output : [];
+  // A provider that tags its answer is read strictly, so private reasoning is
+  // never mistaken for the final message.
+  const tagged = output
+    .filter((item) => item?.type === "message")
+    .flatMap(outputItemText);
+  if (tagged.length > 0) return tagged.join("\n");
+  // Otherwise fall back to any item that is not known tool or reasoning
+  // traffic, which is the only way a non-standard Responses shim contributes
+  // its answer at all.
+  const untagged = output
+    .filter((item) => !NON_ANSWER_OUTPUT_TYPES.has(item?.type))
+    .flatMap(outputItemText);
+  if (untagged.length > 0) return untagged.join("\n");
   const chatText = payload?.choices?.[0]?.message?.content;
   return typeof chatText === "string" ? chatText : "";
 }
@@ -1925,9 +1896,19 @@ async function summarize(request, payload, route, signal) {
     const usage = tokenUsageFromPayload(parsed);
     if (sent.upstream.ok) {
       clearProviderCooldown(attemptRoute.provider);
+      const answer = extractResponseText(parsed);
+      // finalizeCheckpoint turns empty model output into a structurally valid
+      // checkpoint, so an upstream whose answer this router cannot read would
+      // otherwise report ok with nothing in it. Say so where an operator sees
+      // it rather than shipping a silently empty summary.
+      if (!answer.trim() && !QUIET) {
+        console.error(
+          `[codex-router] compaction read no model text model=${attemptRoute.slug} provider=${canonicalProviderId(attemptRoute.provider)}`,
+        );
+      }
       return {
         ok: true,
-        checkpoint: finalizeCheckpoint(extractResponseText(parsed), prepared),
+        checkpoint: finalizeCheckpoint(answer, prepared),
         input: originalInput,
         usage,
         toolResultAging: aged.stats,
@@ -1993,90 +1974,6 @@ function recordCompactionUsage(result, route, startedAt) {
     ...result?.toolResultAging,
     ...(result?.failoverFrom ? { failoverFrom: result.failoverFrom } : {}),
   });
-}
-
-async function bridgedRoutedHistory(request, payload, route, signal) {
-  const input = Array.isArray(payload.input) ? payload.input : [];
-  const boundary = latestHistoryBoundary(input);
-  if (!boundary) return { input };
-  if (boundary.kind === "checkpoint") {
-    return rewriteHistoryFromCheckpoint(input, boundary, boundary.checkpoint);
-  }
-
-  const native =
-    boundary.kind === "opaque" && isNativeEncryptedToken(boundary.value);
-  if (!native && boundary.kind !== "legacy") return { input };
-
-  const prefixInput = input.slice(0, boundary.index + (native ? 0 : 1));
-  const key = historyBridgeKey(request, boundary, prefixInput);
-  let checkpoint = cachedHistoryBridge(key);
-  let cacheHit = Boolean(checkpoint);
-  if (!checkpoint) {
-    let work = historyBridgeInFlight.get(key);
-    if (!work && historyBridgeInFlight.size < HISTORY_BRIDGE_CACHE_MAX_ENTRIES) {
-      work = (async () => {
-        const startedAt = Date.now();
-        try {
-          const result = await summarize(
-            request,
-            { ...payload, input: prefixInput },
-            route,
-            signal,
-          );
-          recordCompactionUsage(result, route, startedAt);
-          if (!result?.ok) return undefined;
-          let generated = result.checkpoint;
-          if (native) {
-            generated = checkpointWithUnknown(
-              generated,
-              "Earlier OpenAI native compaction content is opaque to Codex Router and external models; only retained visible history was available for this checkpoint.",
-            );
-          }
-          if (!generated?.source_refs?.requirements?.length) return undefined;
-          rememberHistoryBridge(key, generated);
-          if (!QUIET) {
-            console.error(
-              `[codex-router] history-bridge generated model=${route.slug} boundary=${native ? "openai-native" : "legacy"}`,
-            );
-          }
-          return generated;
-        } catch (error) {
-          if (signal.aborted) throw error;
-          if (!QUIET) {
-            console.error(
-              `[codex-router] history-bridge fallback model=${route.slug} reason=${error?.name || "Error"}`,
-            );
-          }
-          return undefined;
-        }
-      })();
-      historyBridgeInFlight.set(key, work);
-      void work.then(
-        () => {
-          if (historyBridgeInFlight.get(key) === work) historyBridgeInFlight.delete(key);
-        },
-        () => {
-          if (historyBridgeInFlight.get(key) === work) historyBridgeInFlight.delete(key);
-        },
-      );
-    }
-    try {
-      checkpoint = work ? await work : undefined;
-    } catch (error) {
-      // The shared generation may have inherited another request's abort
-      // signal. Only abort this request when its own caller cancelled;
-      // otherwise fail open and keep the original history.
-      if (signal.aborted) throw error;
-      checkpoint = undefined;
-    }
-    cacheHit = false;
-  }
-  if (!checkpoint) return { input };
-  const rewritten = rewriteHistoryFromCheckpoint(input, boundary, checkpoint);
-  if (!QUIET && cacheHit && rewritten.input !== input) {
-    console.error(`[codex-router] history-bridge cache-hit model=${route.slug}`);
-  }
-  return rewritten;
 }
 
 function compactionSnapshot(model, item, status = "completed") {
@@ -2775,15 +2672,9 @@ async function handleResponses(request, response, requestUrl) {
       });
     };
     if (route) {
-      const history = await bridgedRoutedHistory(
-        request,
-        payload,
-        route,
-        controller.signal,
-      );
       const normalized = await normalizeRoutedAgentInput(
         request,
-        history.input,
+        payload.input,
         controller.signal,
       );
       const aged = ageToolResults(normalized, { enabled: toolResultAgingEnabled() });

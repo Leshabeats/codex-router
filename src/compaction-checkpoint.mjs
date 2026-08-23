@@ -57,7 +57,6 @@ const MAX_CATALOG_BYTES = 96 * 1024;
 const MAX_SOURCE_LABEL_BYTES = 256;
 const MAX_MODEL_OUTPUT_BYTES = 256 * 1024;
 const MAX_MODEL_JSON_CANDIDATES = 8;
-const MAX_REPLAYED_REQUIREMENT_CHARS = 80_000;
 const MAX_UNVERIFIED = 16;
 const MAX_UNKNOWNS = 32;
 const MAX_BLOCKERS = 16;
@@ -452,19 +451,56 @@ export function isRouterCompactionValue(value) {
   );
 }
 
-export function encodeCheckpoint(checkpoint) {
+// A checkpoint this router cannot serialize must not become a 5xx: a failed
+// compaction ends the session just as hard as a failed turn, and the caller
+// has nowhere to retry. `normalizedCheckpoint` returns undefined for a bad
+// `recent_tail` id or missing counters, and `fitCheckpoint` is not guaranteed
+// to reach the size limit, so both encoding and rendering degrade to a
+// minimal, structurally valid checkpoint that says what was lost instead of
+// throwing out of the compaction path.
+const UNENCODABLE_CHECKPOINT_UNKNOWN =
+  "The router could not encode a checkpoint for this compaction; earlier task state must be reconstructed from the conversation itself.";
+
+function minimalCheckpoint() {
+  return {
+    version: 2,
+    orientation: {
+      objective: "",
+      unverified: [],
+      unknowns: [UNENCODABLE_CHECKPOINT_UNKNOWN],
+      blockers: [],
+      next_step: "",
+    },
+    source_refs: { requirements: [], attempts: [], observations: [] },
+    sources: {},
+    recent_tail: [],
+    recent_tail_truncated: true,
+    counters: { U: 1, A: 1, C: 1, R: 1 },
+  };
+}
+
+// Always returns a checkpoint that `normalizedCheckpoint` accepts and that
+// serializes inside MAX_CHECKPOINT_BYTES.
+function encodableCheckpoint(checkpoint) {
   const normalized = normalizedCheckpoint(checkpoint);
-  if (!normalized) throw new TypeError("Invalid compaction checkpoint.");
-  const serialized = JSON.stringify(normalized);
-  if (Buffer.byteLength(serialized, "utf8") > MAX_CHECKPOINT_BYTES) {
-    throw new RangeError("Compaction checkpoint exceeds 96 KiB.");
+  if (!normalized) return normalizedCheckpoint(minimalCheckpoint());
+  if (Buffer.byteLength(JSON.stringify(normalized), "utf8") <= MAX_CHECKPOINT_BYTES) {
+    return normalized;
   }
-  return KCR2_PREFIX + Buffer.from(serialized, "utf8").toString("base64");
+  const fitted = normalizedCheckpoint(fitCheckpoint(normalized));
+  if (fitted && Buffer.byteLength(JSON.stringify(fitted), "utf8") <= MAX_CHECKPOINT_BYTES) {
+    return fitted;
+  }
+  return normalizedCheckpoint(minimalCheckpoint());
+}
+
+export function encodeCheckpoint(checkpoint) {
+  const encodable = encodableCheckpoint(checkpoint);
+  return KCR2_PREFIX + Buffer.from(JSON.stringify(encodable), "utf8").toString("base64");
 }
 
 export function renderCheckpoint(checkpoint) {
-  const normalized = normalizedCheckpoint(checkpoint);
-  if (!normalized) return "[Earlier conversation history was compacted in an unreadable format.]";
+  const normalized = encodableCheckpoint(checkpoint);
   return `${CHECKPOINT_WARNING}\n\n${CHECKPOINT_BEGIN}\n${JSON.stringify(
     normalized,
     null,
@@ -534,90 +570,6 @@ function priorState(input) {
 
 function isCheckpointMessage(item) {
   return Boolean(renderedCheckpointFromMessage(item)) || legacySummaryFromMessage(item) !== undefined;
-}
-
-export function latestHistoryBoundary(input) {
-  let boundary;
-  for (const [index, item] of (Array.isArray(input) ? input : []).entries()) {
-    if (item?.type === "compaction") {
-      const decoded = decodeCompaction(item.encrypted_content);
-      boundary = decoded
-        ? { index, ...decoded, value: item.encrypted_content }
-        : {
-            index,
-            kind: isRouterCompactionValue(item.encrypted_content) ? "invalid" : "opaque",
-            value: item.encrypted_content,
-          };
-      continue;
-    }
-    const checkpoint = renderedCheckpointFromMessage(item);
-    if (checkpoint) {
-      boundary = { index, kind: "checkpoint", checkpoint };
-      continue;
-    }
-    const summary = legacySummaryFromMessage(item);
-    if (summary !== undefined) boundary = { index, kind: "legacy", summary };
-  }
-  return boundary;
-}
-
-export function checkpointWithUnknown(checkpoint, unknown) {
-  const normalized = normalizedCheckpoint(checkpoint);
-  const text = boundedString(unknown, MAX_LIST_TEXT_BYTES);
-  if (!normalized || !text) return normalized;
-  normalized.orientation.unknowns = uniqueStrings(
-    [...normalized.orientation.unknowns, text],
-    MAX_UNKNOWNS,
-  );
-  return normalizedCheckpoint(fitCheckpoint(normalized));
-}
-
-export function rewriteHistoryFromCheckpoint(input, boundary, checkpoint) {
-  const items = Array.isArray(input) ? input : [];
-  const normalized = normalizedCheckpoint(checkpoint);
-  if (
-    !normalized ||
-    !Number.isInteger(boundary?.index) ||
-    boundary.index < 0 ||
-    boundary.index >= items.length ||
-    normalized.source_refs.requirements.length === 0
-  ) {
-    return { input: items };
-  }
-
-  const requiredFingerprints = new Set(
-    normalized.source_refs.requirements
-      .map((id) => normalized.sources[id]?.fingerprint)
-      .filter(Boolean),
-  );
-  const matches = items
-    .slice(0, boundary.index)
-    .map((item, index) => ({ item, index }))
-    .filter(({ item }) => item?.type === "message" && item.role === "user")
-    .filter(({ item }) => requiredFingerprints.has(fingerprint("U", item)))
-    .slice(-2);
-
-  const retained = [];
-  let remaining = MAX_REPLAYED_REQUIREMENT_CHARS;
-  for (let index = matches.length - 1; index >= 0; index -= 1) {
-    const match = matches[index];
-    const length = messageText(match.item).length;
-    if (length > remaining) break;
-    retained.push(match);
-    remaining -= length;
-  }
-  retained.reverse();
-
-  const rewritten = [
-    ...retained.map(({ item }) => item),
-    {
-      type: "message",
-      role: "user",
-      content: [{ type: "input_text", text: renderCheckpoint(normalized) }],
-    },
-    ...items.slice(boundary.index + 1),
-  ];
-  return { input: rewritten };
 }
 
 function nextId(prefix, counters) {
