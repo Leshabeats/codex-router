@@ -133,6 +133,10 @@ import { readVisionBridgeSettings } from "./vision-bridge-state.mjs";
 import { installedNativeVisionEngines } from "./vision-engines.mjs";
 import { ageToolResults } from "./tool-result-aging.mjs";
 import {
+  applyTokenMaxxingOverlay,
+  tokenMaxxingActive,
+} from "./instruction-overlays.mjs";
+import {
   nativeToolResultAgingEnabled,
   toolResultAgingEnabled,
 } from "./tool-result-aging-state.mjs";
@@ -1866,7 +1870,14 @@ async function summarize(request, payload, route, signal) {
   // The summarizer may select source IDs, but only this deterministic pass can
   // decide which source types and machine outcomes enter a kcr2 checkpoint.
   const prepared = prepareCompaction(normalized);
-  const aged = ageToolResults(normalized, { enabled: toolResultAgingEnabled() });
+  const agingEnabled = toolResultAgingEnabled();
+  const aged = ageToolResults(normalized, {
+    enabled: agingEnabled,
+    // A compaction request is already at the context boundary. Dense shaping
+    // gives its summarizer more distinct evidence without changing low-pressure
+    // turns, and every shaped result keeps the exact rerun path.
+    tokenMaxxing: agingEnabled,
+  });
 
   // The models this compaction may be moved to, in order, starting with the one
   // the conversation is on. A provider already known to be empty is dropped
@@ -2200,7 +2211,7 @@ function observeSubagentOutcome(request, route, status, options = {}) {
 // Both are avoided the same way: nothing here writes to `payload` or to
 // `agedInput`. The tool list is a local, and the input array is copied before
 // anything rewrites it.
-async function buildRoutedRequest({ request, payload, route, agedInput }) {
+async function buildRoutedRequest({ request, payload, route, agedInput, tokenMaxxing = false }) {
   let namespacesFlattened = false;
   let flattenedNamespaces = new Map();
   const bridged = await bridgeVisionInput(
@@ -2364,6 +2375,9 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
     delete routed.reasoning_effort;
   }
   if (provider?.id === "fireworks") delete routed.web_search_options;
+  routed.instructions = applyTokenMaxxingOverlay(routed.instructions, {
+    active: tokenMaxxing,
+  });
   return {
     body: Buffer.from(JSON.stringify(routed), "utf8"),
     target: `${GATEWAY_BASE}/responses`,
@@ -2443,6 +2457,7 @@ async function attemptModelFailover({
   verdict,
   status,
   signal,
+  tokenMaxxing,
 }) {
   const settings = readFailoverSettings();
   if (!settings.enabled) return undefined;
@@ -2470,7 +2485,13 @@ async function attemptModelFailover({
     let built;
     let upstream;
     try {
-      built = await buildRoutedRequest({ request, payload, route: model, agedInput });
+      built = await buildRoutedRequest({
+        request,
+        payload,
+        route: model,
+        agedInput,
+        tokenMaxxing,
+      });
       upstream = await fetch(built.target, {
         method: "POST",
         headers: built.headers,
@@ -2535,6 +2556,7 @@ async function handleResponses(request, response, requestUrl) {
   let usage;
   let estimatedInputTokens;
   let toolResultAging;
+  let tokenMaxxing = false;
   let pendingInterrupts = [];
   let emptyCompletion = false;
   let emptyCompletionRetried = false;
@@ -2677,10 +2699,25 @@ async function handleResponses(request, response, requestUrl) {
         payload.input,
         controller.signal,
       );
-      const aged = ageToolResults(normalized, { enabled: toolResultAgingEnabled() });
+      const agingEnabled = toolResultAgingEnabled();
+      tokenMaxxing = tokenMaxxingActive({
+        enabled: agingEnabled,
+        estimatedTokens: estimateInputTokens(body, { contextWindow: route.contextWindow }),
+        autoCompact: route.autoCompact,
+      });
+      const aged = ageToolResults(normalized, {
+        enabled: agingEnabled,
+        tokenMaxxing,
+      });
       toolResultAging = aged.stats;
       agedInput = aged.input;
-      const built = await buildRoutedRequest({ request, payload, route, agedInput });
+      const built = await buildRoutedRequest({
+        request,
+        payload,
+        route,
+        agedInput,
+        tokenMaxxing,
+      });
       namespacesFlattened = built.namespacesFlattened;
       flattenedNamespaces = built.flattenedNamespaces;
       pendingInterrupts = built.pendingInterrupts;
@@ -2707,7 +2744,13 @@ async function handleResponses(request, response, requestUrl) {
           logFailover(route, next.model, `cooled_until_${cooled.until}`, "not-sent", "swapped");
           adoptRoute(
             next.model,
-            await buildRoutedRequest({ request, payload, route: next.model, agedInput }),
+            await buildRoutedRequest({
+              request,
+              payload,
+              route: next.model,
+              agedInput,
+              tokenMaxxing,
+            }),
           );
         }
       }
@@ -2817,6 +2860,7 @@ async function handleResponses(request, response, requestUrl) {
           verdict,
           status: upstream.status,
           signal: controller.signal,
+          tokenMaxxing,
         });
         if (moved) {
           // The attempt that failed is still a turn that happened and still

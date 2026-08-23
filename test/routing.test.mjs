@@ -5755,6 +5755,68 @@ test("router ages consumed large tool results but preserves the newest result fr
   }
 });
 
+test("token maxxing shapes the newest result and injects terse instructions only under pressure", async () => {
+  const gatewayBodies = [];
+  const gateway = await mockServer(async (request, response) => {
+    gatewayBodies.push(await bodyJson(request));
+    json(response, 200, { output: [{ type: "message", role: "assistant", content: "ok" }] });
+  });
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "routing-token-maxxing-"));
+  writeFileSync(
+    path.join(stateDir, "tool-result-aging.json"),
+    JSON.stringify({ version: 1, enabled: true, nativeEnabled: false }),
+  );
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_QUIET: "1",
+    MODEL_ROUTER_STATE_DIR: stateDir,
+  });
+  const turn = (value) => ({
+    model: "deepseek/deepseek-v4-pro",
+    stream: false,
+    instructions: "Base instructions.",
+    input: [
+      { type: "function_call", call_id: "latest", name: "exec_command", arguments: "{}" },
+      { type: "function_call_output", call_id: "latest", output: value },
+    ],
+  });
+  const lowPressure = "ordinary noise\n".repeat(10_000);
+  const highPressure = "repeated build progress\n".repeat(110_000);
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    for (const value of [lowPressure, highPressure]) {
+      const response = await fetch(`${routerBase(routerPort)}/responses`, {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer CODEX_CALLER_SECRET",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(turn(value)),
+      });
+      assert.equal(response.status, 200, await response.text());
+    }
+
+    assert.equal(gatewayBodies[0].input[1].output, lowPressure);
+    assert.equal(gatewayBodies[0].instructions, "Base instructions.");
+    assert.match(gatewayBodies[1].input[1].output, /Tool result shaped by Codex Router token maxxing/u);
+    assert.match(gatewayBodies[1].input[1].output, /same line repeated 109999 more times/u);
+    assert.match(gatewayBodies[1].instructions, /## Context pressure mode/u);
+    assert.match(gatewayBodies[1].instructions, /Be terse in commentary and final prose/u);
+
+    const events = await waitForUsageEvents(stateDir, 2, router);
+    assert.equal(events[0].toolResultsShaped, undefined);
+    assert.equal(events[1].toolResultsShaped, 1);
+    assert.ok(events[1].toolResultShapeBytesSaved > 2_000_000);
+  } finally {
+    await stopChild(router);
+    await closeServer(gateway.server);
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
 test("tool-result aging kill switch forwards the same large output", async () => {
   const gatewayBodies = [];
   const gateway = await mockServer(async (request, response) => {

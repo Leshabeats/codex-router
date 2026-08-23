@@ -105,6 +105,7 @@ test("tool-result aging totals aggregate savings across recorded events", async 
       evaluatedRequests: 0,
       largestResultBytes: 0,
       resultsAged: 0,
+      resultsShaped: 0,
       bytesSaved: 0,
       estimatedTokensSaved: 0,
       firstAt: undefined,
@@ -308,5 +309,44 @@ test("totals separate a pass that ran and aged nothing from one that never ran",
     if (previousStateDir === undefined) delete process.env.MODEL_ROUTER_STATE_DIR;
     else process.env.MODEL_ROUTER_STATE_DIR = previousStateDir;
     rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("token-maxxing shaping contributes savings without being reported as aged", async () => {
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "model-router-usage-"));
+  const previousStateDir = process.env.MODEL_ROUTER_STATE_DIR;
+  process.env.MODEL_ROUTER_STATE_DIR = stateDir;
+  let usage;
+  try {
+    usage = await import(`../src/usage-events.mjs?shaped=${Date.now()}`);
+    usage.recordUsageEvent({
+      model: "deepseek/deepseek-v4-pro",
+      provider: "deepseek",
+      status: 200,
+      durationMs: 100,
+      inputTokens: 700_000,
+      toolResultsShaped: 2,
+      toolResultBytesBefore: 2_400_000,
+      toolResultBytesAfter: 4_000,
+      toolResultBytesSaved: 2_396_000,
+      toolResultShapeBytesSaved: 2_396_000,
+      toolResultsEvaluated: 0,
+      toolResultBytesLargest: 0,
+    });
+    const event = usage.recentUsageEvents().find((entry) => entry.toolResultsShaped === 2);
+    assert.equal(event.toolResultsShaped, 2);
+    assert.equal(event.toolResultsAged, undefined);
+    assert.equal(event.toolResultShapeBytesSaved, 2_396_000);
+
+    const totals = usage.toolResultAgingTotals();
+    assert.equal(totals.requests, 1);
+    assert.equal(totals.resultsAged, 0);
+    assert.equal(totals.resultsShaped, 2);
+    assert.equal(totals.bytesSaved, 2_396_000);
+  } finally {
+    if (previousStateDir === undefined) delete process.env.MODEL_ROUTER_STATE_DIR;
+    else process.env.MODEL_ROUTER_STATE_DIR = previousStateDir;
+    rmSync(stateDir, { recursive: true, force: true });
+    if (usage) rmSync(usage.USAGE_EVENTS_PATH, { force: true });
   }
 });

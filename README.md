@@ -753,6 +753,20 @@ the next external-model request sees the change without restarting Codex or the
 router. The equivalent CLI commands are `./bin/control tool-result-aging on`,
 `off`, and `status`.
 
+When the estimated request reaches 70% of that model's auto-compact budget, the
+same switch automatically enters **token maxxing** for the turn. It applies a
+small deterministic output shaper inspired by
+[RTK](https://github.com/rtk-ai/rtk): terminal progress rewrites, exact repeated
+lines, blank runs, and deep boilerplate are collapsed while error-bearing lines
+stay visible. The newest-result frontier remains intact below that pressure
+threshold. Under pressure, every shaped result carries its original byte count,
+SHA-256 digest, and an exact rerun instruction, and the router adds a terse
+execution overlay inspired by
+[Caveman](https://github.com/JuliusBrussee/caveman) so the model favors targeted
+reads, bounded command output, and concise prose. Routed compaction requests use
+the same dense shaping because they are already at the context boundary. No
+second toggle or restart is required.
+
 Native OpenAI traffic is unchanged by default. `./bin/control
 tool-result-aging native on` extends the same compaction to native GPT models;
 `native off` restores the default. It is opt-in because it changes what is sent
@@ -811,8 +825,10 @@ before and after aging; this is an estimate and spends no provider quota.
 `usage-events.jsonl` — measured turns rather than an estimate. For a
 live check, leave the setting on and inspect `usage-events.jsonl` after a routed
 turn; events that compacted history include `toolResultsAged` and
-`toolResultBytesSaved`. Those counters measure serialized context bytes, while
-provider-billed token counts remain the authoritative cost measurement.
+`toolResultBytesSaved`. Pressure-shaped turns additionally include
+`toolResultsShaped` and `toolResultShapeBytesSaved`. Those counters measure
+serialized context bytes, while provider-billed token counts remain the
+authoritative cost measurement.
 
 For a reproducible provider-reported A/B, see
 [`docs/tool-result-aging-benchmark.md`](docs/tool-result-aging-benchmark.md).

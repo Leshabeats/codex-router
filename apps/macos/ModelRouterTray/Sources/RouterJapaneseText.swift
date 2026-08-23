@@ -3,7 +3,7 @@
 enum RouterJapaneseText {
   static let values: [String: String] = [
     "Uninstalling": "アンインストール中",
-    "Off by default · replaces consumed tool results on external models": "デフォルトでオフ · 外部モデルで消費済みのツール結果を置き換えます",
+    "Off by default · token maxxing starts at 70% on external models": "デフォルトでオフ · 外部モデルでは 70% で token maxxing を開始します",
     "Fix Codex Router installation": "Codex ルーターのインストールを修復",
     "Language": "言語",
     "System": "システムに従う",

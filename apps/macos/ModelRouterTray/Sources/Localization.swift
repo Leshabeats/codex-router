@@ -134,7 +134,7 @@ func routerFormat(_ english: String, _ arguments: CVarArg...) -> String {
 enum RouterChineseText {
   static let values: [String: String] = [
     "Uninstalling": "正在卸载",
-    "Off by default · replaces consumed tool results on external models": "默认关闭 · 在外部模型上替换已使用的工具结果",
+    "Off by default · token maxxing starts at 70% on external models": "默认关闭 · 外部模型达到 70% 时启动 token maxxing",
     "Fix Codex Router installation": "修复 Codex 路由安装",
     "Language": "语言",
     "System": "跟随系统",
