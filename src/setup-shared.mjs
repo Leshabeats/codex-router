@@ -18,7 +18,6 @@ import { PROVIDERS, providerNeedsNoKey } from "./model-registry.mjs";
 import { kimiOAuthStatus } from "./oauth-status.mjs";
 import { grokOAuthStatus } from "./grok-oauth-status.mjs";
 import { antigravityOAuthStatus } from "./antigravity-oauth-status.mjs";
-import { signInAntigravity } from "./antigravity-oauth-onboarding.mjs";
 import { SOURCE_ROOT } from "./paths.mjs";
 import { credentialStatus } from "./provider-credentials.mjs";
 import { providerOnboardingSnapshot } from "./provider-onboarding.mjs";
@@ -281,6 +280,7 @@ function onboardGrokOauth() {
 }
 
 async function onboardAntigravityOauth() {
+  const { signInAntigravity } = await import("./antigravity-oauth-onboarding.mjs");
   for (let attempt = 0; attempt < MAX_LOGIN_ATTEMPTS; attempt += 1) {
     if (!confirm("Open a browser to sign in to Antigravity now?")) {
       throw new Error("Antigravity OAuth setup was cancelled.");

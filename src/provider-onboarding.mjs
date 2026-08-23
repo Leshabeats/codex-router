@@ -11,7 +11,6 @@ import {
 import { devinCliStatus } from "./devin-cli-status.mjs";
 import { grokOAuthStatus } from "./grok-oauth-status.mjs";
 import { antigravityOAuthStatus } from "./antigravity-oauth-status.mjs";
-import { signInAntigravity } from "./antigravity-oauth-onboarding.mjs";
 import { removeAntigravityToken } from "./antigravity-oauth-session.mjs";
 import { KIMI_CLI_NPM_PACKAGE } from "./kimi-oauth-onboarding.mjs";
 import { MODELS, PROVIDERS, providerNeedsNoKey } from "./model-registry.mjs";
@@ -224,6 +223,7 @@ const LOGIN_TIMEOUT_MS = 10 * 60_000;
 
 export async function loginOauthProvider(providerId) {
   if (providerId === "antigravity-oauth") {
+    const { signInAntigravity } = await import("./antigravity-oauth-onboarding.mjs");
     await signInAntigravity();
     if (!oauthConfigured(providerId)) {
       throw new Error("Sign-in finished without a usable Antigravity OAuth session. Please try again.");

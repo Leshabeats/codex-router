@@ -6,7 +6,6 @@ import path from "node:path";
 import { detectLegacyInstallations, applyKnownMigrations, rollbackLatestMigration } from "./legacy-migration.mjs";
 import { grokOAuthStatus } from "./grok-oauth-status.mjs";
 import { antigravityOAuthStatus } from "./antigravity-oauth-status.mjs";
-import { signInAntigravity } from "./antigravity-oauth-onboarding.mjs";
 import { LISTED_MODELS, PROVIDERS, providerNeedsNoKey } from "./model-registry.mjs";
 import { ensureNodeDependencies, isNodeDependencyFailure } from "./node-dependency-install.mjs";
 import { effectiveVisibleModels, setModelSelection } from "./model-picker-state.mjs";
@@ -338,6 +337,7 @@ async function configureProvider(provider) {
       if (!confirm(`Open a browser to sign in to ${provider.displayName} now?`)) {
         throw incomplete(`${provider.displayName} sign-in was cancelled.`);
       }
+      const { signInAntigravity } = await import("./antigravity-oauth-onboarding.mjs");
       await signInAntigravity();
       if (!providerConfigured(provider)) {
         throw incomplete(`${provider.displayName} sign-in did not produce a usable credential.`);
