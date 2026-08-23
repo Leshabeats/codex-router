@@ -1,15 +1,17 @@
 import { execFile as execFileCallback } from "node:child_process";
 
 // Task Scheduler's `State` can remain Running after its only instance has
-// gone. The COM instance enumeration is the authority for whether the managed
-// task still has something running; `LastTaskResult` preserves the exit code
-// when it does not. A query failure is deliberately inconclusive so a
-// restricted shell cannot turn a slow-but-valid startup into a false failure.
+// gone, and the COM instance enumeration can outlive its process too. The
+// launcher process tree is therefore probed directly: a wscript/cmd/node
+// process whose command line references the generated launcher is the one
+// authoritative sign that the managed task is still executing anything. A
+// query failure is deliberately inconclusive so a restricted shell cannot
+// turn a slow-but-valid startup into a false failure.
 export async function windowsScheduledTaskState({
   taskName = "Codex Router",
   execFile = execFileCallback,
   platform = process.platform,
-  timeoutMs = 5_000,
+  timeoutMs = 10_000,
   powershellExecutable = "powershell.exe",
 } = {}) {
   // Task Scheduler queries must not block the event loop that owns the
@@ -24,7 +26,10 @@ export async function windowsScheduledTaskState({
     "  $scheduler.Connect()",
     "  $task = $scheduler.GetFolder('\\').GetTask($env:CODEX_ROUTER_TASK)",
     "  $instances = [array]$task.GetInstances(0)",
-    "  [Console]::Out.Write($instances.Count.ToString() + '|' + $info.LastTaskResult)",
+    "  $launcher = Get-CimInstance Win32_Process -ErrorAction Stop |",
+    "    Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -and ($_.CommandLine -like '*start-codex-router*' -or $_.CommandLine -like '*codex-router*src*start.mjs*') } |",
+    "    Select-Object -First 1",
+    "  [Console]::Out.Write($instances.Count.ToString() + '|' + $info.LastTaskResult + '|' + $(if ($launcher) { '1' } else { '0' }))",
     "} catch { exit 1 }",
   ].join("\n");
 
@@ -52,13 +57,14 @@ export async function windowsScheduledTaskState({
         });
       }),
     ).trim();
-    const separator = output.lastIndexOf("|");
-    if (separator < 1) return undefined;
-    const instanceCount = Number(output.slice(0, separator));
-    const lastTaskResult = Number(output.slice(separator + 1));
+    const fields = output.split("|");
+    if (fields.length < 2) return undefined;
+    const instanceCount = Number(fields[0]);
+    const lastTaskResult = Number(fields[1]);
+    const launcherAlive = fields.length > 2 ? fields[2] === "1" : undefined;
     if (!Number.isSafeInteger(instanceCount) || instanceCount < 0) return undefined;
     if (!Number.isSafeInteger(lastTaskResult) || lastTaskResult < 0) return undefined;
-    return { instanceCount, lastTaskResult };
+    return { instanceCount, lastTaskResult, launcherAlive };
   } catch {
     return undefined;
   }

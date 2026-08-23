@@ -10,12 +10,28 @@ function sleep(milliseconds) {
     : new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+// `waitForRouterHealth` reports failure as a resolved result object, not a
+// rejection. Normalize both shapes so the guard can trust one contract:
+// `healthy === true` only when the router actually answered.
+async function settleHealth(waitForHealth, timeoutMs) {
+  try {
+    const health = await waitForHealth({ timeoutMs });
+    return { healthy: health?.ok === true, health };
+  } catch (error) {
+    return { healthy: false, error };
+  }
+}
+
 /**
  * Wait for router health while honoring Windows' authoritative task state.
  *
- * A short absence from Task Scheduler's instance enumeration is tolerated as
- * launch lag. Once that absence persists, fail before the full readiness
- * budget instead of polling health from a task that is no longer running.
+ * Task Scheduler can keep a stale instance entry (or a Running state) after
+ * its launcher tree has died, so liveness is read from two places: the COM
+ * instance enumeration, and a direct scan for a live process whose command
+ * line references the generated launcher. Once both stop reporting a live
+ * launch for longer than the launch grace, readiness fails with the task's
+ * own result instead of polling health for the full budget. A query failure
+ * is inconclusive and never fails the wait by itself.
  */
 export async function waitForServiceReadiness({
   platform = process.platform,
@@ -26,28 +42,33 @@ export async function waitForServiceReadiness({
   waitForHealth = waitForRouterHealth,
 } = {}) {
   const deadline = Date.now() + Math.max(0, timeoutMs);
-  // Keep exactly one rejection handler attached for the whole operation; the
-  // readiness guard may finish first and must not create an unhandled rejection.
-  const healthOutcome = waitForHealth({ timeoutMs }).then(
-    (health) => ({ ok: true, health }),
-    (error) => ({ ok: false, error }),
+  // Keep exactly one health attempt in flight for the whole operation; the
+  // readiness guard may finish first and must not create an unhandled
+  // rejection.
+  const healthWinner = settleHealth(waitForHealth, Math.max(0, deadline - Date.now())).then(
+    (outcome) => ({ kind: "health", outcome }),
   );
+  const failureOf = (outcome) =>
+    outcome.error ??
+    new Error(outcome.health?.error || "service did not become healthy");
 
   if (platform !== "win32") {
-    const outcome = await healthOutcome;
-    if (outcome.ok) return outcome.health;
-    throw outcome.error;
+    const winner = await healthWinner;
+    if (winner.outcome.healthy) return winner.outcome.health;
+    throw failureOf(winner.outcome);
   }
 
-  let absentSince;
+  let deadSince;
   while (Date.now() < deadline) {
     const winner = await Promise.race([
-      healthOutcome,
+      healthWinner,
       sleep(Math.min(pollMs, deadline - Date.now())).then(() => null),
     ]);
     if (winner) {
-      if (winner.ok) return winner.health;
-      throw winner.error;
+      // The health attempt settles only after its full budget, which matches
+      // this guard's own deadline, so an early settlement is a real verdict.
+      if (winner.outcome.healthy) return winner.outcome.health;
+      throw failureOf(winner.outcome);
     }
 
     let taskState;
@@ -56,22 +77,25 @@ export async function waitForServiceReadiness({
     } catch {
       taskState = undefined;
     }
-    if (taskState?.instanceCount === 0) {
-      absentSince ??= Date.now();
-      if (Date.now() - absentSince >= launchGraceMs) {
+    const launcherAlive =
+      taskState?.launcherAlive === true ||
+      (taskState?.launcherAlive === undefined && taskState?.instanceCount > 0);
+    if (taskState && !launcherAlive) {
+      deadSince ??= Date.now();
+      if (Date.now() - deadSince >= launchGraceMs) {
         const result = Number.isSafeInteger(taskState.lastTaskResult)
           ? `0x${taskState.lastTaskResult.toString(16)}`
           : "unknown";
         throw new Error(
-          `Windows Scheduled Task has no running instance (LastTaskResult=${result}); router cannot become healthy.`,
+          `Windows Scheduled Task has no running launcher process (LastTaskResult=${result}); router cannot become healthy.`,
         );
       }
-    } else if (taskState?.instanceCount > 0) {
-      absentSince = undefined;
+    } else if (launcherAlive) {
+      deadSince = undefined;
     }
   }
 
-  const outcome = await healthOutcome;
-  if (outcome.ok) return outcome.health;
-  throw outcome.error;
+  const winner = await healthWinner;
+  if (winner.outcome.healthy) return winner.outcome.health;
+  throw failureOf(winner.outcome);
 }
