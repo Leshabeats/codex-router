@@ -293,7 +293,15 @@ test("provider registry exposes configured API and OAuth model families", () => 
   assert.deepEqual(venice.credential.environment, ["VENICE_API_KEY"]);
   assert.equal(venice.credential.file, "venice-api-key.secret");
   assert.deepEqual(venice.credential.keychainServices, ["codex-router-venice"]);
-  assert.equal(LISTED_MODELS.some(({ provider }) => provider === "venice"), false);
+  // Venice arrived as catalog-only, and stayed that way until Ox Alpha was
+  // checked in for it. It now ships exactly that one entry -- the picker is not
+  // empty once a key is stored, and everything else on Venice still has to be
+  // curated -- so this asserts the entry rather than merely that something is
+  // listed, which would also pass if a curation bug leaked extra models in.
+  assert.deepEqual(
+    LISTED_MODELS.filter(({ provider }) => provider === "venice").map(({ slug }) => slug),
+    ["venice/ox-alpha"],
+  );
   const opencodeFree = PROVIDERS.get("opencode-free");
   const opencodeFreeResponses = PROVIDERS.get("opencode-free-responses");
   assert.equal(opencodeFree.authMode, "anonymous");
