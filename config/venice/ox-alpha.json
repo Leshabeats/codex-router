@@ -8,21 +8,21 @@
       "provider": "venice",
       "listed": true,
       "displayName": "Ox Alpha (Venice)",
-      "description": "Ox Alpha through Venice, which serves it as a zero-cost beta model. Venice publishes a low/medium/high effort ladder for it rather than the max rung the other routes expose.",
+      "description": "Ox Alpha through Venice, which serves it as a zero-cost beta model. Venice's catalog advertises a different effort ladder than the model itself accepts; this entry follows the model.",
       "priority": 90,
-      "defaultEffort": "high",
+      "defaultEffort": "max",
       "reasoningLevels": [
         {
           "effort": "low",
           "description": "Quick reasoning"
         },
         {
-          "effort": "medium",
-          "description": "Balanced reasoning"
-        },
-        {
           "effort": "high",
           "description": "Deep reasoning"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum reasoning depth"
         }
       ],
       "contextWindow": 1048576,

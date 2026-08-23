@@ -609,21 +609,22 @@ input, and tool calling. Six of this repository's routes resell the same model,
 and it is priced at zero on all of them during the preview, so the entries carry
 a **Free** badge in the control center.
 
-| Picker label | Model ID | Reasoning efforts | Needs a key |
-| --- | --- | --- | --- |
-| Ox Alpha (OpenCode Free) | `opencode-free/ox-alpha` | low · high · **max** | no |
-| Ox Alpha (opencode Go) | `opencode-go/ox-alpha` | low · high · **max** | opencode |
-| Ox Alpha (OpenRouter) | `openrouter/ox-alpha` | low · high · **max** | OpenRouter |
-| Ox Alpha (Command Code) | `commandcode/ox-alpha` | low · high · **max** | Command Code |
-| Ox Alpha (Nous Research) | `nousresearch/ox-alpha` | low · high · **max** | Nous Portal |
-| Ox Alpha (Venice) | `venice/ox-alpha` | low · medium · **high** | Venice |
+| Picker label | Model ID | Needs a key |
+| --- | --- | --- |
+| Ox Alpha (OpenCode Free) | `opencode-free/ox-alpha` | no |
+| Ox Alpha (opencode Go) | `opencode-go/ox-alpha` | opencode |
+| Ox Alpha (OpenRouter) | `openrouter/ox-alpha` | OpenRouter |
+| Ox Alpha (Command Code) | `commandcode/ox-alpha` | Command Code |
+| Ox Alpha (Nous Research) | `nousresearch/ox-alpha` | Nous Portal |
+| Ox Alpha (Venice) | `venice/ox-alpha` | Venice |
 
-The bold rung is the default. Venice publishes a different ladder for the same
-weights, which is why its row differs — and the difference matters, because this
-model always thinks and every route rejects a rung it did not publish with an
-HTTP 400 rather than ignoring it. The router clamps whatever effort Codex sends
-onto the ladder the chosen route actually offers, so switching effort in the
-picker is safe on all six.
+Reasoning effort is **low · high · max** on every route, defaulting to `max`.
+Only three rungs exist because the model always thinks and its upstream says so
+outright — anything else comes back as `400 — This model always engages in
+thinking and cannot be disabled; please use low, high, or max`. Codex has more
+rungs than that, and a Codex older than 0.143 has no `max` at all, so the router
+clamps whatever effort you pick onto the three the model accepts. Switching
+effort in the picker is safe on all six routes.
 
 The quickest route needs nothing at all:
 

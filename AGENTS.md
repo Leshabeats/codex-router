@@ -1092,35 +1092,53 @@ rule itself permits — `x-preview-f-free` earns its place by ending in `-free`,
 the same test `anonymousModelAllowed` applies to everything else, so removing
 the fragment would not make the id any less routable.
 
-## Ox Alpha ships on six routes, and the ladders are not the same
+## Ox Alpha ships on six routes, and the ladder belongs to the model
 
 Ox Alpha is one stealth model that six of this repository's providers resell,
-each under its own id, and the reason it is worth a section is that the routes
-disagree about two things a picker entry has to get right.
+each under its own id: `x-preview-f-free` on `opencode-free`, `ox-alpha-free`
+on `opencode-go`, `stealth/ox-alpha` on `openrouter`, `commandcode` and
+`nousresearch`, and `stealth-ox-alpha` on `venice`. Every one of those was read
+from that provider's own live `/models` response; `test/ox-alpha.test.mjs` pins
+them so a rename upstream fails a test rather than 404-ing inside someone's
+session.
 
-1. **The id.** `x-preview-f-free` on `opencode-free`, `ox-alpha-free` on
-   `opencode-go`, `stealth/ox-alpha` on `openrouter`, `commandcode` and
-   `nousresearch`, and `stealth-ox-alpha` on `venice`. Every one of those was
-   read from that provider's own live `/models` response;
-   `test/ox-alpha.test.mjs` pins them so a rename upstream fails a test rather
-   than 404-ing inside someone's session.
-2. **The effort ladder.** Five routes publish `low`/`high`/`max`; Venice
-   publishes `low`/`medium`/`high`. This is not cosmetic: the model always
-   thinks, and an off-ladder rung comes back as HTTP 400 ("This model always
-   engages in thinking and cannot be disabled") rather than being ignored, so
-   `minimal`, `medium`, `xhigh` and `ultra` all fail on the low/high/max routes
-   and `max` fails on Venice's.
+The effort ladder is `low`/`high`/`max` on all six, and it is the **model's**
+ladder rather than any reseller's. The model always thinks, and its upstream
+refuses an off-ladder rung by name:
 
-That second fact collides with the effort clamp in `src/catalog.mjs`. Codex
+```
+HTTP 400 — [1210] This model always engages in thinking and cannot be
+disabled; please use low, high, or max
+```
+
+`none`, `off`, `minimal`, `medium`, `xhigh`, `ultra`, `default` and `auto` all
+draw that response; `low`, `high` and `max` return 200 with monotonically rising
+reasoning-token counts, so the three rungs are real behavior and not just enum
+validation.
+
+**Venice is the one catalog that disagrees, and it is the one to distrust.** It
+advertises `none`/`low`/`medium`/`high` for this id. That is not a reseller
+knowing something the others do not: it is Venice's most generic shape, shared
+with eight unrelated models, and it contains `none` — a rung this model refuses
+by name. Venice is perfectly capable of publishing a model-specific ladder when
+it has one (`low`/`high`/`max` for GLM-5.3, `none`/`high`/`max` for GLM-5.2), so
+the generic shape here reads as an unverified onboarding default. OpenRouter's
+live API, Nous Portal's live API, and models.dev for `openrouter`,
+`opencode-go`, `opencode`, `kilo` and `nano-gpt` all say `low`/`high`/`max`.
+This is the standing exception to "the provider's own catalog decides": when a
+reseller's advertised ladder contains a rung the model itself rejects by name,
+the model wins, and the disagreement gets written down — here and in the
+fragment's `description` — rather than silently resolved.
+
+The ladder also collides with the effort clamp in `src/catalog.mjs`. Codex
 gained the `max` variant in 0.143.0, so on anything older the catalog rewrites
 this model's default down to `xhigh` — a rung every route refuses. The
 `ox-alpha` request profile in `src/api-forwarder.mjs` is what closes that loop:
 it clamps whatever Codex sent onto the rungs the model's own registry entry
-declares, so `xhigh` lands back on `max` and Venice's `max` lands on `high`.
-The profile is therefore load-bearing on all six entries, including the ones
-with no `max` rung to lose. An absent effort stays absent so the upstream's own
-default applies, and `thinking` is always stripped because none of these routes
-document it and it cannot be switched off anyway.
+declares, so `xhigh` and `ultra` land back on `max`, and `medium` and `minimal`
+land on `low`. An absent effort stays absent so the upstream's own default
+applies, and `thinking` is always stripped because none of these routes document
+it and it cannot be switched off anyway.
 
 The window is 1,048,576 tokens with 131,072 of output on every route, and
 forced `tool_choice: "required"` is observed to work everywhere, so no route

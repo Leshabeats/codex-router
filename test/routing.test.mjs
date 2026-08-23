@@ -7748,13 +7748,12 @@ test("canceling a Zen Free Ox custom-tool stream stops the transformed pipeline"
 });
 
 // Ox Alpha rejects an off-ladder reasoning_effort with HTTP 400 rather than
-// ignoring it, and the ladder is not the same on every route: OpenCode,
-// OpenRouter, Command Code and Nous Portal publish low/high/max while Venice
-// publishes low/medium/high. Codex can send any rung it knows, and an
-// installation older than 0.143 has no `max` in its enum at all -- the catalog
-// clamps the model's default down to `xhigh` for those, so `xhigh` is what
-// arrives here and must land back on the model's own top rung.
-test("API forwarder clamps Ox Alpha efforts onto each route's own ladder", async () => {
+// ignoring it -- its upstream answers "[1210] This model always engages in
+// thinking and cannot be disabled; please use low, high, or max". Codex can
+// send any rung it knows, and an installation older than 0.143 has no `max` in
+// its enum at all: the catalog clamps the model's default down to `xhigh` for
+// those, so `xhigh` is what arrives here and must land back on `max`.
+test("API forwarder clamps Ox Alpha efforts onto the ladder the model accepts", async () => {
   const upstreamRequests = [];
   const upstream = await mockServer(async (request, response) => {
     upstreamRequests.push({ headers: request.headers, body: await bodyJson(request) });
@@ -7775,7 +7774,7 @@ test("API forwarder clamps Ox Alpha efforts onto each route's own ladder", async
       Authorization: `Bearer ${INTERNAL_KEY}`,
     });
     for (const [gatewayModel, upstreamModel, sentEffort, expectedEffort] of [
-      // low/high/max route
+      // The three rungs the upstream names.
       ["opencode-go-ox-alpha", "ox-alpha-free", "low", "low"],
       ["opencode-go-ox-alpha", "ox-alpha-free", "high", "high"],
       ["opencode-go-ox-alpha", "ox-alpha-free", "max", "max"],
@@ -7785,10 +7784,10 @@ test("API forwarder clamps Ox Alpha efforts onto each route's own ladder", async
       // Rungs the route does not publish take the nearest one at or below.
       ["opencode-go-ox-alpha", "ox-alpha-free", "medium", "low"],
       ["opencode-go-ox-alpha", "ox-alpha-free", "minimal", "low"],
-      // Venice publishes a different ladder for the same model.
-      ["venice-ox-alpha", "stealth-ox-alpha", "max", "high"],
-      ["venice-ox-alpha", "stealth-ox-alpha", "xhigh", "high"],
-      ["venice-ox-alpha", "stealth-ox-alpha", "medium", "medium"],
+      // Same ladder on a second provider, because it belongs to the model.
+      ["venice-ox-alpha", "stealth-ox-alpha", "max", "max"],
+      ["venice-ox-alpha", "stealth-ox-alpha", "xhigh", "max"],
+      ["venice-ox-alpha", "stealth-ox-alpha", "medium", "low"],
       ["venice-ox-alpha", "stealth-ox-alpha", "minimal", "low"],
     ]) {
       const response = await fetch(

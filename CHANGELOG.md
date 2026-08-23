@@ -2,20 +2,21 @@
 
 ## Unreleased
 
-- **Ox Alpha ships on six routes, with the effort ladder each one actually
-  publishes.** The stealth 1M-context reasoning model is now checked in for
-  `opencode-free` (no key), `opencode-go`, `openrouter`, `commandcode`,
-  `nousresearch`, and `venice`. Every upstream id, context window, and effort
-  rung was read from that provider's own live catalog rather than inferred:
-  five routes publish low/high/max, Venice publishes low/medium/high, and all
-  six advertise 1,048,576 tokens with 131,072 of output and text+image input.
-  A new `ox-alpha` request profile clamps the requested effort onto the rungs
-  the chosen route declares — which is load-bearing rather than defensive,
-  because the model always thinks and answers an off-ladder rung with HTTP 400,
-  and a Codex older than 0.143 has no `max` in its enum so the catalog sends
-  the clamped `xhigh` instead. Only the credential-free route carries curated
-  announcement copy; the other five use the automatic announcement once their
-  provider is credentialed.
+- **Ox Alpha ships on six routes.** The stealth 1M-context reasoning model is
+  now checked in for `opencode-free` (no key), `opencode-go`, `openrouter`,
+  `commandcode`, `nousresearch`, and `venice`, each under the upstream id that
+  provider's own live catalog publishes. All six advertise 1,048,576 tokens
+  with 131,072 of output, text+image input, and a low/high/max effort ladder
+  defaulting to max — the model always thinks, and its upstream refuses any
+  other rung by name ("please use low, high, or max"). Venice's catalog
+  advertises a fourth rung the model rejects; the model wins, and the
+  disagreement is written down rather than silently resolved. A new `ox-alpha`
+  request profile clamps the requested effort onto those three rungs, which is
+  load-bearing rather than defensive: a Codex older than 0.143 has no `max` in
+  its enum, so the catalog sends the clamped `xhigh` and every turn would
+  otherwise 400. Only the credential-free route carries curated announcement
+  copy; the other five use the automatic announcement once their provider is
+  credentialed.
 
 - **Venice and Nous Research (Hermes) are new API-key providers.** Both are
   selectable through `install.sh --providers`, `providers enable`, and the

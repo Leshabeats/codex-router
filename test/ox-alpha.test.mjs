@@ -24,33 +24,41 @@ const {
 // One model, six routes, and each route names it differently. Every id here was
 // read from that provider's own live catalog, so a rename upstream shows up as
 // a failing assertion rather than as a 404 in someone's session.
+//
+// The ladder is the model's, not the reseller's: its upstream answers an
+// off-ladder rung with "[1210] This model always engages in thinking and cannot
+// be disabled; please use low, high, or max", and OpenRouter's and Nous's live
+// catalogs agree. Venice is the one route whose catalog disagrees -- it
+// advertises none/low/medium/high for this id, which is its generic shape
+// rather than a model-specific one (it publishes low/high/max for GLM-5.3), and
+// it contains a rung the model refuses by name. The model wins.
 const ROUTES = [
-  ["opencode-free/ox-alpha", "x-preview-f-free", ["low", "high", "max"], "max"],
-  ["opencode-go/ox-alpha", "ox-alpha-free", ["low", "high", "max"], "max"],
-  ["openrouter/ox-alpha", "stealth/ox-alpha", ["low", "high", "max"], "max"],
-  ["commandcode/ox-alpha", "stealth/ox-alpha", ["low", "high", "max"], "max"],
-  ["nousresearch/ox-alpha", "stealth/ox-alpha", ["low", "high", "max"], "max"],
-  // Venice publishes its own ladder for the same weights.
-  ["venice/ox-alpha", "stealth-ox-alpha", ["low", "medium", "high"], "high"],
+  ["opencode-free/ox-alpha", "x-preview-f-free"],
+  ["opencode-go/ox-alpha", "ox-alpha-free"],
+  ["openrouter/ox-alpha", "stealth/ox-alpha"],
+  ["commandcode/ox-alpha", "stealth/ox-alpha"],
+  ["nousresearch/ox-alpha", "stealth/ox-alpha"],
+  ["venice/ox-alpha", "stealth-ox-alpha"],
 ];
 
-test("every Ox Alpha route records the upstream id, window and ladder its provider publishes", () => {
-  for (const [slug, upstreamModel, efforts, defaultEffort] of ROUTES) {
+test("every Ox Alpha route records the upstream id, window and ladder the model accepts", () => {
+  for (const [slug, upstreamModel] of ROUTES) {
     const model = MODEL_BY_SLUG.get(slug);
     assert.ok(model, `${slug} is missing from the registry`);
     assert.equal(model.upstreamModel, upstreamModel);
     assert.equal(model.listed, true);
     assert.equal(model.isFree, true);
-    assert.deepEqual(model.reasoningLevels.map((level) => level.effort), efforts);
-    assert.equal(model.defaultEffort, defaultEffort);
+    assert.deepEqual(model.reasoningLevels.map((level) => level.effort), ["low", "high", "max"]);
+    assert.equal(model.defaultEffort, "max");
     // 1,048,576 tokens with 131,072 of output is what every one of these
     // catalogs advertises. autoCompact is derived from the window, and an
     // understated window makes Codex compact a session that had the room.
     assert.equal(model.contextWindow, 1_048_576);
     assert.equal(model.autoCompact, 900_000);
     assert.deepEqual(model.inputModalities, ["text", "image"]);
-    // The routes validate reasoning_effort against their own ladder, so every
-    // one of them needs the clamp rather than only the ones with a `max` rung.
+    // Codex can send a rung this ladder does not have -- most importantly the
+    // `xhigh` an installation older than 0.143 is given in place of `max` --
+    // and the upstream answers those with a 400 rather than ignoring them.
     assert.equal(model.requestProfile, "ox-alpha");
     // Native Codex collaboration has not been proven for this model.
     assert.equal(model.multiAgentVersion, undefined);
