@@ -34,6 +34,7 @@ function upstream(handler) {
 }
 
 function surface(responsesUrl, { abortRequestSignal = false } = {}) {
+  let cachedContentType;
   const server = http.createServer(async (request, response) => {
     const route = new URL(request.url, "http://127.0.0.1").pathname;
     if (isGeminiRoute(route)) {
@@ -46,6 +47,7 @@ function surface(responsesUrl, { abortRequestSignal = false } = {}) {
         responsesUrl,
         routedModels: () => MODELS,
       });
+      cachedContentType = response.getHeader("content-type");
       return;
     }
     writeJson(response, 404, { error: { type: "not_found" } });
@@ -54,6 +56,7 @@ function surface(responsesUrl, { abortRequestSignal = false } = {}) {
     server.listen(0, "127.0.0.1", () => {
       resolve({
         url: (path) => `http://127.0.0.1:${server.address().port}${GEMINI_ROUTE_PREFIX}${path}`,
+        cachedContentType: () => cachedContentType,
         close: () => new Promise((done) => server.close(done)),
       });
     });
@@ -241,6 +244,7 @@ test("a streamed turn arrives as whole Gemini responses in SSE frames", async ()
     assert.equal(response.status, 200);
     assert.match(response.headers.get("content-type"), /text\/event-stream/);
     const parsed = frames(await response.text());
+    assert.match(String(app.cachedContentType()), /text\/event-stream/);
     assert.deepEqual(
       parsed.slice(0, 2).map((chunk) => chunk.candidates[0].content.parts[0].text),
       ["he", "llo"],

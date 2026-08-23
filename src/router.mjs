@@ -25,8 +25,10 @@ import {
   formatErrorChain,
   HOP_BY_HOP_HEADERS,
   httpErrorStatus,
+  installGracefulShutdown,
   pipeResponse,
   readRequestBody,
+  writeEventStreamHead,
   writeJson,
   writeStreamErrorEvent,
 } from "./http-utils.mjs";
@@ -117,7 +119,10 @@ import {
 } from "./tool-result-aging-state.mjs";
 import { VERSION } from "./version.mjs";
 import { nativeSessionHeaders } from "./codex-native-session.mjs";
-import { installStableFetchTransport } from "./fetch-transport.mjs";
+import {
+  installStableFetchTransport,
+  loopbackProbeFetch,
+} from "./fetch-transport.mjs";
 
 installStableFetchTransport();
 
@@ -306,6 +311,23 @@ function parseBody(buffer) {
     wrapped.status = 400;
     throw wrapped;
   }
+}
+
+// Large Codex turns parse several megabytes of JSON on the event loop. Yield
+// first so an already-accepted GET /health can answer instead of sitting
+// behind that parse and looking like a dead router to the tray.
+async function parseBodyAsync(buffer) {
+  await new Promise((resolve) => setImmediate(resolve));
+  return parseBody(buffer);
+}
+
+function bindClientAbort(request, response, onAbort) {
+  const abort = () => onAbort();
+  request.once("aborted", abort);
+  response.once("close", () => {
+    if (!response.writableEnded) abort();
+  });
+  if (request.aborted || response.destroyed) abort();
 }
 
 function decodeBody(body, contentEncoding) {
@@ -750,7 +772,7 @@ function catalogModels() {
 
 // Shared across every /health request so a polling companion collapses into
 // one probe per service per window instead of three per poll.
-const healthCache = createHealthCache();
+const healthCache = createHealthCache({ staleWhileRevalidate: true });
 
 function serviceHealth(url) {
   return healthCache(url, () => probeService(url));
@@ -758,7 +780,9 @@ function serviceHealth(url) {
 
 async function probeService(url) {
   try {
-    const response = await fetch(url, {
+    // No dispatcher argument: `loopbackProbeFetch` owns one shared probe pool
+    // for the process, so this cannot fork a second one.
+    const response = await loopbackProbeFetch(url, {
       headers: { Authorization: `Bearer ${INTERNAL_KEY}` },
       signal: AbortSignal.timeout(3_000),
     });
@@ -1149,6 +1173,42 @@ function visionEngineProvider(engine) {
 // refusal again.
 const visionReadsInFlight = new Map();
 
+// A provider can report account quota exhaustion without a trustworthy reset
+// header. Do not invent a provider cooldown in that case, but also do not buy
+// the exact same failed image read again on every rapid follow-up turn. This is
+// deliberately a short, per-read anti-storm backoff rather than a claim about
+// when the provider quota resets. Provider-named reset windows still use the
+// durable cooldown store below.
+const VISION_FAILURE_BACKOFF_MS = 60_000;
+const VISION_FAILURE_CACHE_MAX_ENTRIES = 128;
+const visionFailedReads = new Map();
+
+function visionFailureCacheKey(readKey) {
+  return createHash("sha256").update(readKey).digest("base64url");
+}
+
+function cachedVisionFailure(readKey, now = Date.now()) {
+  const cacheKey = visionFailureCacheKey(readKey);
+  const cached = visionFailedReads.get(cacheKey);
+  if (!cached) return undefined;
+  if (cached.expiresAt > now) return cached.error;
+  visionFailedReads.delete(cacheKey);
+  return undefined;
+}
+
+function rememberVisionFailure(readKey, error, now = Date.now()) {
+  // A reset-bearing 429 is handled by providerCooldown(), which is broader and
+  // more accurate. The negative cache exists only for quota exhaustion where
+  // the provider named no usable reset window.
+  if (error?.failureKind !== "out_of_usage" || error?.cooldownUntil) return;
+  const cacheKey = visionFailureCacheKey(readKey);
+  visionFailedReads.delete(cacheKey);
+  visionFailedReads.set(cacheKey, { error, expiresAt: now + VISION_FAILURE_BACKOFF_MS });
+  while (visionFailedReads.size > VISION_FAILURE_CACHE_MAX_ENTRIES) {
+    visionFailedReads.delete(visionFailedReads.keys().next().value);
+  }
+}
+
 // Codex resends the whole conversation every turn, so the same screenshot
 // arrives again on every follow-up. Without the hash cache a five-turn
 // conversation about one image would buy the same transcript five times.
@@ -1179,6 +1239,8 @@ async function visionEvidenceFor(url, engine, request, effort, question = "", re
   // record of spend, not of calls the router avoided.
   if (cached !== undefined) return cached;
   const readKey = `${key}\u0000${question}`;
+  const failed = cachedVisionFailure(readKey);
+  if (failed) throw failed;
   const running = visionReadsInFlight.get(readKey);
   if (running) return running;
   // Deliberately not tied to the caller's AbortSignal. The read is shared, so
@@ -1190,6 +1252,9 @@ async function visionEvidenceFor(url, engine, request, effort, question = "", re
   visionReadsInFlight.set(readKey, read);
   try {
     return await read;
+  } catch (error) {
+    rememberVisionFailure(readKey, error);
+    throw error;
   } finally {
     visionReadsInFlight.delete(readKey);
   }
@@ -1219,6 +1284,22 @@ async function readVisionEvidence({ url, engine, nativeCall, effort, question, k
     });
     status = 200;
     return evidenceCache.set(key, question, text);
+  } catch (error) {
+    const errorStatus = Number(error?.status);
+    if (Number.isFinite(errorStatus)) status = errorStatus;
+    const reason =
+      error?.failureKind === "out_of_usage"
+        ? "out_of_usage"
+        : errorStatus === 429 && error?.cooldownUntil
+          ? "rate_limited"
+          : undefined;
+    if (reason && error?.cooldownUntil) {
+      recordProviderCooldown(visionEngineProvider(engine), {
+        until: error.cooldownUntil,
+        reason,
+      });
+    }
+    throw error;
   } finally {
     recordUsageEvent({
       model: engine.slug,
@@ -1396,12 +1477,26 @@ async function bridgeVisionInput(input, route, request) {
   }
   const { effort } = settings;
   let fellBack = 0;
+  // A quota exhaustion is account/provider-wide evidence, not a reason to walk
+  // every model slug backed by that same account. Keep this set scoped to the
+  // current bridge call when the provider did not name a reset window; that
+  // avoids duplicate spend without inventing how long the quota will stay
+  // empty. A provider-named window is persisted by readVisionEvidence instead.
+  const exhaustedProviders = new Set();
   // Each engine in turn until one reads the image. The first is the operator's
   // choice and answers nearly always; the rest exist so a lapsed session or a
   // provider outage costs a slower read rather than the whole image.
   const readWithAnyEngine = async (url, question) => {
     let lastError;
     for (const [index, engine] of engines.entries()) {
+      const provider = canonicalProviderId(visionEngineProvider(engine));
+      const cooled = providerCooldown(provider);
+      if (cooled || exhaustedProviders.has(provider)) {
+        lastError ??= new Error(
+          `${engine.displayName || engine.slug} is temporarily unavailable because its provider reported a quota or rate limit`,
+        );
+        continue;
+      }
       // Retry the engine only when there is nothing else to try. Waiting out a
       // 250ms + 1s ladder against an endpoint that is down, when a working
       // engine is sitting right behind it, is how a fallback that works turns
@@ -1421,6 +1516,7 @@ async function bridgeVisionInput(input, route, request) {
         return { text, engineName: engine.displayName || engine.slug };
       } catch (error) {
         lastError = error;
+        if (error?.failureKind === "out_of_usage") exhaustedProviders.add(provider);
       }
     }
     // Every engine refused, so the turn says what the last one said -- the
@@ -1763,11 +1859,7 @@ function writeCompactionSse(response, model, summary) {
     ["response.output_item.done", { output_index: 0, item }],
     ["response.completed", { response: completed }],
   ];
-  response.writeHead(200, {
-    "Content-Type": "text/event-stream; charset=utf-8",
-    "Cache-Control": "no-cache",
-    Connection: "keep-alive",
-  });
+  writeEventStreamHead(response);
   events.forEach(([type, data], sequence) => {
     response.write(
       `event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: sequence, ...data })}\n\n`,
@@ -1880,38 +1972,13 @@ function requireCodexTransport(request, response) {
   return true;
 }
 
-// A model in the experimental subagent window earns its durable proof — or
-// its demotion — from real traffic: Codex marks child turns with
-// x-openai-subagent, so the first clean completion of one settles "this model
-// can hold the child role" without a dedicated probe session. Structural
-// rejections demote (400/422, the shape a schema or encrypted-payload refusal
-// takes); transient failures — 429s, 5xx, disconnects — prove nothing either
-// way and leave the window open. No line here is QUIET-gated: a promotion or
-// demotion that happens silently is how a picker entry becomes unexplainable.
-//
-// What the promotion claims is exactly one HTTP turn, and the log line has to
-// say so. A child agent makes many turns — one per tool-call round trip — and
-// this observer sees each of them separately; it never sees the agent loop
-// that strings them together, so "the child reached done" is not a fact
-// available here. An operator who read the old "subagent proven … completed a
-// live child turn" as *the delegated work finished* was reading a promise the
-// router cannot make (issue #257).
-//
-// The two halves of that issue meet here, and both are about the gate rather
-// than the thresholds. The gate used to be `awaitingSpawnProof`, true only for
-// `experimental` — so the instant turn one promoted a slug this function
-// stopped looking at it, and a hard 400/422 on turn two was discarded along
-// with everything else. That made the *oldest* observation win over the
-// newest, which no comment ever argued for. The gate is now revocability, so a
-// slug keeps being watched for as long as this machine's traffic is what the
-// v2 advertisement rests on; promotion alone stays scoped to the experimental
-// window, because a first clean turn is only news once.
-//
-// Watching a `proven` slug is also what makes the convergence signal usable. A
-// looping child emits 200s forever, so no status-shaped branch could ever fire
-// for it; the evidence is instead how much of its own budget one spawn burns
-// without stopping, accounted per child thread in subagent-turns.mjs against
-// the model's declared auto-compact limit.
+// Older releases advertised a locally probed route as experimental and then
+// refined that record from `x-openai-subagent` traffic. Keep observing only
+// those historical experimental records so upgrades preserve useful evidence,
+// but never treat the result as catalog authority: local traffic can neither
+// promote nor demote the exact checked-in registry certificate. A 400/422 is
+// useful negative application evidence; transient failures prove nothing. A
+// clean 200 proves only one HTTP turn completed, not that a delegated task did.
 
 function observeSubagentOutcome(request, route, status, options = {}) {
   if (!route) return;
@@ -1924,8 +1991,8 @@ function observeSubagentOutcome(request, route, status, options = {}) {
       recordSpawnFailure(route.slug, { reason, ...detail });
       forgetChildSpawn(spawnId);
       console.error(
-        `[codex-router] subagent demoted: ${route.slug} ${reason}; ` +
-          "it stays v1 until 'control subagents verify' passes again",
+        `[codex-router] legacy subagent evidence rejected: ${route.slug} ${reason}; ` +
+          "the route still requires a reviewed repository v2 certificate",
       );
     };
     if (status === 400 || status === 422) {
@@ -1941,8 +2008,8 @@ function observeSubagentOutcome(request, route, status, options = {}) {
     if (awaitingSpawnProof(route.slug, proofs)) {
       recordSpawnObserved(route.slug, { status });
       console.error(
-        `[codex-router] subagent child role verified: ${route.slug} served a live child turn; ` +
-          "the model holds the child role on the wire, which is not a claim the child finished its task",
+        `[codex-router] legacy subagent evidence observed: ${route.slug} served one child HTTP turn; ` +
+          "this remains diagnostic and is not a repository v2 certificate",
       );
     }
     const spawn = observeChildTurn({
@@ -2309,11 +2376,16 @@ async function handleResponses(request, response, requestUrl) {
   let finalStatus;
   let activityStatus;
   let usageRecorded = false;
+  const controller = new AbortController();
+  bindClientAbort(request, response, () => {
+    clientGone = true;
+    controller.abort();
+  });
   try {
     if (!requireCodexTransport(request, response)) return;
     const encoded = await readRequestBody(request);
     const body = decodeBody(encoded, request.headers["content-encoding"]);
-    const payload = parseBody(body);
+    const payload = await parseBodyAsync(body);
     requestedModel = typeof payload.model === "string" ? payload.model : "";
     let registeredRoute =
       MODEL_BY_SLUG.get(requestedModel) ??
@@ -2362,18 +2434,6 @@ async function handleResponses(request, response, requestUrl) {
       route &&
       Array.isArray(payload.input) &&
       payload.input.at(-1)?.type === "compaction_trigger";
-
-    const controller = new AbortController();
-    request.once("aborted", () => {
-      clientGone = true;
-      controller.abort();
-    });
-    response.once("close", () => {
-      if (!response.writableEnded) {
-        clientGone = true;
-        controller.abort();
-      }
-    });
 
     if (route && (compactV1 || compactV2)) {
       const compaction = await handleRoutedCompaction(
@@ -3080,6 +3140,11 @@ async function handleNativeRequest(request, response, requestUrl, defaultModel) 
   const activity = beginRequestActivity();
   let clientGone = false;
   let requestedModel = defaultModel;
+  const controller = new AbortController();
+  bindClientAbort(request, response, () => {
+    clientGone = true;
+    controller.abort();
+  });
   try {
     if (!requireCodexTransport(request, response)) return;
     // Image and web-search turns are native-only; an idle install refuses
@@ -3090,25 +3155,13 @@ async function handleNativeRequest(request, response, requestUrl, defaultModel) 
     }
     const encoded = await readRequestBody(request);
     const body = decodeBody(encoded, request.headers["content-encoding"]);
-    const payload = parseBody(body);
+    const payload = await parseBodyAsync(body);
     requestedModel =
       typeof payload.model === "string" ? payload.model : defaultModel;
     activity.setRoute({
       provider: "openai",
       model: requestedModel,
       ...activityMetadataFromHeaders(request.headers),
-    });
-
-    const controller = new AbortController();
-    request.once("aborted", () => {
-      clientGone = true;
-      controller.abort();
-    });
-    response.once("close", () => {
-      if (!response.writableEnded) {
-        clientGone = true;
-        controller.abort();
-      }
     });
 
     const headers = nativeHeaders(request);
@@ -3369,6 +3422,4 @@ server.listen(LISTEN_PORT, LISTEN_HOST, () => {
   console.error("[codex-router] listening");
 });
 
-for (const signal of ["SIGINT", "SIGTERM"]) {
-  process.on(signal, () => server.close(() => process.exit(0)));
-}
+installGracefulShutdown(server, { label: "codex-router" });

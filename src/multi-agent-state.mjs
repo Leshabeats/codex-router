@@ -67,10 +67,9 @@ export function subagentSettingsSnapshot() {
     ...settings,
     all: settings.mode === "all",
     path: MULTI_AGENT_STATE_PATH,
-    // Machine-local capability verdicts, keyed by slug: checking /
-    // experimental / proven / failed (with the failure reason). This is what
-    // lets a surface explain *why* an enabled model is or is not offered as
-    // a subagent instead of leaving it a silent no-show.
+    // Machine-local certification evidence, keyed by slug: checking /
+    // candidate / failed (with the failure reason). It explains why an
+    // unknown model is awaiting review, but cannot manufacture a v2 claim.
     proofs: subagentProofSnapshot(),
     // Per-model reasoning depth applied only to child turns. Empty when the
     // operator has never set one, which is the common case.
@@ -203,8 +202,9 @@ export function applyMultiAgentSettings(models, settings, hidden = new Set()) {
   });
 }
 
-// Resolve the effective v2 claims once so catalog publication, managed agent
-// definitions, and doctor checks cannot disagree about machine-local proofs.
+// Resolve the effective registry v2 claims once so catalog publication,
+// managed agent definitions, and doctor checks cannot disagree. Local proofs
+// are deliberately diagnostic only.
 export function applyMultiAgentCapabilities(
   models,
   settings,

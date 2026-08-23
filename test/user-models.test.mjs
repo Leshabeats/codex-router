@@ -174,6 +174,12 @@ test("registry merges valid user models and skips collisions", async () => {
       ...userModelEntry({ providerId: "deepseek", upstreamId: "deepseek-bad-trailing-turn", priority: 111 }),
       requiresTrailingUserTurn: "yes",
     },
+    // Local state is not a repository certificate. A hand-edited overlay must
+    // never make its own route appear as a native v2 subagent.
+    {
+      ...userModelEntry({ providerId: "deepseek", upstreamId: "deepseek-self-certified", priority: 112 }),
+      multiAgentVersion: "v2",
+    },
     // Reasoning-summary capability fields must agree. A valid enum on its own
     // must not make the catalog claim summaries for a model that does not
     // explicitly support them.
@@ -209,6 +215,7 @@ test("registry merges valid user models and skips collisions", async () => {
   assert.ok(slugs.includes("deepseek/deepseek-standalone-search"));
   assert.ok(!slugs.includes("deepseek/deepseek-bad-detail"));
   assert.ok(!slugs.includes("deepseek/deepseek-bad-trailing-turn"));
+  assert.ok(!slugs.includes("deepseek/deepseek-self-certified"));
   assert.ok(!slugs.includes("deepseek/deepseek-summary-without-support"));
   assert.ok(!slugs.includes("deepseek/deepseek-invalid-summary-support"));
   assert.ok(!slugs.includes("deepseek/deepseek-bad-upgrade"));
@@ -218,6 +225,7 @@ test("registry merges valid user models and skips collisions", async () => {
   );
   assert.ok(registry.MODEL_BY_GATEWAY_ID.has("deepseek-deepseek-user-test"));
   assert.ok(registry.USER_MODEL_WARNINGS.length >= 4);
+  assert.ok(registry.USER_MODEL_WARNINGS.some((warning) => /may not declare multiAgentVersion v2/.test(warning)));
   const merged = registry.MODEL_BY_SLUG.get("deepseek/deepseek-user-test");
   assert.equal(merged.listed, true);
   assert.equal(merged.availabilityNux, "Now available through your DeepSeek key.");

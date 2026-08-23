@@ -167,22 +167,17 @@ test(
     writeFileSync(configPath, 'model = "gpt-5.6-sol"\n', { mode: 0o600 });
     writeFileSync(
       path.join(stateDir, "enabled-providers.json"),
-      `${JSON.stringify({ version: 1, providers: ["deepseek"] })}\n`,
+      `${JSON.stringify({ version: 1, providers: ["kimi-api"] })}\n`,
       { mode: 0o600 },
     );
-    writeFileSync(path.join(stateDir, "deepseek-api-key.secret"), "test-key\n", {
+    writeFileSync(path.join(stateDir, "kimi-api-key.secret"), "test-key\n", {
       mode: 0o600,
     });
-    writeFileSync(
-      path.join(stateDir, "multi-agent-proofs.json"),
-      `${JSON.stringify({
-        version: 1,
-        proofs: {
-          "deepseek/deepseek-v4-pro": { status: "proven" },
-        },
-      })}\n`,
-      { mode: 0o600 },
-    );
+    // A registry model carrying `multiAgentVersion: "v2"`, not a local proof.
+    // Local proof records are diagnostic and application material only --
+    // promoting from them let a stream/tool probe masquerade as native
+    // collaboration proof -- so a seeded `proven` entry no longer produces a
+    // managed agent definition and there would be nothing here to remove.
     // The catalog now publishes routed models only after an explicit picker
     // selection. Keep this test focused on the doctor detecting a missing
     // managed agent definition, rather than relying on the old implicit-show
@@ -192,8 +187,8 @@ test(
       `${JSON.stringify({
         version: 1,
         hidden: [],
-        visible: ["deepseek/deepseek-v4-pro"],
-        seeded: ["deepseek/deepseek-v4-pro"],
+        visible: ["kimi-api/kimi-k3"],
+        seeded: ["kimi-api/kimi-k3"],
       })}\n`,
       { mode: 0o600 },
     );
@@ -219,9 +214,7 @@ test(
       const catalog = child("catalog.mjs", ["--refresh-native", "--bundled-native"], env);
       assert.equal(catalog.status, 0, catalog.stderr);
       assert.equal(JSON.parse(catalog.stdout).routed_catalog_active, true);
-      unlinkSync(
-        path.join(codexHome, "agents", "router-model-deepseek-deepseek-v4-pro.toml"),
-      );
+      unlinkSync(path.join(codexHome, "agents", "router-model-kimi-api-kimi-k3.toml"));
 
       const routes = child("litellm-config.mjs", [], env);
       assert.equal(routes.status, 0, routes.stderr);

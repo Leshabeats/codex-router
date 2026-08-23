@@ -692,6 +692,17 @@ function mergeUserModels(base) {
   const gatewayModels = new Set(models.map((model) => model.gatewayModel));
   const userModels = new Set();
   for (const model of readUserModels()) {
+    // A mutable local overlay may describe routing and presentation, but it
+    // cannot grant itself the repository's native-collaboration certificate.
+    // Local Ollama/LM Studio entries intentionally declare conservative v1 so
+    // they are settled and never spend a cloud compatibility probe. Preserve
+    // that denial, but refuse the positive certificate.
+    if (model?.multiAgentVersion === "v2") {
+      warnings.push(
+        `Skipped user model: model ${model?.slug || "<unknown>"} may not declare multiAgentVersion v2`,
+      );
+      continue;
+    }
     const problem = modelProblem(model, base.providers, slugs, gatewayModels);
     if (problem) {
       warnings.push(`Skipped user model: ${problem}`);
@@ -722,6 +733,11 @@ const registry = loadRegistry();
 const merged = mergeUserModels(registry);
 
 export const PROVIDERS = registry.providers;
+// The immutable registry shipped by this checkout, before the operator's
+// mutable user-model overlay is merged. Repository certification gates must
+// bind to this set: a local overlay is useful routing configuration, but it
+// cannot certify itself for every installer.
+export const CHECKED_IN_MODELS = registry.models;
 export const MODELS = merged.models;
 export const USER_MODEL_WARNINGS = merged.warnings;
 export const LISTED_MODELS = Object.freeze(MODELS.filter((model) => model.listed));
