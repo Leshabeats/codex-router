@@ -7746,3 +7746,108 @@ test("canceling a Zen Free Ox custom-tool stream stops the transformed pipeline"
     rmSync(curated.dir, { recursive: true, force: true });
   }
 });
+
+// Ox Alpha rejects an off-ladder reasoning_effort with HTTP 400 rather than
+// ignoring it -- its upstream answers "[1210] This model always engages in
+// thinking and cannot be disabled; please use low, high, or max". Codex can
+// send any rung it knows, and an installation older than 0.143 has no `max` in
+// its enum at all: the catalog clamps the model's default down to `xhigh` for
+// those, so `xhigh` is what arrives here and must land back on `max`.
+test("API forwarder clamps Ox Alpha efforts onto the ladder the model accepts", async () => {
+  const upstreamRequests = [];
+  const upstream = await mockServer(async (request, response) => {
+    upstreamRequests.push({ headers: request.headers, body: await bodyJson(request) });
+    json(response, 200, { choices: [] });
+  });
+  const forwarderPort = await openPort();
+  const forwarder = run("api-forwarder.mjs", {
+    CODEX_ROUTER_API_PORT: String(forwarderPort),
+    OPENCODE_GO_BASE_URL: `http://127.0.0.1:${upstream.port}`,
+    OPENCODE_API_KEY: "TEST_OPENCODE_OX_KEY",
+    VENICE_API_BASE_URL: `http://127.0.0.1:${upstream.port}`,
+    VENICE_API_KEY: "TEST_VENICE_OX_KEY",
+    CODEX_ROUTER_QUIET: "1",
+  });
+
+  try {
+    await waitFor(`http://127.0.0.1:${forwarderPort}/health`, forwarder, {
+      Authorization: `Bearer ${INTERNAL_KEY}`,
+    });
+    for (const [gatewayModel, upstreamModel, sentEffort, expectedEffort] of [
+      // The three rungs the upstream names.
+      ["opencode-go-ox-alpha", "ox-alpha-free", "low", "low"],
+      ["opencode-go-ox-alpha", "ox-alpha-free", "high", "high"],
+      ["opencode-go-ox-alpha", "ox-alpha-free", "max", "max"],
+      // The pre-0.143 Codex enum tops out at xhigh; it must not reach upstream.
+      ["opencode-go-ox-alpha", "ox-alpha-free", "xhigh", "max"],
+      ["opencode-go-ox-alpha", "ox-alpha-free", "ultra", "max"],
+      // Rungs the route does not publish take the nearest one at or below.
+      ["opencode-go-ox-alpha", "ox-alpha-free", "medium", "low"],
+      ["opencode-go-ox-alpha", "ox-alpha-free", "minimal", "low"],
+      // Same ladder on a second provider, because it belongs to the model.
+      ["venice-ox-alpha", "stealth-ox-alpha", "max", "max"],
+      ["venice-ox-alpha", "stealth-ox-alpha", "xhigh", "max"],
+      ["venice-ox-alpha", "stealth-ox-alpha", "medium", "low"],
+      ["venice-ox-alpha", "stealth-ox-alpha", "minimal", "low"],
+    ]) {
+      const response = await fetch(
+        `http://127.0.0.1:${forwarderPort}/v1/chat/completions`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${INTERNAL_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: gatewayModel,
+            reasoning_effort: sentEffort,
+            thinking: { type: "enabled" },
+            messages: [{ role: "user", content: "test" }],
+          }),
+        },
+      );
+      assert.equal(response.status, 200);
+      const request = upstreamRequests.at(-1);
+      assert.equal(request.body.model, upstreamModel);
+      assert.equal(request.body.reasoning_effort, expectedEffort);
+      // Thinking cannot be switched off on this model and none of the routes
+      // document the parameter, so it never travels.
+      assert.equal(request.body.thinking, undefined);
+    }
+
+    // An absent effort stays absent, which is the upstream's own default (the
+    // top rung) rather than a rung this router picked.
+    await fetch(`http://127.0.0.1:${forwarderPort}/v1/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${INTERNAL_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "opencode-go-ox-alpha",
+        messages: [{ role: "user", content: "test" }],
+      }),
+    });
+    assert.equal(upstreamRequests.at(-1).body.reasoning_effort, undefined);
+
+    // Forcing a tool choice is observed to work on every Ox Alpha route, so the
+    // profile must not quietly downgrade it the way the thinking providers do.
+    await fetch(`http://127.0.0.1:${forwarderPort}/v1/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${INTERNAL_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "opencode-go-ox-alpha",
+        reasoning_effort: "low",
+        tool_choice: "required",
+        messages: [{ role: "user", content: "test" }],
+      }),
+    });
+    assert.equal(upstreamRequests.at(-1).body.tool_choice, "required");
+  } finally {
+    await stopChild(forwarder);
+    await closeServer(upstream.server);
+  }
+});

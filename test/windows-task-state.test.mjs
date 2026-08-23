@@ -10,7 +10,11 @@ test("parses the authoritative instance count, result, and launcher liveness", a
     callback(null, "2|267009|1\n");
   };
 
-  assert.deepEqual(await windowsScheduledTaskState({ execFile }), {
+  // `platform` is injected rather than inherited. Without it the call returns
+  // undefined from the non-Windows short-circuit on every runner except the
+  // Windows one, so the parser this test exists to cover is never reached --
+  // and the test passes or fails on which host happens to run it.
+  assert.deepEqual(await windowsScheduledTaskState({ execFile, platform: "win32" }), {
     instanceCount: 2,
     lastTaskResult: 267009,
     launcherAlive: true,
@@ -41,8 +45,13 @@ test("a dead launcher process is reported as not alive", async () => {
 });
 
 test("query failures and malformed output stay inconclusive", async () => {
+  // Also pinned to win32. Off Windows these calls return undefined from the
+  // platform short-circuit, which is the same value the fail-closed path
+  // returns -- so the assertions passed without ever exercising it, and the
+  // inconclusive behaviour was covered only on the Windows job.
   assert.equal(
     await windowsScheduledTaskState({
+      platform: "win32",
       execFile: () => {
         throw new Error("access denied");
       },
@@ -51,6 +60,7 @@ test("query failures and malformed output stay inconclusive", async () => {
   );
   assert.equal(
     await windowsScheduledTaskState({
+      platform: "win32",
       execFile: (_executable, _args, _options, callback) => callback(null, "not-a-count|1"),
     }),
     undefined,

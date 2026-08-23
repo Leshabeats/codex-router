@@ -19,6 +19,7 @@ import lmStudioLogo from "./assets/providers/lmstudio.svg";
 import metaLogo from "./assets/providers/meta.svg";
 import minimaxLogo from "./assets/providers/minimax.svg";
 import mistralLogo from "./assets/providers/mistral.svg";
+import nousResearchLogo from "./assets/providers/nousresearch.png";
 import nvidiaLogo from "./assets/providers/nvidia.svg";
 import ollamaLogo from "./assets/providers/ollama.png";
 import openaiLogo from "./assets/providers/openai.png";
@@ -30,6 +31,7 @@ import siliconFlowLogo from "./assets/providers/siliconflow.png";
 import stepFunLogo from "./assets/providers/stepfun.svg";
 import tencentLogo from "./assets/providers/tencent.svg";
 import togetherLogo from "./assets/providers/together.png";
+import veniceLogo from "./assets/providers/venice.png";
 import xaiLogo from "./assets/providers/xai.png";
 import xiaomiLogo from "./assets/providers/xiaomi.svg";
 import zaiLogo from "./assets/providers/zai.svg";
@@ -70,6 +72,7 @@ const BRANDS: Record<string, ProviderBrand> = {
   meta: { key: "meta", name: "Meta", shortName: "M", color: "#0467df", logo: metaLogo },
   minimax: { key: "minimax", name: "MiniMax", shortName: "MM", color: "#e73562", logo: minimaxLogo },
   mistral: { key: "mistral", name: "Mistral AI", shortName: "MI", color: "#e54b13", logo: mistralLogo },
+  nousresearch: { key: "nousresearch", name: "Nous Research", shortName: "NR", color: "#5a5a5a", logo: nousResearchLogo },
   nvidia: { key: "nvidia", name: "NVIDIA", shortName: "NV", color: "#5d9300", logo: nvidiaLogo },
   ollama: { key: "ollama", name: "Ollama", shortName: "O", color: "#4c4c4c", logo: ollamaLogo },
   openai: { key: "openai", name: "OpenAI", shortName: "OA", color: "#5c6662", logo: openaiLogo },
@@ -81,6 +84,7 @@ const BRANDS: Record<string, ProviderBrand> = {
   stepfun: { key: "stepfun", name: "StepFun", shortName: "ST", color: "#5167f4", logo: stepFunLogo },
   tencent: { key: "tencent", name: "Tencent", shortName: "T", color: "#0052d9", logo: tencentLogo, logoMode: "artwork" },
   together: { key: "together", name: "Together AI", shortName: "TA", color: "#d84a15", logo: togetherLogo, logoMode: "artwork" },
+  venice: { key: "venice", name: "Venice", shortName: "VE", color: "#0e2942", logo: veniceLogo },
   xai: { key: "xai", name: "xAI", shortName: "X", color: "#606060", logo: xaiLogo },
   xiaomi: { key: "xiaomi", name: "Xiaomi", shortName: "MI", color: "#ff6900", logo: xiaomiLogo },
   zai: { key: "zai", name: "Z.ai", shortName: "Z", color: "#1f63ec", logo: zaiLogo, logoMode: "artwork" },
@@ -112,6 +116,7 @@ const PROVIDER_BRANDS: Record<string, string> = {
   meta: "meta",
   "minimax-token-plan": "minimax",
   mistral: "mistral",
+  nousresearch: "nousresearch",
   "nvidia-nim": "nvidia",
   "ollama-cloud": "ollama",
   "opencode-go": "opencode",
@@ -123,6 +128,7 @@ const PROVIDER_BRANDS: Record<string, string> = {
   "qwen-plan": "qwen",
   siliconflow: "siliconflow",
   together: "together",
+  venice: "venice",
   "xiaomi-mimo": "xiaomi",
   "zai-api": "zai",
   "zai-coding": "zai",

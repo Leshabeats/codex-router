@@ -33,6 +33,7 @@ const {
   curatedModelReasoningLevels,
   curationProviderIds,
 } = await import("../src/opencode-curation.mjs");
+const { MODEL_BY_SLUG } = await import("../src/model-registry.mjs");
 const {
   DEFAULT_AUTO_COMPACT,
   DEFAULT_CONTEXT_WINDOW,
@@ -453,7 +454,7 @@ test("OpenCode Free curation migrates Muse to Responses while Ox stays on Chat",
       path.join(root, "src", "curate-models.mjs"),
       "opencode-free",
       "--models",
-      `${museId},${oxId}`,
+      museId,
       "--fixture",
       fixture,
       "--no-apply",
@@ -481,22 +482,25 @@ test("OpenCode Free curation migrates Muse to Responses while Ox stays on Chat",
     const first = run();
     assert.equal(first.status, 0, first.stderr);
     const stored = JSON.parse(readFileSync(file, "utf8"));
-    assert.equal(stored.models.length, 2);
+    // Only Muse is curated now. Ox Alpha ships as a checked-in entry, so
+    // curation must leave it alone rather than write a second copy of it into
+    // the user's models -- the stronger claim, and the one that would break if
+    // the checked-in fragment ever stopped taking precedence.
+    assert.equal(stored.models.length, 1);
     const muse = stored.models.find((model) => model.upstreamModel === museId);
-    const ox = stored.models.find((model) => model.upstreamModel === oxId);
+    assert.equal(stored.models.some((model) => model.upstreamModel === oxId), false);
     assert.equal(muse.provider, "opencode-free-responses");
     assert.equal(muse.slug, `opencode-free-responses/${museId}`);
     assert.equal(muse.displayName, oldMuse.displayName);
     assert.equal(muse.contextWindow, oldMuse.contextWindow);
     assert.deepEqual(muse.inputModalities, oldMuse.inputModalities);
     assert.equal(muse.requestProfile, oldMuse.requestProfile);
-    assert.equal(ox.provider, "opencode-free");
-    assert.equal(ox.slug, `opencode-free/${oxId}`);
-    assert.equal(ox.contextWindow, 1_000_000);
-    assert.equal(ox.autoCompact, 850_000);
+    const oxEntry = MODEL_BY_SLUG.get("opencode-free/ox-alpha");
+    assert.equal(oxEntry.provider, "opencode-free");
+    assert.equal(oxEntry.upstreamModel, oxId);
 
     const picker = JSON.parse(readFileSync(pickerFile, "utf8"));
-    assert.deepEqual(picker.visible, [muse.slug, ox.slug].sort());
+    assert.deepEqual(picker.visible, [muse.slug]);
     assert.equal(picker.visible.includes(oldMuse.slug), false);
 
     const configResult = spawnSync(
@@ -521,8 +525,11 @@ test("OpenCode Free curation migrates Muse to Responses while Ox stays on Chat",
       /model: "openai\/responses\/opencode-free-responses-muse-spark-1-2-contributor-free"/,
     );
     assert.doesNotMatch(museBlock, /use_chat_completions_api/);
-    const oxBlock = blockFor(ox.gatewayModel);
-    assert.match(oxBlock, /model: "openai\/opencode-free-x-preview-f-free"/);
+    // Ox still reaches Chat Completions -- now from the checked-in entry rather
+    // than from a curated one, which is what "Ox stays on Chat" has to mean
+    // once it ships checked in.
+    const oxBlock = blockFor(oxEntry.gatewayModel);
+    assert.match(oxBlock, /model: "openai\/opencode-free-ox-alpha"/);
     assert.match(oxBlock, /use_chat_completions_api: true/);
 
     const beforeRepeat = readFileSync(file, "utf8");
@@ -667,7 +674,12 @@ test("scripted OpenCode Free curation stores the documented window and its sourc
   const dir = mkdtempSync(path.join(os.tmpdir(), "curate-opencode-free-sourcing-"));
   const file = path.join(dir, "user-models.json");
   const fixture = path.join(dir, "models.json");
-  const oxId = "x-preview-f-free";
+  // Ox Alpha used to stand in for the documented-window case here. It ships as
+  // a checked-in entry now, so curation refuses it as a candidate -- the point
+  // being tested is the sourcing, and Nemotron 3 Ultra Free carries the same
+  // shape (a published 1M window with a declared output limit) and is still
+  // reached through curation.
+  const oxId = "nemotron-3-ultra-free";
   const otherId = "mimo-v2.5-free";
   writeFileSync(fixture, JSON.stringify({ data: [{ id: oxId }, { id: otherId }] }));
   try {
@@ -702,9 +714,9 @@ test("scripted OpenCode Free curation stores the documented window and its sourc
     assert.equal(ox.contextWindow, 1_000_000);
     assert.equal(ox.autoCompact, 850_000);
     assert.equal(ox.description, curatedModelDescription("opencode-free", oxId));
-    // autoCompact has to leave room for the published 131,072 output limit, or
+    // autoCompact has to leave room for the id's published output limit, or
     // compaction never fires early enough to keep a completion inside the window.
-    assert.ok(ox.contextWindow - ox.autoCompact >= 131_072);
+    assert.ok(ox.contextWindow - ox.autoCompact >= curatedModelOutputLimit("opencode-free", oxId));
 
     const other = stored.models.find((model) => model.upstreamModel === otherId);
     assert.equal(other.contextWindow, 131072);

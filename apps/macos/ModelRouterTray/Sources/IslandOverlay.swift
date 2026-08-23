@@ -992,6 +992,9 @@ struct ProviderIcon: View {
     if providerID.hasPrefix("commandcode") { return "commandcode" }
     if providerID == "github-copilot" { return "github-copilot" }
     if providerID == "chutes" { return "chutes" }
+    if providerID == "venice" { return "venice" }
+    if providerID == "nousresearch" { return "nousresearch" }
+    if providerID == "openrouter" { return "openrouter" }
     // opencode-free plus the opencode-go API/Messages/Responses routes.
     if providerID.hasPrefix("opencode") { return "opencode-free" }
     if providerID == "kilo-free" { return "kilo-free" }
@@ -1024,6 +1027,9 @@ struct ProviderIcon: View {
     if providerID == "github-copilot" { return "GitHub Copilot" }
     if providerID == "clinepass" { return "ClinePass" }
     if providerID == "chutes" { return "Chutes" }
+    if providerID == "venice" { return "Venice" }
+    if providerID == "nousresearch" { return "Nous Research" }
+    if providerID == "openrouter" { return "OpenRouter" }
     if providerID == "opencode-free" { return "OpenCode Free" }
     if providerID == "kilo-free" { return "Kilo Free" }
     // Deliberately not a vendor name: this provider is a container for
