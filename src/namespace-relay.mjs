@@ -3,7 +3,11 @@ import { StringDecoder } from "node:string_decoder";
 
 import { HeaderlessSseDetector } from "./sse-prefix.mjs";
 import { coerceFunctionCallArguments } from "./tool-arguments.mjs";
-import { nonRecursiveToolSchema, providerToolSchema } from "./tool-schema-root.mjs";
+import {
+  inlineForeignRefs,
+  nonRecursiveToolSchema,
+  providerToolSchema,
+} from "./tool-schema-root.mjs";
 import {
   buildInterruptAgentCall,
   filterAlreadyInterrupted,
@@ -306,14 +310,27 @@ const MAX_JSON_CAPTURE_BYTES = 64 * 1024 * 1024;
 // tool arrived inside a namespace. `providerToolSchema` returns anything it
 // does not recognize by identity, so an ordinary root costs one call and no
 // copy.
-export function repairToolSchemaRoot(tool, { nonRecursive = false } = {}) {
+export function repairToolSchemaRoot(
+  tool,
+  { nonRecursive = false, inlineForeignRefs: inlineRefs = false } = {},
+) {
+  // Moonshot alone rejects a `$ref` that does not point into `#/$defs/`, so
+  // only the route that asks for it pays the inlining -- every other provider
+  // keeps the exact wire payload it has today. `inlineForeignRefs` returns a
+  // schema with no foreign ref by identity, so even on that route an ordinary
+  // toolset is not copied.
+  const relaySchema = (schema) => {
+    const repaired = providerToolSchema(schema);
+    return inlineRefs ? inlineForeignRefs(repaired) : repaired;
+  };
+
   // Preserve the established shared-provider behavior byte-for-byte. Native
   // namespace traversal and inputSchema rewriting belong only to the OpenCode
   // compatibility pass below; other providers keep the original root repair.
   if (!nonRecursive) {
     const parameters = tool?.function?.parameters ?? tool?.parameters;
     if (parameters === undefined) return tool;
-    const repaired = providerToolSchema(parameters);
+    const repaired = relaySchema(parameters);
     if (repaired === parameters) return tool;
     return tool.function
       ? { ...tool, function: { ...tool.function, parameters: repaired } }
@@ -323,7 +340,10 @@ export function repairToolSchemaRoot(tool, { nonRecursive = false } = {}) {
   if (tool?.type === "namespace" && Array.isArray(tool.tools)) {
     let changed = false;
     const children = tool.tools.map((child) => {
-      const repaired = repairToolSchemaRoot(child, { nonRecursive });
+      const repaired = repairToolSchemaRoot(child, {
+        nonRecursive,
+        inlineForeignRefs: inlineRefs,
+      });
       if (repaired !== child) changed = true;
       return repaired;
     });
@@ -332,7 +352,7 @@ export function repairToolSchemaRoot(tool, { nonRecursive = false } = {}) {
 
   let repairedTool = tool;
   let changed = false;
-  const repair = (schema) => nonRecursiveToolSchema(providerToolSchema(schema));
+  const repair = (schema) => nonRecursiveToolSchema(relaySchema(schema));
 
   if (tool?.function?.parameters !== undefined) {
     const parameters = repair(tool.function.parameters);
