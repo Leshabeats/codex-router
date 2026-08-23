@@ -72,6 +72,33 @@ Upgrade an existing Homebrew installation with:
 brew upgrade codex-router
 ```
 
+#### Homebrew command equivalents
+
+A Homebrew install puts a single `codex-router` command on your PATH instead
+of this repository's `bin/` directory. Wherever the rest of this README shows
+`./bin/model-router codex <command>` or `./bin/<command>`, run:
+
+```sh
+codex-router <command>
+```
+
+List everything the packaged build exposes with:
+
+```sh
+codex-router help
+```
+
+To add a custom provider's models — the packaged equivalent of
+`./bin/curate-models <provider>` — run:
+
+```sh
+codex-router curate-models <provider>
+```
+
+`codex-router install` is deliberately unavailable: a Homebrew install has no
+writable checkout to rewrite, and `brew upgrade codex-router` performs that
+step itself.
+
 Before removing the formula, remove the per-user service and managed Codex
 configuration that Homebrew does not own:
 
@@ -399,7 +426,18 @@ in code to its official endpoint.
 
 Both are catalog-only and deliberately ship no checked-in model metadata: the
 provider's live `/models` response is filtered to the free subset and then added
-locally with `./bin/curate-models`.
+locally with `./bin/curate-models`. OpenCode Free curation routes
+`muse-spark-1.2-contributor-free` through its internal Responses sibling while
+keeping Ox Alpha Free (`x-preview-f-free`) and the other free IDs on Chat
+Completions; the provider remains one selection in setup and the picker. An
+existing Chat-routed copy of that one Muse model is migrated only when the
+operator explicitly runs `curate-models`; install, update, and catalog reads do
+not rewrite the user model or picker state. Zen's `/models` response publishes
+no context limits, so those two IDs are sized from OpenCode's own published
+per-free-ID metadata instead of the conservative 131K fallback, and each stored
+entry's `description` records where its window came from. Every other free ID
+keeps the conservative default, and any window is editable in
+`user-models.json`.
 
 ```sh
 ./bin/model-router codex providers enable opencode-free

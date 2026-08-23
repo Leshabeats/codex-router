@@ -16,6 +16,77 @@
   and never answers can no longer wedge the panel's buttons for the rest of
   the session. The panel is translated in all six tray languages.
 
+- **An update no longer empties the picker on a pre-allowlist install.** The
+  routed picker became an allowlist in `v0.4.0-beta.4`; on an install written
+  by an older build, every routed model was absent from `seeded` rather than
+  recorded as visible, so the first catalog rebuild read "on, but never
+  written down" as "never decided" and applied the opt-in default to models
+  that were plainly already showing (issue #338). The catalog build now
+  migrates that file once, before the default runs: a routed slug in neither
+  `hidden` nor `seeded` is recorded visible, so the picker the operator was
+  looking at survives the update. Models switched off on purpose stay off, and
+  a fresh install still opts in model by model.
+
+  **If an update already hid your models,** the migration cannot tell them
+  apart from a deliberate hide -- both now sit in `hidden` and `seeded` -- and
+  deliberately does not guess. Restore a provider's models with the picker
+  command, which republishes the catalog on the way out:
+
+  ```sh
+  ./bin/control picker provider opencode-go show
+  ```
+
+  Substitute your provider ID (`./bin/model-router codex providers list --json`
+  lists them), repeat per provider, then fully quit and reopen Codex.
+
+- **Guided setup asks which models go in the picker.** `./bin/setup --guided`
+  now has a model step between choosing providers and connecting credentials.
+  It starts from the picker the machine already has -- nothing on a first
+  install, the operator's existing selection on a re-run -- so enabling a
+  provider still offers its models rather than choosing them, and pressing
+  Enter through the step never changes what is already there. The selection is
+  written after the "Proceed?" confirmation, so a cancelled setup and a
+  `--selection-only` run both leave `model-picker.json` untouched, and it
+  records `hidden`/`seeded` rather than an allowlist on a pre-allowlist file,
+  because one screen of models cannot answer for the providers it never
+  showed.
+
+- **Concurrent Codex turns no longer stall `/health` and the next request.**
+  Loopback liveliness probes use a separate dispatcher so they cannot queue
+  behind long-lived SSE sockets, and `/health` serves a recent probe result
+  immediately while a slow LiteLLM liveliness check refreshes in the
+  background. The snapshot is still bounded: once it is older than 15s the
+  next `/health` waits for a live probe, so a tray-less `doctor` cannot
+  inherit an hours-old "reachable". Probe GETs use undici's own `fetch` with
+  that extra Agent (Node's builtin `fetch` rejects an npm-undici dispatcher)
+  and the same `NODE_USE_ENV_PROXY` selection as routed traffic. The
+  process-wide HTTP/1.1 pool stays unbounded -- a numeric `connections` cap
+  would queue later turns across every installed client. Disconnect handlers
+  are registered before the `JSON.parse` yield so a canceled turn cannot
+  start an upstream fetch. The tray was reporting Starting and Codex
+  "waiting for network" with two or three in-flight turns even though the
+  router was still generating.
+
+- **Homebrew installs can reach every command again.** The formula's PATH shim
+  exec'd `bin/model-router codex`, whose fixed whitelist has no entry for
+  `curate-models`, `discover-models`, `refresh-catalog`, `test-model`,
+  `support-bundle`, or `control` -- so a packaged user had no way to add a
+  custom provider's models, and a bare `codex-router` or `codex-router --help`
+  printed `model-router`'s usage instead of the packaged command list. The shim
+  now dispatches through `bin/codex-router`, which exists for exactly this
+  case. `post_install` gets its own private entry point, because
+  `bin/codex-router` refuses `install` by design. Reported in #334.
+
+- **GLM-5.3 on opencode Go serves its real 1M context.** The entry still
+  carried 200,000/180,000 -- the GLM-5.1 lineage default that #244 established
+  is wrong for 5.3, where a live probe accepted 990,020 prompt tokens. Both
+  Z.ai GLM-5.3 entries were corrected then; this opencode Go entry was missed,
+  so a session was compacting at 180K against a model that serves a million.
+  Its GLM-5.1 and GLM-5.2 siblings on the same gateway already declare
+  1,048,576, so 1,000,000/900,000 stays conservative against the relay.
+  Standalone web search stays off for this route until the opencode Go relay
+  is verified to preserve tool/function-call history.
+
 - **Grok 4.6 can select Codex's native image viewer.** xAI stopped without a
   function call when the tool was named `view_image`, even when selection was
   required. The Grok OAuth boundary now presents that tool as `inspect_image`
