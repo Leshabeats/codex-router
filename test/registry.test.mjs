@@ -34,6 +34,10 @@ test("provider registry exposes configured API and OAuth model families", () => 
     LISTED_MODELS.map((model) => model.slug),
     [
       "anthropic-api/claude-opus-4.8",
+      "antigravity-oauth/gemini-3.1-pro",
+      "antigravity-oauth/gemini-3.5-flash",
+      "antigravity-oauth/gemini-3.6-flash",
+      "antigravity-oauth/gemini-3.7-flash",
       "clinepass/deepseek-v4-flash",
       "clinepass/deepseek-v4-pro",
       "clinepass/glm-5.2",
