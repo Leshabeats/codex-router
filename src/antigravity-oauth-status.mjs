@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { privateFileIsProtected } from "./file-security.mjs";
 import {
   antigravityTokenPath,
+  protectAntigravityToken,
   validateAntigravityToken,
 } from "./antigravity-oauth-session.mjs";
 
@@ -97,4 +98,8 @@ export function antigravityOAuthHealth() {
       fix: "Run the Antigravity sign-in flow again",
     };
   }
+}
+
+export function repairAntigravityOAuthPermissions() {
+  return protectAntigravityToken();
 }

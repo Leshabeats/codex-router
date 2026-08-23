@@ -191,7 +191,10 @@ export function signInAntigravity({
     const authorizationUrl = antigravityAuthorizationUrl(pkce.verifier, state, {
       redirectUri: callback.redirectUri,
     });
-    process.stdout.write(`Open this URL to sign in to Antigravity:\n\n  ${authorizationUrl}\n\n`);
+    process.stdout.write(
+      "Antigravity sign-in may provision a Google Cloud project for this account when none exists.\n" +
+      `Open this URL to sign in to Antigravity:\n\n  ${authorizationUrl}\n\n`,
+    );
 
     let settled = false;
     let processing = false;

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -17,7 +17,10 @@ const {
   providerOnboardingSnapshot,
   removeApiCredential,
 } = await import("../src/provider-onboarding.mjs");
-const { antigravityOAuthHealth } = await import("../src/antigravity-oauth-status.mjs");
+const {
+  antigravityOAuthHealth,
+  repairAntigravityOAuthPermissions,
+} = await import("../src/antigravity-oauth-status.mjs");
 const {
   enableProvider,
   readProviderSelection,
@@ -80,6 +83,26 @@ test("a rejected Antigravity session remains disconnectable and is withdrawn", a
       (entry) => entry.id === "antigravity-oauth",
     );
     assert.equal(disconnected?.disconnectable, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("doctor permission repair protects an existing Antigravity token", {
+  skip: process.platform === "win32" ? "chmod cannot widen the Windows ACL fixture" : false,
+}, async () => {
+  try {
+    await saveAntigravityToken({
+      access_token: "access-token",
+      refresh_token: "refresh-token",
+      expires_at: 2_000_000_000,
+      expires_in: 3600,
+    });
+    chmodSync(antigravityTokenPath(), 0o644);
+    assert.equal(antigravityOAuthHealth().status, "insecure");
+
+    assert.equal(repairAntigravityOAuthPermissions(), antigravityTokenPath());
+    assert.equal(antigravityOAuthHealth().status, "ok");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

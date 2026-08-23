@@ -27,6 +27,24 @@ test("translates a plain user turn into Gemini contents", () => {
   ]);
 });
 
+test("maps OpenAI tool choices onto Gemini function calling modes", () => {
+  const base = {
+    model: "gemini-3.6-flash",
+    messages: [{ role: "user", content: "use tools" }],
+    tools: [{ type: "function", function: { name: "read", parameters: { type: "object" } } }],
+  };
+  const config = (tool_choice) => toAntigravityRequest({ ...base, tool_choice })
+    .request.toolConfig.functionCallingConfig;
+
+  assert.deepEqual(config("auto"), { mode: "VALIDATED" });
+  assert.deepEqual(config("none"), { mode: "NONE" });
+  assert.deepEqual(config("required"), { mode: "ANY" });
+  assert.deepEqual(
+    config({ type: "function", function: { name: "read" } }),
+    { mode: "ANY", allowedFunctionNames: ["read"] },
+  );
+});
+
 test("pairs function calls with their named function responses", () => {
   const request = toAntigravityRequest(
     {

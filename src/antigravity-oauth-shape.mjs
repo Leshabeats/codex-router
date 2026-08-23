@@ -514,7 +514,21 @@ export function toAntigravityRequest(chat, { projectId = "", requestId = undefin
   const declarations = functionDeclarations(chat);
   if (declarations.length) {
     request.tools = [{ functionDeclarations: declarations }];
-    request.toolConfig = { functionCallingConfig: { mode: "VALIDATED" } };
+    const choice = chat?.tool_choice;
+    let functionCallingConfig;
+    if (choice === "none") {
+      functionCallingConfig = { mode: "NONE" };
+    } else if (choice === "required") {
+      functionCallingConfig = { mode: "ANY" };
+    } else if (choice?.type === "function" && typeof choice.function?.name === "string") {
+      functionCallingConfig = {
+        mode: "ANY",
+        allowedFunctionNames: [choice.function.name],
+      };
+    } else {
+      functionCallingConfig = { mode: "VALIDATED" };
+    }
+    request.toolConfig = { functionCallingConfig };
   }
 
   return {

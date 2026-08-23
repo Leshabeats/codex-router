@@ -95,6 +95,7 @@ test("providers login enters browser OAuth without changing provider selection",
     );
     assert.equal(result.status, 1, result.stderr);
     assert.match(result.stdout, /Open this URL to sign in to Antigravity/);
+    assert.match(result.stdout, /may provision a Google Cloud project/i);
     assert.match(result.stderr, /EADDRINUSE|address already in use/i);
     assert.deepEqual(JSON.parse(readFileSync(selectionPath, "utf8")).providers, ["deepseek"]);
   } finally {
@@ -124,4 +125,11 @@ test("installation docs publish working POSIX and PowerShell login commands", ()
     assert.match(contents, /\.\/bin\/model-router codex providers login antigravity-oauth/);
     assert.match(contents, /\.\\model-router\.ps1 codex providers login antigravity-oauth/);
   }
+});
+
+test("the installation agent contract includes Antigravity onboarding", () => {
+  const contents = readFileSync(path.join(root, "AGENTS.md"), "utf8");
+  assert.match(contents, /`antigravity-oauth`/);
+  assert.match(contents, /ANTIGRAVITY_CLIENT_SECRET/);
+  assert.match(contents, /may provision a Google Cloud project/i);
 });

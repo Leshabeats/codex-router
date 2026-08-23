@@ -12,7 +12,10 @@ import { detectLegacyInstallations } from "./legacy-migration.mjs";
 import { routedCatalogConfigured } from "./catalog.mjs";
 import { MODEL_BY_SLUG, PROVIDERS } from "./model-registry.mjs";
 import { grokOAuthStatus } from "./grok-oauth-status.mjs";
-import { antigravityOAuthHealth } from "./antigravity-oauth-status.mjs";
+import {
+  antigravityOAuthHealth,
+  repairAntigravityOAuthPermissions,
+} from "./antigravity-oauth-status.mjs";
 import { kimiOAuthHealth } from "./oauth-status.mjs";
 import {
   applyMultiAgentCapabilities,
@@ -263,6 +266,7 @@ function repair() {
       });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`Repair installer exited with ${result.status}.`);
+  repairAntigravityOAuthPermissions();
 }
 
 if (process.argv.includes("--help")) {
