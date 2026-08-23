@@ -2,6 +2,67 @@
 
 ## Unreleased
 
+- **Private state files are hardened with a canonical owner-only ACL on
+  Windows.** The previous Windows path asked `GetAccessControl` about the
+  file's existing DACL and then edited it with `SetAccessRuleProtection` and
+  `RemoveAccessRuleSpecific`, so a file whose DACL was already non-canonical
+  could make it throw (or silently keep foreign ACEs), the exact drift an
+  install or `doctor --fix` is meant to repair. Windows hardening now builds a
+  fresh, empty `FileSecurity`, replaces the DACL outright with a single
+  current-identity FullControl Allow rule and inheritance cleared, and skips
+  persisting owner/group so it needs only `WRITE_DAC` and cannot fail where an
+  `icacls /inheritance:r /grant:r` path would have succeeded. A hardening
+  failure now exits non-zero with the PowerShell diagnosis on stderr instead of
+  masquerading as success.
+
+- **MiniMax M3 no longer shows its chain of thought as assistant text.** The
+  Token Plan route asked for adaptive thinking but not `reasoning_split`, so
+  MiniMax embedded the reasoning in `content` as literal `<think>...</think>`
+  markup, which every client that does not know the vendor format rendered as
+  ordinary output. Requesting the split moves it to `reasoning_content`, which
+  this router already relays as reasoning. Verified against api.minimax.io: the
+  same prompt leaks `<think>` into `content` without the flag and carries a
+  populated `reasoning_content` with it. Reported in #333 by @moryk87.
+
+- **The harness caller key is written where a current harness reads it.**
+  DeepSeek Harness moved `.credentials.yaml` to a `version`/`refs` envelope
+  around the reference map, and the router only knew the flat root map the
+  older builds used -- so on a current harness it wrote `CODEX_ROUTER_CALLER_KEY`
+  one level too high, the harness resolved the route's `apiKeyEnv` under `refs`,
+  found nothing, and every turn came back 401 with no diagnostic anywhere
+  (reported in #351 by @jepgambardella). Both shapes are now written in place,
+  and neither is converted into the other: `refs` present settles it, `version`
+  without `refs` settles it the other way -- that is a current harness on its
+  first install, the case where guessing wrong is silent -- and a document with
+  no references at all adopts the current shape. A new reference follows the
+  indentation the envelope already uses for its siblings rather than assuming
+  two spaces, since a mixed-indent block is not YAML any parser reads back and
+  the file holds every adapter's key, not only ours. Removing the reference
+  prunes a `refs:` it emptied, exactly as removing the route prunes an emptied
+  `providers:`, so uninstall restores the document byte for byte. `status`
+  resolves the credential through the same decision the writer makes, so it can
+  no longer report one the harness cannot read. A reference an older build left
+  at the root of an enveloped document is moved rather than copied, so uninstall
+  no longer leaves a second copy of the caller key behind. Anything that is not
+  a reference map in either shape -- a nested mapping at the root, a nested
+  mapping inside `refs`, an inline `refs` -- is still refused with the file
+  untouched.
+
+- **The Grok OAuth forwarder is health-checked, and a dependency the router
+  did not name is no longer reported as unknown.** `/health` probed the Kimi
+  OAuth forwarder, the API forwarder, and the gateway, but never the Grok
+  OAuth forwarder on its own port -- so an operator routing through Grok OAuth
+  got no signal for it at all and the router could answer `ok` with that
+  forwarder dead (issue #366). It is now probed like the others, gated on the
+  `grok-oauth` provider actually being selected so an unused port is never
+  dialled, named as `grokOauth` in `degraded` when it is down, and carried
+  through the redacted health projection into the tray and the Control Center,
+  which both render it beside the other forwarders. Separately, both surfaces
+  fell through to "Unknown / Waiting for health report" whenever a service key
+  was simply absent from the payload; a router that reported `ok` has already
+  probed every dependency it knows about, so an id missing from `degraded` now
+  renders Ready and a healthy install stops looking like it never answered.
+
 - **Curated OpenCode Zen free models now ship the effort ladder and context
   window OpenCode publishes for them, and say which values are still
   guesses.** Zen's anonymous `/models` endpoint returns ids and nothing else,
@@ -126,6 +187,32 @@
   1,048,576, so 1,000,000/900,000 stays conservative against the relay.
   Standalone web search stays off for this route until the opencode Go relay
   is verified to preserve tool/function-call history.
+- **External-model compaction now carries evidence-backed `kcr2`
+  checkpoints.** The router assigns stable `U/C/R/A` source IDs before tool
+  results are aged, accepts only a bounded structured source selection from the
+  summarizing model, and derives the trusted section from redacted original
+  excerpts and machine-readable tool outcomes. Model prose remains explicitly
+  unverified; missing, fabricated, or misclassified references are rejected;
+  unresolved unknowns survive repeated compaction; and replay tells the next
+  model to re-read mutable state before changing it. New checkpoints are capped
+  at 96 KiB after final JSON serialization, with a 32 KiB recent tail. Existing
+  source IDs and counters are rejected unless they are positive safe integers;
+  the source catalog sent to the model has its own 96 KiB JSON limit, and only
+  IDs actually present in that catalog can be selected. Wrapped provider output
+  is accepted only when it contains exactly one contract-valid JSON object and
+  is no larger than 256 KiB. The latest two user messages are reserved in both
+  the source catalog and recent tail. The v1 compact endpoint now replays at
+  most those two complete ordinary user messages before the checkpoint instead
+  of carrying every short historical instruction that fits its character
+  budget; a message that does not fit is never replayed as an unmarked fragment.
+  Responses `reasoning` output is now treated only as a draft: KCR2 parses the
+  final `message` instead of concatenating both channels and mistaking their
+  separate JSON objects for an ambiguous answer. Existing `kcr1` payloads and
+  old v1 plain-summary messages still replay but are labeled
+  `UNVERIFIED_LEGACY_SUMMARY`. Checkpoint excerpts reuse the managed
+  caller-URL redactor and remove recognized GitHub token prefixes before they
+  reach either the source catalog or serialized checkpoint. Native OpenAI
+  requests still forward their encrypted compaction bytes unchanged.
 
 - **Grok 4.6 can select Codex's native image viewer.** xAI stopped without a
   function call when the tool was named `view_image`, even when selection was
