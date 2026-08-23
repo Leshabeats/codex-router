@@ -3219,6 +3219,7 @@ struct ToolResultAgingStats: Decodable {
   let evaluatedRequests: Int?
   let largestResultBytes: Int?
   let resultsAged: Int?
+  let resultsShaped: Int?
   let bytesSaved: Int?
   let estimatedTokensSaved: Int?
   let ranges: [String: ToolResultAgingRange]?
@@ -4356,7 +4357,7 @@ private struct TrayView: View {
       VStack(alignment: .leading, spacing: 8) {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
           VStack(alignment: .leading, spacing: 2) {
-            Text("Old tool results replaced with receipts")
+            Text("Tool results compressed into recoverable receipts")
               .font(.system(size: 10, weight: .medium))
               .lineLimit(1)
             Text(rangeRequests > 0
@@ -4914,7 +4915,7 @@ private struct TrayView: View {
       detail: target.modelSettings?.toolResultAging?.environmentOverride == true
         ? routerLocalized("Forced off by CODEX_ROUTER_TOOL_RESULT_AGING=0")
         : (target.modelSettings?.toolResultAging?.stats?.savingsSummary
-          ?? routerLocalized("Off by default · replaces consumed tool results on external models")),
+          ?? routerLocalized("Off by default · token maxxing starts at 70% on external models")),
       isOn: Binding(
         // Off when the snapshot has not arrived, because that is what the
         // router does with no state file (tool-result-aging-state.mjs). The row

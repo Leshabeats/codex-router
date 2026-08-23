@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 test("usage events persist only bounded request metadata in a private file", async () => {
   const stateDir = mkdtempSync(path.join(os.tmpdir(), "model-router-usage-"));
@@ -105,6 +109,7 @@ test("tool-result aging totals aggregate savings across recorded events", async 
       evaluatedRequests: 0,
       largestResultBytes: 0,
       resultsAged: 0,
+      resultsShaped: 0,
       bytesSaved: 0,
       estimatedTokensSaved: 0,
       firstAt: undefined,
@@ -308,5 +313,88 @@ test("totals separate a pass that ran and aged nothing from one that never ran",
     if (previousStateDir === undefined) delete process.env.MODEL_ROUTER_STATE_DIR;
     else process.env.MODEL_ROUTER_STATE_DIR = previousStateDir;
     rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("token-maxxing shaping contributes savings without being reported as aged", async () => {
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "model-router-usage-"));
+  const previousStateDir = process.env.MODEL_ROUTER_STATE_DIR;
+  process.env.MODEL_ROUTER_STATE_DIR = stateDir;
+  let usage;
+  try {
+    usage = await import(`../src/usage-events.mjs?shaped=${Date.now()}`);
+    usage.recordUsageEvent({
+      model: "deepseek/deepseek-v4-pro",
+      provider: "deepseek",
+      status: 200,
+      durationMs: 100,
+      inputTokens: 700_000,
+      toolResultsShaped: 2,
+      toolResultBytesBefore: 2_400_000,
+      toolResultBytesAfter: 4_000,
+      toolResultBytesSaved: 2_396_000,
+      toolResultShapeBytesSaved: 2_396_000,
+      toolResultsEvaluated: 0,
+      toolResultBytesLargest: 0,
+    });
+    const event = usage.recentUsageEvents().find((entry) => entry.toolResultsShaped === 2);
+    assert.equal(event.toolResultsShaped, 2);
+    assert.equal(event.toolResultsAged, undefined);
+    assert.equal(event.toolResultShapeBytesSaved, 2_396_000);
+
+    const totals = usage.toolResultAgingTotals();
+    assert.equal(totals.requests, 1);
+    assert.equal(totals.resultsAged, 0);
+    assert.equal(totals.resultsShaped, 2);
+    assert.equal(totals.bytesSaved, 2_396_000);
+  } finally {
+    if (previousStateDir === undefined) delete process.env.MODEL_ROUTER_STATE_DIR;
+    else process.env.MODEL_ROUTER_STATE_DIR = previousStateDir;
+    rmSync(stateDir, { recursive: true, force: true });
+    if (usage) rmSync(usage.USAGE_EVENTS_PATH, { force: true });
+  }
+});
+
+test("the aging benchmark classifies shaped-only turns as compacted", () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "model-router-aging-benchmark-"));
+  const eventsPath = path.join(directory, "usage-events.jsonl");
+  const reportPath = path.join(directory, "report.json");
+  const event = {
+    meteringVersion: 1,
+    at: "2026-08-24T00:00:00.000Z",
+    model: "deepseek/deepseek-v4-pro",
+    provider: "deepseek",
+    status: 200,
+    durationMs: 10,
+    inputTokens: 700_000,
+    cachedInputTokens: 350_000,
+    toolResultsShaped: 2,
+    toolResultBytesSaved: 100_000,
+    toolResultShapeBytesSaved: 100_000,
+  };
+  writeFileSync(
+    eventsPath,
+    `${JSON.stringify(event)}\n${JSON.stringify({ ...event, at: "2026-08-24T00:01:00.000Z" })}\n`,
+    "utf8",
+  );
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [path.join(root, "scripts", "aging-benchmark.mjs"), "--json", reportPath],
+      {
+        cwd: root,
+        env: { ...process.env, MODEL_ROUTER_USAGE_EVENTS: eventsPath },
+        encoding: "utf8",
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const report = JSON.parse(readFileSync(reportPath, "utf8"));
+    assert.equal(report.saved[0].resultsAged, 0);
+    assert.equal(report.saved[0].resultsShaped, 2);
+    assert.deepEqual(report.cache.map((turn) => turn.kind), ["fresh", "stable"]);
+    assert.equal(report.summary.cacheRate.unaged, null);
+    assert.equal(report.summary.cacheRate.agedTurnsMeasured, 2);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
   }
 });

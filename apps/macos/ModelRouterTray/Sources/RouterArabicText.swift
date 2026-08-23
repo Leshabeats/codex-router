@@ -3,7 +3,7 @@
 enum RouterArabicText {
   static let values: [String: String] = [
     "Uninstalling": "جارٍ الإزالة",
-    "Off by default · replaces consumed tool results on external models": "معطّل افتراضيًا · يستبدل نتائج الأدوات المستهلكة على النماذج الخارجية",
+    "Off by default · token maxxing starts at 70% on external models": "معطّل افتراضيًا · يبدأ token maxxing عند 70% على النماذج الخارجية",
     "Fix Codex Router installation": "إصلاح تثبيت موجّه Codex",
     "Language": "اللغة",
     "System": "حسب النظام",

@@ -181,6 +181,7 @@ export interface ToolResultAgingStats {
   evaluatedRequests?: number;
   largestResultBytes?: number;
   resultsAged?: number;
+  resultsShaped?: number;
   bytesSaved?: number;
   estimatedTokensSaved?: number;
   firstAt?: string;

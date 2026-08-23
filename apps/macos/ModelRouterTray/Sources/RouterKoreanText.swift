@@ -3,7 +3,7 @@
 enum RouterKoreanText {
   static let values: [String: String] = [
     "Uninstalling": "제거 중",
-    "Off by default · replaces consumed tool results on external models": "기본적으로 꺼짐 · 외부 모델에서 소비된 도구 결과를 대체합니다",
+    "Off by default · token maxxing starts at 70% on external models": "기본적으로 꺼짐 · 외부 모델에서 70%에 token maxxing이 시작됩니다",
     "Fix Codex Router installation": "Codex 라우터 설치 복구",
     "Language": "언어",
     "System": "시스템 따름",

@@ -3,7 +3,7 @@
 enum RouterHindiText {
   static let values: [String: String] = [
     "Uninstalling": "अनइंस्टॉल हो रहा है",
-    "Off by default · replaces consumed tool results on external models": "डिफ़ॉल्ट रूप से बंद · बाहरी मॉडलों पर उपभोग किए गए टूल परिणाम बदल देता है",
+    "Off by default · token maxxing starts at 70% on external models": "डिफ़ॉल्ट रूप से बंद · बाहरी मॉडलों पर 70% पर token maxxing शुरू होता है",
     "Fix Codex Router installation": "Codex राउटर इंस्टॉलेशन ठीक करें",
     "Language": "भाषा",
     "System": "सिस्टम के अनुसार",

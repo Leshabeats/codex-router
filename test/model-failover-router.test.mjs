@@ -107,7 +107,10 @@ function bodyJson(request) {
   });
 }
 
-function run(env, { chain = [FALLBACK.slug], enabled = true, cooldowns } = {}) {
+function run(
+  env,
+  { chain = [FALLBACK.slug], enabled = true, cooldowns, toolResultAging = false } = {},
+) {
   const stateDir = mkdtempSync(path.join(os.tmpdir(), "model-failover-router-state-"));
   if (chain !== null) {
     writeFileSync(
@@ -120,6 +123,13 @@ function run(env, { chain = [FALLBACK.slug], enabled = true, cooldowns } = {}) {
     writeFileSync(
       path.join(stateDir, "provider-cooldowns.json"),
       JSON.stringify(cooldowns),
+      "utf8",
+    );
+  }
+  if (toolResultAging) {
+    writeFileSync(
+      path.join(stateDir, "tool-result-aging.json"),
+      JSON.stringify({ version: 1, enabled: true, nativeEnabled: false }),
       "utf8",
     );
   }
@@ -623,6 +633,60 @@ const RESPONSES_MODEL = {
   slug: "opencode-go-responses/gpt-5.6-luna",
   gatewayModel: "opencode-go-responses-gpt-5-6-luna",
 };
+
+test("failover recalculates token-maxxing pressure for the serving model", async () => {
+  const seen = [];
+  const gw = await gateway(async (request, response) => {
+    const body = await bodyJson(request);
+    seen.push(body);
+    if (body.model === PRIMARY.gatewayModel) {
+      const payload = Buffer.from(QUOTA_BODY, "utf8");
+      response.writeHead(429, {
+        "Content-Type": "application/json",
+        "Content-Length": String(payload.length),
+      });
+      response.end(payload);
+      return;
+    }
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    response.end(contentSse("pressure-fallback"));
+  });
+  const routerPort = await openPort();
+  const child = run(routerEnv(gw.port, routerPort), {
+    chain: [RESPONSES_MODEL.slug],
+    toolResultAging: true,
+  });
+  // The pristine request is larger than the fallback's context window. It can
+  // still serve the turn because its lower auto-compaction threshold shapes
+  // the result before the route-specific fit check.
+  const value = "repeated candidate progress\n".repeat(45_000);
+  const input = [
+    { type: "function_call", call_id: "latest", name: "exec_command", arguments: "{}" },
+    { type: "function_call_output", call_id: "latest", output: value },
+  ];
+  try {
+    await waitFor(`http://127.0.0.1:${routerPort}/health`, child);
+    const result = await readRouted(routerPort, {
+      model: PRIMARY.slug,
+      stream: true,
+      instructions: "Base instructions.",
+      input,
+    });
+    assert.equal(result.status, 200);
+    assert.equal(seen.length, 2);
+    assert.equal(seen[0].model, PRIMARY.gatewayModel);
+    assert.equal(seen[0].input[1].output, value);
+    assert.equal(seen[0].instructions, "Base instructions.");
+    assert.equal(seen[1].model, RESPONSES_MODEL.gatewayModel);
+    assert.match(seen[1].input[1].output, /Tool result shaped by Codex Router token maxxing/u);
+    assert.match(seen[1].instructions, /## Context pressure mode/u);
+    const events = await waitForUsageEvents(child.stateDir, 2, child);
+    assert.equal(events.find((event) => event.model === RESPONSES_MODEL.slug).toolResultsShaped, 1);
+  } finally {
+    await stopChild(child);
+    await closeServer(gw.server);
+  }
+});
 
 const NAMESPACE_TOOLS = [
   {
