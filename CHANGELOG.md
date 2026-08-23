@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **Windows startup now fails fast when the scheduled task is dead instead of
+  polling health for its whole budget.** Task Scheduler can keep a stale
+  instance entry (or a Running state) after the launcher tree behind it has
+  died, so `service start` used to spend its entire readiness timeout waiting
+  for a router that nothing would ever start (issue #384, PR #387). Readiness
+  now reads the task from two places — the COM instance enumeration, and a
+  direct scan for a live process whose command line references the generated
+  launcher — and once both stop reporting a live launch for longer than a short
+  grace, fails with the task's own `LastTaskResult` instead of a generic
+  timeout. A task-state query failure is inconclusive and never fails the wait
+  by itself, so a restricted shell still receives the full health budget rather
+  than a false failure. The health answer itself is normalized to one contract
+  before the guard trusts it — healthy only when the router actually answered,
+  whether the probe resolves or rejects — and a Windows interpreter probe that
+  merely times out under process-launch contention, which is not evidence of a
+  broken virtual environment, is retried once with a wider bound before install
+  reports a condition that was transient all along.
+
 - **ChatGPT subscription access for non-Codex clients is now an explicit,
   one-time local authorization.** A discovered Codex `auth.json` no longer
   silently lets DeepSeek Harness, Gemini CLI, or another caller-key client
