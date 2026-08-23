@@ -22,12 +22,13 @@ const PYTHON_AVAILABLE =
 const GUIDED_SETUP_HELPER = String.raw`
 import errno
 import os
+import re
 import select
 import sys
 import termios
 import time
 
-node, setup, checkout, home, state_dir, secret, confirmation = sys.argv[1:]
+node, setup, checkout, home, state_dir, secret, confirmation, models = sys.argv[1:]
 env = os.environ.copy()
 env.update({
     "HOME": home,
@@ -40,10 +41,19 @@ env.update({
 pid, master = os.forkpty()
 if pid == 0:
     os.chdir(checkout)
-    os.execve(node, [node, setup, "--guided", "--providers", "deepseek", "--selection-only"], env)
+    args = [node, setup, "--guided", "--providers", "deepseek"]
+    # The cancel run has to reach the "Proceed?" gate, which lives past the
+    # --selection-only return.
+    if models != "cancel":
+        args.append("--selection-only")
+    os.execve(node, args, env)
 
 output = bytearray()
+models_cleared = False
+flash_selected = False
+models_confirmed = False
 confirmed = False
+proceeded = False
 key_sent = False
 while True:
     ready, _, _ = select.select([master], [], [], 15)
@@ -59,6 +69,31 @@ while True:
     if not chunk:
         break
     output.extend(chunk)
+    model_prompts = output.count(b"Toggle model numbers")
+    # Whatever the step offers, checked or not: the number is what gets typed,
+    # and which mark it carries is the assertion's business, not the driver's.
+    flash = re.search(br"\[[ x]\]\s+(\d+)\. DeepSeek V4 Flash \(API\)", output)
+    if models == "defaults":
+        # The operator who reads the list and presses Enter, which is the one
+        # keystroke that decides what a first install puts in the picker.
+        if not models_confirmed and model_prompts >= 1:
+            os.write(master, b"\n")
+            models_confirmed = True
+    elif not models_cleared and model_prompts >= 1:
+        os.write(master, b"n\n")
+        models_cleared = True
+    elif models_cleared and not flash_selected and model_prompts >= 2:
+        if flash is None:
+            os.kill(pid, 9)
+            raise SystemExit("DeepSeek V4 Flash was not listed")
+        os.write(master, flash.group(1) + b"\n")
+        flash_selected = True
+    elif flash_selected and not models_confirmed and model_prompts >= 3:
+        os.write(master, b"\n")
+        models_confirmed = True
+    if models == "cancel" and not proceeded and b"Proceed?" in output:
+        os.write(master, b"n\n")
+        proceeded = True
     if not confirmed and b"Enter DeepSeek API key securely now?" in output:
         os.write(master, confirmation.encode() + b"\n")
         confirmed = True
@@ -94,7 +129,11 @@ echo "npm error code EAI_AGAIN" >&2
 exit 1
 `;
 
-function withFreshGuidedSetup(confirmation, verify, { npmStub = NPM_STUB_SUCCEEDS } = {}) {
+function withFreshGuidedSetup(
+  confirmation,
+  verify,
+  { npmStub = NPM_STUB_SUCCEEDS, models = "select-flash" } = {},
+) {
   const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-guided-deps-"));
   const checkout = path.join(testRoot, "checkout");
   const fakeBin = path.join(testRoot, "bin");
@@ -124,6 +163,7 @@ function withFreshGuidedSetup(confirmation, verify, { npmStub = NPM_STUB_SUCCEED
         stateDir,
         secret,
         confirmation,
+        models,
       ],
       {
         encoding: "utf8",
@@ -155,6 +195,14 @@ test(
         readFileSync(path.join(stateDir, "deepseek-api-key.secret"), "utf8"),
         `${secret}\n`,
       );
+      // `--selection-only` is documented as saving the provider selection
+      // without installing, and the model step reports its answer the same
+      // way: the picker is rewritten by the install, not by the preview.
+      assert.equal(existsSync(path.join(stateDir, "model-picker.json")), false);
+      assert.match(result.stdout, /"models":\s*\[\s*"deepseek\/deepseek-v4-flash"\s*\]/);
+      assert.match(result.stdout, /DeepSeek V4 Flash \(API\)/);
+      assert.match(result.stdout, /DeepSeek V4 Pro \(API\)/);
+      assert.doesNotMatch(result.stdout, /Kimi K3/);
       assert.equal(existsSync(path.join(checkout, "node_modules", ".package-lock.json")), true);
     });
   },
@@ -171,6 +219,45 @@ test(
       assert.equal(existsSync(path.join(checkout, "node_modules")), false);
       assert.equal(existsSync(path.join(stateDir, "deepseek-api-key.secret")), false);
     });
+  },
+);
+
+test(
+  "guided model selection starts empty so a first install opts in model by model",
+  { skip: process.platform === "win32" || !PYTHON_AVAILABLE },
+  () => {
+    withFreshGuidedSetup(
+      "n",
+      ({ result, stateDir }) => {
+        assert.equal(result.status, 0, result.stderr || result.stdout);
+        // Enabling a provider offers its models; it does not choose them.
+        assert.match(result.stdout, /\[ \] \d+\. DeepSeek V4 Flash \(API\)/);
+        assert.match(result.stdout, /\[ \] \d+\. DeepSeek V4 Pro \(API\)/);
+        assert.doesNotMatch(result.stdout, /\[x\] \d+\. DeepSeek V4/);
+        assert.match(result.stdout, /"models":\s*\[\s*\]/);
+        assert.equal(existsSync(path.join(stateDir, "model-picker.json")), false);
+      },
+      { models: "defaults" },
+    );
+  },
+);
+
+test(
+  "a cancelled guided setup leaves the model picker exactly as it found it",
+  { skip: process.platform === "win32" || !PYTHON_AVAILABLE },
+  () => {
+    withFreshGuidedSetup(
+      "n",
+      ({ result, stateDir }) => {
+        assert.notEqual(result.status, 0);
+        assert.match(result.stdout, /Setup was cancelled before installing the service/);
+        assert.match(result.stdout, /Models: deepseek\/deepseek-v4-flash/);
+        // Answering "n" to "Proceed?" installs nothing, so it must also have
+        // rewritten none of this machine's protected picker state.
+        assert.equal(existsSync(path.join(stateDir, "model-picker.json")), false);
+      },
+      { models: "cancel" },
+    );
   },
 );
 

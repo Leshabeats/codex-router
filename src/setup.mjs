@@ -5,8 +5,9 @@ import path from "node:path";
 
 import { detectLegacyInstallations, applyKnownMigrations, rollbackLatestMigration } from "./legacy-migration.mjs";
 import { grokOAuthStatus } from "./grok-oauth-status.mjs";
-import { PROVIDERS, providerNeedsNoKey } from "./model-registry.mjs";
+import { LISTED_MODELS, PROVIDERS, providerNeedsNoKey } from "./model-registry.mjs";
 import { ensureNodeDependencies, isNodeDependencyFailure } from "./node-dependency-install.mjs";
+import { effectiveVisibleModels, setModelSelection } from "./model-picker-state.mjs";
 import { kimiOAuthStatus } from "./oauth-status.mjs";
 import { SOURCE_ROOT, TARGET } from "./paths.mjs";
 import { credentialStatus } from "./provider-credentials.mjs";
@@ -16,8 +17,14 @@ import {
   oauthLoginArgs,
   providerOnboardingSnapshot,
 } from "./provider-onboarding.mjs";
-import { renderProviderChoices, stepHeader, toggleSelection } from "./setup-ui.mjs";
 import {
+  renderModelChoices,
+  renderProviderChoices,
+  stepHeader,
+  toggleSelection,
+} from "./setup-ui.mjs";
+import {
+  canonicalProviderId,
   defaultProviderIds,
   selectedConfiguredListedModels,
   validateProviderIds,
@@ -246,6 +253,50 @@ function requestedSelection() {
   return guided ? guidedSelection() : defaultProviderIds();
 }
 
+function guidedModelSelection(providers) {
+  const selectedProviders = new Set(providers);
+  const models = LISTED_MODELS.filter((model) =>
+    selectedProviders.has(canonicalProviderId(model.provider))
+  );
+  if (models.length === 0) {
+    process.stdout.write("\nThe selected providers have no preselected models.\n");
+    return { models, selectedSlugs: [] };
+  }
+
+  // Pre-check what the picker is showing right now, which on a machine that
+  // has never had one is nothing: router models are opt-in, and enabling a
+  // provider must not put its whole catalog in the picker on one keystroke
+  // (the policy `src/catalog.mjs` states at its `seedModelsHidden` call). On a
+  // re-run this is instead the operator's existing picker, so pressing Enter
+  // through this step changes nothing.
+  const visible = effectiveVisibleModels(models.map((model) => model.slug));
+  let selected = new Set(
+    models
+      .map((model, index) => (visible.has(model.slug) ? index + 1 : undefined))
+      .filter(Boolean),
+  );
+  process.stdout.write("\nChoose models from the selected providers:\n");
+  for (;;) {
+    process.stdout.write(`${renderModelChoices(models, selected)}\n`);
+    const raw = promptLine(
+      "Toggle model numbers (comma-separated), a=all, n=none; Enter to continue",
+    );
+    const result = toggleSelection(selected, raw, models.length, { allowEmpty: true });
+    selected = result.selected;
+    if (result.error) {
+      process.stdout.write(`${result.error}\n`);
+    } else if (result.done) {
+      break;
+    }
+  }
+  return {
+    models,
+    selectedSlugs: [...selected]
+      .sort((a, b) => a - b)
+      .map((position) => models[position - 1].slug),
+  };
+}
+
 function run(command, commandArgs, options = {}) {
   const result = spawnSync(command, commandArgs, {
     cwd: SOURCE_ROOT,
@@ -363,7 +414,9 @@ async function main() {
       `An unknown model router owns ${legacy.config.modelCatalogJson}; automatic setup will not replace it.`,
     );
   }
-  const stepTitles = ["Choose providers", "Connect credentials"];
+  const stepTitles = ["Choose providers"];
+  if (guided) stepTitles.push("Choose models");
+  stepTitles.push("Connect credentials");
   if (legacy.installations.length) stepTitles.push("Migrate older router");
   stepTitles.push("Review and install");
   let stepIndex = 0;
@@ -387,6 +440,13 @@ async function main() {
     throw incomplete(
       "No configured provider was found. Run `./bin/setup --guided` or pass `--providers` after configuring credentials.",
     );
+  }
+  let modelChoices = [];
+  let selectedModelSlugs = [];
+  if (guided) {
+    nextStep("Choose models");
+    ({ models: modelChoices, selectedSlugs: selectedModelSlugs } =
+      guidedModelSelection(providers));
   }
   nextStep("Connect credentials");
   // Credentials are addable after the install, and the router already reports
@@ -451,7 +511,9 @@ async function main() {
   }
 
   if (selectionOnly) {
-    process.stdout.write(`${JSON.stringify({ providers, migration }, null, 2)}\n`);
+    process.stdout.write(
+      `${JSON.stringify({ providers, ...(guided ? { models: selectedModelSlugs } : {}), migration }, null, 2)}\n`,
+    );
     return;
   }
 
@@ -464,6 +526,7 @@ async function main() {
     process.stdout.write(
       `\nReady to install:\n` +
         `  Providers: ${providers.length ? providers.join(", ") : "none (idle install)"}\n` +
+        `  Models: ${selectedModelSlugs.length ? selectedModelSlugs.join(", ") : "none"}\n` +
         `  Migration: ${migration ? "recognized older router (rollback snapshot kept)" : "none needed"}\n` +
         (dshTarget
           ? `  Changes: per-user background service and one provider route in the harness settings document\n`
@@ -475,6 +538,15 @@ async function main() {
     if (!confirm("Proceed?")) {
       throw incomplete("Setup was cancelled before installing the service.");
     }
+  }
+
+  // Below the confirmation, and below the `--selection-only` return above it:
+  // model visibility is the operator's existing configuration, so a cancelled
+  // setup and a selection-only run must both leave `model-picker.json` exactly
+  // as they found it. Steps that only report a choice may run before the
+  // answer; the step that rewrites protected state may not.
+  if (guided) {
+    setModelSelection(modelChoices.map((model) => model.slug), selectedModelSlugs);
   }
 
   try {
