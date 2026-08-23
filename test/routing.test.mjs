@@ -3157,6 +3157,52 @@ test("API forwarder routes Ollama Cloud models without unsupported parameters", 
 });
 
 
+test("API forwarder surfaces Ollama Cloud upstream failures for Kimi K3", async () => {
+  const upstream = await mockServer(async (request, response) => {
+    await bodyJson(request);
+    json(response, 503, {
+      error: { message: "model overloaded", type: "server_error" },
+    });
+  });
+  const forwarderPort = await openPort();
+  const forwarder = run("api-forwarder.mjs", {
+    CODEX_ROUTER_API_PORT: String(forwarderPort),
+    OLLAMA_CLOUD_BASE_URL: `http://127.0.0.1:${upstream.port}`,
+    OLLAMA_API_KEY: "TEST_OLLAMA_CLOUD_KEY",
+    CODEX_ROUTER_QUIET: "1",
+  });
+
+  try {
+    await waitFor(`http://127.0.0.1:${forwarderPort}/health`, forwarder, {
+      Authorization: `Bearer ${INTERNAL_KEY}`,
+    });
+    const response = await fetch(
+      `http://127.0.0.1:${forwarderPort}/v1/chat/completions`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${INTERNAL_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "ollama-cloud-kimi-k3",
+          reasoning_effort: "max",
+          messages: [{ role: "user", content: "test" }],
+        }),
+      },
+    );
+    assert.equal(response.status, 503);
+    const payload = await response.json();
+    assert.ok(
+      payload.error.message.includes("model overloaded"),
+      `expected upstream error message preserved, got: ${payload.error.message}`,
+    );
+  } finally {
+    await stopChild(forwarder);
+    await closeServer(upstream.server);
+  }
+});
+
 test("API forwarder routes Qwen plan models without unsupported parameters", async () => {
   const upstreamRequests = [];
   const upstream = await mockServer(async (request, response) => {
