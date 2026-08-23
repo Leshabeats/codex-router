@@ -44,8 +44,9 @@ user.
 3. Never ask the user to paste OAuth tokens or API keys into chat, command
    arguments, logs, environment snippets, or tracked files.
 4. Determine which provider IDs the user requested: `anthropic-api`,
-   `kimi-oauth`, `antigravity-oauth`, `kimi-api`, `kimi-api-cn`, `deepseek`, `grok-oauth`, `grok-api`, `qwen-plan`,
-   `zai-coding`, `ollama-cloud`, `minimax-token-plan`, `meta`, `clinepass`, and/or
+    `kimi-oauth`, `antigravity-oauth`, `kimi-api`, `kimi-api-cn`, `deepseek`, `grok-oauth`, `grok-api`, `qwen-plan`,
+    `zai-coding`, `ollama-cloud`, `minimax-token-plan`, `meta`, `clinepass`,
+    `venice`, `nousresearch`, and/or
    `opencode-go`
    (shown to users as "opencode Go/Zen"; its `opencode-go-messages`,
    `opencode-go-responses`, and `opencode-zen` variants share its stored key
@@ -56,7 +57,7 @@ user.
    shares its stored key and is enabled and disabled with it automatically;
    never select or toggle it separately. Command Code uses its stored or
    environment API key; it has no router-managed CLI sign-in path. The
-   catalog-only providers `groq`, `openrouter`, `together`, `fireworks`,
+   catalog-only providers `groq`, `together`, `fireworks`,
    `cerebras`, `mistral`, `nvidia-nim`, `siliconflow`, `huggingface`,
    `gemini-api`, `github-copilot`, `chutes`, and `orca` are also selectable, but they ship no
    preselected models: after
@@ -64,12 +65,22 @@ user.
    interactive terminal to choose models. If they did not specify and
    credentials already exist, use
    `configured` rather than showing providers that cannot authenticate.
+   `openrouter`, `venice`, and `nousresearch` behave the same way with one
+   exception: each ships the single checked-in Ox Alpha entry described under
+   "Ox Alpha ships on six routes" below, so their picker is not empty after the
+   key is stored, and everything else on them still has to be curated.
+   `venice` and `nousresearch` are ordinary API-key providers — Venice keys come
+   from venice.ai/settings/api and Nous Portal keys from
+   portal.nousresearch.com; neither has a router-managed CLI sign-in path, and
+   Venice carries a `planNote` because a free Venice account has no API
+   entitlement at all.
    The anonymous providers `opencode-free` and `kilo-free` are also selectable
    (`opencode-free-responses` is an internal, single-model protocol variant of
    the former and is never selected or curated separately),
    but they need no credential only for their documented free model subsets.
-   Both are catalog-only: they ship no preselected models and need
-   `bin/curate-models PROVIDER` after selection. `custom` is selectable on the
+   `kilo-free` is catalog-only and needs `bin/curate-models kilo-free` after
+   selection; `opencode-free` ships only the Ox Alpha entry and needs curation
+   for anything else. `custom` is selectable on the
    same terms and is a container whose models each name their own endpoint, so
    enabling it asks for nothing and curating it is unnecessary. All three must
    be selected explicitly; never select one on the user's behalf just because
@@ -1074,8 +1085,72 @@ in `src/model-registry.mjs`, never by the registry fragment alone, and the
 `ANONYMOUS_ENDPOINTS` table beside it is the reason a fragment edit cannot
 point a credential-free provider at a model somebody would be billed for.
 `opencode-free` and `kilo-free` each expose a large free subset picked out by a
-naming rule that changes without notice, so both stay catalog-only: discovery
-filters the provider's live `/models` response and the user curates locally.
+naming rule that changes without notice, so neither ships that subset: discovery
+filters the provider's live `/models` response and the user curates locally. The
+one checked-in exception is `opencode-free/ox-alpha`, and it is an exception the
+rule itself permits — `x-preview-f-free` earns its place by ending in `-free`,
+the same test `anonymousModelAllowed` applies to everything else, so removing
+the fragment would not make the id any less routable.
+
+## Ox Alpha ships on six routes, and the ladder belongs to the model
+
+Ox Alpha is one stealth model that six of this repository's providers resell,
+each under its own id: `x-preview-f-free` on `opencode-free`, `ox-alpha-free`
+on `opencode-go`, `stealth/ox-alpha` on `openrouter`, `commandcode` and
+`nousresearch`, and `stealth-ox-alpha` on `venice`. Every one of those was read
+from that provider's own live `/models` response; `test/ox-alpha.test.mjs` pins
+them so a rename upstream fails a test rather than 404-ing inside someone's
+session.
+
+The effort ladder is `low`/`high`/`max` on all six, and it is the **model's**
+ladder rather than any reseller's. The model always thinks, and its upstream
+refuses an off-ladder rung by name:
+
+```
+HTTP 400 — [1210] This model always engages in thinking and cannot be
+disabled; please use low, high, or max
+```
+
+`none`, `off`, `minimal`, `medium`, `xhigh`, `ultra`, `default` and `auto` all
+draw that response; `low`, `high` and `max` return 200 with monotonically rising
+reasoning-token counts, so the three rungs are real behavior and not just enum
+validation.
+
+**Venice is the one catalog that disagrees, and it is the one to distrust.** It
+advertises `none`/`low`/`medium`/`high` for this id. That is not a reseller
+knowing something the others do not: it is Venice's most generic shape, shared
+with eight unrelated models, and it contains `none` — a rung this model refuses
+by name. Venice is perfectly capable of publishing a model-specific ladder when
+it has one (`low`/`high`/`max` for GLM-5.3, `none`/`high`/`max` for GLM-5.2), so
+the generic shape here reads as an unverified onboarding default. OpenRouter's
+live API, Nous Portal's live API, and models.dev for `openrouter`,
+`opencode-go`, `opencode`, `kilo` and `nano-gpt` all say `low`/`high`/`max`.
+This is the standing exception to "the provider's own catalog decides": when a
+reseller's advertised ladder contains a rung the model itself rejects by name,
+the model wins, and the disagreement gets written down — here and in the
+fragment's `description` — rather than silently resolved.
+
+The ladder also collides with the effort clamp in `src/catalog.mjs`. Codex
+gained the `max` variant in 0.143.0, so on anything older the catalog rewrites
+this model's default down to `xhigh` — a rung every route refuses. The
+`ox-alpha` request profile in `src/api-forwarder.mjs` is what closes that loop:
+it clamps whatever Codex sent onto the rungs the model's own registry entry
+declares, so `xhigh` and `ultra` land back on `max`, and `medium` and `minimal`
+land on `low`. An absent effort stays absent so the upstream's own default
+applies, and `thinking` is always stripped because none of these routes document
+it and it cannot be switched off anyway.
+
+The window is 1,048,576 tokens with 131,072 of output on every route, and
+forced `tool_choice: "required"` is observed to work everywhere, so no route
+needs `auto-tool-choice`. Only `opencode-free/ox-alpha` carries curated
+`availabilityNux`: it is the one route with no credential to buy first, and
+curated announcement copy is seen by every installer. The other five rely on the
+automatic seven-day announcement, which fires only once their provider is
+actually credentialed and enabled.
+
+Free is a preview, not a property. If the providers start billing it, the
+honest change is to drop `isFree` and rewrite the descriptions, not to leave a
+"Free" badge on a metered model.
 
 ## A provider whose models each name their own endpoint
 

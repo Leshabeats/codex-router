@@ -452,13 +452,14 @@ in code to its official endpoint.
 | OpenCode Free | `opencode-free` | `https://opencode.ai/zen/v1` | `big-pickle` and IDs ending in `-free` |
 | Kilo Free | `kilo-free` | `https://api.kilo.ai/api/gateway` | IDs ending in `:free` |
 
-Both are catalog-only and deliberately ship no checked-in model metadata: the
-provider's live `/models` response is filtered to the free subset and then added
-locally with `./bin/curate-models`. OpenCode Free curation routes
-`muse-spark-1.2-contributor-free` through its internal Responses sibling while
-keeping Ox Alpha Free (`x-preview-f-free`) and the other free IDs on Chat
-Completions; the provider remains one selection in setup and the picker. An
-existing Chat-routed copy of that one Muse model is migrated only when the
+Neither ships its free subset as checked-in metadata, with a single exception:
+**Ox Alpha** on OpenCode Free is checked in — see [Ox Alpha](#ox-alpha) below.
+Everything else comes from the provider's live `/models` response, filtered to
+the free subset and then added locally with `./bin/curate-models`. OpenCode Free
+curation routes `muse-spark-1.2-contributor-free` through its internal Responses
+sibling while keeping Ox Alpha Free (`x-preview-f-free`) and the other free IDs
+on Chat Completions; the provider remains one selection in setup and the picker.
+An existing Chat-routed copy of that one Muse model is migrated only when the
 operator explicitly runs `curate-models`; install, update, and catalog reads do
 not rewrite the user model or picker state. Zen's `/models` response publishes
 no context limits, so those two IDs are sized from OpenCode's own published
@@ -566,6 +567,7 @@ CLI session.
 
 | Picker label | Model ID |
 | --- | --- |
+| Ox Alpha (Command Code) | `commandcode/ox-alpha` |
 | DeepSeek V4 Flash (Command Code) | `commandcode/deepseek-v4-flash` |
 | DeepSeek V4 Pro (Command Code) | `commandcode/deepseek-v4-pro` |
 | GLM-5.2 (Command Code) | `commandcode/glm-5.2` |
@@ -599,6 +601,50 @@ remaining credits and its 5-hour and weekly windows from the same undocumented
 billing route the official CLI polls, and links to Command Code Studio when
 that route is unavailable.
 
+### Ox Alpha
+
+Ox Alpha is a stealth reasoning model for coding and long-horizon agentic work:
+a 1,048,576-token context window, 131,072 tokens of output, text and image
+input, and tool calling. Six of this repository's routes resell the same model,
+and it is priced at zero on all of them during the preview, so the entries carry
+a **Free** badge in the control center.
+
+| Picker label | Model ID | Needs a key |
+| --- | --- | --- |
+| Ox Alpha (OpenCode Free) | `opencode-free/ox-alpha` | no |
+| Ox Alpha (opencode Go) | `opencode-go/ox-alpha` | opencode |
+| Ox Alpha (OpenRouter) | `openrouter/ox-alpha` | OpenRouter |
+| Ox Alpha (Command Code) | `commandcode/ox-alpha` | Command Code |
+| Ox Alpha (Nous Research) | `nousresearch/ox-alpha` | Nous Portal |
+| Ox Alpha (Venice) | `venice/ox-alpha` | Venice |
+
+Reasoning effort is **low · high · max** on every route, defaulting to `max`.
+Only three rungs exist because the model always thinks and its upstream says so
+outright — anything else comes back as `400 — This model always engages in
+thinking and cannot be disabled; please use low, high, or max`. Codex has more
+rungs than that, and a Codex older than 0.143 has no `max` at all, so the router
+clamps whatever effort you pick onto the three the model accepts. Switching
+effort in the picker is safe on all six routes.
+
+The quickest route needs nothing at all:
+
+```sh
+./bin/model-router codex providers enable opencode-free
+```
+
+For the credentialed routes, store the key and enable the provider:
+
+```sh
+./bin/model-router codex provider-key venice set
+./bin/model-router codex providers enable venice
+```
+
+> **The free preview is a preview.** No lab has claimed this model, the routes
+> that serve it can narrow or withdraw it without notice, and the retention
+> terms differ per provider — OpenCode advertises zero data retention, Venice
+> anonymizes, and other resellers say less. Treat it as a way to try a model,
+> not as something to depend on.
+
 ### Meta Model API
 
 Meta's Muse Spark models speak the Responses protocol at
@@ -626,7 +672,6 @@ often for the repository to pin and live-verify individual entries:
 | Provider | Provider ID | Base URL |
 | --- | --- | --- |
 | Groq | `groq` | `https://api.groq.com/openai/v1` |
-| OpenRouter | `openrouter` | `https://openrouter.ai/api/v1` |
 | Together AI | `together` | `https://api.together.xyz/v1` |
 | Fireworks AI | `fireworks` | `https://api.fireworks.ai/inference/v1` |
 | Cerebras | `cerebras` | `https://api.cerebras.ai/v1` |
@@ -638,6 +683,22 @@ often for the repository to pin and live-verify individual entries:
 | GitHub Copilot | `github-copilot` | Account-specific GitHub Copilot endpoint |
 | Chutes | `chutes` | `https://llm.chutes.ai/v1` |
 | OrcaRouter | `orca` | `https://api.orcarouter.ai/v1` |
+
+Three more providers work the same way but arrive with the single checked-in
+[Ox Alpha](#ox-alpha) entry, so their picker is not empty once a key is stored:
+
+| Provider | Provider ID | Base URL | Key from |
+| --- | --- | --- | --- |
+| OpenRouter | `openrouter` | `https://openrouter.ai/api/v1` | [openrouter.ai/settings/keys](https://openrouter.ai/settings/keys) |
+| Venice | `venice` | `https://api.venice.ai/api/v1` | [venice.ai/settings/api](https://venice.ai/settings/api) |
+| Nous Research (Hermes) | `nousresearch` | `https://inference-api.nousresearch.com/v1` | [portal.nousresearch.com](https://portal.nousresearch.com) |
+
+Venice API access is an entitlement, not just a key: a free Venice account has
+none. A Pro subscription (the low-rate-limit Explorer tier), a funded USD
+balance, or staked VVV that grants VCU is what makes the key usable, and the
+router prints that requirement wherever you connect the provider rather than
+letting it arrive as a 403 inside Codex. Nous Research keys are Nous Portal API
+keys and authenticate the same endpoint the Hermes agent uses.
 
 Add a key, then pick the models you want from the provider's live catalog:
 

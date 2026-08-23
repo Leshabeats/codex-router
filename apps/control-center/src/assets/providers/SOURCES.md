@@ -39,6 +39,8 @@ hotlinked at runtime. Research was refreshed on 2026-08-21.
 | `huggingface.svg` | Hugging Face Router | https://huggingface.co/brand | https://cdn.simpleicons.org/huggingface |
 | `qwen.svg` | Qwen and Alibaba Plan | https://qwen.ai/ | https://cdn.simpleicons.org/qwen |
 | `xiaomi.svg` | Xiaomi MiMo models | https://www.mi.com/global/ | https://cdn.simpleicons.org/xiaomi |
+| `venice.png` | Venice | https://venice.ai/ | https://venice.ai/apple-touch-icon.png (official touch icon, locally adapted to a white-on-transparent mask) |
+| `nousresearch.png` | Nous Research (Hermes) | https://nousresearch.com/ | https://nousresearch.com/apple-touch-icon.png (official touch icon, locally adapted to a white-on-transparent mask) |
 
 Simple Icons copies are stored locally and used only where an official site did
 not expose a practical standalone product mark. Unknown future providers and

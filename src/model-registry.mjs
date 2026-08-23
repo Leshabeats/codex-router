@@ -473,8 +473,17 @@ function endpointProblem(model, provider) {
 // The endpoint the registry declares is data; the endpoint the router resolves
 // has to be provider-shaped so the existing base-URL and credential chains
 // accept it. Identity is derived here rather than read from the fragment.
-function normalizedModel(model, provider) {
-  const officialDisplayName = officialModelDisplayName(model.provider, model.upstreamModel);
+//
+// The official-name table fills in a name curation could not know -- it reads
+// an opaque id off a provider's catalog and has nothing better to show. A
+// checked-in fragment always knows, and more than one route can carry the same
+// upstream id, so the table must not overwrite a name the repository chose:
+// `opencode-free/ox-alpha` says which of the six Ox Alpha routes it is, and the
+// table would flatten that back to the curated label.
+function normalizedModel(model, provider, { curated = false } = {}) {
+  const officialDisplayName = curated
+    ? officialModelDisplayName(model.provider, model.upstreamModel)
+    : undefined;
   const presented = officialDisplayName && model.displayName !== officialDisplayName
     ? { ...model, displayName: officialDisplayName }
     : model;
@@ -735,7 +744,7 @@ function mergeUserModels(base) {
     }
     slugs.add(model.slug);
     gatewayModels.add(model.gatewayModel);
-    const frozen = normalizedModel(model, base.providers.get(model.provider));
+    const frozen = normalizedModel(model, base.providers.get(model.provider), { curated: true });
     userModels.add(frozen);
     models.push(frozen);
   }
