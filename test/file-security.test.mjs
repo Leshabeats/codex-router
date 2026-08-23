@@ -38,7 +38,7 @@ test(
       const grantEveryoneRead = [
         "$target = $env:CODEX_ROUTER_PRIVATE_FILE",
         "$acl = [System.IO.File]::GetAccessControl($target)",
-        "$everyone = [System.Security.Principal.SecurityIdentifier]::new('S-1-1-0')",
+        "$everyone = [Security.Principal.SecurityIdentifier]::new('S-1-1-0')",
         "$read = [System.Security.AccessControl.FileSystemRights]::Read",
         "$none = [System.Security.AccessControl.InheritanceFlags]::None",
         "$propagationNone = [System.Security.AccessControl.PropagationFlags]::None",
@@ -75,6 +75,94 @@ test(
       ).trim();
       assert.equal(privateFileIsProtected(target), true, acl);
       const snapshot = JSON.parse(acl);
+      assert.equal(snapshot.protected, true);
+      assert.deepEqual(snapshot.rules, [
+        {
+          identity: snapshot.currentSid,
+          type: "Allow",
+          rights: "FullControl",
+          inherited: false,
+        },
+      ]);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "Windows protectPrivateFile rebuilds a canonical owner-only ACL over a broad foreign+inherited DACL",
+  { skip: process.platform !== "win32" },
+  () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "codex-router-acl-dirty-"));
+    const target = path.join(directory, "private.secret");
+    writeFileSync(target, "TEST_ONLY\n");
+    // Make the file a genuinely messy DACL before hardening: keep its inherited
+    // ACEs (don't clear them), re-enable inheritance (unprotect), and add an
+    // explicit Everyone Read Allow. That leaves an "unprotected, foreign +
+    // inherited, mixed" DACL, the exact drift the canonical builder exists to
+    // repair and the shape the old GetAccessControl + SetAccessRuleProtection
+    // + RemoveAccessRuleSpecific path could not safely recanonicalize.
+    const setDirtyAcl = [
+      "$acl = [System.IO.File]::GetAccessControl($env:CODEX_ROUTER_PRIVATE_FILE)",
+      "[void]$acl.SetAccessRuleProtection($false, $true)",
+      "$everyone = [Security.Principal.SecurityIdentifier]::new('S-1-1-0')",
+      "$read = [System.Security.AccessControl.FileSystemRights]::Read",
+      "$none = [System.Security.AccessControl.InheritanceFlags]::None",
+      "$propagationNone = [System.Security.AccessControl.PropagationFlags]::None",
+      "$allow = [System.Security.AccessControl.AccessControlType]::Allow",
+      "$rule = [System.Security.AccessControl.FileSystemAccessRule]::new($everyone, $read, $none, $propagationNone, $allow)",
+      "[void]$acl.AddAccessRule($rule)",
+      "[System.IO.File]::SetAccessControl($env:CODEX_ROUTER_PRIVATE_FILE, $acl)",
+    ].join("; ");
+    execFileSync(
+      "powershell.exe",
+      ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", setDirtyAcl],
+      { env: { ...process.env, CODEX_ROUTER_PRIVATE_FILE: target }, stdio: "ignore" },
+    );
+    try {
+      // Confirm the file started in the messy shape, so the repro is real.
+      const before = execFileSync(
+        "powershell.exe",
+        [
+          "-NoLogo",
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          [
+            "$acl = [System.IO.File]::GetAccessControl($env:CODEX_ROUTER_PRIVATE_FILE)",
+            "$rawRules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))",
+            "$hasForeignAllow = $false",
+            "$everyone = [Security.Principal.SecurityIdentifier]::new('S-1-1-0')",
+            "foreach ($rule in $rawRules) { if ($rule.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow) { if ($rule.IdentityReference.Value -ne $acl.GetOwner([System.Security.Principal.SecurityIdentifier])) { $hasForeignAllow = $true } } }",
+            "[Console]::Out.Write((($acl.AreAccessRulesProtected -eq $false) -and $hasForeignAllow).ToString())",
+          ].join("; "),
+        ],
+        {
+          encoding: "utf8",
+          env: { ...process.env, CODEX_ROUTER_PRIVATE_FILE: target },
+        },
+      ).trim().toLowerCase();
+      assert.equal(before, "true");
+
+      // The repair must not depend on the pre-existing (unprotected,
+      // foreign, non-canonical) DACL: it substitutes a fresh canonical one.
+      protectPrivateFile(target);
+      const snapshotScript = [
+        "$acl = [System.IO.File]::GetAccessControl($env:CODEX_ROUTER_PRIVATE_FILE)",
+        "$identity = [Security.Principal.WindowsIdentity]::GetCurrent()",
+        "$rawRules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))",
+        "$rules = @($rawRules | ForEach-Object { [pscustomobject]@{ identity = $_.IdentityReference.Value; type = $_.AccessControlType.ToString(); rights = $_.FileSystemRights.ToString(); inherited = $_.IsInherited } })",
+        "[pscustomobject]@{ protected = $acl.AreAccessRulesProtected; currentSid = $identity.User.Value; rules = $rules } | ConvertTo-Json -Compress -Depth 4",
+      ].join("; ");
+      const snapshot = JSON.parse(
+        execFileSync(
+          "powershell.exe",
+          ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", snapshotScript],
+          { encoding: "utf8", env: { ...process.env, CODEX_ROUTER_PRIVATE_FILE: target } },
+        ).trim(),
+      );
+      assert.equal(privateFileIsProtected(target), true, JSON.stringify(snapshot));
       assert.equal(snapshot.protected, true);
       assert.deepEqual(snapshot.rules, [
         {

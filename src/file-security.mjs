@@ -10,32 +10,59 @@ import {
 } from "node:fs";
 import path from "node:path";
 
-export function protectPrivateFile(target) {
-  chmodSync(target, 0o600);
-  if (process.platform !== "win32") return target;
-  const script = [
-    "$target = $env:CODEX_ROUTER_PRIVATE_FILE",
+// Windows private-file hardening is one PowerShell spawn per call. Lowering
+// that count matters: download workers persist progress on every percentage
+// point, and each spawn cold-starts powershell.exe, so a state writer that
+// protected two files per atomic replace used to pay twice per write.
+//
+// Internal callers that harden several paths at once go through
+// protectPrivateFilesWin32 so that cost is paid once.
+function powershellPrivateScript() {
+  return [
+    // Build the ACL from a fresh, empty FileSecurity rather than asking
+    // GetAccessControl about the file's existing (possibly non-canonical)
+    // DACL. SetAccessRuleProtection on a clean object never canonicalizes a
+    // broken inherited/permission mix, so a file whose DACL is already
+    // corrupt — the exact drift an install or doctor --fix must be able to
+    // repair — cannot make this throw. The pre-existing DACL is replaced
+    // outright instead of being edited toward compliance.
     "$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User",
-    "$acl = [System.IO.File]::GetAccessControl($target)",
-    "$acl.SetAccessRuleProtection($true, $false)",
-    "$rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))",
-    "foreach ($rule in $rules) { [void]$acl.RemoveAccessRuleSpecific($rule) }",
     "$fullControl = [System.Security.AccessControl.FileSystemRights]::FullControl",
     "$none = [System.Security.AccessControl.InheritanceFlags]::None",
     "$propagationNone = [System.Security.AccessControl.PropagationFlags]::None",
     "$allow = [System.Security.AccessControl.AccessControlType]::Allow",
-    "$rule = [System.Security.AccessControl.FileSystemAccessRule]::new($sid, $fullControl, $none, $propagationNone, $allow)",
-    "[void]$acl.AddAccessRule($rule)",
-    "[System.IO.File]::SetAccessControl($target, $acl)",
+    "foreach ($p in (ConvertFrom-Json -InputObject $env:CODEX_ROUTER_PRIVATE_FILES)) {",
+    "  $acl = [System.Security.AccessControl.FileSecurity]::new()",
+    "  [void]$acl.SetAccessRuleProtection($true, $false)",
+    "  $acl.SetOwner($sid)",
+    "  $acl.SetGroup($sid)",
+    "  $rule = [System.Security.AccessControl.FileSystemAccessRule]::new($sid, $fullControl, $none, $propagationNone, $allow)",
+    "  [void]$acl.AddAccessRule($rule)",
+    "  [System.IO.File]::SetAccessControl($p, $acl)",
+    "}",
   ].join("; ");
+}
+
+// Protect one or more paths in a single PowerShell process. Each file ends up
+// with exactly one current-identity FullControl Allow rule, no inheritance, no
+// foreign grants, and owner/group set to the current identity — the same
+// strictness privateFileIsProtected verifies.
+function protectPrivateFilesWin32(paths) {
+  const list = [...paths];
   execFileSync(
     "powershell.exe",
-    ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+    ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", powershellPrivateScript()],
     {
-      env: { ...process.env, CODEX_ROUTER_PRIVATE_FILE: target },
+      env: { ...process.env, CODEX_ROUTER_PRIVATE_FILES: JSON.stringify(list) },
       stdio: "ignore",
     },
   );
+  return list;
+}
+
+export function protectPrivateFile(target) {
+  chmodSync(target, 0o600);
+  if (process.platform === "win32") protectPrivateFilesWin32([target]);
   return target;
 }
 
@@ -48,9 +75,19 @@ export function writePrivateFile(target, contents, { directoryMode } = {}) {
   const temporary = `${target}.tmp.${process.pid}`;
   try {
     writeFileSync(temporary, contents, { encoding: "utf8", mode: 0o600 });
-    protectPrivateFile(temporary);
-    renameSync(temporary, target);
-    protectPrivateFile(target);
+    if (process.platform === "win32") {
+      // One spawn hardens the temporary; the renameSync below then moves this
+      // exact file over the target, and MoveFile carries the source's DACL
+      // with it, so the destination inherits the same owner-only ACL without a
+      // second PowerShell cold start. A pre-existing target that is being
+      // replaced is discarded with the move, so it cannot leak permissions.
+      protectPrivateFilesWin32([temporary]);
+      renameSync(temporary, target);
+    } else {
+      protectPrivateFile(temporary);
+      renameSync(temporary, target);
+      protectPrivateFile(target);
+    }
   } catch (error) {
     if (existsSync(temporary)) unlinkSync(temporary);
     throw error;
