@@ -56,7 +56,7 @@ test("a draft may be submitted before live evidence exists", () => {
     slug: "example/beta",
     status: "draft",
   });
-  assert.equal(validateV2AgentApplications(root)[0].status, "draft");
+  assert.equal(validateV2AgentApplications(root, { models: [] })[0].status, "draft");
 });
 
 test("proofs fail closed on missing checks, identity drift, and credential-shaped content", () => {
@@ -177,7 +177,7 @@ test("the route directory is independent of slash-bearing upstream model ids", (
     slug: "example/alpha-v2",
     status: "draft",
   });
-  assert.deepEqual(validateV2AgentApplications(root)[0], {
+  assert.deepEqual(validateV2AgentApplications(root, { models: [] })[0], {
     provider: "example",
     model: "accounts/vendor/models/alpha:v2",
     slug: "example/alpha-v2",
