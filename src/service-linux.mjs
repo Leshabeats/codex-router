@@ -68,6 +68,9 @@ function unit() {
     MODEL_ROUTER_GROK_OAUTH_PORT: String(PORTS.grokOauth),
     MODEL_ROUTER_DEVIN_CLI_PORT: String(PORTS.devinCli),
     MODEL_ROUTER_ANTIGRAVITY_OAUTH_PORT: String(PORTS.antigravityOauth),
+    ...(process.env.ANTIGRAVITY_CLIENT_SECRET
+      ? { ANTIGRAVITY_CLIENT_SECRET: process.env.ANTIGRAVITY_CLIENT_SECRET }
+      : {}),
     CODEX_HOME,
     CODEX_ROUTER_STATE_DIR: STATE_DIR,
     CODEX_ROUTER_QUIET: "1",

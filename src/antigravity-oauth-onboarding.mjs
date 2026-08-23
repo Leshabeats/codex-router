@@ -5,10 +5,10 @@ import http from "node:http";
 import {
   ANTIGRAVITY_AUTH_URL,
   ANTIGRAVITY_CLIENT_ID,
-  ANTIGRAVITY_REDIRECT_URI,
   ANTIGRAVITY_SCOPES,
   ANTIGRAVITY_TOKEN_URL,
   antigravityCallbackTarget,
+  antigravityRedirectUri,
   antigravityUserAgent,
   requireAntigravityClientSecret,
 } from "./antigravity-oauth-constants.mjs";
@@ -42,7 +42,7 @@ function verifierChallenge(verifier) {
 export function antigravityAuthorizationUrl(
   verifier,
   state,
-  { redirectUri = ANTIGRAVITY_REDIRECT_URI } = {},
+  { redirectUri = antigravityRedirectUri() } = {},
 ) {
   // Validation and listener derivation share the same helper, so the URI sent
   // to Google cannot drift from the local callback server.
@@ -63,7 +63,7 @@ export function antigravityAuthorizationUrl(
 export async function exchangeAntigravityCode(
   code,
   verifier,
-  { fetchImpl = fetch, now = Date.now, redirectUri = ANTIGRAVITY_REDIRECT_URI } = {},
+  { fetchImpl = fetch, now = Date.now, redirectUri = antigravityRedirectUri() } = {},
 ) {
   const validatedRedirect = antigravityCallbackTarget(redirectUri).redirectUri;
   const response = await fetchImpl(ANTIGRAVITY_TOKEN_URL, {
@@ -174,13 +174,16 @@ function browserResponse(response, status, html) {
 export function signInAntigravity({
   fetchImpl = fetch,
   open = openBrowser,
-  redirectUri = ANTIGRAVITY_REDIRECT_URI,
+  redirectUri = antigravityRedirectUri(),
   timeoutMs = 10 * 60_000,
   now = Date.now,
   projectAttempts = DEFAULT_ATTEMPTS,
   projectRetryDelayMs = DEFAULT_RETRY_DELAY_MS,
   delayImpl,
 } = {}) {
+  // Fail before printing or opening the consent URL. The same secret must also
+  // be available to the background service for subsequent token refreshes.
+  requireAntigravityClientSecret();
   const callback = antigravityCallbackTarget(redirectUri);
   return new Promise((resolve, reject) => {
     const pkce = generateAntigravityPkce();

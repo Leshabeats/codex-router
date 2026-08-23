@@ -215,6 +215,34 @@ test("retries transient refresh failures and honors Retry-After", async () => {
   );
 });
 
+test("aborts an in-flight refresh when the caller disconnects", async () => {
+  await withToken(
+    {
+      access_token: "old",
+      refresh_token: "refresh",
+      expires_at: 2_000_000_000,
+      expires_in: 3600,
+      project_id: "p",
+    },
+    async () => {
+      const controller = new AbortController();
+      let started;
+      const fetchStarted = new Promise((resolve) => { started = resolve; });
+      const refreshing = ensureFreshAntigravitySession({
+        now: () => 1_999_999_999_000,
+        signal: controller.signal,
+        fetchImpl: async (_url, { signal }) => new Promise((_resolve, reject) => {
+          started();
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        }),
+      });
+      await fetchStarted;
+      controller.abort(new Error("caller disconnected"));
+      await assert.rejects(refreshing, /caller disconnected/);
+    },
+  );
+});
+
 test("caps an excessive refresh Retry-After delay", async () => {
   const delays = [];
   await withToken(

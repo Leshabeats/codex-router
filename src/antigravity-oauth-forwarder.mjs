@@ -24,6 +24,7 @@ import {
   applyKeepAliveTimeouts,
   formatErrorChain,
   httpErrorStatus,
+  installGracefulShutdown,
   readRequestBody,
   reportListenFailure,
   requireInternalAuth,
@@ -458,10 +459,9 @@ async function handleChatCompletions(request, response) {
   });
 
   const sessionAndProject = async ({ force = false } = {}) => {
-    const session = await ensureFreshAntigravitySession({ force });
+    const session = await ensureFreshAntigravitySession({ force, signal: controller.signal });
     return ensureAntigravityProject(session, {
       signal: controller.signal,
-      forceFallbackRefresh: force,
     });
   };
 
@@ -671,7 +671,5 @@ if (isMain) {
     console.error("[antigravity-oauth] listening");
   });
 
-  for (const signal of ["SIGINT", "SIGTERM"]) {
-    process.on(signal, () => server.close(() => process.exit(0)));
-  }
+  installGracefulShutdown(server, { label: "antigravity-oauth" });
 }

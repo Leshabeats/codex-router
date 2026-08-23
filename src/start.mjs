@@ -26,6 +26,7 @@ import { venvRuntimeProblem } from "./venv-runtime.mjs";
 import { dependencyRepairHint } from "./dependency-repair.mjs";
 import { clearServiceProcessState, writeServiceProcessState } from "./service-process.mjs";
 import { environmentProxyOptedIn } from "./proxy-environment.mjs";
+import { antigravityOAuthStatus } from "./antigravity-oauth-status.mjs";
 
 const dependencyFix = dependencyRepairHint();
 
@@ -247,7 +248,9 @@ async function main() {
   const kimiForwarder = run(process.execPath, [path.join(SOURCE_ROOT, "src", "oauth-forwarder.mjs")]);
   const api = run(process.execPath, [path.join(SOURCE_ROOT, "src", "api-forwarder.mjs")]);
   const grokForwarder = run(process.execPath, [path.join(SOURCE_ROOT, "src", "grok-oauth-forwarder.mjs")]);
-  const antigravityForwarder = run(process.execPath, [path.join(SOURCE_ROOT, "src", "antigravity-oauth-forwarder.mjs")]);
+  const antigravityForwarder = antigravityOAuthStatus().configured
+    ? run(process.execPath, [path.join(SOURCE_ROOT, "src", "antigravity-oauth-forwarder.mjs")])
+    : undefined;
   const devinForwarder = devinCliRouted
     ? run(process.execPath, [path.join(SOURCE_ROOT, "src", "devin-cli-forwarder.mjs")])
     : undefined;
@@ -276,14 +279,18 @@ async function main() {
       undefined,
       grokForwarder,
     ),
-    waitForHealth(
-      "Antigravity OAuth forwarder",
-      loopback(PORTS.antigravityOauth, "/health"),
-      { Authorization: `Bearer ${internalKey}` },
-      30_000,
-      undefined,
-      antigravityForwarder,
-    ),
+    ...(antigravityForwarder
+      ? [
+        waitForHealth(
+          "Antigravity OAuth forwarder",
+          loopback(PORTS.antigravityOauth, "/health"),
+          { Authorization: `Bearer ${internalKey}` },
+          30_000,
+          undefined,
+          antigravityForwarder,
+        ),
+      ]
+      : []),
     // Spread rather than a conditional inside the wait: an unrouted Devin adds
     // no entry at all, so it cannot add latency. A routed one is waited on
     // exactly as the other three are, and a forwarder that cannot bind still
@@ -348,7 +355,9 @@ async function main() {
     waitForExit(kimiForwarder, "OAuth forwarder"),
     waitForExit(api, "API forwarder"),
     waitForExit(grokForwarder, "Grok OAuth forwarder"),
-    waitForExit(antigravityForwarder, "Antigravity OAuth forwarder"),
+    ...(antigravityForwarder
+      ? [waitForExit(antigravityForwarder, "Antigravity OAuth forwarder")]
+      : []),
     // Only when it is actually running. A forwarder of ours that dies is a bug
     // report, and the rule above is that the service exits so the OS supervisor
     // rebuilds it -- leaving this one out of the race would instead strand a

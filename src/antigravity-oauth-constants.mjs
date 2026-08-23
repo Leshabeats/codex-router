@@ -12,7 +12,9 @@ export const ANTIGRAVITY_CLIENT_ID =
 export function requireAntigravityClientSecret() {
   const value = process.env.ANTIGRAVITY_CLIENT_SECRET;
   if (!value) {
-    throw new Error("Antigravity OAuth is not configured on this build.");
+    throw new Error(
+      "Antigravity OAuth requires ANTIGRAVITY_CLIENT_SECRET; set it before signing in or starting the service.",
+    );
   }
   return value;
 }
@@ -55,9 +57,11 @@ export function validateAntigravityRedirectUri(
   return url;
 }
 
-export const ANTIGRAVITY_REDIRECT_URI = validateAntigravityRedirectUri().toString();
+export function antigravityRedirectUri() {
+  return validateAntigravityRedirectUri().toString();
+}
 
-export function antigravityCallbackTarget(value = ANTIGRAVITY_REDIRECT_URI) {
+export function antigravityCallbackTarget(value = antigravityRedirectUri()) {
   const url = validateAntigravityRedirectUri(value);
   return {
     host: url.hostname === "localhost"

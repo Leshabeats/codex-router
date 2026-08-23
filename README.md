@@ -255,7 +255,13 @@ Pro/Ultra entitlement on the signed-in account. It needs neither a Gemini API
 key nor a separate Antigravity CLI. Signing in and enabling are separate so a
 re-authentication never replaces the rest of the provider selection:
 
+Antigravity OAuth requires an integration client secret. Set
+`ANTIGRAVITY_CLIENT_SECRET` in the environment used for installation and
+sign-in; the generated background-service definition preserves it for token
+refreshes. The command fails before opening Google consent when it is absent.
+
 ```sh
+export ANTIGRAVITY_CLIENT_SECRET='your-integration-client-secret'
 ./bin/model-router codex providers login antigravity-oauth
 ./bin/model-router codex providers enable antigravity-oauth
 ```
@@ -263,6 +269,7 @@ re-authentication never replaces the rest of the provider selection:
 On Windows PowerShell, use the matching wrapper:
 
 ```powershell
+$env:ANTIGRAVITY_CLIENT_SECRET = 'your-integration-client-secret'
 .\model-router.ps1 codex providers login antigravity-oauth
 .\model-router.ps1 codex providers enable antigravity-oauth
 ```

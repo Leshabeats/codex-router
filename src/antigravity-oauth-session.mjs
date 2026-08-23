@@ -65,9 +65,7 @@ export function validateAntigravityToken(value) {
     expires_at: expiresAt,
     expires_in: expiresIn,
     project_id: typeof value.project_id === "string" ? value.project_id : "",
-    project_source: value.project_source === "managed" || value.project_source === "fallback"
-      ? value.project_source
-      : undefined,
+    project_source: value.project_source === "managed" ? "managed" : undefined,
     project_checked_at: Number.isFinite(projectCheckedAt) ? projectCheckedAt : undefined,
     tier_id: typeof value.tier_id === "string" && value.tier_id ? value.tier_id : undefined,
     email: typeof value.email === "string" ? value.email : undefined,
@@ -102,7 +100,15 @@ function lockTarget() {
   return `${antigravityTokenPath()}.guard`;
 }
 
-async function withTokenLock(run) {
+function abortReason(signal) {
+  return signal?.reason || new DOMException("The operation was aborted.", "AbortError");
+}
+
+function throwIfAborted(signal) {
+  if (signal?.aborted) throw abortReason(signal);
+}
+
+async function withTokenLock(run, { signal } = {}) {
   const target = lockTarget();
   let release;
   try {
@@ -113,13 +119,23 @@ async function withTokenLock(run) {
     mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
     writeFileSync(target, "", { flag: "a", mode: 0o600 });
     protectPrivateFile(target);
-    release = await lockfile.lock(target, {
-      retries: { retries: 120, factor: 1, minTimeout: 250, maxTimeout: 1_000 },
-      stale: 120_000,
-      update: 10_000,
-      realpath: false,
-    });
+    for (let attempt = 0; attempt <= 120; attempt += 1) {
+      throwIfAborted(signal);
+      try {
+        release = await lockfile.lock(target, {
+          retries: 0,
+          stale: 120_000,
+          update: 10_000,
+          realpath: false,
+        });
+        break;
+      } catch (error) {
+        if (error?.code !== "ELOCKED" || attempt === 120) throw error;
+        await delay(250, signal);
+      }
+    }
   } catch (error) {
+    if (signal?.aborted) throw abortReason(signal);
     throw transientError("Antigravity OAuth credential lock is unavailable.", error);
   }
   try {
@@ -210,8 +226,20 @@ function revokedTombstone(token) {
   };
 }
 
-function delay(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+function delay(milliseconds, signal) {
+  return new Promise((resolve, reject) => {
+    throwIfAborted(signal);
+    const timer = setTimeout(finish, milliseconds);
+    function finish() {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    }
+    function abort() {
+      clearTimeout(timer);
+      reject(abortReason(signal));
+    }
+    signal?.addEventListener("abort", abort, { once: true });
+  });
 }
 
 function retryDelay(response, attempt, now, random) {
@@ -239,10 +267,12 @@ async function refreshAntigravityToken(
     now = Date.now,
     delayImpl = delay,
     random = Math.random,
+    signal,
   } = {},
 ) {
   let lastError;
   for (let attempt = 0; attempt < 3; attempt += 1) {
+    throwIfAborted(signal);
     let response;
     try {
       response = await fetchImpl(ANTIGRAVITY_TOKEN_URL, {
@@ -254,14 +284,17 @@ async function refreshAntigravityToken(
           client_id: ANTIGRAVITY_CLIENT_ID,
           client_secret: requireAntigravityClientSecret(),
         }),
-        signal: AbortSignal.timeout(30_000),
+        signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(30_000)])
+          : AbortSignal.timeout(30_000),
       });
     } catch (error) {
       lastError = transientError(
         "Antigravity OAuth refresh could not reach Google's authentication service.",
         error,
       );
-      if (attempt < 2) await delayImpl(2 ** attempt * 1_000 + Math.floor(random() * 250));
+      if (signal?.aborted) throw abortReason(signal);
+      if (attempt < 2) await delayImpl(2 ** attempt * 1_000 + Math.floor(random() * 250), signal);
       continue;
     }
 
@@ -293,7 +326,7 @@ async function refreshAntigravityToken(
       });
     }
     lastError = transientError(`Temporary Antigravity OAuth error: HTTP ${response.status}.`);
-    if (attempt < 2) await delayImpl(retryDelay(response, attempt, now, random));
+    if (attempt < 2) await delayImpl(retryDelay(response, attempt, now, random), signal);
   }
   throw lastError || transientError("Antigravity OAuth refresh failed.");
 }
@@ -304,9 +337,14 @@ export async function ensureFreshAntigravitySession({
   fetchImpl = fetch,
   delayImpl = delay,
   random = Math.random,
+  signal,
 } = {}) {
+  throwIfAborted(signal);
   const key = antigravityTokenPath();
-  const current = refreshInFlight.get(key);
+  // A request-scoped signal must not control or wait uninterruptibly on a
+  // refresh shared with another client. The file lock still deduplicates the
+  // mutation, and the waiter can now leave immediately when its caller does.
+  const current = signal ? undefined : refreshInFlight.get(key);
   if (current) {
     if (!force || current.force) return current.promise;
     try {
@@ -315,7 +353,7 @@ export async function ensureFreshAntigravitySession({
       // The original caller owns its failure. A forced caller still needs an
       // attempt when the first call only retained a hard-valid token.
     }
-    return ensureFreshAntigravitySession({ force: true, now, fetchImpl, delayImpl, random });
+    return ensureFreshAntigravitySession({ force: true, now, fetchImpl, delayImpl, random, signal });
   }
 
   const promise = (async () => {
@@ -337,6 +375,7 @@ export async function ensureFreshAntigravitySession({
             now,
             delayImpl,
             random,
+            signal,
           });
           const recovered = readAntigravityToken();
           if (!sameToken(recovered, latest)) return recovered;
@@ -346,7 +385,7 @@ export async function ensureFreshAntigravitySession({
           });
         } catch (error) {
           if (error?.code === "oauth_unauthorized") {
-            await delayImpl(100);
+            await delayImpl(100, signal);
             const recovered = readAntigravityToken();
             if (!sameToken(recovered, latest)) return recovered;
             writePrivateJson(
@@ -363,7 +402,7 @@ export async function ensureFreshAntigravitySession({
           }
           throw error;
         }
-      });
+      }, { signal });
     } catch (error) {
       if (error?.code === "oauth_transient" && !force) {
         try {
@@ -381,7 +420,7 @@ export async function ensureFreshAntigravitySession({
   })().finally(() => {
     if (refreshInFlight.get(key)?.promise === promise) refreshInFlight.delete(key);
   });
-  refreshInFlight.set(key, { promise, force });
+  if (!signal) refreshInFlight.set(key, { promise, force });
   return promise;
 }
 

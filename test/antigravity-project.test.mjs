@@ -163,68 +163,6 @@ test("does not persist a fallback project when discovery fails", async () => {
   });
 });
 
-test("force-refreshes a legacy fallback and replaces it with a managed project", async () => {
-  await withToken(
-    baseToken({
-      project_id: "legacy-fallback-project",
-      project_source: "fallback",
-      project_checked_at: 20_000,
-    }),
-    async () => {
-      let calls = 0;
-      const options = {
-        now: () => 20_001,
-        attempts: 1,
-        delayImpl: async () => {},
-        fetchImpl: async () => {
-          calls += 1;
-          return new Response(JSON.stringify({
-            cloudaicompanionProject: "managed-after-refresh",
-            currentTier: { id: "pro-tier" },
-          }), { status: 200, headers: { "Content-Type": "application/json" } });
-        },
-      };
-      const forced = await ensureAntigravityProject(readAntigravityToken(), {
-        ...options,
-        forceFallbackRefresh: true,
-      });
-      assert.equal(calls, 1);
-      assert.equal(forced.projectId, "managed-after-refresh");
-      assert.equal(forced.source, "managed");
-      assert.equal(forced.session.project_source, "managed");
-    },
-  );
-});
-
-test("refuses to route a recent legacy fallback without a forced refresh", async () => {
-  await withToken(
-    baseToken({
-      project_id: "legacy-fallback-project",
-      project_source: "fallback",
-      project_checked_at: 20_000,
-    }),
-    async () => {
-      let calls = 0;
-      await assert.rejects(
-        ensureAntigravityProject(readAntigravityToken(), {
-          now: () => 20_001,
-          attempts: 1,
-          delayImpl: async () => {},
-          fetchImpl: async () => {
-            calls += 1;
-            return new Response("{}", {
-              status: 503,
-              headers: { "Content-Type": "application/json" },
-            });
-          },
-        }),
-        { code: "project_required" },
-      );
-      assert.equal(calls, 0);
-    },
-  );
-});
-
 test("deduplicates concurrent discovery for the same account", async () => {
   await withToken(baseToken(), async () => {
     let calls = 0;

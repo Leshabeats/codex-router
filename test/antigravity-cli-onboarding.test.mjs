@@ -90,6 +90,7 @@ test("providers login enters browser OAuth without changing provider selection",
       ["src/providers.mjs", "login", "antigravity-oauth"],
       isolatedEnvironment(testRoot, {
         ANTIGRAVITY_REDIRECT_URI: `http://127.0.0.1:${port}/oauth-callback`,
+        ANTIGRAVITY_CLIENT_SECRET: "test-client-secret",
       }),
     );
     assert.equal(result.status, 1, result.stderr);
@@ -98,6 +99,21 @@ test("providers login enters browser OAuth without changing provider selection",
     assert.deepEqual(JSON.parse(readFileSync(selectionPath, "utf8")).providers, ["deepseek"]);
   } finally {
     await new Promise((resolve) => occupied.close(resolve));
+    rmSync(testRoot, { recursive: true, force: true });
+  }
+});
+
+test("providers login reports a missing client secret before opening consent", () => {
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "antigravity-cli-secret-"));
+  try {
+    const result = runNode(
+      ["src/providers.mjs", "login", "antigravity-oauth"],
+      isolatedEnvironment(testRoot, { ANTIGRAVITY_CLIENT_SECRET: "" }),
+    );
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, "");
+    assert.match(result.stderr, /ANTIGRAVITY_CLIENT_SECRET/);
+  } finally {
     rmSync(testRoot, { recursive: true, force: true });
   }
 });

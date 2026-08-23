@@ -194,7 +194,7 @@ export async function discoverAntigravityProject(
   // fail with a clear message rather than routing through a foreign project.
   if (!allowOnboard) {
     throw projectUnavailable(
-      "Antigravity could not discover a Google Cloud project. Re-run sign-in to provision one.",
+      "Antigravity could not discover a Google Cloud project. Check Google connectivity and try again; sign-in can provision a project when none exists.",
     );
   }
 
@@ -223,23 +223,14 @@ export async function resolveAntigravityProject(accessToken, options = {}) {
   return (await discoverAntigravityProject(accessToken, { allowOnboard: true, ...options })).projectId;
 }
 
-function alreadyResolved(session, nowMs) {
-  if (session.project_id && session.project_source !== "fallback") {
+function alreadyResolved(session) {
+  if (session.project_id) {
     return {
       projectId: session.project_id,
       source: "managed",
       tierId: session.tier_id,
       checkedAt: session.project_checked_at,
     };
-  }
-  if (
-    session.project_source === "fallback" &&
-    Number.isFinite(session.project_checked_at) &&
-    nowMs - session.project_checked_at < PROJECT_CACHE_TTL_MS
-  ) {
-    throw projectUnavailable(
-      "The Antigravity Google Cloud project is not available; re-run sign-in to provision one.",
-    );
   }
   return undefined;
 }
@@ -249,7 +240,7 @@ async function persistProjectContext(session, context) {
     if (latest.refresh_token !== session.refresh_token) return undefined;
     return {
       ...latest,
-      project_id: context.source === "managed" ? context.projectId : "",
+      project_id: context.projectId,
       project_source: context.source,
       project_checked_at: context.checkedAt,
       tier_id: context.tierId,
@@ -269,13 +260,10 @@ export async function ensureAntigravityProject(
     timeoutMs = 15_000,
     signal,
     allowOnboard = false,
-    forceFallbackRefresh = false,
   } = {},
 ) {
   const nowMs = now();
-  const refreshFallback = forceFallbackRefresh && session.project_source === "fallback";
-  if (refreshFallback) invalidateAntigravityProjectCache(session.refresh_token);
-  const resolved = refreshFallback ? undefined : alreadyResolved(session, nowMs);
+  const resolved = alreadyResolved(session);
   if (resolved) return { session, ...resolved };
 
   const refreshToken = session.refresh_token;
@@ -293,7 +281,6 @@ export async function ensureAntigravityProject(
         timeoutMs,
         signal,
         allowOnboard,
-        forceFallbackRefresh,
       });
     }
     return { session: saved, ...cached.context };
@@ -314,7 +301,6 @@ export async function ensureAntigravityProject(
         timeoutMs,
         signal,
         allowOnboard,
-        forceFallbackRefresh,
       });
     }
     return { session: saved, ...context };
@@ -352,7 +338,6 @@ export async function ensureAntigravityProject(
       timeoutMs,
       signal,
       allowOnboard,
-      forceFallbackRefresh,
     });
   }
   return { session: saved, ...context };
