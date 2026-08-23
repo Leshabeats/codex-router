@@ -27,11 +27,19 @@ const {
 const {
   curatedModelContextLength,
   curatedModelDescription,
+  curatedModelIds,
+  curatedModelOutputLimit,
   curatedModelProviderId,
+  curatedModelReasoningLevels,
   curationProviderIds,
 } = await import("../src/opencode-curation.mjs");
-const { defaultUserModelDescription, userModelEntry } =
-  await import("../src/user-models.mjs");
+const {
+  DEFAULT_AUTO_COMPACT,
+  DEFAULT_CONTEXT_WINDOW,
+  defaultUserModelDescription,
+  hasDefaultUserModelReasoning,
+  userModelEntry,
+} = await import("../src/user-models.mjs");
 process.argv = savedArgv;
 process.exitCode = 0;
 
@@ -701,6 +709,244 @@ test("scripted OpenCode Free curation stores the documented window and its sourc
     const other = stored.models.find((model) => model.upstreamModel === otherId);
     assert.equal(other.contextWindow, 131072);
     assert.equal(other.description, defaultUserModelDescription("opencode-free"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+
+// The context window is this repository's one departure from "conservative
+// default", so a declared one has to be safe as well as sourced: Codex
+// compacts at `curatedSizing`'s ratio, and whatever is left has to still hold
+// a full-length completion or the turn runs past the window the entry itself
+// declared. An id whose published output limit does not fit in that reserve
+// keeps the default rather than declaring a number it cannot honour.
+test("every documented OpenCode Free window reserves room for its output limit", () => {
+  const ids = curatedModelIds("opencode-free");
+  assert.ok(ids.length > 0);
+  let declared = 0;
+  for (const id of ids) {
+    const output = curatedModelOutputLimit("opencode-free", id);
+    assert.equal(typeof output, "number", `${id} records no published output limit`);
+    const window = curatedModelContextLength("opencode-free", id);
+    if (window === undefined) {
+      // A withheld window has to say so in the entry, not only in a comment.
+      assert.match(curatedModelDescription("opencode-free", id), /unknown/);
+      continue;
+    }
+    declared += 1;
+    const sizing = curatedSizing(window);
+    assert.ok(
+      sizing.contextWindow - sizing.autoCompact >= output,
+      `${id} compacts at ${sizing.autoCompact} of ${sizing.contextWindow}, ` +
+        `which leaves less than its ${output}-token output limit`,
+    );
+  }
+  assert.ok(declared >= 4, "the documented windows regressed");
+});
+
+test("documented OpenCode Free effort ladders are real Codex efforts", () => {
+  let ladders = 0;
+  for (const id of curatedModelIds("opencode-free")) {
+    const efforts = curatedModelReasoningLevels("opencode-free", id);
+    if (!efforts) {
+      // No published ladder means the entry keeps the single `high` default,
+      // and its description has to admit that rather than imply a capability.
+      assert.match(curatedModelDescription("opencode-free", id), /conservative default/);
+      continue;
+    }
+    ladders += 1;
+    const parsed = parseEfforts(efforts.join(","));
+    assert.deepEqual(parsed.reasoningLevels.map((level) => level.effort), efforts);
+    assert.equal(parsed.defaultEffort, "high");
+  }
+  assert.ok(ladders >= 4, "the documented effort ladders regressed");
+});
+
+test("an untuned entry gains the documented ladder while a tuned one is untouched", () => {
+  const stock = userModelEntry({
+    providerId: "opencode-free",
+    upstreamId: "laguna-s-2.1-free",
+    priority: 152,
+  });
+  assert.ok(hasDefaultUserModelReasoning(stock));
+  const [upgraded] = normalizeCurationModels([stock], "opencode-free");
+  assert.deepEqual(
+    upgraded.reasoningLevels.map((level) => level.effort),
+    ["low", "medium", "high"],
+  );
+  assert.equal(upgraded.contextWindow, 256_000);
+  assert.equal(upgraded.autoCompact, 217_600);
+
+  // A ladder-only id keeps the conservative window and still gains the ladder.
+  const flash = userModelEntry({
+    providerId: "opencode-free",
+    upstreamId: "deepseek-v4-flash-free",
+    priority: 153,
+  });
+  const [ladderOnly] = normalizeCurationModels([flash], "opencode-free");
+  assert.deepEqual(
+    ladderOnly.reasoningLevels.map((level) => level.effort),
+    ["low", "high", "max"],
+  );
+  assert.equal(ladderOnly.contextWindow, DEFAULT_CONTEXT_WINDOW);
+  assert.equal(ladderOnly.autoCompact, DEFAULT_AUTO_COMPACT);
+
+  // Hand-tuned metadata survives byte for byte, ladder included.
+  const tuned = {
+    ...stock,
+    autoCompact: 100_000,
+    reasoningLevels: [{ effort: "medium", description: "Mine" }],
+    defaultEffort: "medium",
+  };
+  assert.strictEqual(normalizeCurationModels([tuned], "opencode-free")[0], tuned);
+  const tunedSizingOnly = { ...stock, contextWindow: 200_000, autoCompact: 170_000 };
+  assert.strictEqual(
+    normalizeCurationModels([tunedSizingOnly], "opencode-free")[0],
+    tunedSizingOnly,
+  );
+
+  // An id this module documents nothing for keeps every default it started with.
+  const undocumented = userModelEntry({
+    providerId: "opencode-free",
+    upstreamId: "mimo-v2.5-free",
+    priority: 154,
+  });
+  assert.strictEqual(normalizeCurationModels([undocumented], "opencode-free")[0], undocumented);
+});
+
+test("a non-interactive OpenCode Free curation stores documented windows and ladders", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "curate-opencode-free-ladders-"));
+  const file = path.join(dir, "user-models.json");
+  const fixture = path.join(dir, "models.json");
+  const lagunaId = "laguna-s-2.1-free";
+  const flashId = "deepseek-v4-flash-free";
+  const undocumentedId = "mimo-v2.5-free";
+  // Zen serves these exact id-only records: no context limit, no effort control.
+  writeFileSync(fixture, JSON.stringify({
+    data: [{ id: lagunaId }, { id: flashId }, { id: undocumentedId }],
+  }));
+  const env = {
+    ...process.env,
+    CODEX_HOME: path.join(dir, "codex"),
+    MODEL_ROUTER_STATE_DIR: dir,
+    MODEL_ROUTER_USER_MODELS: file,
+    MODEL_ROUTER_MODEL_PICKER_STATE: path.join(dir, "model-picker.json"),
+    OPENCODE_API_KEY: "",
+    OPENCODE_GO_API_KEY: "",
+  };
+  const curate = (extra = []) => spawnSync(
+    process.execPath,
+    [
+      path.join(root, "src", "curate-models.mjs"),
+      "opencode-free",
+      "--models",
+      `${lagunaId},${flashId},${undocumentedId}`,
+      "--fixture",
+      fixture,
+      "--no-apply",
+      ...extra,
+    ],
+    { cwd: root, encoding: "utf8", env },
+  );
+  try {
+    const result = curate();
+    assert.equal(result.status, 0, result.stderr);
+    const stored = JSON.parse(readFileSync(file, "utf8"));
+    const find = (id) => stored.models.find((model) => model.upstreamModel === id);
+
+    // Documented window and documented ladder.
+    const laguna = find(lagunaId);
+    assert.equal(laguna.contextWindow, 256_000);
+    assert.equal(laguna.autoCompact, 217_600);
+    assert.ok(
+      laguna.contextWindow - laguna.autoCompact >=
+        curatedModelOutputLimit("opencode-free", lagunaId),
+    );
+    assert.deepEqual(
+      laguna.reasoningLevels.map((level) => level.effort),
+      ["low", "medium", "high"],
+    );
+    assert.equal(laguna.defaultEffort, "high");
+    assert.equal(laguna.description, curatedModelDescription("opencode-free", lagunaId));
+    assert.match(laguna.description, /256,000/);
+    assert.match(laguna.description, /models\.dev/);
+
+    // Documented ladder, window deliberately left on the conservative default.
+    const flash = find(flashId);
+    assert.deepEqual(
+      flash.reasoningLevels.map((level) => level.effort),
+      ["low", "high", "max"],
+    );
+    assert.equal(flash.contextWindow, DEFAULT_CONTEXT_WINDOW);
+    assert.equal(flash.autoCompact, DEFAULT_AUTO_COMPACT);
+    // The entry itself says which half is documented and which is unknown.
+    assert.match(flash.description, /unknown/);
+    assert.match(flash.description, /low\/high\/max/);
+
+    // Nothing documented: every value stays a conservative default, and the
+    // stock description keeps saying exactly that.
+    const undocumented = find(undocumentedId);
+    assert.equal(undocumented.contextWindow, DEFAULT_CONTEXT_WINDOW);
+    assert.equal(undocumented.autoCompact, DEFAULT_AUTO_COMPACT);
+    assert.ok(hasDefaultUserModelReasoning(undocumented));
+    assert.equal(undocumented.description, defaultUserModelDescription("opencode-free"));
+
+    // A rerun is additive and must not rewrite what it already stored.
+    const before = readFileSync(file, "utf8");
+    const second = curate();
+    assert.equal(second.status, 0, second.stderr);
+    assert.equal(readFileSync(file, "utf8"), before);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("--efforts still overrides a documented ladder", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "curate-opencode-free-efforts-"));
+  const file = path.join(dir, "user-models.json");
+  const fixture = path.join(dir, "models.json");
+  const lagunaId = "laguna-s-2.1-free";
+  writeFileSync(fixture, JSON.stringify({ data: [{ id: lagunaId }] }));
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [
+        path.join(root, "src", "curate-models.mjs"),
+        "opencode-free",
+        "--models",
+        lagunaId,
+        "--efforts",
+        "medium,high",
+        "--fixture",
+        fixture,
+        "--no-apply",
+      ],
+      {
+        cwd: root,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          CODEX_HOME: path.join(dir, "codex"),
+          MODEL_ROUTER_STATE_DIR: dir,
+          MODEL_ROUTER_USER_MODELS: file,
+          MODEL_ROUTER_MODEL_PICKER_STATE: path.join(dir, "model-picker.json"),
+          OPENCODE_API_KEY: "",
+          OPENCODE_GO_API_KEY: "",
+        },
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const [stored] = JSON.parse(readFileSync(file, "utf8")).models;
+    assert.deepEqual(
+      stored.reasoningLevels.map((level) => level.effort),
+      ["medium", "high"],
+    );
+    // The stored ladder is the operator's, so the note must not claim OpenCode
+    // published it -- while the documented window it did supply keeps its note.
+    assert.equal(stored.contextWindow, 256_000);
+    assert.match(stored.description, /256,000/);
+    assert.doesNotMatch(stored.description, /low\/medium\/high ladder/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

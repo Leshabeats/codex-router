@@ -17,6 +17,30 @@
   probed every dependency it knows about, so an id missing from `degraded` now
   renders Ready and a healthy install stops looking like it never answered.
 
+- **Curated OpenCode Zen free models now ship the effort ladder and context
+  window OpenCode publishes for them, and say which values are still
+  guesses.** Zen's anonymous `/models` endpoint returns ids and nothing else,
+  and the deterministic curation path is never interactive, so every free
+  model landed in the picker with a generic 131,072-token window and a single
+  `high` effort no matter what the route actually supported (#352).
+  `src/opencode-curation.mjs` now carries OpenCode's own published `limit` and
+  `reasoning_options` per *free id* -- adding real windows for
+  `nemotron-3-ultra-free` (1,000,000) and `laguna-s-2.1-free` (256,000)
+  alongside the two that already had them, and real effort ladders for
+  `muse-spark-1.2-contributor-free`, `x-preview-f-free`,
+  `laguna-s-2.1-free`, `deepseek-v4-flash-free`, and `hy3-free`. A window is
+  declared only when curation's 0.85 auto-compact ratio still reserves that
+  id's published output limit, so compaction fires before a completion can
+  overrun the window the entry just declared; `deepseek-v4-flash-free`,
+  `hy3-free`, `mimo-v2.5-free`, and `nemotron-3.5-lightning-free` therefore
+  keep the conservative default rather than a number a full-length answer
+  could walk off the end of. Each entry's description now names the provenance
+  of every capability it carries *and* the ones that stayed unknown, so a
+  reader can tell a documented value from a default without leaving the file.
+  Hand-tuned entries are still never rewritten: the upgrade path touches only
+  an entry still holding the untouched generic sizing pair and the untouched
+  single-`high` ladder, and an explicit `--efforts` always wins.
+
 - **Kimi OAuth sessions survive the Codex App connector pack.** Moonshot
   accepts a tool-schema `$ref` only when it points into `#/$defs/` and rejects
   the whole request -- not the one tool -- over anything else, so the
