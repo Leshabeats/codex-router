@@ -2846,7 +2846,9 @@ final class RouterScriptWatchdog: @unchecked Sendable {
   private let lock = NSLock()
   private var finished = false
   private var timedOut = false
-  private var timer: DispatchWorkItem?
+  // Signalled by `disarm` so a deadline that is no longer needed stops waiting
+  // immediately instead of sleeping out a 330s curation budget.
+  private let gate = DispatchSemaphore(value: 0)
 
   init(task: Process) { self.task = task }
 
@@ -2856,21 +2858,31 @@ final class RouterScriptWatchdog: @unchecked Sendable {
     return timedOut
   }
 
+  /// The deadline runs on a thread of its own, deliberately.
+  ///
+  /// The first version scheduled it with `DispatchQueue.global().asyncAfter`.
+  /// That deadlocks against the very condition this class exists to break:
+  /// the caller blocks a thread in `waitUntilExit()`, the pipe readers hold
+  /// two more, and on a small machine libdispatch had no thread left to run
+  /// the work item -- so a wedged child ran to completion and the watchdog
+  /// never fired. CI caught it on a 3-core macOS runner, where a `sleep 60`
+  /// armed at 0.4s exited normally after 60s. A dedicated thread cannot be
+  /// starved by the blocked callers it is supposed to rescue.
   func arm(after timeout: TimeInterval) {
-    let item = DispatchWorkItem { [weak self] in self?.fire() }
-    lock.lock()
-    timer = item
-    lock.unlock()
-    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout, execute: item)
+    let thread = Thread { [weak self] in
+      guard let self else { return }
+      if self.gate.wait(timeout: .now() + timeout) == .timedOut { self.fire() }
+    }
+    thread.name = "codex-router.script-watchdog"
+    thread.stackSize = 64 << 10
+    thread.start()
   }
 
   func disarm() {
     lock.lock()
     finished = true
-    let item = timer
-    timer = nil
     lock.unlock()
-    item?.cancel()
+    gate.signal()
   }
 
   private func fire() {
@@ -2884,13 +2896,14 @@ final class RouterScriptWatchdog: @unchecked Sendable {
     task.terminate()
     lock.unlock()
     guard pid > 0 else { return }
-    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + Self.terminationGrace) { [weak self] in
-      guard let self else { return }
-      self.lock.lock()
-      defer { self.lock.unlock() }
-      guard !self.finished, self.task.isRunning else { return }
-      kill(pid, SIGKILL)
-    }
+    // Escalation sleeps on the watchdog's own thread rather than queueing:
+    // this runs after `terminate()` on a wedged child, which is exactly when
+    // libdispatch's pool may have nothing free to hand a work item.
+    Thread.sleep(forTimeInterval: Self.terminationGrace)
+    lock.lock()
+    defer { lock.unlock() }
+    guard !finished, task.isRunning else { return }
+    kill(pid, SIGKILL)
   }
 }
 

@@ -302,7 +302,7 @@ struct RouterScriptWatchdogTests {
   /// Mirrors the ordering inside `runRouterScript`: drain both pipes, arm the
   /// watchdog, then wait. Reversing the first two would deadlock on the large
   /// output case below.
-  private func run(
+  private static func runScript(
     _ command: String,
     timeout: TimeInterval
   ) async throws -> (stdout: Data, timedOut: Bool, status: Int32) {
@@ -332,15 +332,46 @@ struct RouterScriptWatchdogTests {
     // caller's `defer` never clears the loading flag, and both catalog
     // buttons stay disabled for the rest of the app's life.
     let started = Date()
-    let result = try await run("sleep 60", timeout: 0.4)
+    let result = try await Self.runScript("sleep 60", timeout: 0.4)
     #expect(result.timedOut)
     #expect(result.status != 0)
     #expect(Date().timeIntervalSince(started) < 20)
   }
 
+  @Test("wedged children are stopped even when every other thread is blocked")
+  func terminatesWedgedChildrenUnderThreadPressure() async throws {
+    // This is the case CI caught and the single-child test above misses. Each
+    // in-flight run blocks a thread in `waitUntilExit()` and holds two more in
+    // its pipe readers. The first watchdog scheduled its deadline on
+    // libdispatch's global queue, which on a small machine had no thread left
+    // to run it -- so every child ran to completion and nothing was killed.
+    // Run enough of them at once to starve the pool on a CI-sized box.
+    let started = Date()
+    let wedged = 8
+    let results = try await withThrowingTaskGroup(of: (Bool, Int32).self) { group in
+      for _ in 0 ..< wedged {
+        group.addTask {
+          let result = try await Self.runScript("sleep 60", timeout: 0.4)
+          return (result.timedOut, result.status)
+        }
+      }
+      var collected: [(Bool, Int32)] = []
+      for try await result in group { collected.append(result) }
+      return collected
+    }
+
+    #expect(results.count == wedged)
+    for (timedOut, status) in results {
+      #expect(timedOut, "a wedged child was not stopped by the watchdog")
+      #expect(status != 0, "a wedged child exited normally instead of being signalled")
+    }
+    // Generous, but far below the 60s a starved watchdog produces.
+    #expect(Date().timeIntervalSince(started) < 30)
+  }
+
   @Test("a child that finishes in time is never signalled")
   func leavesAFastChildAlone() async throws {
-    let result = try await run("printf ok", timeout: 30)
+    let result = try await Self.runScript("printf ok", timeout: 30)
     #expect(result.timedOut == false)
     #expect(result.status == 0)
     #expect(String(data: result.stdout, encoding: .utf8) == "ok")
@@ -351,7 +382,7 @@ struct RouterScriptWatchdogTests {
     // 200KB is comfortably past the 64KB pipe: a child blocked writing into a
     // full pipe never exits, so waiting before draining would deadlock and the
     // watchdog would report a timeout that is really the caller's own bug.
-    let result = try await run("head -c 200000 /dev/zero | tr '\\0' a", timeout: 30)
+    let result = try await Self.runScript("head -c 200000 /dev/zero | tr '\\0' a", timeout: 30)
     #expect(result.timedOut == false)
     #expect(result.status == 0)
     #expect(result.stdout.count == 200_000)
@@ -359,7 +390,7 @@ struct RouterScriptWatchdogTests {
 
   @Test("disarming after the process is gone is inert")
   func disarmIsIdempotent() async throws {
-    let result = try await run("printf ok", timeout: 0.05)
+    let result = try await Self.runScript("printf ok", timeout: 0.05)
     // The timer may well have fired during teardown; it must not have signalled
     // a reaped process nor claimed a timeout on a run that completed.
     #expect(result.status == 0)
