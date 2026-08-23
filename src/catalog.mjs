@@ -734,7 +734,13 @@ function pickerProviderGroup(provider) {
   const value = String(provider || "");
   if (value === "antigravity-oauth") return { rank: 0, key: "antigravity" };
   if (value === "deepseek") return { rank: 1, key: "deepseek" };
-  if (value.startsWith("opencode-go")) return { rank: 2, key: "opencode" };
+  // The opencode family shares one stored key: `opencode-go` and its variants
+  // (`opencode-go-messages`, `opencode-go-responses`, `opencode-zen`). Group
+  // them together so Zen models stay next to the Go models they relate to
+  // instead of falling into the rank-3 catch-all under their own key.
+  if (value.startsWith("opencode-go") || value === "opencode-zen") {
+    return { rank: 2, key: "opencode" };
+  }
   return { rank: 3, key: value };
 }
 
@@ -744,12 +750,13 @@ function pickerSlugGroup(slug) {
   return pickerProviderGroup(value.slice(0, value.indexOf("/")));
 }
 
+// Orders routed models for the picker by the vendor-group policy WITHOUT
+// rewriting each model's `priority`. The `priority` field feeds Codex's
+// spawn_agent override window (AGENTS.md step 5), where certified native v2
+// routes keep intentionally low values; renumbering every routed model to
+// nativeMax+1 would crowd those certified routes out of the window. Grouping
+// only reorders the published array while every model keeps its own priority.
 function routedPickerPriorities(nativeModels, routedModelsList) {
-  const nativeMaximum = nativeModels.reduce(
-    (maximum, model) =>
-      Math.max(maximum, Number.isFinite(Number(model.priority)) ? Number(model.priority) : -1),
-    -1,
-  );
   const groups = new Map();
   for (const model of routedModelsList) {
     const group = pickerProviderGroup(model.provider);
@@ -758,18 +765,15 @@ function routedPickerPriorities(nativeModels, routedModelsList) {
     groups.get(key).models.push(model);
   }
 
-  let nextPriority = nativeMaximum + 1;
   return [...groups.values()]
     .sort((left, right) =>
       left.rank - right.rank || left.key.localeCompare(right.key),
     )
     .flatMap((group) =>
-      group.models
-        .sort((left, right) =>
-          Number(left.priority) - Number(right.priority) ||
-          String(left.slug).localeCompare(String(right.slug)),
-        )
-        .map((model) => ({ ...model, priority: nextPriority++ })),
+      group.models.sort((left, right) =>
+        Number(left.priority) - Number(right.priority) ||
+        String(left.slug).localeCompare(String(right.slug)),
+      ),
     );
 }
 
