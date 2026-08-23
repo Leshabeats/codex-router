@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { SOURCE_ROOT } from "./paths.mjs";
 import { stopManagedOllama } from "./ollama-runtime.mjs";
-import { waitForRouterHealth } from "./router-health.mjs";
+import { waitForServiceReadiness } from "./service-readiness.mjs";
 import { withServiceOperationLock } from "./service-operation-lock.mjs";
 import { environmentProxyOptedIn } from "./proxy-environment.mjs";
 
@@ -51,7 +51,7 @@ async function runServiceCommand() {
   if (shutdownCommands.has(command)) await stopManagedOllama();
   if (!readinessCommands.has(command)) return 0;
 
-  const health = await waitForRouterHealth({ timeoutMs: READINESS_TIMEOUT_MS });
+  const health = await waitForServiceReadiness({ timeoutMs: READINESS_TIMEOUT_MS });
   if (health.ok) return 0;
   console.error(
     `Router did not become healthy within ${READINESS_TIMEOUT_MS / 1_000} seconds: ${health.error}`,
