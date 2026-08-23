@@ -22,7 +22,10 @@ import {
 } from "./paths.mjs";
 import { antigravityClientSecretEnvironment } from "./antigravity-oauth-constants.mjs";
 import { serviceProxyEnvironment } from "./proxy-environment.mjs";
-import { assertServiceWriteIsolated } from "./service-write-guard.mjs";
+import {
+  skipServiceManagerCall,
+  assertServiceWriteIsolated,
+} from "./service-write-guard.mjs";
 
 const effectivePlatform = process.env.CODEX_ROUTER_SERVICE_PLATFORM || process.platform;
 const command = process.argv[2] || "status";
@@ -111,7 +114,32 @@ WantedBy=default.target
 `;
 }
 
+// Only this platform's own module can reach this machine's service manager.
+// Run anywhere else -- the cross-platform render tests drive all three modules
+// on one host -- systemctl is absent or a test's own stub.
+const HOST_MANAGED = process.platform === "linux";
+
+// The write guard covers the unit file, but a test cannot redirect systemd:
+// XDG_CONFIG_HOME moves where the unit is written, not where the running
+// systemd looks for it, so `enable --now codex-router.service` from an
+// otherwise isolated test acts on the developer's own unit. Same failure the
+// launchd module already skips, same shape.
+//
+// Reads stay live. `status` has to keep answering whether the unit is really
+// active, or the doctor reasons from a state the skip invented.
+const MUTATING_VERBS = new Set([
+  "daemon-reload",
+  "disable",
+  "enable",
+  "restart",
+  "start",
+  "stop",
+]);
+
 function systemctl(args, options = {}) {
+  if (MUTATING_VERBS.has(args[0]) && skipServiceManagerCall({ hostManaged: HOST_MANAGED })) {
+    return "";
+  }
   return execFileSync("systemctl", ["--user", ...args], {
     encoding: "utf8",
     stdio: options.quiet ? ["ignore", "ignore", "ignore"] : ["ignore", "pipe", "pipe"],
