@@ -3440,6 +3440,11 @@ test("API forwarder routes MiniMax M3 streaming tool calls with adaptive thinkin
     assert.equal(request.body.stream, true);
     assert.equal(request.body.reasoning_effort, undefined);
     assert.deepEqual(request.body.thinking, { type: "adaptive" });
+    // Without this, MiniMax returns the chain of thought inline in `content`
+    // as literal <think>...</think> markup. Verified against api.minimax.io:
+    // the same prompt leaks `<think>` into `content` without the flag and
+    // carries a populated `reasoning_content` with it.
+    assert.equal(request.body.reasoning_split, true);
     assert.equal(request.body.tools[0].function.name, "get_weather");
     assert.deepEqual(request.body.tools[0].function.parameters.required, ["city"]);
   } finally {
