@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -104,6 +111,55 @@ test("accepted proof identity must match one exact v2 registry route", () => {
     }),
     /requires the exact registry route to declare multiAgentVersion v2/,
   );
+});
+
+test("accepted applications fail closed on legacy versions, v1 routes, and unknown checks", () => {
+  const roots = [];
+  const fixture = (suffix) => {
+    const root = mkdtempSync(path.join(os.tmpdir(), `v2-agent-contract-${suffix}-`));
+    roots.push(root);
+    return root;
+  };
+  try {
+    const legacy = acceptedProof();
+    legacy.version = 0;
+    const legacyRoot = fixture("version");
+    application(legacyRoot, legacy);
+    assert.throws(
+      () => validateV2AgentApplications(legacyRoot, { models: ACCEPTED_MODELS }),
+      /proof\.json version must be 1/,
+    );
+
+    const v1Root = fixture("v1");
+    application(v1Root, acceptedProof());
+    assert.throws(
+      () => validateV2AgentApplications(v1Root, {
+        models: [{
+          slug: "example/alpha",
+          provider: "example",
+          upstreamModel: "alpha",
+          multiAgentVersion: "v1",
+        }],
+      }),
+      /requires the exact registry route to declare multiAgentVersion v2/,
+    );
+
+    const unknownCheckRoot = fixture("check");
+    const unknownCheck = acceptedProof();
+    delete unknownCheck.checks.toolCall;
+    unknownCheck.checks.tools = {
+      outcome: "pass",
+      status: 200,
+      observedAt: unknownCheck.testedAt,
+    };
+    application(unknownCheckRoot, unknownCheck);
+    assert.throws(
+      () => validateV2AgentApplications(unknownCheckRoot, { models: ACCEPTED_MODELS }),
+      /checks\.toolCall must record outcome: "pass"/,
+    );
+  } finally {
+    for (const root of roots) rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("accepted proofs reject placeholder sources and loose timestamps", () => {
