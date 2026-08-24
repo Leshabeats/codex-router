@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { createHash, createHmac } from "node:crypto";
+import { createHash, scryptSync } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -33,7 +33,12 @@ test.after(() => rmSync(stateRoot, { recursive: true, force: true }));
 test("catalog identity fingerprints require the installation's independent secret", () => {
   const payload = JSON.stringify(["test-account"]);
   const unkeyed = createHash("sha256").update(payload).digest("hex");
-  const keyed = createHmac("sha256", internalSecret).update(payload).digest("hex");
+  const keyed = scryptSync(payload, internalSecret, 32, {
+    N: 16_384,
+    r: 8,
+    p: 1,
+    maxmem: 32 * 1024 * 1024,
+  }).toString("hex");
   assert.equal(TEST_IDENTITY, keyed);
   assert.notEqual(TEST_IDENTITY, unkeyed);
   try {

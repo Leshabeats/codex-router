@@ -1,4 +1,4 @@
-import { createHmac, randomBytes } from "node:crypto";
+import { randomBytes, scryptSync } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
@@ -30,6 +30,7 @@ const MAX_MODELS = 4000;
 const PROVIDER_ID = /^[a-z0-9][a-z0-9._-]{0,80}$/i;
 const IDENTITY_FINGERPRINT = /^[a-f0-9]{64}$/;
 const PROCESS_IDENTITY_KEY = randomBytes(32);
+const IDENTITY_SCRYPT_OPTIONS = Object.freeze({ N: 16_384, r: 8, p: 1, maxmem: 32 * 1024 * 1024 });
 
 function providerCatalogIdentityKey() {
   try {
@@ -44,14 +45,18 @@ function providerCatalogIdentityKey() {
 }
 
 // The cache must answer only for the effective account that produced it. This
-// keyed digest is a private verifier, never a credential. The installation's
-// independent internal secret prevents somebody who obtains only the private
-// cache document from testing credential guesses against its fingerprint.
+// memory-hard digest is a private verifier, never a credential. The
+// installation's independent internal secret is its salt, so somebody who
+// obtains only the private cache cannot test credential guesses, and scrypt
+// keeps verification expensive even if both private files are compromised.
 export function providerCatalogIdentityFingerprint(parts) {
   const values = Array.isArray(parts) ? parts : [parts];
-  return createHmac("sha256", providerCatalogIdentityKey())
-    .update(JSON.stringify(values.map((value) => value ?? null)))
-    .digest("hex");
+  return scryptSync(
+    JSON.stringify(values.map((value) => value ?? null)),
+    providerCatalogIdentityKey(),
+    32,
+    IDENTITY_SCRYPT_OPTIONS,
+  ).toString("hex");
 }
 
 function readCacheDocument() {
