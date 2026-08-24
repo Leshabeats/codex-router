@@ -29,6 +29,19 @@ const DEFAULTS = Object.freeze({
     structuredOutput: true,
     maxOutputTokensField: "max_tokens",
   }),
+  // Legacy Completions is intentionally conservative. It accepts a prompt
+  // and token budget, but no chat messages, tools, images, hosted search or
+  // structured-output fields unless a provider declares a richer adapter.
+  "openai-completions": Object.freeze({
+    streaming: true,
+    tools: false,
+    parallelToolCalls: false,
+    reasoning: "none",
+    vision: false,
+    webSearch: false,
+    structuredOutput: false,
+    maxOutputTokensField: "max_tokens",
+  }),
 });
 
 function clone(value) {
@@ -42,10 +55,12 @@ function clone(value) {
 function adapterId(value) {
   if (typeof value === "string") {
     if (value === "openai-responses" || value === "responses") return "openai-responses";
+    if (value === "openai-completions" || value === "completions") return "openai-completions";
     return "openai-chat";
   }
   if (value?.adapter) return adapterId(value.adapter);
   if (value?.protocol === "openai-responses") return "openai-responses";
+  if (value?.protocol === "openai-completions") return "openai-completions";
   return "openai-chat";
 }
 
@@ -325,6 +340,11 @@ export function normalizeOpenAIRequest(payload, {
 } = {}) {
   const id = adapterId(adapter);
   const next = clone(payload) || {};
+  if (id === "openai-completions") {
+    delete next.messages;
+    delete next.input;
+    return omitUnsupportedFields(next, capabilities, id);
+  }
   if (id === "openai-chat") {
     if (next.input !== undefined && next.messages === undefined) {
       next.messages = responsesInputToChatMessages(next.input);

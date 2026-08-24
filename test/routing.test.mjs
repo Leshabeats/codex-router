@@ -3300,6 +3300,11 @@ function curatedOpenRouterModels() {
       models: [
         entry("openrouter", "qwen/qwen3.8-max", "openrouter-qwen-qwen3-8-max", "auto-tool-choice"),
         entry("openrouter", "openai/gpt-5.3", "openrouter-openai-gpt-5-3"),
+        {
+          ...entry("openrouter", "openai/text-embedding-3-small", "openrouter-openai-text-embedding-3-small"),
+          adapter: "openai-completions",
+          supportedEndpoints: ["/completions"],
+        },
         entry("chutes", "moonshotai/Kimi-K3-TEE", "chutes-moonshotai-kimi-k3-tee"),
       ],
     }),
@@ -3310,9 +3315,66 @@ function curatedOpenRouterModels() {
     file,
     restricted: "openrouter-qwen-qwen3-8-max",
     unrestricted: "openrouter-openai-gpt-5-3",
+    completions: "openrouter-openai-text-embedding-3-small",
     chutes: "chutes-moonshotai-kimi-k3-tee",
   };
 }
+
+test("API forwarder routes legacy Completions only for models that declare it", async () => {
+  const upstreamRequests = [];
+  const upstream = await mockServer(async (request, response) => {
+    upstreamRequests.push({ url: request.url, body: await bodyJson(request) });
+    json(response, 200, { id: "cmpl_test", object: "text_completion", choices: [] });
+  });
+  const curated = curatedOpenRouterModels();
+  const forwarderPort = await openPort();
+  const forwarder = run("api-forwarder.mjs", {
+    CODEX_ROUTER_API_PORT: String(forwarderPort),
+    MODEL_ROUTER_USER_MODELS: curated.file,
+    OPENROUTER_API_BASE_URL: `http://127.0.0.1:${upstream.port}/v1`,
+    OPENROUTER_API_KEY: "TEST_OPENROUTER_API_KEY",
+    CODEX_ROUTER_QUIET: "1",
+  });
+  const headers = {
+    Authorization: `Bearer ${INTERNAL_KEY}`,
+    "Content-Type": "application/json",
+  };
+
+  try {
+    await waitFor(`http://127.0.0.1:${forwarderPort}/health`, forwarder, headers);
+    const response = await fetch(`http://127.0.0.1:${forwarderPort}/v1/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: curated.completions,
+        prompt: "hello",
+        messages: [{ role: "user", content: "must not reach legacy endpoint" }],
+        tools: [{ type: "function" }],
+        max_output_tokens: 20,
+      }),
+    });
+    assert.equal(response.status, 200, forwarder.testErrors());
+    assert.equal(upstreamRequests[0].url, "/v1/completions");
+    assert.equal(upstreamRequests[0].body.model, "openai/text-embedding-3-small");
+    assert.equal(upstreamRequests[0].body.prompt, "hello");
+    assert.equal(upstreamRequests[0].body.max_tokens, 20);
+    assert.equal(upstreamRequests[0].body.messages, undefined);
+    assert.equal(upstreamRequests[0].body.tools, undefined);
+
+    const refused = await fetch(`http://127.0.0.1:${forwarderPort}/v1/embeddings`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ model: curated.completions, input: "hello" }),
+    });
+    assert.equal(refused.status, 400);
+    const error = await refused.json();
+    assert.equal(error.error.type, "provider_api_proxy_error");
+  } finally {
+    await stopChild(forwarder);
+    await closeServer(upstream.server);
+    rmSync(curated.dir, { recursive: true, force: true });
+  }
+});
 
 test("API forwarder downgrades forced tool choices only for models that declare the restriction", async () => {
   const upstreamRequests = [];

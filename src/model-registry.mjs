@@ -4,6 +4,7 @@ import path from "node:path";
 import { instructionOverlayExists } from "./instruction-overlays.mjs";
 import { SOURCE_ROOT } from "./paths.mjs";
 import { officialModelDisplayName, readUserModels } from "./user-models.mjs";
+import { normalizeSupportedEndpoints } from "./openai-endpoint-policy.mjs";
 
 export const REGISTRY_PATH =
   process.env.MODEL_ROUTER_REGISTRY ||
@@ -532,6 +533,15 @@ function modelProblem(model, providers, slugs, gatewayModels) {
   }
   if (model.requestProfile !== undefined && typeof model.requestProfile !== "string") {
     return `model ${model.slug} has an invalid requestProfile`;
+  }
+  if (model.supportedEndpoints !== undefined) {
+    try {
+      normalizeSupportedEndpoints(model.supportedEndpoints, {
+        field: `model ${model.slug}.supportedEndpoints`,
+      });
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
   }
   if (
     model.requiresTrailingUserTurn !== undefined &&

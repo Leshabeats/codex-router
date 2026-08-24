@@ -22,6 +22,23 @@ test("adapter profiles stay conservative and select the correct token field", ()
   );
   // Invalid metadata cannot grant a capability by accident.
   assert.equal(adapterCapabilities("openai-chat", { tools: "yes" }).tools, true);
+  assert.equal(adapterCapabilities("openai-completions").tools, false);
+  assert.equal(adapterCapabilities("openai-completions").maxOutputTokensField, "max_tokens");
+});
+
+test("legacy Completions keeps prompt-shaped payloads and drops chat-only fields", () => {
+  const normalized = normalizeOpenAIRequest({
+    model: "legacy",
+    prompt: "hello",
+    messages: [{ role: "user", content: "wrong surface" }],
+    tools: [{ type: "function" }],
+    stream: true,
+    max_output_tokens: 12,
+  }, { adapter: "openai-completions" });
+  assert.equal(normalized.prompt, "hello");
+  assert.deepEqual(normalized.messages, undefined);
+  assert.equal(normalized.tools, undefined);
+  assert.equal(normalized.max_tokens, 12);
 });
 
 test("Responses function tools become Chat Completions tools without mutating input", () => {
@@ -170,4 +187,3 @@ test("stream event adapters preserve text, reasoning, tools, completion and usag
     ],
   );
 });
-

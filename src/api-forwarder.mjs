@@ -46,6 +46,12 @@ import { VERSION } from "./version.mjs";
 import { installStableFetchTransport } from "./fetch-transport.mjs";
 import { zaiCacheUsageTransform } from "./zai-cache-usage.mjs";
 import { normalizeOpenAIRequest } from "./openai-adapters.mjs";
+import {
+  adapterForEndpoint,
+  endpointCapabilityError,
+  protocolEndpoint,
+  supportsOpenAIEndpoint,
+} from "./openai-endpoint-policy.mjs";
 
 installStableFetchTransport();
 
@@ -546,16 +552,14 @@ function normalizeBody(buffer, contentType, route) {
     throw error;
   }
   const adapter = model.adapter || provider.adapter || provider.protocol;
-  const expectedRoute =
-    adapter === "anthropic"
-      ? "/messages"
-      : ["openai-responses", "responses"].includes(adapter)
-        ? "/responses"
-        : "/chat/completions";
-  if (route !== expectedRoute) {
+  const expectedRoute = adapter === "anthropic" ? "/messages" : protocolEndpoint(adapter);
+  if (adapter === "anthropic" && route !== expectedRoute) {
     const error = new Error(`Model ${model.gatewayModel} does not support ${route}.`);
     error.status = 400;
     throw error;
+  }
+  if (adapter !== "anthropic" && !supportsOpenAIEndpoint(route, { adapter, model, provider })) {
+    throw endpointCapabilityError(route, model);
   }
 
   // Generic providers may opt into an explicit adapter capability profile.
@@ -564,7 +568,10 @@ function normalizeBody(buffer, contentType, route) {
   // original request body.
   const capabilities = model.capabilities || model.adapterCapabilities || provider.capabilities;
   if (model.adapter || provider.adapter || capabilities || model.adapterCapabilities) {
-    payload = normalizeOpenAIRequest(payload, { adapter, capabilities });
+    payload = normalizeOpenAIRequest(payload, {
+      adapter: adapterForEndpoint(route, adapter),
+      capabilities,
+    });
   }
 
   // OpenAI Chat Completions providers place terminal usage in a final empty
@@ -1002,7 +1009,17 @@ async function handleRequest(request, response) {
   }
   if (
     request.method !== "POST" ||
-    !["/chat/completions", "/messages", "/responses"].includes(route)
+    ![
+      "/chat/completions",
+      "/messages",
+      "/responses",
+      "/completions",
+      "/embeddings",
+      "/moderations",
+      "/images/generations",
+      "/audio/speech",
+      "/batches",
+    ].includes(route)
   ) {
     writeJson(response, 404, {
       error: { type: "proxy_route_not_found", message: "Unsupported API-provider route." },
