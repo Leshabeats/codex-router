@@ -1,9 +1,9 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AppWindow, Eye, Moon, RefreshCw, Server, Sun, Wrench } from "lucide-react";
 import { Badge, Button, Dialog, InlineNotice, PageHeader, SectionHeading, Toggle } from "../components";
 import { compactNumber } from "../lib";
 import { LANGUAGE_OPTIONS, type LanguageId, type Translate } from "../i18n";
-import type { DoctorSnapshot, PresenceSnapshot, RouterControlApi, RouterHealth, RouterTarget, VisionEngine } from "../types";
+import type { ChatGptSessionStatus, DoctorSnapshot, PresenceSnapshot, RouterControlApi, RouterHealth, RouterTarget, VisionEngine } from "../types";
 import { useOptimisticValues, type RunAction } from "../useOptimisticValues";
 
 // Mirrors RETENTION_MIN/MAX/DEFAULT_TTL_DAYS in src/tool-result-retention.mjs.
@@ -25,10 +25,11 @@ function formatBytes(value: number | null | undefined): string {
   return `${size >= 10 || unit === 0 ? Math.round(size) : size.toFixed(1)} ${units[unit]}`;
 }
 
-export function SettingsPage({ target, health, presence, api, theme, onTheme, language, onLanguage, t, refreshing, onRefresh, runAction }: {
+export function SettingsPage({ target, health, presence, chatgptSession, api, theme, onTheme, language, onLanguage, t, refreshing, onRefresh, runAction }: {
   target?: RouterTarget;
   health?: RouterHealth;
   presence?: PresenceSnapshot;
+  chatgptSession?: ChatGptSessionStatus;
   api?: RouterControlApi;
   theme: "light" | "dark";
   onTheme: (theme: "light" | "dark") => void;
@@ -40,13 +41,46 @@ export function SettingsPage({ target, health, presence, api, theme, onTheme, la
   runAction: RunAction;
 }) {
   const [confirmTrayDisable, setConfirmTrayDisable] = useState(false);
+  const [confirmSessionSharing, setConfirmSessionSharing] = useState(false);
   const [confirmRepair, setConfirmRepair] = useState(false);
   const [repairing, setRepairing] = useState(false);
   const [repairReport, setRepairReport] = useState<DoctorSnapshot | null>(null);
+  const [trayCapability, setTrayCapability] = useState<{ supported?: boolean; why?: string }>();
+  useEffect(() => {
+    let active = true;
+    if (!api) {
+      setTrayCapability(undefined);
+      return () => { active = false; };
+    }
+    void api.controlTray("status").then((result) => {
+      if (!active) return;
+      const status = (result as { status?: { supported?: boolean; why?: string } } | undefined)?.status;
+      setTrayCapability(status);
+    }).catch(() => {
+      if (active) setTrayCapability(undefined);
+    });
+    return () => { active = false; };
+  }, [api, refreshing]);
+  const trayControlsUnavailable = trayCapability?.supported === false;
   const repairFailures = useMemo(
     () => (repairReport?.checks ?? []).filter((check) => check.status === "fail"),
     [repairReport],
   );
+  const sessionSharingEnabled = chatgptSession?.sharing === "enabled";
+  const sessionLoginLabel = chatgptSession?.session === "usable"
+    ? (typeof chatgptSession.expiresInHours === "number"
+      ? t("settings.chatgptSession.status.loginUsableHours", { hours: chatgptSession.expiresInHours })
+      : t("settings.chatgptSession.status.loginUsable"))
+    : chatgptSession?.session === "expired"
+      ? t("settings.chatgptSession.status.loginExpired")
+      : chatgptSession?.present
+        ? t("settings.chatgptSession.status.loginUnavailableDetected")
+        : t("settings.chatgptSession.status.loginUnavailableLogin");
+  const sessionSharingLabel = chatgptSession
+    ? `${t(sessionSharingEnabled
+      ? "settings.chatgptSession.status.sharingEnabled"
+      : "settings.chatgptSession.status.sharingDisabled")} · ${sessionLoginLabel}`
+    : t("settings.chatgptSession.status.unavailable");
 
   // Repair reinstalls and restarts the service, so it can outlast several
   // ordinary actions. `runAction` owns the toast and the refresh; the report
@@ -127,6 +161,22 @@ export function SettingsPage({ target, health, presence, api, theme, onTheme, la
               <div className="setting-row">
                 <div><strong>{t("settings.signedRouting.title")}</strong><small>{t("settings.signedRouting.detail")}</small></div>
                 <Toggle checked={optimisticToggles.value("signed-routing", target?.signedRouting === true)} disabled={!api || !target} label={t("settings.signedRouting.title")} onChange={(enabled) => api && void optimisticToggles.mutate("signed-routing", enabled, "Change signed routing", () => api.setSignedRouting(enabled))} />
+              </div>
+              <div className="setting-row">
+                <div>
+                  <strong>{t("settings.chatgptSession.title")}</strong>
+                  <small>{t("settings.chatgptSession.detail")} {sessionSharingLabel}</small>
+                </div>
+                <Toggle
+                  checked={sessionSharingEnabled}
+                  disabled={!api || !chatgptSession || (!sessionSharingEnabled && chatgptSession.session !== "usable")}
+                  label={t("settings.chatgptSession.title")}
+                  onChange={(enabled) => {
+                    if (!api) return;
+                    if (enabled) setConfirmSessionSharing(true);
+                    else void runAction(t("settings.chatgptSession.action.disable"), () => api.setChatGptSessionSharing(false));
+                  }}
+                />
               </div>
             </div>
             <InlineNotice tone="neutral" title={t("settings.restart.title")}>{t("settings.restart.body")}</InlineNotice>
@@ -270,10 +320,15 @@ export function SettingsPage({ target, health, presence, api, theme, onTheme, la
               <div><strong>{t("settings.desktop.tray.title")}</strong><small>{t("settings.desktop.tray.detail")}</small></div>
             </div>
             <div className="settings-actions">
-              <Button variant="secondary" disabled={!api} onClick={() => api && void runAction("Enable desktop tray", () => api.controlTray("enable"))}>{t("settings.desktop.enable")}</Button>
-              <Button variant="secondary" disabled={!api} onClick={() => api && void runAction("Restart desktop tray", () => api.controlTray("restart"))}>{t("settings.desktop.restart")}</Button>
-              <Button variant="ghost" disabled={!api} onClick={() => setConfirmTrayDisable(true)}>{t("settings.desktop.disable")}</Button>
+              <Button variant="secondary" disabled={!api || trayControlsUnavailable} onClick={() => api && void runAction("Enable desktop tray", () => api.controlTray("enable"))}>{t("settings.desktop.enable")}</Button>
+              <Button variant="secondary" disabled={!api || trayControlsUnavailable} onClick={() => api && void runAction("Restart desktop tray", () => api.controlTray("restart"))}>{t("settings.desktop.restart")}</Button>
+              <Button variant="ghost" disabled={!api || trayControlsUnavailable} onClick={() => setConfirmTrayDisable(true)}>{t("settings.desktop.disable")}</Button>
             </div>
+            {trayControlsUnavailable ? (
+              <InlineNotice tone="neutral" title={t("settings.desktop.unavailable.title")}>
+                {t("settings.desktop.unavailable.body")}
+              </InlineNotice>
+            ) : null}
           </section>
 
           <section className="panel-section">
@@ -329,6 +384,22 @@ export function SettingsPage({ target, health, presence, api, theme, onTheme, la
       </div>
 
       <Dialog
+        open={confirmSessionSharing}
+        title={t("settings.chatgptSession.confirm.title")}
+        description={t("settings.chatgptSession.confirm.description")}
+        onClose={() => setConfirmSessionSharing(false)}
+      >
+        <p className="dialog-copy">{t("settings.chatgptSession.confirm.body")}</p>
+        <div className="dialog-actions">
+          <Button variant="secondary" onClick={() => setConfirmSessionSharing(false)}>{t("settings.desktop.confirm.cancel")}</Button>
+          <Button variant="primary" onClick={() => {
+            setConfirmSessionSharing(false);
+            if (api) void runAction(t("settings.chatgptSession.action.enable"), () => api.setChatGptSessionSharing(true));
+          }}>{t("settings.chatgptSession.confirm.enable")}</Button>
+        </div>
+      </Dialog>
+
+      <Dialog
         open={confirmRepair}
         title={t("settings.maintenance.confirm.title")}
         description={t("settings.maintenance.confirm.description")}
@@ -348,7 +419,7 @@ export function SettingsPage({ target, health, presence, api, theme, onTheme, la
         <p className="dialog-copy">{t("settings.desktop.confirm.body")}</p>
         <div className="dialog-actions">
           <Button variant="secondary" onClick={() => setConfirmTrayDisable(false)}>{t("settings.desktop.confirm.cancel")}</Button>
-          <Button variant="danger" onClick={() => {
+          <Button variant="danger" disabled={trayControlsUnavailable} onClick={() => {
             setConfirmTrayDisable(false);
             if (api) void runAction("Disable desktop tray", () => api.controlTray("disable"));
           }}>{t("settings.desktop.disable")}</Button>

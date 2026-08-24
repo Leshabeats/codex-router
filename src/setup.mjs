@@ -32,7 +32,7 @@ import {
   writeProviderSelection,
 } from "./provider-selection.mjs";
 import { writeDiscoveryMode } from "./discovery-mode.mjs";
-import { trayBundleDir, trayDecision } from "./tray-install.mjs";
+import { trayDecision } from "./tray-install.mjs";
 import { resolveVisionEngine } from "./vision-bridge.mjs";
 import {
   readVisionBridgeSettings,
@@ -385,10 +385,11 @@ function installTray() {
         );
         return;
       }
-      const bundleDir = trayBundleDir("darwin", os.homedir());
-      run(path.join(SOURCE_ROOT, "scripts", "build-macos-tray-app.sh"), [bundleDir]);
-      run("open", [bundleDir]);
-      process.stdout.write(`Menu-bar companion installed at ${bundleDir} and opened.\n`);
+      // One canonical transaction stages the signed bundle, drains any
+      // running embedded Control Center, swaps atomically, stamps the build,
+      // and hands the native host to launchd.
+      run(path.join(SOURCE_ROOT, "bin", "model-router-tray"), []);
+      process.stdout.write("Model Router installed with its native menu-bar tray and Control Center.\n");
     } else if (process.platform === "win32") {
       // Windows had no path through here at all: the tray was built by hand or
       // not at all, and nothing brought it back after a reboot. `tray install`
@@ -417,8 +418,7 @@ function installTray() {
           ? "Recent macOS SDKs need the full Xcode app (not only the Command Line Tools) to build the menu-bar companion's SwiftUI macros.\n"
           : "") +
         (process.platform === "win32"
-          ? "The router itself is installed; retry later with .\\codex-router.ps1 tray,\n" +
-            "or .\\codex-router.ps1 companion for the Electron build, which needs no Rust.\n"
+          ? "The router itself is installed; retry later with .\\codex-router.ps1 tray.\n"
           : "The router itself is installed; retry later with ./bin/model-router-tray.\n") +
         // Nothing to build and nothing to download, so it is the one suggestion
         // that cannot fail for the same reason this just did.

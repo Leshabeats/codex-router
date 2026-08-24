@@ -75,24 +75,31 @@ the same run upgrades the exact generic `131072` / `110000` sizing pair on
 these two ids while preserving any user-tuned value. Install, update, registry
 load, and catalog discovery remain read-only.
 
-The Go documentation names 20 current subscription models. The checked-in
-registry contains those exact upstream IDs and uses the endpoint family the
-official table specifies (`chat/completions`, `messages`, or `responses`). The
-2026-08-21 addition is `muse-spark-1.2-contributor` on Responses.
+The Go documentation was rechecked on 2026-08-24 (the page reports an
+2026-08-23 update). Its overview names 22 current subscription models, while
+its authoritative endpoint table additionally documents `minimax-m2.5` on
+`/messages` and its pricing table still assigns that ID a Go allowance. The
+checked-in registry contains those 23 documented endpoint IDs and uses the
+endpoint family the official table specifies (`chat/completions`, `messages`,
+or `responses`).
 
-The live Go `/models` response also contained seven IDs not in the
+The live Go `/models` response also contained six IDs not in the
 documentation's current-model list. They are intentionally not advertised as
 checked-in Go models:
 
 | Live-only ID | Reason not shipped |
 | --- | --- |
-| `minimax-m2.5` | The Zen documentation marks it deprecated on 2026-08-05. |
 | `kimi-k2.5` | The Zen documentation marks it deprecated on 2026-08-05. |
 | `glm-5` | The Zen documentation marks it deprecated on 2026-05-14. |
 | `qwen3.5-plus` | Not in the Go documentation's current-model or Go endpoint table. |
 | `mimo-v2-pro` | Not in the Go documentation's current-model or Go endpoint table. |
 | `mimo-v2-omni` | Not in the Go documentation's current-model or Go endpoint table. |
 | `hy3-preview` | Not in the Go documentation's current-model or Go endpoint table. |
+
+`minimax-m2.5` remains deprecated on pay-per-use Zen, but that is a different
+surface: Go's current endpoint and pricing tables explicitly retain it on the
+subscription Messages route. The registry therefore ships the Go route and
+does not infer a Zen route from it.
 
 A future refresh should update this table if the official current-model list
 adopts one of those IDs.

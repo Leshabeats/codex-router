@@ -52,7 +52,27 @@ function isolatedEnvironment(testRoot) {
     GITHUB_TOKEN: "",
     CLINE_API_KEY: "",
     CHUTES_API_KEY: "",
+    OPENCODE_API_KEY: "",
+    OPENCODE_GO_API_KEY: "",
   };
+}
+
+function seedCatalogCache(stateDir) {
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(path.join(stateDir, "provider-catalog-cache.json"), JSON.stringify({
+    version: 1,
+    providers: {
+      "opencode-go": { discovered: ["go-old-account"], fetchedAt: new Date().toISOString() },
+      "opencode-zen": { discovered: ["zen-old-account"], fetchedAt: new Date().toISOString() },
+      deepseek: { discovered: ["keep-me"], fetchedAt: new Date().toISOString() },
+    },
+  }));
+}
+
+function cachedProviders(stateDir) {
+  return JSON.parse(
+    readFileSync(path.join(stateDir, "provider-catalog-cache.json"), "utf8"),
+  ).providers;
 }
 
 test("provider onboarding reports install, login, and API key actions without secrets", () => {
@@ -119,6 +139,37 @@ test("control accepts an API key only through stdin and stores it privately", ()
       readFileSync(path.join(testRoot, "state", "xai-api-key.secret"), "utf8").trim(),
       testKey,
     );
+  } finally {
+    rmSync(testRoot, { recursive: true, force: true });
+  }
+});
+
+test("control clears every catalog source when a shared credential changes", () => {
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "provider-family-cache-control-"));
+  const environment = isolatedEnvironment(testRoot);
+  const stateDir = environment.MODEL_ROUTER_STATE_DIR;
+  try {
+    seedCatalogCache(stateDir);
+    const saved = spawnSync(
+      process.execPath,
+      [path.join(root, "src", "control.mjs"), "credential", "opencode-go"],
+      { cwd: root, encoding: "utf8", env: environment, input: "TEST_OPENCODE_KEY\n" },
+    );
+    assert.equal(saved.status, 0, saved.stderr);
+    assert.equal(cachedProviders(stateDir)["opencode-go"], undefined);
+    assert.equal(cachedProviders(stateDir)["opencode-zen"], undefined);
+    assert.deepEqual(cachedProviders(stateDir).deepseek.discovered, ["keep-me"]);
+
+    seedCatalogCache(stateDir);
+    const removed = spawnSync(
+      process.execPath,
+      [path.join(root, "src", "control.mjs"), "credential", "opencode-go", "--remove"],
+      { cwd: root, encoding: "utf8", env: environment },
+    );
+    assert.equal(removed.status, 0, removed.stderr);
+    assert.equal(cachedProviders(stateDir)["opencode-go"], undefined);
+    assert.equal(cachedProviders(stateDir)["opencode-zen"], undefined);
+    assert.deepEqual(cachedProviders(stateDir).deepseek.discovered, ["keep-me"]);
   } finally {
     rmSync(testRoot, { recursive: true, force: true });
   }
@@ -191,6 +242,29 @@ test("provider-key remove awaits removal and reports the deleted credential", ()
     assert.equal(existsSync(keyPath), false);
     assert.match(result.stdout, /Removed 1 managed DeepSeek API key file/);
     assert.doesNotMatch(result.stdout, /No managed DeepSeek API key file exists/);
+  } finally {
+    rmSync(testRoot, { recursive: true, force: true });
+  }
+});
+
+test("provider-key remove clears every catalog source sharing the credential", () => {
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "provider-family-cache-cli-"));
+  const environment = isolatedEnvironment(testRoot);
+  const stateDir = environment.MODEL_ROUTER_STATE_DIR;
+  const keyPath = path.join(stateDir, "opencode-go-api-key.secret");
+  try {
+    seedCatalogCache(stateDir);
+    writeFileSync(keyPath, "test-provider-key\n", { mode: 0o600 });
+    const result = spawnSync(
+      process.execPath,
+      [path.join(root, "src", "provider-key.mjs"), "opencode-go", "remove"],
+      { cwd: root, encoding: "utf8", env: environment },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(existsSync(keyPath), false);
+    assert.equal(cachedProviders(stateDir)["opencode-go"], undefined);
+    assert.equal(cachedProviders(stateDir)["opencode-zen"], undefined);
+    assert.deepEqual(cachedProviders(stateDir).deepseek.discovered, ["keep-me"]);
   } finally {
     rmSync(testRoot, { recursive: true, force: true });
   }

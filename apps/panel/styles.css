@@ -1477,7 +1477,8 @@ h2 {
   line-height: 1.45;
 }
 
-.local-catalog-search {
+.local-catalog-search,
+.model-picker-search {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 6px;
@@ -1485,7 +1486,8 @@ h2 {
   margin-bottom: 8px;
 }
 
-.local-catalog-search input {
+.local-catalog-search input,
+.model-picker-search input {
   min-width: 0;
   padding: 7px 8px;
   border: 1px solid var(--line-strong);
@@ -1496,7 +1498,8 @@ h2 {
   font-size: 9px;
 }
 
-.local-catalog-search input:focus {
+.local-catalog-search input:focus,
+.model-picker-search input:focus {
   border-color: rgba(112, 157, 255, 0.6);
 }
 

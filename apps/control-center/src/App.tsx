@@ -18,7 +18,7 @@ import {
   Settings,
   Sun,
 } from "lucide-react";
-import routerIcon from "../../desktop/src-tauri/icons/32x32.png";
+import routerIcon from "../assets/32x32.png";
 import { Badge, Button, InlineNotice, LoadingState } from "./components";
 import { classNames } from "./lib";
 import { ContextPage } from "./pages/ContextPage";
@@ -105,7 +105,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [operation, setOperation] = useState<OperationEvent | null>(null);
-  const [toast, setToast] = useState<{ tone: "success" | "danger"; message: string } | null>(null);
+  const [toast, setToast] = useState<{ tone: "neutral" | "success" | "danger"; message: string } | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const downloadPollInFlight = useRef(false);
   const previousActivityState = useRef<string | undefined>(undefined);
@@ -269,13 +269,32 @@ export default function App() {
   const runAction = useCallback(async (label: string, action: () => Promise<unknown>) => {
     setOperation({ action: label, status: "started", message: label });
     try {
-      await action();
+      const result = await action();
+      if (
+        result !== null
+        && typeof result === "object"
+        && (result as { accepted?: unknown }).accepted === true
+      ) {
+        // Detached tray work can outlive (and intentionally close) this app.
+        // Spawn acceptance is not scheduler/build success, so never render the
+        // generic "completed" state for it; the supervisor status remains the
+        // source of truth after the replacement app opens.
+        const message = `${label} started.`;
+        setToast({ tone: "neutral", message });
+        setOperation({ action: label, status: "started", message });
+        return;
+      }
       setToast({ tone: "success", message: `${label} completed.` });
       await Promise.allSettled([refreshCore(), refreshUsage()]);
     } catch (error) {
       const message = readableError(error);
       setToast({ tone: "danger", message });
       setOperation({ action: label, status: "failed", message });
+      // Some control transactions persist their safe local decision before
+      // republishing installed client catalogs. A later publication failure
+      // rejects the command even though the durable state changed, so reconcile
+      // immediately instead of displaying the opposite consent for five minutes.
+      await Promise.allSettled([refreshCore(), refreshUsage()]);
       return;
     }
     setOperation({ action: label, status: "completed", message: `${label} completed.` });
@@ -328,7 +347,7 @@ export default function App() {
       case "local": return <LocalPage {...shared} operation={operation} />;
       case "harness": return <HarnessPage {...shared} />;
       case "context": return <ContextPage {...shared} />;
-      case "settings": return <SettingsPage {...shared} health={health} presence={presence} theme={theme} onTheme={setTheme} language={language} onLanguage={setLanguage} t={t} />;
+      case "settings": return <SettingsPage {...shared} health={health} presence={presence} chatgptSession={snapshot?.chatgptSession} theme={theme} onTheme={setTheme} language={language} onLanguage={setLanguage} t={t} />;
     }
   })();
 
@@ -388,7 +407,7 @@ export default function App() {
         />
       ) : null}
 
-      {toast ? <div className={classNames("toast", `toast-${toast.tone}`)} role="status">{toast.tone === "success" ? <Badge tone="success">Done</Badge> : <Badge tone="danger">Error</Badge>}<span>{toast.message}</span></div> : null}
+      {toast ? <div className={classNames("toast", `toast-${toast.tone}`)} role="status">{toast.tone === "success" ? <Badge tone="success">Done</Badge> : toast.tone === "danger" ? <Badge tone="danger">Error</Badge> : <Badge tone="neutral">Started</Badge>}<span>{toast.message}</span></div> : null}
     </div>
   );
 }

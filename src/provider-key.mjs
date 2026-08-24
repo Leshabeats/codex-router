@@ -9,6 +9,8 @@ import {
   writeProviderCredential,
 } from "./provider-credentials.mjs";
 import { providerNeedsCuration, removeApiCredential } from "./provider-onboarding.mjs";
+import { withProviderCatalogCacheTransaction } from "./model-catalog-cache.mjs";
+import { providerCatalogFamilyCacheIds } from "./provider-catalogs.mjs";
 import { enableProvider } from "./provider-selection.mjs";
 import { withModelOverlayLock } from "./model-overlay-lock.mjs";
 import { secretEntryFeedback, secretEntryProblem } from "./secret-entry.mjs";
@@ -243,7 +245,10 @@ if (command === "status") {
     // Keep the credential write and the provider selection in one cross-process
     // critical section. A concurrent remove must not delete the key between
     // these operations and leave an enabled credentialless provider behind.
-    target = writeProviderCredential(provider, value);
+    await withProviderCatalogCacheTransaction((catalog) => {
+      target = writeProviderCredential(provider, value);
+      catalog.forget(providerCatalogFamilyCacheIds(provider.id));
+    });
     enableProvider(provider.id);
     refreshed = refreshTargetPickerIfInstalled();
   });
@@ -266,7 +271,11 @@ if (command === "status") {
     // is no rollback of credential files, so a publication failure leaves the
     // coherent result (credential gone, provider disabled) rather than a
     // selection restored next to a deleted secret.
-    removal = await removeApiCredential(provider.id);
+    removal = await withProviderCatalogCacheTransaction(async (catalog) => {
+      const result = await removeApiCredential(provider.id);
+      if (result.removedFiles) catalog.forget(providerCatalogFamilyCacheIds(provider.id));
+      return result;
+    });
     refreshed = removal.removedFiles ? refreshTargetPickerIfInstalled() : false;
   });
   process.stdout.write(

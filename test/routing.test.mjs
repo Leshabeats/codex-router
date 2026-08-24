@@ -543,7 +543,7 @@ test("router rewrites gateway errors to name the failing provider", async () => 
         Authorization: "Bearer CODEX_CALLER_SECRET",
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ model: "opencode-go/grok-4.5", input: "test" }),
+      body: JSON.stringify({ model: "opencode-go-responses/grok-4.5", input: "test" }),
     });
     assert.equal(response.status, 503);
     const payload = await response.json();
@@ -6902,8 +6902,8 @@ function curatedZenFreeCompatibilityModels() {
   const dir = mkdtempSync(path.join(os.tmpdir(), "routing-opencode-tool-model-"));
   const file = path.join(dir, "user-models.json");
   const ox = {
-    slug: "opencode-free/x-preview-f-free",
-    gatewayModel: "opencode-free-x-preview-f-free",
+    slug: "opencode-free/ox-alpha",
+    gatewayModel: "opencode-free-ox-alpha",
     upstreamModel: "x-preview-f-free",
     provider: "opencode-free",
   };
@@ -6929,7 +6929,7 @@ function curatedZenFreeCompatibilityModels() {
           contextWindow: 131072,
           autoCompact: 110000,
           inputModalities: ["text", "image"],
-          compHash: "opencode-free-x-preview-f-free-user-v1",
+          compHash: "opencode-free-ox-alpha-user-v1",
         },
         {
           ...muse,

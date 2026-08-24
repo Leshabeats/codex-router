@@ -27,6 +27,10 @@ import { presenceSnapshot } from "./presence-state.mjs";
 import { harnessSnapshotWithWeb } from "./dsh-install.mjs";
 import { USER_MODELS_PATH } from "./user-models.mjs";
 import { refreshTargetPickerIfInstalled } from "./target-integration.mjs";
+import {
+  chatGptSessionStatus,
+  setChatGptSessionSharingFromControl,
+} from "./chatgpt-session-control.mjs";
 
 // Cross-target control plane for a tray/UI (e.g. the planned pane fork). It
 // reads which registry models are enabled per target and toggles them. Toggling
@@ -468,6 +472,10 @@ async function printOverview(asJson) {
           // login-free aliases are client concerns, while this catalog is the
           // durable router policy shared by Codex, DSH, and Gemini.
           catalog: await routerCatalogSnapshot(),
+          // Explicit sharing consent and login usability are separate facts.
+          // This projection contains no token, account id, credential path, or
+          // filesystem age even though the underlying doctor status does.
+          chatgptSession: await chatGptSessionStatus(),
           presence: presenceSnapshot(),
           harness: await harnessSnapshotWithWeb(),
         },
@@ -643,6 +651,15 @@ async function loginProvider(providerId) {
   process.stdout.write(`${JSON.stringify(providerOnboardingSnapshot())}\n`);
 }
 
+async function invalidateProviderCatalog(providerId) {
+  const { providerOnboardingSnapshot } = await import("./provider-onboarding.mjs");
+  const provider = providerOnboardingSnapshot().providers.find((entry) => entry.id === providerId);
+  if (!provider) throw new Error(`Unknown provider: ${providerId}`);
+  const { forgetProviderCatalogFamilyCache } = await import("./provider-catalogs.mjs");
+  const cleared = await forgetProviderCatalogFamilyCache(providerId);
+  process.stdout.write(`${JSON.stringify({ provider: providerId, cleared })}\n`);
+}
+
 async function readSecretFromStdin() {
   const chunks = [];
   let size = 0;
@@ -662,17 +679,19 @@ async function saveProviderCredential(providerId) {
   // together so a concurrent remove cannot create an enabled credentialless
   // provider between the child processes.
   await withModelOverlayLock(async () => {
-    saveApiCredential(providerId, value);
+    const { withProviderCatalogCacheTransaction } = await import("./model-catalog-cache.mjs");
+    const { providerCatalogFamilyCacheIds } = await import("./provider-catalogs.mjs");
+    await withProviderCatalogCacheTransaction((catalog) => {
+      saveApiCredential(providerId, value);
+      // One credential can expose several account catalogs. The same lock
+      // discovery uses for snapshot+commit makes write+invalidation one
+      // generation boundary rather than a race with an old in-flight fetch.
+      catalog.forget(providerCatalogFamilyCacheIds(providerId));
+    });
     const { enableProvider } = await import("./provider-selection.mjs");
     enableProvider(providerId);
     const { refreshTargetPickerIfInstalled } = await import("./target-integration.mjs");
     refreshTargetPickerIfInstalled();
-    // The stored catalog is what the previous credential could see. A new key
-    // may be a different account with a different entitlement, so the next
-    // read has to come from the provider rather than from the old account's
-    // list. Removal drops the entry for the same reason.
-    const { forgetProviderCatalogCache } = await import("./model-catalog-cache.mjs");
-    forgetProviderCatalogCache(providerId);
   });
   process.stdout.write(`${JSON.stringify(providerOnboardingSnapshot())}\n`);
 }
@@ -684,15 +703,16 @@ async function deleteProviderCredential(providerId) {
   // local-model mutations; status reads remain outside the lock.
   let removal;
   await withModelOverlayLock(async () => {
-    removal = await removeApiCredential(providerId);
+    const { withProviderCatalogCacheTransaction } = await import("./model-catalog-cache.mjs");
+    const { providerCatalogFamilyCacheIds } = await import("./provider-catalogs.mjs");
+    removal = await withProviderCatalogCacheTransaction(async (catalog) => {
+      const result = await removeApiCredential(providerId);
+      if (result.removedFiles) catalog.forget(providerCatalogFamilyCacheIds(providerId));
+      return result;
+    });
     if (removal.removedFiles) {
       const { refreshTargetPickerIfInstalled } = await import("./target-integration.mjs");
       refreshTargetPickerIfInstalled();
-      // The cached catalog was what this credential could see. Another key may
-      // see a different one, so drop it rather than let a disconnected
-      // provider keep showing the previous account's model list.
-      const { forgetProviderCatalogCache } = await import("./model-catalog-cache.mjs");
-      forgetProviderCatalogCache(providerId);
     }
   });
   process.stdout.write(
@@ -2399,13 +2419,28 @@ function handleService(action) {
   else process.stdout.write(`${JSON.stringify({ state: value === "stop" ? "stopped" : "running" })}\n`);
 }
 
-// Supervision for the tray companion. `disable` boots the agent out, which
-// stops the running tray too -- that is why the Settings toggle does not call
-// it and this stays an explicit command.
+// Supervision for the tray companion. `disable` boots the agent out and stops
+// the running tray too, so the Settings surface exposes it only behind its
+// explicit confirmation dialog.
 const TRAY_COMMANDS = { enable: "install", disable: "uninstall", status: "status", restart: "restart" };
 
 function handleTray(action) {
   const value = action || "status";
+  if (value === "refresh") {
+    const plan = spawnSync(
+      process.execPath,
+      [path.join(REPO_ROOT, "src", "install-plan.mjs"), "tray-plan"],
+      { cwd: REPO_ROOT, env: process.env, encoding: "utf8" },
+    );
+    if (plan.error) throw plan.error;
+    if (plan.status !== 0) {
+      throw new Error(String(plan.stderr || "The desktop companion refresh plan failed.").trim());
+    }
+    const decision = String(plan.stdout || "").trim();
+    if (decision === "rebuild") return handleTray("rebuild");
+    process.stdout.write(`${JSON.stringify({ tray: decision || "absent", rebuilt: false })}\n`);
+    return;
+  }
   if (value === "rebuild") {
     // The tray's footer Restart control wants the bundle rebuilt from this
     // checkout even when its source fingerprint says the installed copy is
@@ -2413,8 +2448,8 @@ function handleTray(action) {
     // the launcher directly. The launcher quits the running tray only after
     // the staged replacement passes verification. `bin/model-router-tray` is
     // a POSIX shell script; Windows reaches the same sequence through
-    // `codex-router.ps1 tray rebuild`, which owns the cargo-or-Electron
-    // choice so it exists once instead of drifting between here and there.
+    // `codex-router.ps1 tray rebuild`, which owns the same unified Electron
+    // replacement transaction so it exists once instead of drifting.
     const result = process.platform === "win32"
       ? spawnSync(
           "powershell.exe",
@@ -2427,10 +2462,11 @@ function handleTray(action) {
             path.join(REPO_ROOT, "codex-router.ps1"),
             "tray",
             "rebuild",
+            "--preserve-window",
           ],
-          { stdio: "inherit", env: process.env },
+          { stdio: "inherit", env: process.env, windowsHide: true },
         )
-      : spawnSync(path.join(REPO_ROOT, "bin", "model-router-tray"), [], {
+      : spawnSync(path.join(REPO_ROOT, "bin", "model-router-tray"), ["--preserve-window"], {
           stdio: "inherit",
           env: process.env,
         });
@@ -2442,13 +2478,34 @@ function handleTray(action) {
   }
   const subcommand = TRAY_COMMANDS[value];
   if (!subcommand) {
-    throw new Error(`Usage: control tray ${[...Object.keys(TRAY_COMMANDS), "rebuild"].join("|")}`);
+    throw new Error(`Usage: control tray ${[...Object.keys(TRAY_COMMANDS), "refresh", "rebuild"].join("|")}`);
   }
-  const result = spawnSync(
-    process.execPath,
-    [path.join(REPO_ROOT, "src", "tray-service.mjs"), subcommand],
-    { stdio: "inherit", env: process.env },
-  );
+  // Enabling can replace both a package and a pre-existing recognized task.
+  // On Windows that must go through the durable PowerShell transaction, which
+  // snapshots the exact task XML/SDDL and rollback package before touching
+  // either. Calling tray-service.mjs install directly would strand a partial
+  // registration when Task Scheduler or the ready handshake fails midway.
+  const result = value === "enable" && process.platform === "win32"
+    ? spawnSync(
+        "powershell.exe",
+        [
+          "-NoLogo",
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          path.join(REPO_ROOT, "codex-router.ps1"),
+          "tray",
+          "install",
+          "--preserve-window",
+        ],
+        { stdio: "inherit", env: process.env, windowsHide: true },
+      )
+    : spawnSync(
+        process.execPath,
+        [path.join(REPO_ROOT, "src", "tray-service.mjs"), subcommand],
+        { stdio: "inherit", env: process.env, windowsHide: true },
+      );
   if (result.error) throw result.error;
   if (result.status !== 0) {
     throw new Error(`Tray ${value} failed with exit code ${result.status}.`);
@@ -2529,6 +2586,20 @@ async function handlePresence(action, value) {
     throw new Error(`Usage: control presence status|set <${PRESENCE_MODES.join("|")}>`);
   }
   process.stdout.write(`${JSON.stringify(setPresenceMode(value))}\n`);
+}
+
+async function handleChatGptSession(action) {
+  const desired = action || "status";
+  if (desired === "status") {
+    process.stdout.write(`${JSON.stringify(await chatGptSessionStatus())}\n`);
+    return;
+  }
+  if (desired !== "enable" && desired !== "disable") {
+    throw new Error("Usage: control chatgpt-session status|enable|disable");
+  }
+  process.stdout.write(
+    `${JSON.stringify(await setChatGptSessionSharingFromControl(desired === "enable"))}\n`,
+  );
 }
 
 // The public `/health` leaf intentionally contains only the router summary and
@@ -2616,6 +2687,11 @@ if (args.includes("--probe")) {
 } else if (args[0] === "login") {
   if (!args[1]) throw new Error("Usage: control login <oauth-provider>");
   await loginProvider(args[1]);
+} else if (args[0] === "catalog-cache") {
+  if (args[1] !== "invalidate" || !args[2]) {
+    throw new Error("Usage: control catalog-cache invalidate <provider>");
+  }
+  await invalidateProviderCatalog(args[2]);
 } else if (args[0] === "credential") {
   if (!args[1]) throw new Error("Usage: control credential <provider> [--remove]");
   if (args.includes("--remove")) {
@@ -2653,6 +2729,9 @@ if (args.includes("--probe")) {
   await handleHarness(args[1]);
 } else if (args[0] === "presence") {
   await handlePresence(args[1], args[2]);
+} else if (args[0] === "chatgpt-session") {
+  if (args.length > 2) throw new Error("Usage: control chatgpt-session status|enable|disable");
+  await handleChatGptSession(args[1]);
 } else if (args[0] === "health") {
   await printHealth();
 } else if (args[0] === "maintenance") {

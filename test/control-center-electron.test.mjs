@@ -1,19 +1,360 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { realpathSync, symlinkSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 import {
   assertMutationCompatibility,
+  detachedControlRuntime,
   discoverSourceRoot,
+  runControlDetached,
   runControl,
   runControlJson,
   runtimeEnvironment,
   standardSourceRoots,
 } from "../apps/control-center/electron/command-runner.mjs";
+import {
+  groupModelFamilies,
+  modelFamilyKey,
+} from "../apps/control-center/src/model-families.mjs";
+import {
+  addPendingCatalogModels,
+  beginCatalogRequest,
+  catalogRequestIsCurrent,
+  clearProviderCatalogStates,
+  invalidateProviderCatalogRequests,
+  modelRouteKind,
+  modelRouteProtocol,
+  pendingCatalogModelIds,
+  removePendingCatalogModels,
+  searchLoadedCatalogModels,
+} from "../apps/control-center/src/model-catalog-search.mjs";
+import {
+  createOpenRequestGate,
+  createRendererReadyGate,
+  lifecycleStatePath,
+  linuxStatusNotifierHostAvailable,
+  queryLifecycleState,
+  shouldQuitOnLastWindowClosed,
+  writeLifecycleState,
+} from "../apps/control-center/electron/lifecycle-state.mjs";
+
+test("Control Center groups provider routes under one model family", () => {
+  const families = groupModelFamilies([
+    { slug: "opencode-free/ox-alpha", displayName: "Ox Alpha (OpenCode Free)", provider: "opencode-free", visible: false, enabled: true },
+    { slug: "opencode-go/ox-alpha", displayName: "Ox Alpha (opencode Go)", provider: "opencode-go", visible: true, enabled: true },
+    { slug: "opencode-free/x-preview-f-free", displayName: "Ox Alpha Free", provider: "opencode-free", visible: true, enabled: true },
+    { slug: "deepseek/deepseek-v4-pro", displayName: "DeepSeek V4 Pro (API)", provider: "deepseek", visible: true, enabled: true },
+  ]);
+  assert.equal(families.length, 2);
+  const ox = families.find((family) => family.id === "ox-alpha");
+  assert.equal(ox.displayName, "Ox Alpha");
+  assert.deepEqual(ox.routes.map((route) => route.slug), [
+    "opencode-free/ox-alpha",
+    "opencode-free/x-preview-f-free",
+    "opencode-go/ox-alpha",
+  ]);
+  assert.equal(modelFamilyKey({ displayName: "Kimi K3 (OAuth)" }), "kimi-k3");
+  assert.equal(modelFamilyKey({ displayName: "Kimi K3 (opencode Go)" }), "kimi-k3");
+});
+
+test("global model search includes candidates that exist only in loaded discovery state", () => {
+  const directory = [{
+    id: "opencode-go",
+    displayName: "opencode Go/Zen",
+    setup: {
+      configured: true,
+      catalogSources: [
+        { id: "opencode-go", displayName: "opencode Go" },
+        { id: "opencode-zen", displayName: "opencode Zen" },
+      ],
+    },
+  }];
+  const states = {
+    "opencode-zen": {
+      data: {
+        discovered: ["discovery-only-model"],
+        registered: [],
+        unregistered: ["discovery-only-model"],
+        addable: ["discovery-only-model"],
+        blocked: {},
+        contextLengths: { "discovery-only-model": 131_072 },
+      },
+    },
+  };
+
+  const [match] = searchLoadedCatalogModels(directory, states, "discovery only");
+  assert.equal(match.modelId, "discovery-only-model");
+  assert.equal(match.providerName, "opencode Go/Zen");
+  assert.equal(match.sourceName, "opencode Zen");
+  assert.equal(match.sourceId, "opencode-zen");
+  assert.equal(match.addable, true);
+  assert.equal(match.registered, false);
+  assert.equal(match.contextWindow, 131_072);
+  assert.equal(searchLoadedCatalogModels(directory, states, "opencode zen").length, 1);
+});
+
+test("global model search exposes blocked reasons and hides disconnected catalog state", () => {
+  const connected = [{
+    id: "opencode-go",
+    displayName: "opencode Go/Zen",
+    setup: {
+      configured: true,
+      catalogSources: [{ id: "opencode-go", displayName: "opencode Go" }],
+    },
+  }];
+  const states = {
+    "opencode-go": {
+      data: {
+        discovered: ["future-protocol-model"],
+        registered: [],
+        unregistered: ["future-protocol-model"],
+        addable: [],
+        blocked: {
+          "future-protocol-model": "No certified Chat, Messages, or Responses route yet.",
+        },
+      },
+    },
+  };
+
+  const [match] = searchLoadedCatalogModels(connected, states, "future protocol");
+  assert.equal(match.addable, false);
+  assert.equal(match.blockedReason, "No certified Chat, Messages, or Responses route yet.");
+
+  const disconnected = [{
+    ...connected[0],
+    setup: { ...connected[0].setup, configured: false },
+  }];
+  assert.deepEqual(searchLoadedCatalogModels(disconnected, states, "future protocol"), []);
+});
+
+test("credential changes clear every loaded catalog source in only that provider family", () => {
+  const current = {
+    "opencode-go": { status: "ready" },
+    "opencode-zen": { status: "ready" },
+    deepseek: { status: "ready" },
+  };
+  const cleared = clearProviderCatalogStates(current, [
+    { id: "opencode-go" },
+    { id: "opencode-zen" },
+  ]);
+  assert.deepEqual(cleared, { deepseek: { status: "ready" } });
+  assert.deepEqual(current, {
+    "opencode-go": { status: "ready" },
+    "opencode-zen": { status: "ready" },
+    deepseek: { status: "ready" },
+  });
+  assert.strictEqual(clearProviderCatalogStates(current, []), current);
+});
+
+test("credential changes invalidate every pre-existing catalog completion", () => {
+  const generations = {};
+  const oldGo = beginCatalogRequest(generations, "opencode-go");
+  const oldZen = beginCatalogRequest(generations, "opencode-zen");
+  const unrelated = beginCatalogRequest(generations, "deepseek");
+
+  invalidateProviderCatalogRequests(generations, [
+    { id: "opencode-go" },
+    { id: "opencode-zen" },
+  ]);
+  assert.equal(catalogRequestIsCurrent(generations, "opencode-go", oldGo), false);
+  assert.equal(catalogRequestIsCurrent(generations, "opencode-zen", oldZen), false);
+  assert.equal(catalogRequestIsCurrent(generations, "deepseek", unrelated), true);
+
+  const newGo = beginCatalogRequest(generations, "opencode-go");
+  assert.equal(catalogRequestIsCurrent(generations, "opencode-go", newGo), true);
+  assert.equal(catalogRequestIsCurrent(generations, "opencode-go", oldGo), false);
+});
+
+test("route protocol labels use the provider-qualified snapshot slug", () => {
+  const base = { provider: "opencode-go", enabled: true, visible: true };
+  const messages = { ...base, slug: "opencode-go-messages/minimax-m3" };
+  const responses = { ...base, slug: "opencode-go-responses/grok-4.5", isFree: true };
+
+  assert.equal(modelRouteProtocol(messages), "messages");
+  assert.equal(modelRouteKind(messages), "Messages API route");
+  assert.equal(modelRouteProtocol(responses), "responses");
+  assert.equal(modelRouteKind(responses), "Responses API route");
+});
+
+test("overlapping catalog adds retain each operation's pending models", () => {
+  let pending = {};
+  pending = addPendingCatalogModels(pending, "deepseek", ["deepseek-v4", "shared-model"]);
+  pending = addPendingCatalogModels(pending, "deepseek", ["deepseek-v5", "shared-model"]);
+  assert.deepEqual(
+    new Set(pendingCatalogModelIds(pending, "deepseek")),
+    new Set(["deepseek-v4", "deepseek-v5", "shared-model"]),
+  );
+
+  pending = removePendingCatalogModels(pending, "deepseek", ["deepseek-v4", "shared-model"]);
+  assert.deepEqual(
+    new Set(pendingCatalogModelIds(pending, "deepseek")),
+    new Set(["deepseek-v5", "shared-model"]),
+  );
+
+  pending = removePendingCatalogModels(pending, "deepseek", ["deepseek-v5", "shared-model"]);
+  assert.deepEqual(pendingCatalogModelIds(pending, "deepseek"), []);
+  assert.deepEqual(pending, {});
+});
+
+test("Electron queues pre-ready open requests and drains them once", () => {
+  let opens = 0;
+  const gate = createOpenRequestGate(() => { opens += 1; });
+  gate.requestOpen();
+  gate.requestOpen();
+  assert.equal(gate.pending(), true);
+  assert.equal(opens, 0);
+  gate.markReady();
+  assert.equal(gate.pending(), false);
+  assert.equal(opens, 1);
+  gate.requestOpen();
+  assert.equal(opens, 2);
+});
+
+test("Electron renderer readiness requires load and first-paint signals", () => {
+  let ready = 0;
+  let failures = 0;
+  const gate = createRendererReadyGate({
+    onReady: () => { ready += 1; },
+    onFailure: () => { failures += 1; },
+  });
+  gate.didFinishLoad();
+  assert.equal(gate.ready(), false);
+  assert.equal(ready, 0);
+  gate.didBecomeReadyToShow();
+  assert.equal(gate.ready(), true);
+  assert.equal(ready, 1);
+  gate.didBecomeReadyToShow();
+  gate.didFinishLoad();
+  gate.didFailLoad(new Error("late failure"));
+  assert.equal(ready, 1);
+  assert.equal(failures, 0);
+});
+
+test("Electron renderer readiness fails closed before first paint", () => {
+  let ready = 0;
+  let failure;
+  const gate = createRendererReadyGate({
+    onReady: () => { ready += 1; },
+    onFailure: (error) => { failure = error; },
+  });
+  gate.didFinishLoad();
+  gate.didFailLoad(new Error("missing renderer"));
+  gate.didBecomeReadyToShow();
+  assert.equal(gate.ready(), false);
+  assert.equal(gate.failed(), true);
+  assert.equal(ready, 0);
+  assert.match(failure.message, /missing renderer/);
+});
+
+test("Electron lifecycle state is durable, queryable, and fail-closed", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "router-control-lifecycle-"));
+  const file = path.join(directory, "control-center-lifecycle.json");
+  try {
+    assert.equal(
+      lifecycleStatePath({ MODEL_ROUTER_STATE_DIR: directory }, "/unused"),
+      file,
+    );
+    const written = writeLifecycleState(file, {
+      pid: 4321,
+      ready: true,
+      visible: true,
+      now: new Date("2026-08-24T00:00:00.000Z"),
+    });
+    assert.equal(written.visible, true);
+    if (process.platform !== "win32") assert.equal((await stat(file)).mode & 0o077, 0);
+    assert.deepEqual(queryLifecycleState(file, { isRunning: (pid) => pid === 4321 }), {
+      version: 1,
+      running: true,
+      pid: 4321,
+      ready: true,
+      visible: true,
+      updatedAt: "2026-08-24T00:00:00.000Z",
+    });
+    assert.deepEqual(queryLifecycleState(file, { isRunning: () => false }), {
+      version: 1,
+      running: false,
+      pid: null,
+      ready: false,
+      visible: false,
+      updatedAt: "2026-08-24T00:00:00.000Z",
+    });
+    writeLifecycleState(file, { pid: 4321, ready: false, visible: false });
+    const stopped = queryLifecycleState(file, { isRunning: () => true });
+    assert.equal(stopped.ready, false);
+    assert.equal(stopped.visible, false);
+    await writeFile(file, "not json\n", { mode: 0o600 });
+    assert.equal(queryLifecycleState(file).visible, false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a windowless desktop process survives only while a real tray owner exists", () => {
+  assert.equal(shouldQuitOnLastWindowClosed({ platform: "darwin", nativeTrayOwnedByHost: true }), true);
+  assert.equal(shouldQuitOnLastWindowClosed({ platform: "darwin", nativeTrayOwnedByHost: false, trayAvailable: false }), false);
+  assert.equal(shouldQuitOnLastWindowClosed({ platform: "win32", nativeTrayOwnedByHost: false, trayAvailable: true }), false);
+  assert.equal(shouldQuitOnLastWindowClosed({ platform: "win32", nativeTrayOwnedByHost: false, trayAvailable: false }), true);
+  assert.equal(shouldQuitOnLastWindowClosed({ platform: "linux", nativeTrayOwnedByHost: false, trayAvailable: true }), false);
+  assert.equal(shouldQuitOnLastWindowClosed({ platform: "linux", nativeTrayOwnedByHost: false, trayAvailable: false }), true);
+});
+
+test("Linux tray-only mode trusts only a positively registered StatusNotifier host", () => {
+  const calls = [];
+  const available = linuxStatusNotifierHostAvailable({
+    platform: "linux",
+    executableExists: () => true,
+    environment: { DBUS_SESSION_BUS_ADDRESS: "unix:path=/test/session-bus" },
+    spawn(executable, args, options) {
+      calls.push({ executable, args, options });
+      return { status: 0, stdout: "(<true>,)\n" };
+    },
+  });
+  assert.equal(available, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].executable, "/usr/bin/gdbus");
+  assert.deepEqual(calls[0].args, [
+    "call",
+    "--session",
+    "--dest", "org.kde.StatusNotifierWatcher",
+    "--object-path", "/StatusNotifierWatcher",
+    "--method", "org.freedesktop.DBus.Properties.Get",
+    "org.kde.StatusNotifierWatcher",
+    "IsStatusNotifierHostRegistered",
+  ]);
+  assert.equal(calls[0].options.shell, false);
+
+  for (const result of [
+    { status: 0, stdout: "(<false>,)\n" },
+    { status: 0, stdout: "unexpected\n" },
+    { status: 1, stdout: "(<true>,)\n" },
+  ]) {
+    assert.equal(linuxStatusNotifierHostAvailable({
+      platform: "linux",
+      executableExists: () => true,
+      spawn: () => result,
+    }), false);
+  }
+  assert.equal(linuxStatusNotifierHostAvailable({
+    platform: "linux",
+    executableExists: () => false,
+    spawn: () => assert.fail("a missing probe must fail open without spawning"),
+  }), false);
+  assert.equal(linuxStatusNotifierHostAvailable({
+    platform: "linux",
+    executableExists: () => true,
+    spawn: () => { throw new Error("session bus unavailable"); },
+  }), false);
+  assert.equal(linuxStatusNotifierHostAvailable({
+    platform: "win32",
+    executableExists: () => true,
+    spawn: () => assert.fail("non-Linux platforms must not query D-Bus"),
+  }), false);
+});
 
 async function waitForProcessExit(pid, timeoutMs = 4_000) {
   const deadline = Date.now() + timeoutMs;
@@ -119,6 +460,96 @@ test("an operator's own runtime choice is honored exactly as written", async () 
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("Windows detached tray refresh runs outside the package on external node.exe", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "router-control-detached-"));
+  const packageDirectory = path.join(directory, "win-unpacked");
+  const runtimeDirectory = path.join(directory, "node-runtime");
+  const packagedExecutable = path.join(packageDirectory, "Codex Router.exe");
+  const externalNode = path.join(runtimeDirectory, "node.exe");
+  try {
+    await mkdir(packageDirectory, { recursive: true });
+    await mkdir(runtimeDirectory, { recursive: true });
+    await writeFile(packagedExecutable, "");
+    await writeFile(externalNode, "");
+    const launch = detachedControlRuntime(
+      {
+        PATH: "",
+        CODEX_ROUTER_NODE_BIN: externalNode,
+        ELECTRON_RUN_AS_NODE: "1",
+      },
+      { platform: "win32", execPath: packagedExecutable, electron: true },
+    );
+    assert.equal(launch.executable, externalNode);
+    assert.equal(launch.environment.CODEX_ROUTER_NODE_BIN, externalNode);
+    assert.equal(launch.environment.ELECTRON_RUN_AS_NODE, undefined);
+
+    const source = await readFile(new URL("../apps/control-center/electron/command-runner.mjs", import.meta.url), "utf8");
+    const detached = source.slice(source.indexOf("export function runControlDetached("));
+    assert.match(detached, /spawnImpl\([\s\S]*runtime\.executable,[\s\S]*path\.join\(sourceRoot, "src", "control\.mjs"\), \.\.\.args/);
+    assert.doesNotMatch(detached, /spawn\(process\.execPath/);
+
+    const inPackageNode = path.join(packageDirectory, "node.exe");
+    await writeFile(inPackageNode, "");
+    assert.throws(
+      () => detachedControlRuntime(
+        { PATH: "", CODEX_ROUTER_NODE_BIN: inPackageNode },
+        { platform: "win32", execPath: packagedExecutable, electron: true },
+      ),
+      /trusted external node\.exe is required/,
+    );
+    await rm(inPackageNode);
+    assert.throws(
+      () => detachedControlRuntime(
+        { PATH: "" },
+        { platform: "win32", execPath: packagedExecutable, electron: true },
+      ),
+      /trusted external node\.exe is required/,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("non-Windows detached refresh keeps the packaged Node-mode launch", { skip: process.platform === "win32" }, () => {
+  const launch = detachedControlRuntime(
+    { PATH: path.dirname(process.execPath) },
+    { platform: process.platform, execPath: process.execPath, electron: true },
+  );
+  assert.equal(launch.executable, process.execPath);
+  assert.equal(launch.environment.ELECTRON_RUN_AS_NODE, "1");
+});
+
+test("detached control resolves only after spawn and rejects a pre-spawn error", async () => {
+  const runtime = { executable: "/test/node", environment: {} };
+  const sourceRoot = path.dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
+  const failedChild = new EventEmitter();
+  failedChild.unref = () => assert.fail("a failed child must not be unreferenced as launched");
+  const failed = runControlDetached(["tray", "restart"], {
+    sourceRoot,
+    runtime,
+    spawnImpl: () => {
+      queueMicrotask(() => failedChild.emit("error", new Error("spawn ENOENT")));
+      return failedChild;
+    },
+  });
+  await assert.rejects(failed, /spawn ENOENT/);
+
+  const launchedChild = new EventEmitter();
+  launchedChild.pid = 4242;
+  let unreferenced = false;
+  launchedChild.unref = () => { unreferenced = true; };
+  const launched = runControlDetached(["tray", "restart"], {
+    sourceRoot,
+    runtime,
+    spawnImpl: () => {
+      queueMicrotask(() => launchedChild.emit("spawn"));
+      return launchedChild;
+    },
+  });
+  assert.equal(await launched, 4242);
+  assert.equal(unreferenced, true);
 });
 
 test("control center resolves a trusted router source root", async () => {
@@ -281,7 +712,31 @@ test("electron boundary does not enable node integration or shell argv", async (
   assert.match(main, /setPermissionRequestHandler\([\s\S]*callback\(false\)/);
   assert.match(main, /requestSingleInstanceLock\(\)/);
   assert.match(main, /app\.on\("second-instance"/);
-  assert.match(main, /mainWindow\.isDestroyed\(\)\) && app\.isReady\(\)\) createWindow\(\)/);
+  assert.match(main, /else openRequests\.requestOpen\(\)/);
+  assert.match(main, /new Tray\(/);
+  assert.match(main, /createdTray\.on\("click", showWindow\)/);
+  assert.match(main, /Open Control Center/);
+  assert.match(main, /CODEX_ROUTER_EMBEDDED_CONTROL_CENTER/);
+  assert.match(main, /image\.isEmpty\(\)[\s\S]*tray icon could not be loaded/);
+  assert.match(main, /const trayAvailable = trayIsAvailable\(\)/);
+  assert.match(main, /process\.platform === "linux"[\s\S]{0,100}linuxStatusNotifierHostAvailable\(\)/);
+  assert.doesNotMatch(main, /nativeImage\.createEmpty\(\)/);
+  assert.match(
+    main,
+    /if \(!trayOnlyInvocation \|\| !trayAvailable\) openRequests\.requestOpen\(\);\s*createWindow\(\);/,
+  );
+  assert.doesNotMatch(main, /if \(trayAvailable\)[\s\S]{0,100}completeApplicationReadiness\(\)/);
+  assert.match(main, /webContents\.once\("did-finish-load"/);
+  assert.match(main, /createdWindow\.once\("ready-to-show"/);
+  assert.match(main, /webContents\.once\([\s\S]{0,80}"did-fail-load"/);
+  assert.match(main, /rendererReady\.didFailLoad/);
+  assert.match(main, /app\.exit\(1\)/);
+  assert.match(main, /commandLine\.includes\("--quit-for-update"\)/);
+  assert.match(main, /shouldQuitOnLastWindowClosed\([\s\S]{0,120}app\.quit\(\)/);
+  assert.match(main, /LIFECYCLE_QUERY_ARGUMENT/);
+  assert.match(main, /queryLifecycleState\(lifecycleFile\)/);
+  assert.match(main, /createdWindow\.on\("hide"[\s\S]{0,140}windowVisible = false/);
+  assert.match(main, /app\.on\("will-quit"[\s\S]{0,160}applicationReady = false/);
   assert.match(main, /app\.on\("before-quit"/);
   assert.match(main, /mutationLifecycle\.hasActiveMutations\(\)/);
   assert.match(main, /mutationLifecycle\.whenMutationsIdle\(\)/);
@@ -456,8 +911,8 @@ test("preload constructs exact positional IPC payloads", async () => {
 
 // The Control Center and the tray render the same health report through two
 // separate implementations, so the pair has to be checked, not just one half
-// (#366). apps/desktop/ui/model.mjs is exercised directly in
-// test/desktop-ui.test.mjs; this is the TypeScript twin.
+// (#366). apps/panel/model.mjs is exercised directly in
+// test/panel-ui.test.mjs; this is the TypeScript twin.
 test("the control center health rows match the tray's on absent and Grok dependencies", async () => {
   const source = await readFile(new URL("../apps/control-center/src/service-health.ts", import.meta.url), "utf8");
 
@@ -589,10 +1044,45 @@ test("settings keeps model choice out and exposes durable app preferences", asyn
     const occurrences = i18n.split(`"${key}"`).length - 1;
     assert.equal(occurrences, 6, `${key} must be translated in all six locales`);
   }
+  // Sharing is an authorization to spend the user's subscription, so its
+  // confirmation and live state cannot silently fall back to English.
+  for (const key of [
+    "settings.chatgptSession.title",
+    "settings.chatgptSession.detail",
+    "settings.chatgptSession.confirm.title",
+    "settings.chatgptSession.confirm.description",
+    "settings.chatgptSession.confirm.body",
+    "settings.chatgptSession.confirm.enable",
+    "settings.chatgptSession.status.sharingEnabled",
+    "settings.chatgptSession.status.sharingDisabled",
+    "settings.chatgptSession.status.unavailable",
+    "settings.chatgptSession.status.loginUsable",
+    "settings.chatgptSession.status.loginUsableHours",
+    "settings.chatgptSession.status.loginExpired",
+    "settings.chatgptSession.status.loginUnavailableDetected",
+    "settings.chatgptSession.status.loginUnavailableLogin",
+    "settings.chatgptSession.action.enable",
+    "settings.chatgptSession.action.disable",
+  ]) {
+    const occurrences = i18n.split(`"${key}"`).length - 1;
+    assert.equal(occurrences, 6, `${key} must be translated in all six locales`);
+  }
+  for (const key of [
+    "settings.desktop.unavailable.title",
+    "settings.desktop.unavailable.body",
+  ]) {
+    const occurrences = i18n.split(`"${key}"`).length - 1;
+    assert.equal(occurrences, 6, `${key} must be translated in all six locales`);
+    assert.ok(settings.includes(`t("${key}")`), `${key} must be rendered through the translator`);
+  }
+  assert.doesNotMatch(settings, /["`]Sharing (?:enabled|disabled|status unavailable)/);
+  assert.doesNotMatch(settings, /["`]Login (?:usable|expired|unavailable)/);
+  assert.doesNotMatch(settings, /Tray supervision controls unavailable|no supported OS supervision contract/);
 });
 
-test("the model directory combines provider setup and models in accessible single-open accordions", async () => {
+test("the model directory combines provider setup with de-duplicated model-family routes", async () => {
   const models = await readFile(new URL("../apps/control-center/src/pages/ModelsPage.tsx", import.meta.url), "utf8");
+  const catalogSearch = await readFile(new URL("../apps/control-center/src/model-catalog-search.mjs", import.meta.url), "utf8");
   const providerModelsCss = await readFile(new URL("../apps/control-center/src/pages/providers-models.css", import.meta.url), "utf8");
   assert.match(models, /aria-expanded=\{expanded\}/);
   assert.match(models, /aria-controls=\{panelId\}/);
@@ -602,18 +1092,25 @@ test("the model directory combines provider setup and models in accessible singl
   assert.match(models, /saveProviderCredential/);
   assert.match(models, /setProviderEnabled/);
   assert.match(models, /setPickerModel/);
+  assert.match(models, /"Show all router models", \(\) => api\.setPickerModels\(true\)/);
+  assert.match(models, />Show all<\/Button>/);
+  assert.match(models, />Hide all<\/Button>/);
+  assert.match(models, /invalidateCatalogs\(\);[\s\S]{0,180}try \{[\s\S]*finally \{\s*invalidateCatalogs\(\)/);
+  assert.match(models, /const generation = beginCatalogRequest/);
+  assert.match(models, /catalogRequestIsCurrent\(catalogRequestGenerations\.current, sourceId, generation\)/);
 
   // Adding republishes the whole catalog to every installed client and is the
   // slowest thing this page starts. Placeholder rows carrying the chosen slugs
   // stand in meanwhile, or the click reads as having done nothing at all.
-  assert.match(models, /setPendingModels\(\(current\) => \(\{ \.\.\.current, \[entry\.id\]: selected \}\)\)/);
+  assert.match(models, /setPendingModels\(\(current\) => addPendingCatalogModels\(current, entry\.id, selected\)\)/);
   assert.match(models, /<PendingModelRows slugs=\{pending\} \/>/);
   assert.match(models, /Adding to the picker/);
   // Cleared in a finally: a placeholder surviving a failed add would claim the
   // model arrived.
   assert.match(models, /\} finally \{[\s\S]{0,400}setPendingModels\(/);
   // A slug already in the picker gets no ghost row beside its real one.
-  assert.match(models, /pendingModels\[entry\.id\] \?\? \[\][\s\S]{0,160}!entry\.models\.some/);
+  assert.match(models, /pendingCatalogModelIds\(pendingModels, entry\.id\)[\s\S]{0,160}!entry\.models\.some/);
+  assert.match(models, /removePendingCatalogModels\(current, entry\.id, selected\)/);
   // The placeholder must hold the real row's geometry so the list does not jump
   // when the add lands.
   assert.match(providerModelsCss, /\.pm-model-row-pending/);
@@ -624,15 +1121,20 @@ test("the model directory combines provider setup and models in accessible singl
   assert.match(models, /subagent thinking effort/);
   assert.match(models, /<option value="default">Model default<\/option>/);
   assert.match(providerModelsCss, /\.pm-model-row\[data-subagent="enabled"\]/);
-  assert.match(models, /<strong>\{model\.displayName\}<\/strong>/);
+  assert.match(models, /<strong>\{family\.displayName\}<\/strong>/);
+  assert.match(models, /<strong>\{providerName\}<\/strong>/);
+  assert.match(models, /groupModelFamilies\(models\)/);
+  assert.match(models, /One model row\. Expand it only when you need to choose a provider route\./);
+  assert.match(models, /These routes use different credentials, quotas, and provider policies\./);
+  assert.match(models, /setExpandedFamilyId\(expanded \? null : family\.id\)/);
   assert.match(models, /discoverProviderModels/);
   assert.match(models, /addProviderModels/);
-  assert.match(models, /<Badge tone="accent">\{entry\.models\.length\} selected<\/Badge>/);
+  assert.match(models, /<Badge tone="accent">\{entry\.models\.length\} active/);
   assert.doesNotMatch(models, /providerUsage\?\.requests \|\| 0/);
   assert.match(models, /\{providerUsage\?\.requests \? <small className="pm-provider-requests">/);
   assert.match(models, /providerUsage\.requests === 1 \? "request" : "requests"/);
   assert.match(providerModelsCss, /\.pm-provider-tags\s*\{[^}]*flex-wrap:\s*nowrap;/s);
-  assert.match(models, /\{ label: "Selected", value: models\.length, detail: `\$\{enabledCount\} enabled` \}/);
+  assert.match(models, /\{ label: "Models", value: modelFamilies\.length, detail: `\$\{enabledCount\} provider routes` \}/);
   assert.match(models, /className="pm-provider-toolbar-primary"/);
   assert.match(models, /className="pm-provider-toolbar-actions"/);
   assert.match(models, /className="pm-filter-trigger"/);
@@ -644,18 +1146,30 @@ test("the model directory combines provider setup and models in accessible singl
   assert.doesNotMatch(models, /Enabled models only/);
   assert.doesNotMatch(models, /if \(enabledModelsOnly/);
   assert.match(models, /className="pm-selected-models-heading"/);
-  assert.match(models, />Picker models<\/strong>/);
+  assert.match(models, />Provider catalog<\/strong>/);
+  assert.match(models, />Model families<\/strong>/);
   assert.match(models, /catalogEligible\(entry\) && catalog \?/);
-  assert.match(models, /catalog\?\.data \? "Reload from provider" : "Load all models"/);
-  assert.match(models, /Use Load all models to choose/);
+  assert.match(models, /catalog\?\.data \? "Reload catalog" : "Browse model catalog"/);
+  assert.match(models, /Load connected catalogs/);
+  assert.match(models, /Available from loaded catalogs/);
+  assert.match(models, /publishCatalogModels\(entry, result\.sourceId, \[result\.modelId\]\)/);
+  assert.match(models, /modelRouteKind\(model\)/);
+  assert.match(models, /Search all providers/);
+  assert.match(models, /Every supported provider stays visible/);
+  assert.match(models, /catalogSources\.length > 1/);
+  assert.match(models, /Select up to 200/);
+  assert.match(models, /state\.data\.addable \?\? state\.data\.unregistered/);
+  assert.match(models, /addable\.has\(id\)/);
+  assert.match(models, /Protocol pending/);
+  assert.match(models, /pm-catalog-block-reason/);
+  assert.match(models, /Show 120 more/);
   // Opening a provider shows its stored list; only an explicit reload re-asks.
   assert.match(models, /const openProvider = \(entry: ProviderDirectoryEntry, expanded: boolean\)/);
-  assert.match(models, /discoverProviderModels\(entry\.id, \{ refresh \}\)/);
-  assert.match(models, /onReload=\{\(\) => void discoverCatalog\(entry, \{ refresh: true \}\)\}/);
+  assert.match(models, /discoverProviderModels\(sourceId, \{ refresh \}\)/);
+  assert.match(models, /onReload=\{\(\) => catalogSource && void discoverCatalog/);
   assert.match(models, /state\.data\.cached \? "saved list from" : "read"/);
   assert.match(models, /<strong>Available models<\/strong>/);
   assert.doesNotMatch(models, /Use Add models|<strong>Add models<\/strong>/);
-  assert.doesNotMatch(models, />Provider catalog<\/strong>/);
   assert.match(providerModelsCss, /\.pm-filter-menu-wrap\s*\{/);
   assert.match(providerModelsCss, /\.pm-filter-menu\s*\{/);
   assert.doesNotMatch(providerModelsCss, /\.pm-model-layout\s*\{/);
@@ -663,13 +1177,19 @@ test("the model directory combines provider setup and models in accessible singl
   assert.doesNotMatch(models, /reasoningLevels\?\.map\(\(level\) => level\.effort\)/);
   assert.doesNotMatch(models, /<dt>Available<\/dt>/);
   assert.match(models, /This list is saved locally/);
-  assert.match(models, /x-preview-f-free[^\n]+Ox Alpha Free/);
+  assert.match(catalogSearch, /x-preview-f-free[^\n]+Ox Alpha Free/);
 
   const components = await readFile(new URL("../apps/control-center/src/components.tsx", import.meta.url), "utf8");
   assert.match(components, /export function SkeletonBlock/);
   assert.match(components, /export function CatalogSkeleton/);
   assert.match(components, /export function PanelSkeleton/);
   assert.match(components, /app-loading-skeleton/);
+  assert.match(components, /createPortal\([\s\S]*document\.body\)/);
+  assert.match(components, /element\.inert = true/);
+  assert.match(components, /panel\.focus\(\{ preventScroll: true \}\)/);
+  assert.match(components, /event\.key === "Escape"/);
+  assert.match(components, /event\.key !== "Tab"/);
+  assert.match(components, /previouslyFocused\?\.isConnected/);
   const appStyles = await readFile(new URL("../apps/control-center/src/styles.css", import.meta.url), "utf8");
   assert.match(appStyles, /\.skeleton-block::after/);
   assert.match(appStyles, /@keyframes skeleton-sweep/);
@@ -841,6 +1361,14 @@ test("provider writes republish all installed targets and roll selection back on
   assert.match(repair, /runRouterScript\("doctor\.mjs", \["--fix", "--json"\]/);
   assert.match(repair, /allowNonZero: true/);
   assert.match(repair, /REPAIR_TIMEOUT_MS/);
+  assert.match(repair, /CODEX_ROUTER_DEFER_TRAY_REBUILD: "1"/);
+  assert.match(repair, /\} finally \{[\s\S]*await runControlDetached/);
+  assert.match(repair, /runControlDetached\(\["tray", "refresh"\]\)/);
+  assert.doesNotMatch(repair, /setTimeout/);
+  assert.ok(
+    repair.indexOf('await runControlDetached(["tray", "refresh"])') < repair.indexOf("return response"),
+    "the detached refresh must start before repair releases its mutation drain",
+  );
   assert.match(repair, /requiresCompatibleRouter: false/);
 
   assert.doesNotMatch(source, /apply\s*=/);
@@ -861,7 +1389,8 @@ test("provider writes republish all installed targets and roll selection back on
   for (const handler of ["saveProviderCredential", "deleteProviderCredential"]) {
     const body = control.match(new RegExp(`async function ${handler}[\\s\\S]*?\\n}`))?.[0];
     assert.ok(body, `${handler} should be readable`);
-    assert.match(body, /forgetProviderCatalogCache\(providerId\)/);
+    assert.match(body, /withProviderCatalogCacheTransaction/);
+    assert.match(body, /catalog\.forget\(providerCatalogFamilyCacheIds\(providerId\)\)/);
   }
 });
 
@@ -884,6 +1413,30 @@ test("service IPC exposes only safe beta actions and start covers readiness", as
   const api = await readFile(new URL("../apps/control-center/electron/api.d.ts", import.meta.url), "utf8");
   assert.match(api, /type ServiceAction = "status" \| "start"/);
   assert.doesNotMatch(api, /type ServiceAction =[^;]*(?:stop|restart)/);
+});
+
+test("tray mutations detach before the GUI releases its mutation drain", async () => {
+  const source = await readFile(new URL("../apps/control-center/electron/ipc.mjs", import.meta.url), "utf8");
+  const handler = source.match(/handleAction\("controlTray"[\s\S]*?\n  \}\);/)?.[0];
+  assert.ok(handler, "controlTray handler should be readable");
+  assert.match(handler, /runControlJson\(\["tray", "status"\]/);
+  assert.match(handler, /status\?\.supported === false[\s\S]*throw new Error/);
+  assert.match(handler, /await runControlDetached\(\["tray", value\]\)/);
+  assert.match(handler, /accepted: true/);
+  assert.ok(
+    handler.indexOf('value === "status"') < handler.indexOf('runControlDetached(["tray", value])'),
+    "only status may use the awaited tray path",
+  );
+});
+
+test("detached tray acceptance is labeled started, never completed", async () => {
+  const source = await readFile(new URL("../apps/control-center/src/App.tsx", import.meta.url), "utf8");
+  const action = source.slice(source.indexOf("const runAction"), source.indexOf("const t = useCallback"));
+  assert.match(action, /accepted[^\n]+=== true/);
+  assert.match(action, /`\$\{label\} started\.`/);
+  const accepted = action.slice(action.indexOf("accepted"), action.indexOf("return;", action.indexOf("accepted")));
+  assert.doesNotMatch(accepted, /status: "completed"/);
+  assert.match(source, /<Badge tone="neutral">Started<\/Badge>/);
 });
 
 test("local model mutations cover service readiness and validate consent flags", async () => {

@@ -2,13 +2,13 @@
   "version": 1,
   "models": [
     {
-      "slug": "opencode-go/grok-4.5",
-      "gatewayModel": "opencode-go-grok-4-5",
+      "slug": "opencode-go-responses/grok-4.5",
+      "gatewayModel": "opencode-go-responses-grok-4-5",
       "upstreamModel": "grok-4.5",
-      "provider": "opencode-go",
+      "provider": "opencode-go-responses",
       "listed": true,
       "displayName": "Grok 4.5 (opencode Go)",
-      "description": "Grok 4.5 through the opencode Go subscription.",
+      "description": "Grok 4.5 through the opencode Go subscription using the Responses API documented by OpenCode.",
       "priority": 30,
       "defaultEffort": "high",
       "reasoningLevels": [
@@ -31,7 +31,7 @@
         "text",
         "image"
       ],
-      "compHash": "opencode-go-grok-4-5-v2"
+      "compHash": "opencode-go-responses-grok-4-5-v3"
     }
   ]
 }

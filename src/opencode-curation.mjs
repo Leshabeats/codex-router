@@ -135,10 +135,108 @@ const OPENCODE_FREE_MODELS = Object.freeze({
 });
 
 const CURATION_ROUTES = Object.freeze({
+  "commandcode": Object.freeze({
+    providers: Object.freeze(["commandcode", "commandcode-messages"]),
+    protocols: Object.freeze(["Chat", "Messages"]),
+    messagesProvider: "commandcode-messages",
+    messagesModels: Object.freeze([
+      "claude-fable-5",
+      "claude-haiku-4-5-20251001",
+      "claude-opus-4-8",
+      "claude-opus-5",
+      "claude-sonnet-5",
+    ]),
+    responsesModels: Object.freeze([]),
+    primaryModels: Object.freeze([
+      "MiniMaxAI/MiniMax-M2.7",
+      "MiniMaxAI/MiniMax-M3",
+      "Qwen/Qwen3.7-Flash",
+      "Qwen/Qwen3.7-Max",
+      "Qwen/Qwen3.7-Plus",
+      "Qwen/Qwen3.8-Max",
+      "deepseek/deepseek-v4-flash",
+      "deepseek/deepseek-v4-pro",
+      "google/gemini-3.5-flash",
+      "google/gemini-3.7-flash",
+      "gpt-5.5",
+      "gpt-5.6-luna",
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "meta/muse-spark-1.2",
+      "moonshotai/Kimi-K2.7-Code",
+      "moonshotai/Kimi-K2.7-Code-Highspeed",
+      "moonshotai/Kimi-K3",
+      "nvidia/nemotron-3-ultra-550b-a55b",
+      "poolside/laguna-s-2.1-free",
+      "sakana/fugu-ultra",
+      "stealth/ox-alpha",
+      "stepfun/Step-3.7-Flash",
+      "tencent/hy3-paid",
+      "thinkingmachines/inkling",
+      "thinkingmachines/inkling-small",
+      "xai/grok-4.5",
+      "xai/grok-4.6",
+      "xiaomi/mimo-v2.5-pro",
+      "zai-org/GLM-5.2",
+      "zai-org/GLM-5.2-Fast",
+    ]),
+    models: Object.freeze({}),
+  }),
+  "opencode-go": Object.freeze({
+    providers: Object.freeze([
+      "opencode-go",
+      "opencode-go-messages",
+      "opencode-go-responses",
+    ]),
+    protocols: Object.freeze(["Chat", "Messages", "Responses"]),
+    messagesProvider: "opencode-go-messages",
+    messagesModels: Object.freeze([
+      "minimax-m2.5",
+      "minimax-m2.7",
+      "minimax-m3",
+      "qwen3.6-plus",
+      "qwen3.7-max",
+      "qwen3.7-plus",
+      "qwen3.8-max",
+    ]),
+    responsesProvider: "opencode-go-responses",
+    responsesModels: Object.freeze([
+      "gpt-5.6-luna",
+      "grok-4.5",
+      "muse-spark-1.2-contributor",
+    ]),
+    primaryModels: Object.freeze([
+      "deepseek-v4-flash",
+      "deepseek-v4-flash-vision-exp",
+      "deepseek-v4-pro",
+      "glm-5.1",
+      "glm-5.2",
+      "glm-5.3",
+      "hy3",
+      "kimi-k2.6",
+      "kimi-k2.7-code",
+      "kimi-k3",
+      "mimo-v2.5",
+      "mimo-v2.5-pro",
+      "x-preview-f",
+    ]),
+    models: Object.freeze({}),
+  }),
   "opencode-free": Object.freeze({
     providers: Object.freeze(["opencode-free", "opencode-free-responses"]),
+    protocols: Object.freeze(["Chat", "Responses"]),
     responsesProvider: "opencode-free-responses",
     responsesModels: Object.freeze(["muse-spark-1.2-contributor-free"]),
+    primaryModels: Object.freeze([
+      "big-pickle",
+      "deepseek-v4-flash-free",
+      "hy3-free",
+      "laguna-s-2.1-free",
+      "mimo-v2.5-free",
+      "nemotron-3-ultra-free",
+      "nemotron-3.5-lightning-free",
+      "x-preview-f-free",
+    ]),
     models: OPENCODE_FREE_MODELS,
   }),
 });
@@ -158,11 +256,51 @@ export function curationProviderIds(providerId) {
   return [...(CURATION_ROUTES[primary]?.providers || [primary])];
 }
 
-export function curatedModelProviderId(providerId, upstreamModel) {
+function curatedModelRouteSelection(providerId, upstreamModel, { existingProvider } = {}) {
   const primary = curationPrimaryProviderId(providerId);
   const route = CURATION_ROUTES[primary];
-  if (route?.responsesModels.includes(upstreamModel)) return route.responsesProvider;
-  return primary;
+  if (route?.responsesModels.includes(upstreamModel)) {
+    return { providerId: route.responsesProvider };
+  }
+  if (route?.messagesModels?.includes(upstreamModel)) {
+    return { providerId: route.messagesProvider };
+  }
+  if (route?.primaryModels?.includes(upstreamModel)) return { providerId: primary };
+  if (route?.providers.length > 1) {
+    // Preserve a route the operator already chose, but never invent a protocol
+    // for a newly discovered id. OpenCode's one /models catalog backs Chat,
+    // Messages, and Responses; the payload does not say which wire contract a
+    // new id accepts, and guessing Chat makes a picker entry that can fail on
+    // its very first request.
+    if (existingProvider && route.providers.includes(existingProvider)) {
+      return { providerId: existingProvider };
+    }
+    const protocols = route.protocols || ["API"];
+    const protocolList = protocols.length === 1
+      ? protocols[0]
+      : `${protocols.slice(0, -1).join(", ")}${
+        protocols.length > 2 ? "," : ""
+      } or ${protocols.at(-1)}`;
+    return {
+      blockedReason:
+        `${upstreamModel} has no certified ${primary} protocol route yet. `
+        + `Update Codex Router after that model's ${protocolList} route is verified.`,
+    };
+  }
+  return { providerId: primary };
+}
+
+// Discovery and UI surfaces need the same fail-closed protocol verdict as the
+// curation write path, but a disabled candidate is ordinary control data rather
+// than an exception. Undefined means the model has a settled route.
+export function curatedModelBlockReason(providerId, upstreamModel, options = {}) {
+  return curatedModelRouteSelection(providerId, upstreamModel, options).blockedReason;
+}
+
+export function curatedModelProviderId(providerId, upstreamModel, options = {}) {
+  const selection = curatedModelRouteSelection(providerId, upstreamModel, options);
+  if (selection.blockedReason) throw new Error(selection.blockedReason);
+  return selection.providerId;
 }
 
 function curatedModelRecord(providerId, upstreamModel) {

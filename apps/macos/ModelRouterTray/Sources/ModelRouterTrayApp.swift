@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import Darwin
 import Foundation
 import ServiceManagement
 import SwiftUI
@@ -16,6 +17,153 @@ let routerText = Color.primary.opacity(0.92)
 let routerMuted = Color.primary.opacity(0.76)
 let routerMutedStrong = Color.primary.opacity(0.90)
 let removalArmWindow: TimeInterval = 4
+
+struct RouterControlContract: Decodable, Equatable {
+  let version: String
+  let controlProtocol: Int
+}
+
+enum RouterControlAccess: Equatable {
+  case read
+  case recovery
+  case mutation
+}
+
+/// The native host and embedded Electron window are one app, so they must
+/// enforce the same mutation boundary when the installed router checkout is a
+/// different build. Status reads remain available to explain the mismatch;
+/// writes fail closed before a control process is launched.
+enum RouterControlContractPolicy {
+  static let packageLimit = 1_048_576
+
+  static func access(for arguments: [String]) -> RouterControlAccess {
+    if arguments == ["--json"]
+      || arguments == ["account", "--json"]
+      || arguments == ["provider-usage", "--json"]
+      || arguments == ["providers", "--json"]
+      || arguments == ["local-models", "list", "--json"]
+      || arguments == ["vision-bridge", "pull-status"]
+      || arguments == ["chatgpt-session", "status"]
+      || arguments == ["health", "--json"]
+    {
+      return .read
+    }
+    // These are the escape hatch from a mismatched/broken install, or the
+    // runtime-only service transition needed to leave follow mode safely.
+    // Blocking them on the mismatch they repair would make recovery
+    // impossible. They must stay exact; an unknown future argv is a mutation.
+    if arguments == ["doctor", "--fix"]
+      || arguments == ["maintenance"]
+      || arguments == ["tray", "refresh"]
+      || arguments == ["tray", "rebuild"]
+      || arguments == ["service", "start"]
+      || arguments == ["service", "stop"]
+      || arguments == ["service", "restart"]
+    {
+      return .recovery
+    }
+    return .mutation
+  }
+
+  static func drainsBeforeTermination(_ arguments: [String]) -> Bool {
+    // Repair is compatibility-exempt so it can fix skew, but it still writes
+    // the installation and therefore must finish before an unrelated quit.
+    // Maintenance and tray rebuild replace this very app and must not wait on
+    // themselves; service transitions do not write router configuration.
+    access(for: arguments) == .mutation || arguments == ["doctor", "--fix"]
+  }
+
+  static func outlivesApplication(_ arguments: [String]) -> Bool {
+    arguments == ["maintenance"]
+      || arguments == ["tray", "refresh"]
+      || arguments == ["tray", "rebuild"]
+  }
+
+  static func requiresDetachedTrayRefresh(_ arguments: [String]) -> Bool {
+    arguments == ["maintenance"] || arguments == ["doctor", "--fix"]
+  }
+
+  static func installedContract(
+    sourceRoot: URL,
+    currentUserID: UInt32 = getuid()
+  ) -> RouterControlContract? {
+    let package = sourceRoot
+      .appendingPathComponent("apps", isDirectory: true)
+      .appendingPathComponent("control-center", isDirectory: true)
+      .appendingPathComponent("package.json")
+    let required: [(URL, FileAttributeType)] = [
+      (package, .typeRegular),
+      (package.deletingLastPathComponent(), .typeDirectory),
+      (package.deletingLastPathComponent().deletingLastPathComponent(), .typeDirectory),
+    ]
+    for (url, expectedType) in required {
+      guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+        attributes[.type] as? FileAttributeType == expectedType,
+        let owner = attributes[.ownerAccountID] as? NSNumber,
+        owner.uint32Value == currentUserID || owner.uint32Value == 0,
+        let permissions = attributes[.posixPermissions] as? NSNumber,
+        (permissions.uint16Value & 0o022) == 0
+      else { return nil }
+    }
+    guard let attributes = try? FileManager.default.attributesOfItem(atPath: package.path),
+      let size = attributes[.size] as? NSNumber,
+      size.intValue <= packageLimit,
+      let data = try? Data(contentsOf: package),
+      let contract = try? JSONDecoder().decode(RouterControlContract.self, from: data),
+      !contract.version.isEmpty,
+      contract.controlProtocol >= 1
+    else { return nil }
+    return contract
+  }
+
+  static func matches(
+    installed: RouterControlContract?,
+    expectedVersion: String?,
+    expectedProtocol: Int?
+  ) -> Bool {
+    guard let installed,
+      let expectedVersion,
+      !expectedVersion.isEmpty,
+      let expectedProtocol,
+      expectedProtocol >= 1
+    else { return false }
+    return installed.version == expectedVersion
+      && installed.controlProtocol == expectedProtocol
+  }
+}
+
+enum RouterInstallManifestPolicy {
+  static let manifestLimit = 1_048_576
+
+  static func sourceRoot(
+    stateDirectory: URL,
+    currentUserID: UInt32 = getuid()
+  ) -> URL? {
+    let manifest = stateDirectory.appendingPathComponent("install-manifest.json")
+    guard let directoryAttributes = try? FileManager.default.attributesOfItem(atPath: stateDirectory.path),
+      let manifestAttributes = try? FileManager.default.attributesOfItem(atPath: manifest.path),
+      directoryAttributes[.type] as? FileAttributeType == .typeDirectory,
+      manifestAttributes[.type] as? FileAttributeType == .typeRegular,
+      let directoryOwner = directoryAttributes[.ownerAccountID] as? NSNumber,
+      let manifestOwner = manifestAttributes[.ownerAccountID] as? NSNumber,
+      directoryOwner.uint32Value == currentUserID,
+      manifestOwner.uint32Value == currentUserID,
+      let directoryMode = directoryAttributes[.posixPermissions] as? NSNumber,
+      let manifestMode = manifestAttributes[.posixPermissions] as? NSNumber,
+      (directoryMode.uint16Value & 0o077) == 0,
+      (manifestMode.uint16Value & 0o077) == 0,
+      let size = manifestAttributes[.size] as? NSNumber,
+      size.intValue <= manifestLimit,
+      let data = try? Data(contentsOf: manifest),
+      let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+      payload["version"] as? Int == 1,
+      let current = payload["current"] as? [String: Any],
+      let sourceRoot = current["sourceRoot"] as? String,
+      !sourceRoot.isEmpty
+    else { return nil }
+    return URL(fileURLWithPath: sourceRoot, isDirectory: true)
+  }
+}
 
 enum LocalModelOperationKind: Equatable {
   case uninstall
@@ -80,6 +228,84 @@ struct OptimisticToggleLedger<Key: Hashable> {
     guard isCurrent(intent, for: key) else { return false }
     intents.removeValue(forKey: key)
     return true
+  }
+}
+
+// Provider discovery is not serialized with credential writes. Generations
+// make the renderer last-request-wins and, more importantly, let a credential
+// boundary invalidate every response that was authorized by the old account.
+struct ProviderCatalogGenerationLedger: Equatable {
+  private var generations: [String: Int] = [:]
+
+  mutating func begin(_ sourceID: String) -> Int {
+    let generation = (generations[sourceID] ?? 0) + 1
+    generations[sourceID] = generation
+    return generation
+  }
+
+  mutating func invalidate(_ sourceIDs: [String]) {
+    for sourceID in sourceIDs { _ = begin(sourceID) }
+  }
+
+  func isCurrent(_ generation: Int, for sourceID: String) -> Bool {
+    generation > 0 && generations[sourceID] == generation
+  }
+}
+
+enum ProviderCatalogReloadOutcome: Equatable {
+  case loaded
+  case superseded
+  case failed(String)
+}
+
+struct ProviderCatalogReloadBatch: Equatable {
+  private(set) var loaded = 0
+  private(set) var failures: [String] = []
+
+  mutating func record(_ outcome: ProviderCatalogReloadOutcome, sourceID: String) {
+    switch outcome {
+    case .loaded:
+      loaded += 1
+    case .superseded:
+      failures.append("\(sourceID): reload superseded by a credential change")
+    case .failed(let detail):
+      failures.append(detail)
+    }
+  }
+
+  var message: String {
+    if failures.isEmpty {
+      return "Reloaded current models from \(loaded) catalog\(loaded == 1 ? "" : "s")."
+    }
+    if loaded == 0 {
+      return "Catalog reload failed: \(failures.joined(separator: " · "))"
+    }
+    return "Reloaded \(loaded) catalog\(loaded == 1 ? "" : "s"); \(failures.count) failed: \(failures.joined(separator: " · "))"
+  }
+}
+
+struct NativeMutationDrain: Equatable {
+  private(set) var active = 0
+  private(set) var terminationPending = false
+
+  mutating func begin() {
+    active += 1
+  }
+
+  /// Returns true when AppKit may complete a previously deferred quit.
+  mutating func finish() -> Bool {
+    precondition(active > 0, "native mutation drain underflow")
+    active -= 1
+    guard active == 0, terminationPending else { return false }
+    terminationPending = false
+    return true
+  }
+
+  /// Returns true for terminate-now, false for terminate-later.
+  mutating func requestTermination() -> Bool {
+    guard active > 0 else { return true }
+    terminationPending = true
+    return false
   }
 }
 
@@ -158,7 +384,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     Task { await store.startActivityPolling() }
     Task { await store.startAccountUsagePolling() }
     Task { await store.startProviderPolling() }
-    if Self.launchedByUser { store.revealForUserLaunch() }
+    if Self.launchedByUser {
+      store.revealForUserLaunch()
+      ControlCenterLauncher.open()
+    }
   }
 
   // Double-clicking an app that is already running sends this instead of a
@@ -167,6 +396,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   // broken.
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
     store.revealForUserLaunch()
+    ControlCenterLauncher.open()
     return true
   }
 
@@ -179,7 +409,112 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   func applicationWillTerminate(_ notification: Notification) {
+    ControlCenterLauncher.terminateEmbeddedApplication()
     store.restoreServiceOnQuit()
+  }
+
+  func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+    store.applicationTerminationReply()
+  }
+}
+
+@MainActor
+enum ControlCenterLauncher {
+  private static let bundleName = "Control Center.app"
+  private static let bundleIdentifier = "io.github.codex-router.control-center"
+
+  static var bundledApplicationURL: URL? {
+    guard let resources = Bundle.main.resourceURL else { return nil }
+    let candidate = resources.appendingPathComponent(bundleName, isDirectory: true)
+    return FileManager.default.fileExists(atPath: candidate.path) ? candidate : nil
+  }
+
+  static func open() {
+    guard let application = bundledApplicationURL else {
+      RouterStore.shared.reportControlCenterLaunchFailure(
+        "The embedded Control Center is missing. Rebuild Model Router."
+      )
+      return
+    }
+    Task { @MainActor in
+      do {
+        try await retireSupersededControlCenters(except: application)
+        openBundledApplication(application)
+      } catch {
+        RouterStore.shared.reportControlCenterLaunchFailure(error.localizedDescription)
+      }
+    }
+  }
+
+  nonisolated static func shouldRetireControlCenter(
+    at candidate: URL?,
+    embeddedApplication: URL
+  ) -> Bool {
+    guard let candidate else { return true }
+    return candidate.standardizedFileURL.resolvingSymlinksInPath()
+      != embeddedApplication.standardizedFileURL.resolvingSymlinksInPath()
+  }
+
+  private static func retireSupersededControlCenters(except embedded: URL) async throws {
+    let superseded = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
+      .filter { shouldRetireControlCenter(at: $0.bundleURL, embeddedApplication: embedded) }
+    guard !superseded.isEmpty else { return }
+    for application in superseded where !application.isTerminated {
+      _ = application.terminate()
+    }
+    for _ in 0..<50 {
+      if superseded.allSatisfy(\.isTerminated) { return }
+      try await Task.sleep(for: .milliseconds(100))
+    }
+    throw RouterError(
+      "A superseded Codex Router Control Center is still running. Quit it, then reopen Model Router."
+    )
+  }
+
+  private static func openBundledApplication(_ application: URL) {
+    let configuration = NSWorkspace.OpenConfiguration()
+    configuration.activates = true
+    configuration.environment = embeddedEnvironment(
+      processEnvironment: ProcessInfo.processInfo.environment
+    )
+    NSWorkspace.shared.openApplication(at: application, configuration: configuration) { _, error in
+      guard let error else { return }
+      Task { @MainActor in
+        RouterStore.shared.reportControlCenterLaunchFailure(
+          "Control Center could not open: \(error.localizedDescription)"
+        )
+      }
+    }
+  }
+
+  nonisolated static func embeddedEnvironment(
+    processEnvironment: [String: String]
+  ) -> [String: String] {
+    var environment = ["CODEX_ROUTER_EMBEDDED_CONTROL_CENTER": "1"]
+    // Keep source ownership identical across the native host and embedded
+    // Electron process. These are the complete aliases both sides accept for
+    // the checkout, shared state plane, and Codex client home. Forward only
+    // these named paths; arbitrary environment values may contain secrets.
+    for key in [
+      "CODEX_ROUTER_SOURCE_ROOT", "MODEL_ROUTER_SOURCE_ROOT",
+      "MODEL_ROUTER_STATE_DIR", "CODEX_ROUTER_STATE_DIR", "KIMI_CODEX_STATE_DIR",
+      "CODEX_HOME",
+    ] {
+      if let value = processEnvironment[key], !value.isEmpty {
+        environment[key] = value
+      }
+    }
+    return environment
+  }
+
+  static func terminateEmbeddedApplication() {
+    guard let embedded = bundledApplicationURL?.standardizedFileURL else { return }
+    for application in NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier) {
+      guard let runningURL = application.bundleURL?.standardizedFileURL,
+        runningURL == embedded
+      else { continue }
+      application.terminate()
+    }
   }
 }
 
@@ -208,6 +543,7 @@ final class RouterStore: ObservableObject {
   // the user presses Load/Reload models for that provider.
   @Published private(set) var providerCatalogs: [String: ProviderModelCatalog] = [:]
   @Published private(set) var providerCatalogLoading = Set<String>()
+  private var providerCatalogGenerations = ProviderCatalogGenerationLedger()
   @Published private(set) var providerOperation: String?
   @Published private(set) var visionDownload: VisionDownloadState?
   @Published private(set) var localDownload: VisionDownloadState?
@@ -242,6 +578,7 @@ final class RouterStore: ObservableObject {
   // running and nothing about the router changed.
   @Published private(set) var attentionPulse = 0
   @Published private var optimisticToggles = OptimisticToggleLedger<RouterToggleKey>()
+  private var nativeMutationDrain = NativeMutationDrain()
   private var attentionRelease: Task<Void, Never>?
   private var userRevealUntil: Date?
   private static let userRevealWindow: TimeInterval = 20
@@ -738,6 +1075,11 @@ final class RouterStore: ObservableObject {
       self.refreshSurfacesVisible()
       self.reconcileService()
     }
+  }
+
+  func reportControlCenterLaunchFailure(_ detail: String) {
+    message = detail
+    attentionPulse &+= 1
   }
 
   private func persistPresenceMode(_ mode: TrayPresenceMode) {
@@ -1407,17 +1749,28 @@ final class RouterStore: ObservableObject {
   /// offline. That is the same split `discoverProviderModels` makes in
   /// apps/control-center/electron/ipc.mjs, and the reason the decoded
   /// `cached`/`stale` fields exist at all.
-  func reloadProviderCatalog(_ provider: String, refresh: Bool = false) async {
+  @discardableResult
+  func reloadProviderCatalog(
+    _ provider: String,
+    refresh: Bool = false,
+    reportsOutcome: Bool = true
+  ) async -> ProviderCatalogReloadOutcome {
     let providerID: String
     do {
       providerID = try ProviderCatalogInput.validatedProviderID(provider)
     } catch {
-      message = "\(provider): \(error.localizedDescription)"
-      return
+      let detail = "\(provider): \(error.localizedDescription)"
+      if reportsOutcome { message = detail }
+      return .failed(detail)
     }
-    guard !providerCatalogLoading.contains(providerID) else { return }
+    guard !providerCatalogLoading.contains(providerID) else { return .superseded }
+    let generation = providerCatalogGenerations.begin(providerID)
     providerCatalogLoading.insert(providerID)
-    defer { providerCatalogLoading.remove(providerID) }
+    defer {
+      if providerCatalogGenerations.isCurrent(generation, for: providerID) {
+        providerCatalogLoading.remove(providerID)
+      }
+    }
     do {
       let output = try await runRouterScript(
         "model-discovery.mjs",
@@ -1425,25 +1778,43 @@ final class RouterStore: ObservableObject {
         timeout: RouterScriptWatchdog.discoveryTimeout
       )
       let catalog = try JSONDecoder().decode(ProviderModelCatalog.self, from: output)
+      guard providerCatalogGenerations.isCurrent(generation, for: providerID) else {
+        return .superseded
+      }
       providerCatalogs[providerID] = catalog
       let origin = catalog.cached == true ? "saved" : "current"
-      message = "\(catalog.discovered.count) \(origin) \(providerID) models loaded. Select the ones to add below."
+      if reportsOutcome {
+        message = "\(catalog.discovered.count) \(origin) \(providerID) models loaded. Select the ones to add below."
+      }
+      return .loaded
     } catch {
-      message = "\(providerID): \(error.localizedDescription)"
+      guard providerCatalogGenerations.isCurrent(generation, for: providerID) else {
+        return .superseded
+      }
+      let detail = "\(providerID): \(error.localizedDescription)"
+      if reportsOutcome { message = detail }
+      return .failed(detail)
     }
   }
 
   func reloadAvailableProviderCatalogs() async {
-    let providers = providerSetup.values
-      .filter { $0.configured && $0.supportsLiveModelCatalog }
+    let sources = providerSetup.values
+      .filter(\.configured)
+      .flatMap { $0.catalogSources ?? [] }
       .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
-    guard !providers.isEmpty, providerCatalogLoading.isEmpty else { return }
-    for provider in providers {
+    guard !sources.isEmpty, providerCatalogLoading.isEmpty else { return }
+    var batch = ProviderCatalogReloadBatch()
+    for source in sources {
       // The button says "Reload", so this one is the explicit re-ask. Every
       // other entry point is cache-first.
-      await reloadProviderCatalog(provider.id, refresh: true)
+      let outcome = await reloadProviderCatalog(
+        source.id,
+        refresh: true,
+        reportsOutcome: false
+      )
+      batch.record(outcome, sourceID: source.id)
     }
-    message = "Reloaded current models for \(providers.count) provider\(providers.count == 1 ? "" : "s")."
+    message = batch.message
   }
 
   func addProviderCatalogModels(_ provider: String, modelIDs: [String]) async {
@@ -1458,6 +1829,13 @@ final class RouterStore: ObservableObject {
       unique = try ProviderCatalogInput.validatedModelIDs(modelIDs)
     } catch {
       message = "\(provider): \(error.localizedDescription)"
+      return
+    }
+    if let catalog = providerCatalogs[providerID],
+       let blockedID = unique.first(where: { !catalog.addableModelIDs.contains($0) })
+    {
+      message = catalog.blocked?[blockedID]
+        ?? "\(blockedID) is not an addable \(providerID) catalog candidate."
       return
     }
     guard !providerCatalogLoading.contains(providerID) else { return }
@@ -1765,12 +2143,29 @@ final class RouterStore: ObservableObject {
 
   func updateAndVerify() async {
     guard providerOperation == nil else { return }
+    // Keep a pending AppKit quit deferred through both maintenance and the
+    // spawn-only refresh handoff. Releasing the drain after maintenance but
+    // before the helper starts can leave a successful update with the old app.
+    let maintenanceArguments = ["maintenance"]
+    var refreshLaunched = false
+    beginNativeMutation()
+    defer {
+      // A failed final check can follow a partially applied repair. Refresh is
+      // plan-driven and becomes a no-op when nothing changed, so attempt the
+      // same safe handoff before releasing a pending quit on every exit path.
+      if !refreshLaunched {
+        try? launchDetachedTrayRefresh(after: maintenanceArguments)
+      }
+      finishNativeMutation()
+    }
     providerOperation = "maintenance"
     maintenanceMessage = "Running update and doctor…"
     maintenanceSucceeded = false
     defer { providerOperation = nil }
     do {
-      _ = try await runControl(arguments: ["maintenance"])
+      _ = try await runControl(arguments: maintenanceArguments)
+      try launchDetachedTrayRefresh(after: maintenanceArguments)
+      refreshLaunched = true
       await refresh()
       await refreshAccountUsage()
       await refreshProviderUsage()
@@ -1891,12 +2286,27 @@ final class RouterStore: ObservableObject {
 
   func fixAndVerify() async {
     guard providerOperation == nil else { return }
+    // doctor --fix has its own mutation classification, but this outer claim is
+    // intentionally one level wider: it stays active until the detached tray
+    // refresh is launched, so a quit already waiting on doctor cannot win the
+    // handoff race.
+    let repairArguments = ["doctor", "--fix"]
+    var refreshLaunched = false
+    beginNativeMutation()
+    defer {
+      if !refreshLaunched {
+        try? launchDetachedTrayRefresh(after: repairArguments)
+      }
+      finishNativeMutation()
+    }
     providerOperation = "doctor"
     maintenanceMessage = "Running doctor --fix…"
     maintenanceSucceeded = false
     defer { providerOperation = nil }
     do {
-      _ = try await runControl(arguments: ["doctor", "--fix"])
+      _ = try await runControl(arguments: repairArguments)
+      try launchDetachedTrayRefresh(after: repairArguments)
+      refreshLaunched = true
       await refresh()
       await refreshAccountUsage()
       await refreshProviderUsage()
@@ -1947,6 +2357,31 @@ final class RouterStore: ObservableObject {
         : "Previous provider restored. Fully quit and reopen Codex when ready."
       }
     )
+  }
+
+  func setChatGptSessionSharing(_ enabled: Bool) async {
+    guard providerOperation == nil else { return }
+    guard ChatGptSessionControlPolicy.allowsChange(
+      to: enabled,
+      status: snapshot.chatgptSession
+    ) else {
+      message = enabled
+        ? routerLocalized("A usable ChatGPT login is required before sharing can be enabled. Run codex login first.")
+        : routerLocalized("ChatGPT session-sharing status is unavailable. Refresh before changing it.")
+      return
+    }
+    providerOperation = "chatgpt-session"
+    defer { providerOperation = nil }
+    do {
+      _ = try await runControl(arguments: ChatGptSessionControlPolicy.arguments(enabled: enabled))
+      await refresh()
+      message = enabled
+        ? routerLocalized("ChatGPT session sharing enabled for local router clients.")
+        : routerLocalized("ChatGPT session sharing disabled. Installed client catalogs were refreshed.")
+    } catch {
+      message = error.localizedDescription
+      await refresh()
+    }
   }
 
   func setSubagentMode(_ mode: String) {
@@ -2413,17 +2848,33 @@ final class RouterStore: ObservableObject {
     operation: () async throws -> Void
   ) async {
     guard providerOperation == nil else { return }
+    let catalogSourceIDs = providerSetup[provider]?.catalogSources?.map(\.id) ?? []
+    // Invalidate before the command begins and again after it ends. A command
+    // can store/remove the credential successfully and then fail while
+    // republishing clients, so its thrown result is not proof the old account
+    // is still authoritative.
+    invalidateProviderCatalogs(catalogSourceIDs)
     providerOperation = provider
     defer { providerOperation = nil }
     do {
       try await operation()
+      invalidateProviderCatalogs(catalogSourceIDs)
       await refreshProviderSetup()
       await refresh()
       await refreshProviderUsage()
       message = successMessage
     } catch {
+      invalidateProviderCatalogs(catalogSourceIDs)
       message = error.localizedDescription
       await refreshProviderSetup()
+    }
+  }
+
+  private func invalidateProviderCatalogs(_ sourceIDs: [String]) {
+    providerCatalogGenerations.invalidate(sourceIDs)
+    for sourceID in sourceIDs {
+      providerCatalogs.removeValue(forKey: sourceID)
+      providerCatalogLoading.remove(sourceID)
     }
   }
 
@@ -2571,12 +3022,17 @@ final class RouterStore: ObservableObject {
   // and relaunches the process that is asking. A failed update must not turn
   // Restart into a no-op -- an offline machine still deserves a restart -- so
   // its error is carried into the message but the restart steps still run.
-  // Each step outlives this process: maintenance may itself relaunch a stale
-  // tray, and the rebuild launcher quits this tray only after the staged
-  // bundle passes verification, with launchd's `SuccessfulExit: false`
-  // covering any abnormal exit. Only the failure path can be reported,
-  // because a success takes the window that would have shown it.
+  // Maintenance defers its companion rebuild while this app owns the mutation
+  // drain. The detached rebuild launcher then outlives this process and quits
+  // the tray only after its staged bundle passes verification, with launchd's
+  // `SuccessfulExit: false` covering any abnormal exit. Only the failure path
+  // can be reported, because a success takes the window that would show it.
   func restartRouter() async {
+    // This flow used to await the self-replacing rebuild while AppKit was free
+    // to terminate between maintenance and that last command. Hold one outer
+    // claim, then launch the rebuild without waiting before releasing it.
+    beginNativeMutation()
+    defer { finishNativeMutation() }
     message = routerLocalized("Restarting…")
     var updateFailure: String?
     do {
@@ -2586,7 +3042,7 @@ final class RouterStore: ObservableObject {
     }
     do {
       _ = try await runControl(arguments: ["service", "restart"])
-      _ = try await runControl(arguments: ["tray", "rebuild"])
+      try launchDetachedTrayCommand("rebuild")
       if let updateFailure {
         message = routerFormat("Restarted without updating: %@", updateFailure)
       }
@@ -2636,8 +3092,69 @@ final class RouterStore: ObservableObject {
     }
   }
 
+  func applicationTerminationReply() -> NSApplication.TerminateReply {
+    nativeMutationDrain.requestTermination() ? .terminateNow : .terminateLater
+  }
+
+  private func beginNativeMutation() {
+    nativeMutationDrain.begin()
+  }
+
+  private func finishNativeMutation() {
+    if nativeMutationDrain.finish() {
+      NSApp.reply(toApplicationShouldTerminate: true)
+    }
+  }
+
+  private func launchDetachedTrayRefresh(after arguments: [String]) throws {
+    guard RouterControlContractPolicy.requiresDetachedTrayRefresh(arguments) else {
+      throw RouterError("This maintenance command does not schedule a desktop refresh.")
+    }
+    try launchDetachedTrayCommand("refresh")
+  }
+
+  private func launchDetachedTrayCommand(_ action: String) throws {
+    guard action == "refresh" || action == "rebuild" else {
+      throw RouterError("Unsupported detached tray command.")
+    }
+    let root = try sourceRoot()
+    let task = Process()
+    task.executableURL = root.appendingPathComponent("bin/control")
+    task.arguments = ["tray", action]
+    task.currentDirectoryURL = root
+    var environment = ProcessInfo.processInfo.environment
+    let home = FileManager.default.homeDirectoryForCurrentUser.path
+    let preferredPaths = [
+      "\(home)/.npm-global/bin",
+      "\(home)/.local/bin",
+      "/opt/homebrew/bin",
+      "/usr/local/bin",
+    ]
+    environment["PATH"] = (preferredPaths + [environment["PATH"] ?? ""]).joined(separator: ":")
+    environment["MODEL_ROUTER_SOURCE_ROOT"] = root.path
+    environment["MODEL_ROUTER_TARGET"] = "codex"
+    environment.removeValue(forKey: "CODEX_ROUTER_DEFER_TRAY_REBUILD")
+    environment.removeValue(forKey: "ELECTRON_RUN_AS_NODE")
+    task.environment = environment
+    task.standardInput = FileHandle.nullDevice
+    task.standardOutput = FileHandle.nullDevice
+    task.standardError = FileHandle.nullDevice
+    // Process.run() only waits for exec. The child owns no pipe back into this
+    // app and remains alive when the staged replacement asks AppKit to quit.
+    try task.run()
+  }
+
   private func runControl(arguments: [String], stdin: Data? = nil) async throws -> Data {
     let root = try sourceRoot()
+    if RouterControlContractPolicy.access(for: arguments) == .mutation {
+      try assertMutationCompatibility(sourceRoot: root)
+    }
+    let drainsBeforeTermination = RouterControlContractPolicy.drainsBeforeTermination(arguments)
+    if drainsBeforeTermination { beginNativeMutation() }
+    defer {
+      if drainsBeforeTermination { finishNativeMutation() }
+    }
+    let outlivesApplication = RouterControlContractPolicy.outlivesApplication(arguments)
     return try await Task.detached {
       let task = Process()
       task.executableURL = root.appendingPathComponent("bin/control")
@@ -2652,27 +3169,76 @@ final class RouterStore: ObservableObject {
         "/usr/local/bin",
       ]
       environment["PATH"] = (preferredPaths + [environment["PATH"] ?? ""]).joined(separator: ":")
+      if arguments == ["maintenance"] || arguments == ["doctor", "--fix"] {
+        // The installer must return before it replaces the app that is waiting
+        // for this mutation. A detached tray refresh below performs the
+        // self-replace after the mutation drain is clear.
+        environment["CODEX_ROUTER_DEFER_TRAY_REBUILD"] = "1"
+      }
       task.environment = environment
-      let output = Pipe()
-      let errors = Pipe()
+      let output = outlivesApplication ? nil : Pipe()
+      let errors = outlivesApplication ? nil : Pipe()
       let input = stdin.map { _ in Pipe() }
-      task.standardOutput = output
-      task.standardError = errors
+      var durableErrorURL: URL?
+      var durableErrorHandle: FileHandle?
+      if outlivesApplication {
+        let url = FileManager.default.temporaryDirectory
+          .appendingPathComponent("model-router-self-replace-\(UUID().uuidString).log")
+        guard FileManager.default.createFile(
+          atPath: url.path,
+          contents: nil,
+          attributes: [.posixPermissions: 0o600]
+        ) else {
+          throw RouterError("Could not create the private maintenance error log.")
+        }
+        durableErrorURL = url
+        durableErrorHandle = try FileHandle(forUpdating: url)
+      }
+      defer {
+        try? durableErrorHandle?.close()
+        if let durableErrorURL { try? FileManager.default.removeItem(at: durableErrorURL) }
+      }
+      // Self-replacing maintenance/rebuild commands deliberately terminate
+      // this app while their child tree is still completing the atomic swap.
+      // A pipe owned by the dying app becomes EPIPE and can kill that updater;
+      // /dev/null plus a private on-disk stderr handle remain valid after the
+      // parent exits, so the child safely outlives the UI. If replacement does
+      // not happen and the command fails, a bounded tail still carries the
+      // actionable refusal back into the live app.
+      if let output { task.standardOutput = output }
+      else { task.standardOutput = FileHandle.nullDevice }
+      if let errors { task.standardError = errors }
+      else { task.standardError = durableErrorHandle ?? FileHandle.nullDevice }
       task.standardInput = input
       try task.run()
-      let stdoutReader = Task.detached {
-        output.fileHandleForReading.readDataToEndOfFile()
+      // A successful self-replace can end this process before Swift executes
+      // its defer. Remove the private name as soon as the child inherits the
+      // descriptor; the inode remains usable until both processes close it,
+      // and the kernel then reclaims it without leaving a temp-file orphan.
+      if let errorURL = durableErrorURL, unlink(errorURL.path) == 0 {
+        durableErrorURL = nil
       }
-      let stderrReader = Task.detached {
-        errors.fileHandleForReading.readDataToEndOfFile()
+      let stdoutReader = output.map { pipe in
+        Task.detached { pipe.fileHandleForReading.readDataToEndOfFile() }
+      }
+      let stderrReader = errors.map { pipe in
+        Task.detached { pipe.fileHandleForReading.readDataToEndOfFile() }
       }
       if let stdin, let input {
         input.fileHandleForWriting.write(stdin)
         try? input.fileHandleForWriting.close()
       }
       task.waitUntilExit()
-      let stdout = await stdoutReader.value
-      let stderr = await stderrReader.value
+      let stdout = await stdoutReader?.value ?? Data()
+      let stderr: Data
+      if let durableErrorHandle {
+        try? durableErrorHandle.synchronize()
+        let end = (try? durableErrorHandle.seekToEnd()) ?? 0
+        try? durableErrorHandle.seek(toOffset: end > 65_536 ? end - 65_536 : 0)
+        stderr = (try? durableErrorHandle.read(upToCount: 65_536)) ?? Data()
+      } else {
+        stderr = await stderrReader?.value ?? Data()
+      }
       guard task.terminationStatus == 0 else {
         let detail = String(data: stderr, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
         throw RouterError(detail?.isEmpty == false ? detail! : "Model Router control command failed.")
@@ -2694,6 +3260,13 @@ final class RouterStore: ObservableObject {
       throw RouterError("Unsupported Model Router script.")
     }
     let root = try sourceRoot()
+    if script == "curate-models.mjs" {
+      try assertMutationCompatibility(sourceRoot: root)
+      beginNativeMutation()
+    }
+    defer {
+      if script == "curate-models.mjs" { finishNativeMutation() }
+    }
     let scriptURL = root.appendingPathComponent("src").appendingPathComponent(script)
     return try await Task.detached {
       let task = Process()
@@ -2746,21 +3319,110 @@ final class RouterStore: ObservableObject {
   }
 
   private func sourceRoot() throws -> URL {
-    guard let configured = Bundle.main.object(forInfoDictionaryKey: "ModelRouterSourceRoot") as? String,
-      !configured.isEmpty
-    else {
-      throw RouterError("Cannot find this Model Router checkout. Rebuild the tray app from the router repository.")
+    var candidates: [URL] = []
+    let environment = ProcessInfo.processInfo.environment
+    for key in ["CODEX_ROUTER_SOURCE_ROOT", "MODEL_ROUTER_SOURCE_ROOT"] {
+      if let explicit = environment[key], !explicit.isEmpty {
+        candidates.append(URL(fileURLWithPath: explicit, isDirectory: true))
+      }
     }
-    return try validatedSourceRoot(URL(fileURLWithPath: configured, isDirectory: true))
+    // The service owner's private manifest wins over the app's build checkout,
+    // matching the embedded Control Center after any explicit operator
+    // override. Otherwise the two halves of this one app can mutate different
+    // registries after a developer build opens an installed service.
+    if let recorded = recordedInstallSourceRoot() { candidates.append(recorded) }
+    if let configured = Bundle.main.object(forInfoDictionaryKey: "ModelRouterSourceRoot") as? String,
+      !configured.isEmpty
+    {
+      candidates.append(URL(fileURLWithPath: configured, isDirectory: true))
+    }
+
+    if let dataHome = environment["XDG_DATA_HOME"], !dataHome.isEmpty {
+      candidates.append(
+        URL(fileURLWithPath: dataHome, isDirectory: true)
+          .appendingPathComponent("codex-router", isDirectory: true)
+      )
+    }
+    let home = FileManager.default.homeDirectoryForCurrentUser
+    candidates.append(
+      home.appendingPathComponent(".local/share/codex-router", isDirectory: true)
+    )
+    candidates.append(home.appendingPathComponent(".codex-router", isDirectory: true))
+
+    for candidate in candidates {
+      if let root = try? validatedSourceRoot(candidate) { return root }
+    }
+    throw RouterError(
+      "Cannot find the installed Model Router checkout. Install the router or rebuild this app from its checkout."
+    )
+  }
+
+  private func assertMutationCompatibility(sourceRoot: URL) throws {
+    let expectedVersion = Bundle.main.object(
+      forInfoDictionaryKey: "ModelRouterControlVersion"
+    ) as? String
+    let expectedProtocol = (
+      Bundle.main.object(forInfoDictionaryKey: "ModelRouterControlProtocol") as? NSNumber
+    )?.intValue
+    let installed = RouterControlContractPolicy.installedContract(sourceRoot: sourceRoot)
+    guard RouterControlContractPolicy.matches(
+      installed: installed,
+      expectedVersion: expectedVersion,
+      expectedProtocol: expectedProtocol
+    ) else {
+      throw RouterError(
+        "This Model Router app does not match the installed router control protocol. "
+          + "Install or update the router and desktop app from the same build, then reopen the app."
+      )
+    }
   }
 
   private func validatedSourceRoot(_ root: URL) throws -> URL {
     let resolvedRoot = root.standardizedFileURL.resolvingSymlinksInPath()
-    let control = resolvedRoot.appendingPathComponent("bin/control")
-    guard FileManager.default.isExecutableFile(atPath: control.path) else {
-      throw RouterError("Cannot find this Model Router checkout. Rebuild the tray app from the router repository.")
+    let required: [(URL, FileAttributeType, Bool)] = [
+      (resolvedRoot, .typeDirectory, false),
+      (resolvedRoot.appendingPathComponent("src", isDirectory: true), .typeDirectory, false),
+      (resolvedRoot.appendingPathComponent("bin", isDirectory: true), .typeDirectory, false),
+      (resolvedRoot.appendingPathComponent("src/control.mjs"), .typeRegular, false),
+      (resolvedRoot.appendingPathComponent("bin/control"), .typeRegular, true),
+    ]
+    for (url, expectedType, executable) in required {
+      let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+      guard attributes[.type] as? FileAttributeType == expectedType,
+        trustedOwnerAndMode(attributes),
+        !executable || FileManager.default.isExecutableFile(atPath: url.path)
+      else {
+        throw RouterError("The Model Router checkout is missing or has unsafe ownership or permissions.")
+      }
     }
     return resolvedRoot
+  }
+
+  private func trustedOwnerAndMode(_ attributes: [FileAttributeKey: Any]) -> Bool {
+    guard let owner = attributes[.ownerAccountID] as? NSNumber,
+      let permissions = attributes[.posixPermissions] as? NSNumber
+    else { return false }
+    let ownerID = owner.uint32Value
+    return (ownerID == getuid() || ownerID == 0) && (permissions.uint16Value & 0o022) == 0
+  }
+
+  private func recordedInstallSourceRoot() -> URL? {
+    let environment = ProcessInfo.processInfo.environment
+    let home = FileManager.default.homeDirectoryForCurrentUser
+    let stateDirectory: URL
+    if let configured = environment["MODEL_ROUTER_STATE_DIR"]
+      ?? environment["CODEX_ROUTER_STATE_DIR"]
+      ?? environment["KIMI_CODEX_STATE_DIR"],
+      !configured.isEmpty
+    {
+      stateDirectory = URL(fileURLWithPath: configured, isDirectory: true)
+    } else {
+      let codexHome = environment["CODEX_HOME"].flatMap { $0.isEmpty ? nil : $0 }
+        .map { URL(fileURLWithPath: $0, isDirectory: true) }
+        ?? home.appendingPathComponent(".codex", isDirectory: true)
+      stateDirectory = codexHome.appendingPathComponent("codex-router", isDirectory: true)
+    }
+    return RouterInstallManifestPolicy.sourceRoot(stateDirectory: stateDirectory)
   }
 }
 
@@ -2916,13 +3578,109 @@ private struct RouterError: LocalizedError {
   var errorDescription: String? { message }
 }
 
+enum ChatGptSessionSharingState: String, Decodable, Equatable {
+  case enabled
+  case disabled
+}
+
+enum ChatGptSessionUsability: String, Decodable, Equatable {
+  case usable
+  case expired
+  case unavailable
+}
+
+struct ChatGptSessionStatus: Decodable, Equatable {
+  let sharing: ChatGptSessionSharingState
+  let session: ChatGptSessionUsability
+  let present: Bool
+  let expiresInHours: Double?
+
+  private enum CodingKeys: String, CodingKey {
+    case sharing
+    case session
+    case present
+    case expiresInHours
+  }
+
+  init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    sharing = try values.decode(ChatGptSessionSharingState.self, forKey: .sharing)
+    session = try values.decode(ChatGptSessionUsability.self, forKey: .session)
+    present = try values.decode(Bool.self, forKey: .present)
+    let expiry = try values.decodeIfPresent(Double.self, forKey: .expiresInHours)
+    guard expiry?.isFinite != false else {
+      throw DecodingError.dataCorruptedError(
+        forKey: .expiresInHours,
+        in: values,
+        debugDescription: "ChatGPT session expiry must be finite"
+      )
+    }
+    expiresInHours = expiry
+  }
+}
+
+enum ChatGptSessionControlPolicy {
+  static func allowsChange(to enabled: Bool, status: ChatGptSessionStatus?) -> Bool {
+    guard let status else { return false }
+    return !enabled || status.session == .usable
+  }
+
+  static func arguments(enabled: Bool) -> [String] {
+    ["chatgpt-session", enabled ? "enable" : "disable"]
+  }
+}
+
 struct RouterSnapshot: Decodable {
   let targets: [String: RouterTarget]
   // Absent from an older router's output, so the tray keeps working against one
   // rather than failing the whole decode over a field it gained later.
   let presence: RouterPresence?
   let harness: RouterHarness?
-  static let empty = RouterSnapshot(targets: [:], presence: nil, harness: nil)
+  // Malformed or future consent states fail closed without taking the rest of
+  // the tray offline. The settings row becomes unavailable and cannot enable
+  // sharing until this app understands the control contract again.
+  let chatgptSession: ChatGptSessionStatus?
+
+  private enum CodingKeys: String, CodingKey {
+    case targets
+    case presence
+    case harness
+    case chatgptSession
+  }
+
+  init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    targets = try values.decode([String: RouterTarget].self, forKey: .targets)
+    presence = try values.decodeIfPresent(RouterPresence.self, forKey: .presence)
+    harness = try values.decodeIfPresent(RouterHarness.self, forKey: .harness)
+    do {
+      chatgptSession = try values.decodeIfPresent(
+        ChatGptSessionStatus.self,
+        forKey: .chatgptSession
+      )
+    } catch {
+      chatgptSession = nil
+    }
+  }
+
+  init(
+    targets: [String: RouterTarget],
+    presence: RouterPresence?,
+    harness: RouterHarness?,
+    chatgptSession: ChatGptSessionStatus?
+  ) {
+    self.targets = targets
+    self.presence = presence
+    self.harness = harness
+    self.chatgptSession = chatgptSession
+  }
+
+  static let empty = RouterSnapshot(
+    targets: [:],
+    presence: nil,
+    harness: nil,
+    chatgptSession: nil
+  )
 }
 
 struct HarnessStopResult: Decodable {
@@ -3742,22 +4500,22 @@ struct ProviderSetupState: Decodable, Identifiable, Equatable {
   // rather than after a 403 lands in Codex.
   let planNote: String?
   let anonymousNote: String?
-
-  // Match the Electron catalog surface: these sources either have no single
-  // provider endpoint to interrogate or are owned by the client/runtime.
-  // Showing a Load button for them would promise a request that discovery
-  // correctly refuses.
-  //
-  // The authority is `NO_LIVE_CATALOG` in
-  // apps/control-center/src/pages/ModelsPage.tsx. ProviderCatalogTests reads
-  // that file and fails if the two ever diverge.
-  static let liveModelCatalogExclusions: Set<String> = [
-    "openai", "local", "lmstudio", "custom", "devin-cli", "anthropic-api",
-  ]
+  let catalogSources: [ProviderCatalogSource]?
 
   var supportsLiveModelCatalog: Bool {
-    !Self.liveModelCatalogExclusions.contains(id)
+    !(catalogSources ?? []).isEmpty
   }
+}
+
+struct ProviderCatalogSource: Decodable, Identifiable, Equatable {
+  let id: String
+  let displayName: String
+  let kind: String
+}
+
+struct ProviderCatalogChoice: Identifiable {
+  let id: String
+  let displayName: String
 }
 
 /// The Swift half of the catalog input contract that
@@ -3851,10 +4609,19 @@ struct ProviderModelCatalog: Decodable, Equatable {
   let discovered: [String]
   let registered: [String]
   let unregistered: [String]
+  let addable: [String]?
+  let blocked: [String: String]?
   let unavailable: [String]
   let cached: Bool?
   let stale: Bool?
   let fetchedAt: String?
+
+  // Older routers did not distinguish protocol-verified candidates. Keep the
+  // tray compatible with them while honoring the explicit fail-closed set as
+  // soon as the backend supplies it.
+  var addableModelIDs: Set<String> {
+    Set(addable ?? unregistered)
+  }
 }
 
 private struct MenuBarIconView: View {
@@ -4006,6 +4773,7 @@ private struct TrayView: View {
   @State private var providersExpanded = true
   @State private var savingsRange: SavingsRange = .day
   @State private var savingsRangeSelectedByUser = false
+  @State private var confirmSessionSharing = false
 
   private var target: RouterTarget? { store.snapshot.targets["codex"] }
   // Rows come from the registry snapshot, not from the models in the picker.
@@ -4118,6 +4886,34 @@ private struct TrayView: View {
     // Identical names share every word, which says nothing about a vendor.
     if values.allSatisfy({ $0 == first }) { return "" }
     return prefix.joined(separator: " ")
+  }
+
+  private var chatGptSessionDetail: String {
+    guard let status = store.snapshot.chatgptSession else {
+      return routerLocalized("Sharing status unavailable")
+    }
+    let sharing = status.sharing == .enabled
+      ? routerLocalized("Sharing enabled")
+      : routerLocalized("Sharing disabled")
+    let login: String
+    switch status.session {
+    case .usable:
+      if let hours = status.expiresInHours {
+        login = routerFormat(
+          "login usable · about %@h left",
+          hours.formatted(.number.precision(.fractionLength(0...1)))
+        )
+      } else {
+        login = routerLocalized("login usable")
+      }
+    case .expired:
+      login = routerLocalized("login expired")
+    case .unavailable:
+      login = status.present
+        ? routerLocalized("login unavailable · sign-in data detected")
+        : routerLocalized("login unavailable · run codex login")
+    }
+    return "\(sharing) · \(login)"
   }
 
   var body: some View {
@@ -4900,6 +5696,52 @@ private struct TrayView: View {
       isDisabled: store.loginFreeEnabled(authoritative: store.loginFree)
     )
     settingRow(
+      title: routerLocalized("Share ChatGPT subscription"),
+      detail: chatGptSessionDetail,
+      isOn: Binding(
+        get: { store.snapshot.chatgptSession?.sharing == .enabled },
+        set: { enabled in
+          if enabled {
+            confirmSessionSharing = true
+          } else {
+            Task { await store.setChatGptSessionSharing(false) }
+          }
+        }
+      ),
+      isDisabled: store.providerOperation != nil
+        || !ChatGptSessionControlPolicy.allowsChange(
+          to: store.snapshot.chatgptSession?.sharing != .enabled,
+          status: store.snapshot.chatgptSession
+        )
+    )
+    if confirmSessionSharing {
+      VStack(alignment: .leading, spacing: 7) {
+        Text(routerLocalized("Enable ChatGPT session sharing?"))
+          .font(.system(size: 10, weight: .semibold))
+          .foregroundStyle(routerYellow)
+        Text(routerLocalized("Enabling lets other local Codex Router clients spend this user's ChatGPT subscription. Only continue for clients you trust on this Mac."))
+          .font(.system(size: 9))
+          .foregroundStyle(routerMutedStrong)
+          .fixedSize(horizontal: false, vertical: true)
+        HStack(spacing: 8) {
+          Button(routerLocalized("Cancel")) { confirmSessionSharing = false }
+            .buttonStyle(.borderless)
+          Button(routerLocalized("Enable sharing")) {
+            confirmSessionSharing = false
+            Task { await store.setChatGptSessionSharing(true) }
+          }
+          .buttonStyle(.borderedProminent)
+          .controlSize(.small)
+          .tint(routerYellow)
+        }
+      }
+      .padding(8)
+      .background(
+        routerYellow.opacity(0.10),
+        in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+      )
+    }
+    settingRow(
       title: routerLocalized("Use without OpenAI login"),
       detail: store.loginFreeEnabled(authoritative: store.loginFree)
         ? routerLocalized("External providers · Codex restarts automatically")
@@ -5009,6 +5851,7 @@ private struct TrayView: View {
     @State private var expandedLocalVariants = Set<String>()
     @State private var variantHelpExpanded = false
     @State private var localCatalogFilter = ""
+    @State private var pickerModelFilter = ""
     @State private var installTag = ""
     @State private var armedRemoval: String?
     // Set to the tag awaiting an "it will not fit here" confirmation. Held as
@@ -5056,6 +5899,17 @@ private struct TrayView: View {
           if $0.provider != $1.provider { return $0.provider < $1.provider }
           return $0.slug < $1.slug
         }
+    }
+
+    private var filteredPickerModels: [RouterModel] {
+      let query = pickerModelFilter.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+      guard !query.isEmpty else { return enabledModels }
+      return enabledModels.filter { model in
+        [model.displayName, model.slug, model.provider, providerName(model.provider)]
+          .joined(separator: " ")
+          .lowercased()
+          .contains(query)
+      }
     }
 
     private var canReloadProviderCatalogs: Bool {
@@ -5216,7 +6070,15 @@ private struct TrayView: View {
                 ("Hide all", { Task { await store.hideAllPickerModels() } }),
               ]
             )
-            ForEach(providerGroups(enabledModels)) { group in
+            TextField(routerLocalized("Search available models"), text: $pickerModelFilter)
+              .textFieldStyle(.roundedBorder)
+              .font(.system(size: 10))
+            if filteredPickerModels.isEmpty && !pickerModelFilter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+              Text(routerLocalized("No provider models match this search."))
+                .font(.system(size: 9))
+                .foregroundStyle(routerMuted)
+            }
+            ForEach(providerGroups(filteredPickerModels)) { group in
               AccordionPanel(
                 title: providerName(group.provider),
                 summary: pickerGroupSummary(group),
@@ -5352,9 +6214,20 @@ private struct TrayView: View {
       .animation(.easeOut(duration: 0.2), value: store.localModelOperation)
     }
 
-    private var catalogProviders: [ProviderSetupState] {
+    private var catalogProviders: [ProviderCatalogChoice] {
       store.providerSetup.values
-        .filter { $0.configured && $0.supportsLiveModelCatalog }
+        .filter(\.configured)
+        .flatMap { provider -> [ProviderCatalogChoice] in
+          let sources = provider.catalogSources ?? []
+          return sources.map { source in
+            ProviderCatalogChoice(
+              id: source.id,
+              displayName: sources.count > 1
+                ? "\(provider.displayName) — \(source.displayName)"
+                : provider.displayName
+            )
+          }
+        }
         .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
     }
 
@@ -5370,7 +6243,7 @@ private struct TrayView: View {
             .foregroundStyle(routerMuted)
           ForEach(catalogProviders) { provider in
             ProviderCatalogRow(
-              provider: provider,
+              title: provider.displayName,
               catalog: store.providerCatalogs[provider.id],
               isLoading: store.providerCatalogLoading.contains(provider.id),
               // Any catalog run in flight -- including a bulk reload started
@@ -6940,7 +7813,7 @@ private struct TrayView: View {
   }
 
   private struct ProviderCatalogRow: View {
-    let provider: ProviderSetupState
+    let title: String
     let catalog: ProviderModelCatalog?
     let isLoading: Bool
     let isBusy: Bool
@@ -6962,7 +7835,7 @@ private struct TrayView: View {
       VStack(alignment: .leading, spacing: 7) {
         HStack(spacing: 8) {
           VStack(alignment: .leading, spacing: 2) {
-            Text(provider.displayName)
+            Text(title)
               .font(.system(size: 10, weight: .medium))
             Text(catalogDetail)
               .font(.system(size: 8))
@@ -6984,6 +7857,7 @@ private struct TrayView: View {
 
         if let catalog {
           let registered = Set(catalog.registered)
+          let addable = catalog.addableModelIDs
           TextField(routerLocalized("Search available models"), text: $query)
             .textFieldStyle(.roundedBorder)
             .font(.system(size: 9))
@@ -7013,12 +7887,20 @@ private struct TrayView: View {
                     .toggleStyle(.checkbox)
                     .controlSize(.mini)
                     .frame(width: 14)
-                    .disabled(isLoading || isBusy)
+                    .disabled(isLoading || isBusy || !addable.contains(model))
                   }
-                  Text(model)
-                    .font(.system(size: 8, design: .monospaced))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                  VStack(alignment: .leading, spacing: 2) {
+                    Text(model)
+                      .font(.system(size: 8, design: .monospaced))
+                      .lineLimit(1)
+                      .truncationMode(.middle)
+                    if let reason = catalog.blocked?[model] {
+                      Text(reason)
+                        .font(.system(size: 8))
+                        .foregroundStyle(routerYellow)
+                        .lineLimit(2)
+                    }
+                  }
                   Spacer(minLength: 0)
                   if registered.contains(model) {
                     Text(routerLocalized("Added"))
@@ -7060,8 +7942,8 @@ private struct TrayView: View {
       }
       .padding(8)
       .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-      .onChange(of: catalog?.fetchedAt) { _ in
-        selected.formIntersection(Set(catalog?.unregistered ?? []))
+      .onChange(of: catalog?.addableModelIDs) { _ in
+        selected.formIntersection(catalog?.addableModelIDs ?? [])
       }
     }
 
@@ -7375,6 +8257,13 @@ private struct TrayView: View {
 
   private var footer: some View {
     HStack(spacing: 9) {
+      Button(routerLocalized("Control Center")) {
+        ControlCenterLauncher.open()
+      }
+      .buttonStyle(.plain)
+      .font(.system(size: 11, weight: .semibold))
+      .foregroundStyle(routerAccent)
+
       Button(store.isRefreshing ? routerLocalized("Refreshing…") : routerLocalized("Refresh")) {
         Task {
           await store.refresh()

@@ -25,6 +25,7 @@ const {
 } =
   await import("../src/curate-models.mjs");
 const {
+  curatedModelBlockReason,
   curatedModelContextLength,
   curatedModelDescription,
   curatedModelIds,
@@ -33,7 +34,7 @@ const {
   curatedModelReasoningLevels,
   curationProviderIds,
 } = await import("../src/opencode-curation.mjs");
-const { MODEL_BY_SLUG } = await import("../src/model-registry.mjs");
+const { CHECKED_IN_MODELS, MODEL_BY_SLUG } = await import("../src/model-registry.mjs");
 const {
   DEFAULT_AUTO_COMPACT,
   DEFAULT_CONTEXT_WINDOW,
@@ -71,7 +72,7 @@ test("curation merges current unrelated providers and rejects stale same-provide
   );
 });
 
-test("OpenCode curation pairs only the anonymous Free protocol variants", () => {
+test("OpenCode curation keeps each endpoint family on its documented protocol", () => {
   assert.deepEqual(curationProviderIds("opencode-free"), [
     "opencode-free",
     "opencode-free-responses",
@@ -81,8 +82,19 @@ test("OpenCode curation pairs only the anonymous Free protocol variants", () => 
     "opencode-free-responses",
   ]);
   assert.deepEqual(curationProviderIds("opencode-zen"), ["opencode-zen"]);
-  assert.deepEqual(curationProviderIds("opencode-go"), ["opencode-go"]);
-  assert.deepEqual(curationProviderIds("opencode-go-messages"), ["opencode-go-messages"]);
+  assert.deepEqual(curationProviderIds("opencode-go"), [
+    "opencode-go",
+    "opencode-go-messages",
+    "opencode-go-responses",
+  ]);
+  assert.deepEqual(curationProviderIds("opencode-go-messages"), [
+    "opencode-go",
+    "opencode-go-messages",
+    "opencode-go-responses",
+  ]);
+  assert.equal(curatedModelProviderId("opencode-go", "minimax-m2.5"), "opencode-go-messages");
+  assert.equal(curatedModelProviderId("opencode-go", "grok-4.5"), "opencode-go-responses");
+  assert.equal(curatedModelProviderId("opencode-go", "deepseek-v4-flash-vision-exp"), "opencode-go");
   assert.equal(
     curatedModelProviderId("opencode-free", "muse-spark-1.2-contributor-free"),
     "opencode-free-responses",
@@ -95,6 +107,129 @@ test("OpenCode curation pairs only the anonymous Free protocol variants", () => 
     curatedModelProviderId("opencode-free", "x-preview-f-free"),
     "opencode-free",
   );
+  assert.equal(curatedModelBlockReason("opencode-go", "grok-4.5"), undefined);
+  assert.match(
+    curatedModelBlockReason("opencode-go", "future-responses-only-model"),
+    /no certified opencode-go protocol route yet.*Chat, Messages, or Responses route is verified/s,
+  );
+  assert.throws(
+    () => curatedModelProviderId("opencode-go", "future-responses-only-model"),
+    /no certified opencode-go protocol route yet/,
+  );
+  assert.equal(
+    curatedModelProviderId("opencode-go", "existing-private-model", {
+      existingProvider: "opencode-go-responses",
+    }),
+    "opencode-go-responses",
+  );
+});
+
+test("Command Code curation accepts only its exact certified Chat and Messages routes", () => {
+  assert.deepEqual(curationProviderIds("commandcode"), [
+    "commandcode",
+    "commandcode-messages",
+  ]);
+  assert.deepEqual(curationProviderIds("commandcode-messages"), [
+    "commandcode",
+    "commandcode-messages",
+  ]);
+  for (const model of CHECKED_IN_MODELS.filter(({ provider }) => (
+    provider === "commandcode" || provider === "commandcode-messages"
+  ))) {
+    assert.equal(
+      curatedModelProviderId("commandcode", model.upstreamModel),
+      model.provider,
+      model.slug,
+    );
+  }
+  assert.match(
+    curatedModelBlockReason("commandcode", "claude-future-messages-only"),
+    /no certified commandcode protocol route yet.*Chat or Messages route is verified/s,
+  );
+  assert.throws(
+    () => curatedModelProviderId("commandcode", "claude-future-messages-only"),
+    /no certified commandcode protocol route yet/,
+  );
+  assert.equal(
+    curatedModelProviderId("commandcode", "existing-private-model", {
+      existingProvider: "commandcode-messages",
+    }),
+    "commandcode-messages",
+  );
+});
+
+test("scripted OpenCode curation refuses an uncertified discovered protocol route", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "curate-models-opencode-blocked-"));
+  const fixture = path.join(dir, "models.json");
+  writeFileSync(fixture, JSON.stringify({ data: [{ id: "future-responses-only-model" }] }));
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [
+        path.join(root, "src", "curate-models.mjs"),
+        "opencode-go",
+        "--models",
+        "future-responses-only-model",
+        "--fixture",
+        fixture,
+        "--no-apply",
+      ],
+      {
+        cwd: root,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          CODEX_ROUTER_STATE_DIR: dir,
+          MODEL_ROUTER_USER_MODELS: path.join(dir, "user-models.json"),
+          OPENCODE_API_KEY: "",
+        },
+      },
+    );
+    assert.equal(result.status, 1);
+    assert.match(
+      result.stderr,
+      /future-responses-only-model has no certified opencode-go protocol route yet/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("scripted Command Code curation refuses an uncertified discovered protocol route", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "curate-models-commandcode-blocked-"));
+  const fixture = path.join(dir, "models.json");
+  writeFileSync(fixture, JSON.stringify({ data: [{ id: "claude-future-messages-only" }] }));
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [
+        path.join(root, "src", "curate-models.mjs"),
+        "commandcode",
+        "--models",
+        "claude-future-messages-only",
+        "--fixture",
+        fixture,
+        "--no-apply",
+      ],
+      {
+        cwd: root,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          CODEX_ROUTER_STATE_DIR: dir,
+          MODEL_ROUTER_USER_MODELS: path.join(dir, "user-models.json"),
+          COMMAND_CODE_API_KEY: "",
+        },
+      },
+    );
+    assert.equal(result.status, 1);
+    assert.match(
+      result.stderr,
+      /claude-future-messages-only has no certified commandcode protocol route yet/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("OpenCode Free curation knows the documented windows its live catalog omits", () => {

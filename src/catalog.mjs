@@ -24,7 +24,7 @@ import {
 import { codexAuthStatus, codexVersion, runCodex } from "./codex-binary.mjs";
 import { readUserModels } from "./user-models.mjs";
 import { syncRoutedCodexAgents } from "./codex-agent-catalog.mjs";
-import { MODEL_BY_SLUG } from "./model-registry.mjs";
+import { MODEL_BY_SLUG, MODEL_SLUG_ALIASES } from "./model-registry.mjs";
 import {
   applyMultiAgentCapabilities,
   readMultiAgentSettings,
@@ -32,6 +32,7 @@ import {
 } from "./multi-agent-state.mjs";
 import {
   migrateLegacyVisibleModels,
+  migrateModelVisibility,
   modelPickerSnapshot,
   readHiddenModels,
   seedModelsHidden,
@@ -935,6 +936,9 @@ function main() {
   // and is a no-op on a fresh install and on every later rebuild.  Native
   // context variants are deliberately not offered to it: they have never been
   // visible by default under either set of semantics.
+  migrateModelVisibility(
+    [...MODEL_SLUG_ALIASES].map(([from, to]) => ({ from, to })),
+  );
   migrateLegacyVisibleModels(routedSeedSlugs);
   seedModelsHidden([...NATIVE_CONTEXT_VARIANT_SLUGS, ...routedSeedSlugs]);
   const hiddenModels = readHiddenModels();

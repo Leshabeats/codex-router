@@ -56,12 +56,20 @@ export interface ContextSessionsSnapshot {
   counts: { total: number; codex: number; deepcode: number; archived: number };
 }
 
+export interface ChatGptSessionStatus {
+  sharing: "enabled" | "disabled";
+  session: "usable" | "expired" | "unavailable";
+  present: boolean;
+  expiresInHours?: number;
+}
+
 export interface RouterControl {
   readonly platform: string;
   minimizeWindow(): Promise<unknown>;
   toggleMaximizeWindow(): Promise<unknown>;
   closeWindow(): Promise<unknown>;
   getSnapshot(): Promise<unknown>;
+  getChatGptSession(): Promise<ChatGptSessionStatus>;
   getHealth(): Promise<unknown>;
   getProviders(): Promise<unknown>;
   discoverProviderModels(provider: string, options?: { refresh?: boolean }): Promise<unknown>;
@@ -106,6 +114,7 @@ export interface RouterControl {
   setRouterDefault(model: string): Promise<unknown>;
   clearRouterDefault(): Promise<unknown>;
   setSignedRouting(enabled: boolean): Promise<unknown>;
+  setChatGptSessionSharing(enabled: boolean): Promise<ChatGptSessionStatus>;
   setPresence(mode: PresenceMode): Promise<unknown>;
   controlService(action: ServiceAction): Promise<unknown>;
   controlTray(action: TrayAction): Promise<unknown>;

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -107,6 +107,8 @@ test(
   },
   () => {
     const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-posix-prompt-"));
+    const stateDir = path.join(testRoot, "router state");
+    const cachePath = path.join(stateDir, "provider-catalog-cache.json");
     const secret = "test-value";
     const helper = String.raw`
 import errno
@@ -161,6 +163,14 @@ sys.stdout.buffer.write(output)
 raise SystemExit(os.waitstatus_to_exitcode(status))
 `;
     try {
+      mkdirSync(stateDir, { recursive: true });
+      writeFileSync(cachePath, JSON.stringify({
+        version: 1,
+        providers: {
+          deepseek: { discovered: ["old-account-model"], fetchedAt: new Date().toISOString() },
+          unrelated: { discovered: ["keep-me"], fetchedAt: new Date().toISOString() },
+        },
+      }));
       const result = spawnSync(
         "python3",
         [
@@ -169,7 +179,7 @@ raise SystemExit(os.waitstatus_to_exitcode(status))
           process.execPath,
           path.join(root, "src", "provider-key.mjs"),
           testRoot,
-          path.join(testRoot, "router state"),
+          stateDir,
           secret,
         ],
         {
@@ -185,6 +195,9 @@ raise SystemExit(os.waitstatus_to_exitcode(status))
       assert.match(result.stdout, /Received \d+ characters\./);
       assert.match(result.stdout, /DeepSeek API key saved to protected local storage/);
       assert.doesNotMatch(result.stdout, new RegExp(secret));
+      const cached = JSON.parse(readFileSync(cachePath, "utf8")).providers;
+      assert.equal(cached.deepseek, undefined);
+      assert.deepEqual(cached.unrelated.discovered, ["keep-me"]);
     } finally {
       rmSync(testRoot, { recursive: true, force: true });
     }

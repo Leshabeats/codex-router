@@ -25,8 +25,40 @@ test("model discovery compares fixtures without needing or exposing a key", () =
     );
     const result = JSON.parse(output);
     assert.deepEqual(result.unregistered, ["deepseek-v5-preview"]);
+    assert.deepEqual(result.addable, ["deepseek-v5-preview"]);
+    assert.deepEqual(result.blocked, {});
     assert.ok(result.unavailable.includes("deepseek-v4-flash"));
     assert.doesNotMatch(output, /Bearer|api[_-]?key/i);
+  } finally {
+    rmSync(testRoot, { recursive: true, force: true });
+  }
+});
+
+test("OpenCode Go discovery blocks live ids whose protocol route is not certified", () => {
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-opencode-route-discovery-"));
+  const fixture = path.join(testRoot, "models.json");
+  writeFileSync(
+    fixture,
+    JSON.stringify({ data: [
+      { id: "grok-4.5" },
+      { id: "future-responses-only-model" },
+      { id: "glm-5" },
+    ] }),
+  );
+  try {
+    const output = execFileSync(
+      process.execPath,
+      ["src/model-discovery.mjs", "opencode-go", "--fixture", fixture, "--json"],
+      { cwd: root, encoding: "utf8", env: { ...process.env, OPENCODE_API_KEY: "" } },
+    );
+    const result = JSON.parse(output);
+    assert.deepEqual(result.unregistered, ["future-responses-only-model", "glm-5"]);
+    assert.deepEqual(result.addable, []);
+    assert.deepEqual(Object.keys(result.blocked).sort(), result.unregistered);
+    assert.match(
+      result.blocked["future-responses-only-model"],
+      /no certified opencode-go protocol route yet.*Chat, Messages, or Responses route is verified/s,
+    );
   } finally {
     rmSync(testRoot, { recursive: true, force: true });
   }
@@ -50,8 +82,32 @@ test("Command Code discovery parses the Provider API model list", () => {
     );
     const result = JSON.parse(output);
     assert.deepEqual(result.unregistered, ["claude-sonnet-4-6"]);
+    assert.deepEqual(result.addable, []);
+    assert.deepEqual(Object.keys(result.blocked), ["claude-sonnet-4-6"]);
+    assert.match(
+      result.blocked["claude-sonnet-4-6"],
+      /no certified commandcode protocol route yet.*Chat or Messages route is verified/s,
+    );
     assert.ok(result.unavailable.includes("deepseek/deepseek-v4-pro"));
     assert.doesNotMatch(output, /Bearer|api[_-]?key/i);
+  } finally {
+    rmSync(testRoot, { recursive: true, force: true });
+  }
+});
+
+test("Devin discovery accepts the account model-list adapter", () => {
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-devin-discovery-"));
+  const fixture = path.join(testRoot, "models.json");
+  writeFileSync(fixture, JSON.stringify({ data: [{ id: "swe-1" }, { id: "swe-2" }] }));
+  try {
+    const output = execFileSync(
+      process.execPath,
+      ["src/model-discovery.mjs", "devin-cli", "--fixture", fixture, "--json"],
+      { cwd: root, encoding: "utf8", env: { ...process.env, DEVIN_CREDENTIALS_PATH: path.join(testRoot, "missing.toml") } },
+    );
+    const result = JSON.parse(output);
+    assert.deepEqual(result.unregistered, ["swe-1", "swe-2"]);
+    assert.deepEqual(result.registered, []);
   } finally {
     rmSync(testRoot, { recursive: true, force: true });
   }
@@ -180,7 +236,7 @@ test("the current OpenCode catalogs remain fully fetchable without preselecting 
   );
 
   const goLive = [
-    "deepseek-v4-flash", "deepseek-v4-pro", "glm-5", "glm-5.1", "glm-5.2", "glm-5.3",
+    "deepseek-v4-flash", "deepseek-v4-flash-vision-exp", "deepseek-v4-pro", "glm-5", "glm-5.1", "glm-5.2", "glm-5.3",
     "gpt-5.6-luna", "grok-4.5", "hy3", "hy3-preview", "kimi-k2.5", "kimi-k2.6",
     "kimi-k2.7-code", "kimi-k3", "mimo-v2-omni", "mimo-v2-pro", "mimo-v2.5",
     "mimo-v2.5-pro", "minimax-m2.5", "minimax-m2.7", "minimax-m3",
@@ -195,9 +251,9 @@ test("the current OpenCode catalogs remain fully fetchable without preselecting 
 
 test("the checked-in OpenCode Go set matches the official current-model table", () => {
   const documented = [
-    "deepseek-v4-flash", "deepseek-v4-pro", "glm-5.1", "glm-5.2", "glm-5.3",
+    "deepseek-v4-flash", "deepseek-v4-flash-vision-exp", "deepseek-v4-pro", "glm-5.1", "glm-5.2", "glm-5.3",
     "gpt-5.6-luna", "grok-4.5", "hy3", "kimi-k2.6", "kimi-k2.7-code", "kimi-k3",
-    "mimo-v2.5", "mimo-v2.5-pro", "minimax-m2.7", "minimax-m3",
+    "mimo-v2.5", "mimo-v2.5-pro", "minimax-m2.5", "minimax-m2.7", "minimax-m3",
     "muse-spark-1.2-contributor", "ox-alpha-free", "qwen3.6-plus", "qwen3.7-max",
     "qwen3.7-plus", "qwen3.8-max",
   ].sort();

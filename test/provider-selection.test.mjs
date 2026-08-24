@@ -9,6 +9,7 @@ process.env.CODEX_HOME = path.join(testRoot, "codex");
 process.env.CODEX_ROUTER_STATE_DIR = path.join(testRoot, "state");
 process.env.KIMI_CODE_HOME = path.join(testRoot, "kimi-code");
 process.env.GROK_AUTH_PATH = path.join(testRoot, "grok", "auth.json");
+process.env.DEVIN_CREDENTIALS_PATH = path.join(testRoot, "devin", "credentials.toml");
 const { PROVIDERS } = await import("../src/model-registry.mjs");
 // Clearing every registry-declared credential variable keeps the "no provider
 // is configured yet" assertions deterministic on a developer machine that has
@@ -40,6 +41,20 @@ function stageSelectionFile(contents) {
   mkdirSync(path.dirname(PROVIDER_SELECTION_PATH), { recursive: true });
   writeFileSync(PROVIDER_SELECTION_PATH, contents, { encoding: "utf8", mode: 0o600 });
 }
+
+test("a valid official Devin CLI session configures the provider family", () => {
+  try {
+    mkdirSync(path.dirname(process.env.DEVIN_CREDENTIALS_PATH), { recursive: true });
+    writeFileSync(
+      process.env.DEVIN_CREDENTIALS_PATH,
+      'windsurf_api_key = "TEST_DEVIN_SESSION_ONLY"\napi_server_url = "https://server.invalid"\n',
+      { mode: 0o600 },
+    );
+    assert.ok(configuredProviderIds().includes("devin-cli"));
+  } finally {
+    rmSync(process.env.DEVIN_CREDENTIALS_PATH, { force: true });
+  }
+});
 
 test("provider selection keeps backward compatibility and can hide the final provider", () => {
   try {
@@ -124,7 +139,7 @@ test("opencode Go protocol variants follow their parent as one family", () => {
     ]);
 
     const slugs = selectedConfiguredListedModels().map((model) => model.slug);
-    assert.ok(slugs.includes("opencode-go/grok-4.5"));
+    assert.ok(slugs.includes("opencode-go-responses/grok-4.5"));
     assert.ok(slugs.includes("opencode-go-messages/minimax-m3"));
     assert.ok(slugs.includes("opencode-go-messages/qwen3.8-max"));
     assert.ok(slugs.includes("opencode-go-responses/gpt-5.6-luna"));

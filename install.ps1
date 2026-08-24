@@ -449,14 +449,14 @@ try {
   # `exit` would otherwise terminate this installer before the status could be
   # checked. This remains best effort, matching bin/install: an optional Rust
   # or Electron build failure must not roll back a healthy router update.
-  if ($TrayWasInstalled) {
+  if ($TrayWasInstalled -and $env:CODEX_ROUTER_DEFER_TRAY_REBUILD -ne "1") {
     $SavedRouterTarget = $env:MODEL_ROUTER_TARGET
     try {
       # The tray belongs to the shared router plane. codex-router.ps1 is the
       # Windows companion entry point and deliberately accepts only its Codex
       # spelling, even when this update was initiated for DSH or Gemini CLI.
       $env:MODEL_ROUTER_TARGET = "codex"
-      & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $ScriptDirectory "codex-router.ps1") tray install
+      & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $ScriptDirectory "codex-router.ps1") tray install --preserve-window
       $TrayExitCode = $LASTEXITCODE
       if ($TrayExitCode -ne 0) {
         Write-Warning "Desktop companion refresh failed with exit code $TrayExitCode; the router is installed. Run '.\codex-router.ps1 tray repair' if an earlier elevated install owns the task."
@@ -466,6 +466,13 @@ try {
     } finally {
       $env:MODEL_ROUTER_TARGET = $SavedRouterTarget
     }
+  } elseif ($TrayWasInstalled) {
+    # A Control Center cannot synchronously rebuild the executable that is
+    # running this installer: stop/drain waits for the caller's mutation, while
+    # the caller waits for install.ps1. The UI launches a detached `control tray
+    # refresh` after its mutation settles; that command rechecks tray-plan and
+    # does nothing when this install did not make the package stale.
+    Write-Output "Desktop companion refresh deferred until the Control Center mutation completes."
   }
 
   # Managed Codex skills are an integration convenience, not part of router

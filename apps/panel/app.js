@@ -6,6 +6,7 @@ import {
   dailySeries,
   exactTokens,
   formatReset,
+  modelMatchesQuery,
   observedModelSpeed,
   readOnlyCapabilities,
   serviceHealthRows,
@@ -28,9 +29,8 @@ const invoke = window.__TAURI__?.core?.invoke;
 const view = new URLSearchParams(window.location.search).get("view") || "panel";
 
 // What the surface hosting this UI is willing to run, as the surface itself
-// reported it. Null until platform_info answers, and null forever in the tray
-// and the Electron window, which advertise no limit and carry the full command
-// table: every check below is a no-op for them.
+// reported it. Null until platform_info answers; an unrestricted future host
+// can continue to advertise no limit, making every check below a no-op.
 let capabilities = null;
 
 applyTranslations(document);
@@ -64,6 +64,7 @@ function startPanel() {
     sourceWasChosen: false,
     busyProvider: null,
     modelSettingsBusy: false,
+    pickerModelFilter: "",
     localModelBusy: null,
     localCancelBusy: false,
     localRemoveArmed: null,
@@ -120,6 +121,7 @@ function startPanel() {
     providers: document.getElementById("provider-list"),
     subagentSummary: document.getElementById("subagent-summary"),
     pickerSummary: document.getElementById("picker-summary"),
+    pickerModelSearch: document.getElementById("picker-model-search"),
     subagentAllSwitch: document.getElementById("subagent-all-switch"),
     subagentAllSwitchLabel: document.getElementById("subagent-all-switch-label"),
     subagentModelList: document.getElementById("subagent-model-list"),
@@ -213,6 +215,10 @@ function startPanel() {
   elements.subagentModelList.addEventListener("click", handleModelSettingsClick);
   elements.pickerModelList.addEventListener("change", handleModelSettingsToggle);
   elements.pickerModelList.addEventListener("click", handleModelSettingsClick);
+  elements.pickerModelSearch.addEventListener("input", () => {
+    state.pickerModelFilter = elements.pickerModelSearch.value;
+    renderModelSettings();
+  });
   elements.localModelList.addEventListener("click", handleLocalModelClick);
   elements.localModelList.addEventListener("change", handleLocalModelToggle);
   elements.localRuntimeActions.addEventListener("click", handleLocalRuntimeClick);
@@ -718,7 +724,6 @@ function startPanel() {
       ? [...nativeModels, ...(routerCatalog.models || []).filter((model) => !seenModels.has(model.slug))]
       : clientModels;
     const enabledModels = models.filter((model) => model.enabled);
-    const pickerModels = models.filter((model) => model.enabled);
     const subagent = routerCatalog?.subagents || settings?.subagents || { mode: "proven", enabled: [], disabled: [] };
     const disabledSubagents = new Set(subagent.disabled || []);
     const selectedSubagents = new Set(subagent.enabled || []);
@@ -732,6 +737,10 @@ function startPanel() {
     function providerLabel(provider) {
       return providerNames.get(provider) || provider;
     }
+
+    const pickerModels = enabledModels.filter((model) =>
+      modelMatchesQuery(model, state.pickerModelFilter, providerLabel(model.provider))
+    );
 
     function groupModels(list) {
       const groups = new Map();
@@ -859,8 +868,8 @@ function startPanel() {
               total: group.items.length,
             }),
         )
-      : `<div class="empty-state">${escapeHtml(t("models.noEnabledModels"))}</div>`;
-    const pickerCount = pickerModels.filter((model) => !hiddenModels.has(model.slug)).length;
+      : `<div class="empty-state">${escapeHtml(t(state.pickerModelFilter.trim() ? "models.noModelsMatch" : "models.noEnabledModels"))}</div>`;
+    const pickerCount = enabledModels.filter((model) => !hiddenModels.has(model.slug)).length;
     elements.pickerSummary.textContent = `${pickerCount} ${t("models.visible")} · ${hiddenModels.size} ${t("models.hidden")}`;
   }
 
@@ -2215,7 +2224,7 @@ function call(command, args) {
 // would drift the moment a command moves. The panel rebuilds whole sections
 // from innerHTML in a dozen places; an observer means a new section cannot
 // forget to ask, and it is installed only on a surface that is actually
-// restricted, so the other two shells never run it.
+// restricted, so an unrestricted host never runs it.
 function applyReadOnly(root) {
   const message = t("general.readOnlyControl");
   for (const element of root.querySelectorAll("[data-command]")) {

@@ -149,6 +149,35 @@ test("registry merges valid user models and skips collisions", async () => {
     }),
     // Collides with a built-in slug and must be skipped, not fatal.
     { ...userModelEntry({ providerId: "deepseek", upstreamId: "deepseek-v4-pro", priority: 101 }) },
+    // The old OpenCode curation slug differs from the checked-in public slug,
+    // but provider + upstream id identify the same physical route. It must be
+    // suppressed and exposed as a visibility migration, not rendered twice.
+    userModelEntry({
+      providerId: "opencode-free",
+      upstreamId: "x-preview-f-free",
+      priority: 113,
+    }),
+    // A duplicate route must not be able to turn somebody else's checked-in
+    // slug into its own alias. MODEL_BY_SLUG applies aliases after real models,
+    // so accepting this would silently reroute DeepSeek traffic to OpenCode.
+    {
+      ...userModelEntry({
+        providerId: "opencode-free",
+        upstreamId: "x-preview-f-free",
+        priority: 114,
+      }),
+      slug: "deepseek/deepseek-v4-pro",
+    },
+    // Repository migration aliases are reserved too. A mutable overlay must
+    // not replace the old Grok route's checked-in Responses migration.
+    {
+      ...userModelEntry({
+        providerId: "opencode-free",
+        upstreamId: "x-preview-f-free",
+        priority: 115,
+      }),
+      slug: "opencode-go/grok-4.5",
+    },
     // Unknown provider must be skipped, not fatal.
     userModelEntry({ providerId: "no-such-provider", upstreamId: "x-model", priority: 102 }),
     // Announcement copy must be a non-empty string; a blank one is skipped.
@@ -213,6 +242,22 @@ test("registry merges valid user models and skips collisions", async () => {
   const slugs = registry.MODELS.map((model) => model.slug);
   assert.ok(slugs.includes("deepseek/deepseek-user-test"));
   assert.equal(slugs.filter((slug) => slug === "deepseek/deepseek-v4-pro").length, 1);
+  assert.equal(slugs.filter((slug) => slug === "opencode-free/ox-alpha").length, 1);
+  assert.ok(!slugs.includes("opencode-free/x-preview-f-free"));
+  assert.equal(
+    registry.MODEL_SLUG_ALIASES.get("opencode-free/x-preview-f-free"),
+    "opencode-free/ox-alpha",
+  );
+  assert.equal(registry.MODEL_SLUG_ALIASES.has("deepseek/deepseek-v4-pro"), false);
+  assert.equal(registry.MODEL_BY_SLUG.get("deepseek/deepseek-v4-pro").provider, "deepseek");
+  assert.equal(
+    registry.MODEL_SLUG_ALIASES.get("opencode-go/grok-4.5"),
+    "opencode-go-responses/grok-4.5",
+  );
+  assert.equal(
+    registry.MODEL_BY_SLUG.get("opencode-go/grok-4.5").provider,
+    "opencode-go-responses",
+  );
   assert.ok(!slugs.includes("no-such-provider/x-model"));
   assert.ok(!slugs.includes("deepseek/deepseek-blank-nux"));
   assert.ok(!slugs.includes("deepseek/deepseek-bad-search"));
@@ -230,6 +275,12 @@ test("registry merges valid user models and skips collisions", async () => {
   assert.ok(registry.MODEL_BY_GATEWAY_ID.has("deepseek-deepseek-user-test"));
   assert.ok(registry.USER_MODEL_WARNINGS.length >= 4);
   assert.ok(registry.USER_MODEL_WARNINGS.some((warning) => /may not declare multiAgentVersion v2/.test(warning)));
+  assert.ok(registry.USER_MODEL_WARNINGS.some((warning) => (
+    /alias deepseek\/deepseek-v4-pro/.test(warning) && /collides with an existing model or alias/.test(warning)
+  )));
+  assert.ok(registry.USER_MODEL_WARNINGS.some((warning) => (
+    /alias opencode-go\/grok-4\.5/.test(warning) && /collides with an existing model or alias/.test(warning)
+  )));
   const merged = registry.MODEL_BY_SLUG.get("deepseek/deepseek-user-test");
   assert.equal(merged.listed, true);
   assert.equal(merged.availabilityNux, "Now available through your DeepSeek key.");

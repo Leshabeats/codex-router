@@ -9,7 +9,13 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const readScript = (name) => readFileSync(path.join(root, name), "utf8");
 
 test("the Windows operational scripts parse in Windows PowerShell", { skip: process.platform !== "win32" }, () => {
-  for (const name of ["install.ps1", "deploy-codex-router.ps1", "restart-codex-router.ps1"]) {
+  for (const name of [
+    "install.ps1",
+    "deploy-codex-router.ps1",
+    "restart-codex-router.ps1",
+    "codex-router.ps1",
+    "scripts/build-electron-companion.ps1",
+  ]) {
     const target = path.join(root, name).replaceAll("'", "''");
     const check = [
       "$tokens = $null; $errors = $null",
@@ -87,8 +93,8 @@ test("deploy and install preserve the existing tray opt-in", () => {
   assert.match(deploy, /\$TrayInstallExitCode\s*=\s*\$LASTEXITCODE/);
   assert.match(deploy, /if \(\$TrayInstallExitCode -ne 0\)[\s\S]*?throw/);
   assert.match(deploy, /-not \$TrayStatus\.installed[\s\S]*?-not \$TrayStatus\.loaded[\s\S]*?-not \$TrayStatus\.appPresent/);
-  assert.match(deploy, /codex-router-desktop\.exe/);
-  assert.match(deploy, /electron\.exe/);
+  assert.match(deploy, /apps\\control-center\\release\\win-unpacked\\Codex Router\.exe/);
+  assert.match(deploy, /TrayStatus\.argument[\s\S]*--tray-only/);
   assert.match(deploy, /\[string\]::Equals\([\s\S]*?\$RegisteredTrayPath[\s\S]*?\$ExpectedTrayPath/);
   assert.doesNotMatch(deploy, /tray-service\.mjs"\) restart/);
 
@@ -103,6 +109,8 @@ test("deploy and install preserve the existing tray opt-in", () => {
   assert.match(install, /\$TrayExitCode\s*=\s*\$LASTEXITCODE/);
   assert.match(install, /Desktop companion refresh failed[\s\S]*the router is installed/);
   assert.match(install, /codex-router\.ps1 tray repair/);
+  assert.match(install, /CODEX_ROUTER_DEFER_TRAY_REBUILD -ne "1"/);
+  assert.match(install, /Desktop companion refresh deferred until the Control Center mutation completes/);
 });
 
 test("Windows refreshes managed Codex skills as a best-effort post-install step", () => {

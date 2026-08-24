@@ -140,6 +140,38 @@ test("tray refresh is skipped when no tray bundle exists", () => {
   }
 });
 
+test("tray refresh preserves an explicit macOS supervision disable", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "tray-refresh-disabled-"));
+  try {
+    mkdirSync(path.join(root, "home", "Applications", "Model Router.app"), {
+      recursive: true,
+    });
+    assert.equal(
+      trayRefreshRequired({
+        platform: "darwin",
+        home: path.join(root, "home"),
+        sourceRoot: path.join(root, "router"),
+        registeredPath: path.join(root, "home", "Applications", "Model Router.app"),
+        supervisionPreference: { state: "disabled", enabled: false },
+      }),
+      false,
+    );
+    assert.equal(
+      trayRefreshRequired({
+        platform: "darwin",
+        home: path.join(root, "home"),
+        sourceRoot: path.join(root, "router"),
+        registeredPath: path.join(root, "home", "Applications", "Model Router.app"),
+        supervisionPreference: { state: "invalid", enabled: null },
+      }),
+      false,
+      "a damaged marker must fail closed instead of resurrecting the tray",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("tray refresh is skipped on non-macOS platforms", () => {
   assert.equal(
     trayRefreshRequired({

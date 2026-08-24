@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash, scryptSync } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -14,22 +15,53 @@ const stateRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-catalog-cache
 process.env.MODEL_ROUTER_STATE_DIR = stateRoot;
 process.env.CODEX_ROUTER_STATE_DIR = stateRoot;
 const cachePath = path.join(stateRoot, "provider-catalog-cache.json");
+const internalSecret = "provider-catalog-test-internal-secret-0000000000000000";
+writeFileSync(path.join(stateRoot, "internal-secret"), `${internalSecret}\n`, { mode: 0o600 });
 const {
   catalogEntryIsStale,
   forgetProviderCatalogCache,
+  forgetProviderCatalogCaches,
+  providerCatalogIdentityFingerprint,
   readProviderCatalogCache,
+  withProviderCatalogCacheTransaction,
   writeProviderCatalogCache,
 } = await import("../src/model-catalog-cache.mjs");
+const TEST_IDENTITY = providerCatalogIdentityFingerprint(["test-account"]);
 
 test.after(() => rmSync(stateRoot, { recursive: true, force: true }));
 
-test("a provider's published list survives for the next visit", () => {
+test("catalog identity fingerprints require the installation's independent secret", () => {
+  const payload = JSON.stringify(["test-account"]);
+  const unkeyed = createHash("sha256").update(payload).digest("hex");
+  const keyed = scryptSync(payload, internalSecret, 32, {
+    N: 16_384,
+    r: 8,
+    p: 1,
+    maxmem: 32 * 1024 * 1024,
+  }).toString("hex");
+  assert.equal(TEST_IDENTITY, keyed);
+  assert.notEqual(TEST_IDENTITY, unkeyed);
+  try {
+    writeFileSync(
+      path.join(stateRoot, "internal-secret"),
+      "rotated-provider-catalog-test-secret-1111111111111111\n",
+      { mode: 0o600 },
+    );
+    assert.notEqual(providerCatalogIdentityFingerprint(["test-account"]), TEST_IDENTITY);
+  } finally {
+    writeFileSync(path.join(stateRoot, "internal-secret"), `${internalSecret}\n`, { mode: 0o600 });
+  }
+  assert.equal(providerCatalogIdentityFingerprint(["test-account"]), TEST_IDENTITY);
+});
+
+test("a provider's published list survives for the next visit", async () => {
   assert.equal(readProviderCatalogCache("deepseek"), undefined);
-  writeProviderCatalogCache("deepseek", {
+  await writeProviderCatalogCache("deepseek", {
     discovered: ["deepseek-v5", "deepseek-v4-flash"],
     free: ["deepseek-v5"],
     contextLengths: { "deepseek-v5": 262_144, unlisted: 4096 },
     fetchedAt: "2020-01-01T00:00:00.000Z",
+    identityFingerprint: TEST_IDENTITY,
   });
   const entry = readProviderCatalogCache("deepseek");
   // Age is derived on every read and never persisted, so a stored document can
@@ -43,7 +75,10 @@ test("a provider's published list survives for the next visit", () => {
   const fixedNow = Date.parse("2026-08-21T00:00:00.000Z");
   assert.equal(catalogEntryIsStale("2026-08-20T23:00:00.000Z", fixedNow), false);
   assert.equal(catalogEntryIsStale("2026-08-19T23:00:00.000Z", fixedNow), true);
-  writeProviderCatalogCache("fresh-provider", { discovered: ["only"] });
+  await writeProviderCatalogCache("fresh-provider", {
+    discovered: ["only"],
+    identityFingerprint: TEST_IDENTITY,
+  });
   assert.equal(readProviderCatalogCache("fresh-provider").stale, false);
   assert.deepEqual(entry.discovered, ["deepseek-v5", "deepseek-v4-flash"]);
   assert.deepEqual(entry.free, ["deepseek-v5"]);
@@ -56,9 +91,134 @@ test("a provider's published list survives for the next visit", () => {
   }
   assert.doesNotMatch(readFileSync(cachePath, "utf8"), /Bearer|api[_-]?key/i);
 
-  assert.equal(forgetProviderCatalogCache("deepseek"), true);
+  assert.equal(await forgetProviderCatalogCache("deepseek"), true);
   assert.equal(readProviderCatalogCache("deepseek"), undefined);
-  assert.equal(forgetProviderCatalogCache("deepseek"), false);
+  assert.equal(await forgetProviderCatalogCache("deepseek"), false);
+});
+
+test("several catalog sources are forgotten with one family invalidation", async () => {
+  await writeProviderCatalogCache("opencode-go", {
+    discovered: ["go-model"],
+    identityFingerprint: TEST_IDENTITY,
+  });
+  await writeProviderCatalogCache("opencode-zen", {
+    discovered: ["zen-model"],
+    identityFingerprint: TEST_IDENTITY,
+  });
+  await writeProviderCatalogCache("deepseek", {
+    discovered: ["deepseek-model"],
+    identityFingerprint: TEST_IDENTITY,
+  });
+
+  assert.equal(
+    await forgetProviderCatalogCaches(["opencode-go", "opencode-zen", "opencode-go"]),
+    2,
+  );
+  assert.equal(readProviderCatalogCache("opencode-go"), undefined);
+  assert.equal(readProviderCatalogCache("opencode-zen"), undefined);
+  assert.deepEqual(readProviderCatalogCache("deepseek").discovered, ["deepseek-model"]);
+  assert.equal(await forgetProviderCatalogCaches(["../escape", "opencode-go"]), 0);
+});
+
+test("parallel catalog transactions preserve every provider entry", async () => {
+  let active = 0;
+  let overlap = 0;
+  const firstEntered = Promise.withResolvers();
+  const releaseFirst = Promise.withResolvers();
+  const first = withProviderCatalogCacheTransaction(async (catalog) => {
+    active += 1;
+    overlap = Math.max(overlap, active);
+    firstEntered.resolve();
+    await releaseFirst.promise;
+    catalog.write("parallel-one", { discovered: ["one"], identityFingerprint: TEST_IDENTITY });
+    active -= 1;
+  });
+  await firstEntered.promise;
+  const second = withProviderCatalogCacheTransaction(async (catalog) => {
+    active += 1;
+    overlap = Math.max(overlap, active);
+    catalog.write("parallel-two", { discovered: ["two"], identityFingerprint: TEST_IDENTITY });
+    active -= 1;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(active, 1, "the second cache writer entered before the first committed");
+  releaseFirst.resolve();
+  await Promise.all([first, second]);
+  assert.equal(overlap, 1);
+  assert.deepEqual(readProviderCatalogCache("parallel-one").discovered, ["one"]);
+  assert.deepEqual(readProviderCatalogCache("parallel-two").discovered, ["two"]);
+});
+
+test("an old-account discovery cannot commit after credential replacement", async () => {
+  process.env.DEEPSEEK_API_KEY = "";
+  const { discoverProviderModels } = await import("../src/model-discovery.mjs");
+  const { writeProviderCredential } = await import("../src/provider-credentials.mjs");
+  const { providerCatalogFamilyCacheIds } = await import("../src/provider-catalogs.mjs");
+  const fetchedWithOldAccount = Promise.withResolvers();
+  const finishOldFetch = Promise.withResolvers();
+
+  await withProviderCatalogCacheTransaction((catalog) => {
+    writeProviderCredential("deepseek", "old-account-key");
+    catalog.forget(providerCatalogFamilyCacheIds("deepseek"));
+  });
+  const discovery = discoverProviderModels("deepseek", {
+    refresh: true,
+    loadPayload: async (_provider, identity) => {
+      assert.equal(identity.credential.value, "old-account-key");
+      fetchedWithOldAccount.resolve();
+      await finishOldFetch.promise;
+      return { data: [{ id: "old-account-only-model" }] };
+    },
+  });
+  await fetchedWithOldAccount.promise;
+  await withProviderCatalogCacheTransaction((catalog) => {
+    writeProviderCredential("deepseek", "new-account-key");
+    catalog.forget(providerCatalogFamilyCacheIds("deepseek"));
+  });
+  finishOldFetch.resolve();
+
+  await assert.rejects(discovery, (error) => {
+    assert.equal(error.code, "provider_catalog_credential_changed");
+    assert.doesNotMatch(error.message, /old-account-key|new-account-key/);
+    return true;
+  });
+  assert.equal(readProviderCatalogCache("deepseek"), undefined);
+});
+
+test("a cache hit is rejected after an external account replacement", async () => {
+  process.env.DEEPSEEK_API_KEY = "";
+  const {
+    discoverProviderModels,
+    providerDiscoveryIdentityFingerprint,
+  } = await import("../src/model-discovery.mjs");
+  const { writeProviderCredential } = await import("../src/provider-credentials.mjs");
+  const baseUrl = "https://api.deepseek.com";
+  writeProviderCredential("deepseek", "old-external-account-key");
+  await writeProviderCatalogCache("deepseek", {
+    discovered: ["old-account-only-model"],
+    identityFingerprint: providerDiscoveryIdentityFingerprint({
+      kind: "api",
+      baseUrl,
+      credential: { value: "old-external-account-key" },
+    }),
+  });
+
+  // This intentionally bypasses the router's normal write+invalidation
+  // transaction, just like an environment, Keychain, or official CLI account
+  // change can. The identity verifier must still turn the old hit into a miss.
+  writeProviderCredential("deepseek", "new-external-account-key");
+  let fetches = 0;
+  const result = await discoverProviderModels("deepseek", {
+    loadPayload: async (_provider, identity) => {
+      fetches += 1;
+      assert.equal(identity.credential.value, "new-external-account-key");
+      return { data: [{ id: "new-account-only-model" }] };
+    },
+  });
+  assert.equal(fetches, 1);
+  assert.equal(result.cached, false);
+  assert.deepEqual(result.discovered, ["new-account-only-model"]);
+  assert.deepEqual(readProviderCatalogCache("deepseek").discovered, ["new-account-only-model"]);
 });
 
 test("a damaged or foreign cache document reads as a miss", () => {
@@ -74,9 +234,12 @@ test("a damaged or foreign cache document reads as a miss", () => {
   rmSync(cachePath, { force: true });
 });
 
-test("a provider id that is not one is never a cache key", () => {
+test("a provider id that is not one is never a cache key", async () => {
   assert.equal(readProviderCatalogCache("../escape"), undefined);
-  assert.equal(writeProviderCatalogCache("../escape", { discovered: ["x"] }), undefined);
+  assert.equal(await writeProviderCatalogCache("../escape", {
+    discovered: ["x"],
+    identityFingerprint: TEST_IDENTITY,
+  }), undefined);
   assert.equal(existsSync(cachePath), false);
 });
 
@@ -145,9 +308,14 @@ test("curation with a fixture never becomes the stored answer either", () => {
   }
 });
 
-test("a stored list answers discovery without a credential or a network", () => {
+test("a same-account stored list answers discovery without a network", async () => {
   const offlineRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-catalog-offline-"));
   try {
+    const credential = "offline-same-account-key";
+    const baseUrl = "http://127.0.0.1:9";
+    const { providerDiscoveryIdentityFingerprint } = await import("../src/model-discovery.mjs");
+    writeFileSync(path.join(offlineRoot, "internal-secret"), `${internalSecret}\n`, { mode: 0o600 });
+    writeFileSync(path.join(offlineRoot, "deepseek-api-key.secret"), `${credential}\n`, { mode: 0o600 });
     writeFileSync(
       path.join(offlineRoot, "provider-catalog-cache.json"),
       `${JSON.stringify({
@@ -157,6 +325,11 @@ test("a stored list answers discovery without a credential or a network", () => 
             fetchedAt: "2020-01-01T00:00:00.000Z",
             discovered: ["deepseek-v4-flash", "deepseek-v9-preview"],
             contextLengths: { "deepseek-v9-preview": 262_144 },
+            identityFingerprint: providerDiscoveryIdentityFingerprint({
+              kind: "api",
+              baseUrl,
+              credential: { value: credential },
+            }),
           },
         },
       })}\n`,
@@ -167,13 +340,10 @@ test("a stored list answers discovery without a credential or a network", () => 
       MODEL_ROUTER_STATE_DIR: offlineRoot,
       CODEX_ROUTER_STATE_DIR: offlineRoot,
       DEEPSEEK_API_KEY: "",
-      // The state directory does not isolate the macOS Keychain or the legacy
-      // state directories, so "no credential" is not something this test can
-      // assert on a configured machine. Pinning the endpoint at a port nothing
-      // listens on makes the refresh fail for every developer, credential or
-      // not, while leaving the cached read untouched.
-      DEEPSEEK_API_BASE_URL: "http://127.0.0.1:9",
-      CODEX_ROUTER_NO_DISCOVERY: "1",
+      // Pinning the endpoint at a port nothing listens on proves the matching
+      // account can read its bound cache without a network, while an explicit
+      // refresh still fails rather than silently substituting that cache.
+      DEEPSEEK_API_BASE_URL: baseUrl,
     };
     const cached = JSON.parse(execFileSync(
       process.execPath,

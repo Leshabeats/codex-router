@@ -190,7 +190,7 @@ if ($PSCmdlet.ShouldProcess($installDir, "copy router source")) {
   $TrayStoppedForDeploy = $false
   Push-Location $installDir
   try {
-    # Tauri and Electron both update files held open by a running companion.
+    # The packaged Control Center updates files held open by its running process.
     # Stop an opted-in tray before either the canonical installer's best-effort
     # refresh or the strict verification below gets a chance to rebuild it.
     if ($TrayWasInstalled) {
@@ -223,7 +223,7 @@ if ($PSCmdlet.ShouldProcess($installDir, "copy router source")) {
       $SavedRouterTarget = $env:MODEL_ROUTER_TARGET
       try {
         $env:MODEL_ROUTER_TARGET = "codex"
-        & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $installDir "codex-router.ps1") tray install
+        & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $installDir "codex-router.ps1") tray install --preserve-window
         $TrayInstallExitCode = $LASTEXITCODE
         if ($TrayInstallExitCode -ne 0) {
           throw "Refreshing the installed tray failed with exit code $TrayInstallExitCode."
@@ -236,11 +236,7 @@ if ($PSCmdlet.ShouldProcess($installDir, "copy router source")) {
       if (-not $TrayStatus.installed -or -not $TrayStatus.loaded -or -not $TrayStatus.appPresent) {
         throw "The refreshed tray is not installed, running, and present on disk."
       }
-      $ExpectedTrayPath = if (Get-Command cargo -ErrorAction SilentlyContinue) {
-        Join-Path $installDir "apps\desktop\src-tauri\target\release\codex-router-desktop.exe"
-      } else {
-        Join-Path $installDir "apps\electron\node_modules\electron\dist\electron.exe"
-      }
+      $ExpectedTrayPath = Join-Path $installDir "apps\control-center\release\win-unpacked\Codex Router.exe"
       $RegisteredTrayPath = [IO.Path]::GetFullPath([string]$TrayStatus.path)
       if (-not [string]::Equals(
         $RegisteredTrayPath,
@@ -248,6 +244,9 @@ if ($PSCmdlet.ShouldProcess($installDir, "copy router source")) {
         [StringComparison]::OrdinalIgnoreCase
       )) {
         throw "The refreshed tray registered an unexpected executable: $RegisteredTrayPath"
+      }
+      if ([string]$TrayStatus.argument -ne "--tray-only") {
+        throw "The refreshed tray registered unexpected arguments: $($TrayStatus.argument)"
       }
       $TrayStoppedForDeploy = $false
     }
