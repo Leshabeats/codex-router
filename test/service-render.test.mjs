@@ -517,7 +517,13 @@ test(
 // They can never shadow the real executables, because the tests that use them
 // are skipped on win32.
 function schedulerStubs(directory, options = {}) {
-  const { schtasksFail = "", powershellFail = "", runningQueries = 0 } = options;
+  const {
+    schtasksFail = "",
+    powershellFail = "",
+    runningQueries = 0,
+    authoritativeState = "0|0|0",
+    authoritativeFail = false,
+  } = options;
   mkdirSync(directory, { recursive: true });
   const logPath = path.join(directory, "calls.log");
   const counterPath = path.join(directory, "state-queries");
@@ -539,6 +545,11 @@ function schedulerStubs(directory, options = {}) {
     [
       preamble(powershellFail),
       'case "$*" in',
+      "  *Schedule.Service*)",
+      authoritativeFail
+        ? "    exit 1"
+        : `    printf '%s' ${JSON.stringify(authoritativeState)}`,
+      "    ;;",
       "  *Get-ScheduledTask*)",
       "    count=0",
       `    if [ -f "${counterPath}" ]; then count=$(cat "${counterPath}"); fi`,
@@ -576,6 +587,146 @@ function runWindowsService(testRoot, command, extraEnv = {}) {
     },
   );
 }
+
+test(
+  "Windows status trusts a live launcher when Task Scheduler reports Ready",
+  { skip: process.platform === "win32" },
+  () => {
+    const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-win-status-live-"));
+    try {
+      const stubs = schedulerStubs(path.join(testRoot, "scheduler"), {
+        authoritativeState: "1|267009|1",
+      });
+      const result = runWindowsService(testRoot, "status", { PATH: stubs.path });
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(JSON.parse(result.stdout), {
+        installed: true,
+        loaded: true,
+        state: "running",
+      });
+      assert.equal(stubs.calls().some((line) => line.includes("Schedule.Service")), true);
+    } finally {
+      rmSync(testRoot, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "Windows status keeps Ready when the authoritative launcher is dead",
+  { skip: process.platform === "win32" },
+  () => {
+    const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-win-status-dead-"));
+    try {
+      const stubs = schedulerStubs(path.join(testRoot, "scheduler"), {
+        authoritativeState: "1|267014|0",
+      });
+      const result = runWindowsService(testRoot, "status", { PATH: stubs.path });
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(JSON.parse(result.stdout), {
+        installed: true,
+        loaded: false,
+        state: "ready",
+      });
+    } finally {
+      rmSync(testRoot, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "Windows status does not claim an idle task from an external launcher",
+  { skip: process.platform === "win32" },
+  () => {
+    const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-win-status-external-"));
+    try {
+      const stubs = schedulerStubs(path.join(testRoot, "scheduler"), {
+        authoritativeState: "0|267009|1",
+      });
+      const result = runWindowsService(testRoot, "status", { PATH: stubs.path });
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(JSON.parse(result.stdout), {
+        installed: true,
+        loaded: false,
+        state: "ready",
+      });
+    } finally {
+      rmSync(testRoot, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "Windows status keeps Ready when launcher evidence is incomplete",
+  { skip: process.platform === "win32" },
+  () => {
+    const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-win-status-partial-"));
+    try {
+      const stubs = schedulerStubs(path.join(testRoot, "scheduler"), {
+        authoritativeState: "1|267009",
+      });
+      const result = runWindowsService(testRoot, "status", { PATH: stubs.path });
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(JSON.parse(result.stdout), {
+        installed: true,
+        loaded: false,
+        state: "ready",
+      });
+    } finally {
+      rmSync(testRoot, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "Windows status keeps Ready when authoritative launcher state is inconclusive",
+  { skip: process.platform === "win32" },
+  async (context) => {
+    for (const [name, options] of [
+      ["malformed", { authoritativeState: "not-task-state" }],
+      ["failed", { authoritativeFail: true }],
+    ]) {
+      await context.test(name, () => {
+        const testRoot = mkdtempSync(path.join(os.tmpdir(), `codex-router-win-status-${name}-`));
+        try {
+          const stubs = schedulerStubs(path.join(testRoot, "scheduler"), options);
+          const result = runWindowsService(testRoot, "status", { PATH: stubs.path });
+          assert.equal(result.status, 0, result.stderr);
+          assert.deepEqual(JSON.parse(result.stdout), {
+            installed: true,
+            loaded: false,
+            state: "ready",
+          });
+        } finally {
+          rmSync(testRoot, { recursive: true, force: true });
+        }
+      });
+    }
+  },
+);
+
+test(
+  "Windows status accepts Running without an authoritative fallback query",
+  { skip: process.platform === "win32" },
+  () => {
+    const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-win-status-running-"));
+    try {
+      const stubs = schedulerStubs(path.join(testRoot, "scheduler"), {
+        runningQueries: 1,
+        authoritativeFail: true,
+      });
+      const result = runWindowsService(testRoot, "status", { PATH: stubs.path });
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(JSON.parse(result.stdout), {
+        installed: true,
+        loaded: true,
+        state: "running",
+      });
+      assert.equal(stubs.calls().some((line) => line.includes("Schedule.Service")), false);
+    } finally {
+      rmSync(testRoot, { recursive: true, force: true });
+    }
+  },
+);
 
 test(
   "a blocked registration restarts whichever task definition survived",
