@@ -8,12 +8,7 @@
 export const OPENAI_ENDPOINTS = Object.freeze([
   "/chat/completions",
   "/responses",
-  "/completions",
   "/embeddings",
-  "/moderations",
-  "/images/generations",
-  "/audio/speech",
-  "/batches",
 ]);
 
 const ENDPOINTS = new Set(OPENAI_ENDPOINTS);
@@ -46,17 +41,18 @@ export function adapterForEndpoint(route, adapter) {
 /**
  * Return whether a model may receive this endpoint.
  *
- * An explicit model or provider declaration is authoritative. Without one,
- * only the adapter's native protocol route is allowed; no extra endpoint is
- * inferred from a provider name or a shared base URL.
+ * Chat and Responses remain native protocol routes. Embeddings are an
+ * explicit per-model opt-in; no shared base URL or adapter can grant it.
  */
 export function supportsOpenAIEndpoint(route, { adapter, model, provider } = {}) {
   if (!ENDPOINTS.has(route)) return false;
-  const declared = model?.supportedEndpoints ?? provider?.supportedEndpoints;
-  if (declared !== undefined) {
-    const normalized = normalizeSupportedEndpoints(declared);
-    return normalized.includes(route);
+  if (route === "/embeddings") {
+    const declared = model?.supportedEndpoints ?? provider?.supportedEndpoints;
+    if (declared === undefined) return false;
+    return normalizeSupportedEndpoints(declared).includes(route);
   }
+  const declared = model?.supportedEndpoints ?? provider?.supportedEndpoints;
+  if (declared !== undefined && !normalizeSupportedEndpoints(declared).includes(route)) return false;
   return route === protocolEndpoint(adapter);
 }
 

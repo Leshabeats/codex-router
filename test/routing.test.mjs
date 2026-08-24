@@ -3302,8 +3302,7 @@ function curatedOpenRouterModels() {
         entry("openrouter", "openai/gpt-5.3", "openrouter-openai-gpt-5-3"),
         {
           ...entry("openrouter", "openai/text-embedding-3-small", "openrouter-openai-text-embedding-3-small"),
-          adapter: "openai-completions",
-          supportedEndpoints: ["/completions"],
+          supportedEndpoints: ["/chat/completions", "/embeddings"],
         },
         entry("chutes", "moonshotai/Kimi-K3-TEE", "chutes-moonshotai-kimi-k3-tee"),
       ],
@@ -3315,16 +3314,16 @@ function curatedOpenRouterModels() {
     file,
     restricted: "openrouter-qwen-qwen3-8-max",
     unrestricted: "openrouter-openai-gpt-5-3",
-    completions: "openrouter-openai-text-embedding-3-small",
+    embeddings: "openrouter-openai-text-embedding-3-small",
     chutes: "chutes-moonshotai-kimi-k3-tee",
   };
 }
 
-test("API forwarder routes legacy Completions only for models that declare it", async () => {
+test("API forwarder forwards declared embeddings without chat conversion", async () => {
   const upstreamRequests = [];
   const upstream = await mockServer(async (request, response) => {
     upstreamRequests.push({ url: request.url, body: await bodyJson(request) });
-    json(response, 200, { id: "cmpl_test", object: "text_completion", choices: [] });
+    json(response, 200, { object: "list", data: [{ embedding: [0.1, 0.2], index: 0 }] });
   });
   const curated = curatedOpenRouterModels();
   const forwarderPort = await openPort();
@@ -3342,33 +3341,43 @@ test("API forwarder routes legacy Completions only for models that declare it", 
 
   try {
     await waitFor(`http://127.0.0.1:${forwarderPort}/health`, forwarder, headers);
-    const response = await fetch(`http://127.0.0.1:${forwarderPort}/v1/completions`, {
+    const response = await fetch(`http://127.0.0.1:${forwarderPort}/v1/embeddings`, {
       method: "POST",
       headers,
       body: JSON.stringify({
-        model: curated.completions,
-        prompt: "hello",
+        model: curated.embeddings,
+        input: ["hello", "world"],
+        encoding_format: "float",
+        dimensions: 2,
         messages: [{ role: "user", content: "must not reach legacy endpoint" }],
         tools: [{ type: "function" }],
-        max_output_tokens: 20,
       }),
     });
     assert.equal(response.status, 200, forwarder.testErrors());
-    assert.equal(upstreamRequests[0].url, "/v1/completions");
+    assert.equal(upstreamRequests[0].url, "/v1/embeddings");
     assert.equal(upstreamRequests[0].body.model, "openai/text-embedding-3-small");
-    assert.equal(upstreamRequests[0].body.prompt, "hello");
-    assert.equal(upstreamRequests[0].body.max_tokens, 20);
-    assert.equal(upstreamRequests[0].body.messages, undefined);
-    assert.equal(upstreamRequests[0].body.tools, undefined);
+    assert.deepEqual(upstreamRequests[0].body.input, ["hello", "world"]);
+    assert.equal(upstreamRequests[0].body.encoding_format, "float");
+    assert.equal(upstreamRequests[0].body.dimensions, 2);
+    assert.deepEqual(upstreamRequests[0].body.messages, [{ role: "user", content: "must not reach legacy endpoint" }]);
+    assert.deepEqual(upstreamRequests[0].body.tools, [{ type: "function" }]);
 
     const refused = await fetch(`http://127.0.0.1:${forwarderPort}/v1/embeddings`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ model: curated.completions, input: "hello" }),
+      body: JSON.stringify({ model: curated.unrestricted, input: "hello" }),
     });
     assert.equal(refused.status, 400);
     const error = await refused.json();
     assert.equal(error.error.type, "provider_api_proxy_error");
+
+    const media = await fetch(`http://127.0.0.1:${forwarderPort}/v1/audio/speech`, {
+      method: "POST",
+      headers: { ...headers, "Content-Type": "application/octet-stream" },
+      body: Buffer.from("not-json"),
+    });
+    assert.equal(media.status, 404);
+    assert.equal(upstreamRequests.length, 1);
   } finally {
     await stopChild(forwarder);
     await closeServer(upstream.server);

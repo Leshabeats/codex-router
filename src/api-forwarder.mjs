@@ -45,9 +45,7 @@ import { relayCommandCodeGenerate } from "./commandcode-relay.mjs";
 import { VERSION } from "./version.mjs";
 import { installStableFetchTransport } from "./fetch-transport.mjs";
 import { zaiCacheUsageTransform } from "./zai-cache-usage.mjs";
-import { normalizeOpenAIRequest } from "./openai-adapters.mjs";
 import {
-  adapterForEndpoint,
   endpointCapabilityError,
   protocolEndpoint,
   supportsOpenAIEndpoint,
@@ -562,16 +560,12 @@ function normalizeBody(buffer, contentType, route) {
     throw endpointCapabilityError(route, model);
   }
 
-  // Generic providers may opt into an explicit adapter capability profile.
-  // Curated routes without this metadata keep their established path
-  // unchanged. Capability conversion is pure, so a retry can reuse the
-  // original request body.
-  const capabilities = model.capabilities || model.adapterCapabilities || provider.capabilities;
-  if (model.adapter || provider.adapter || capabilities || model.adapterCapabilities) {
-    payload = normalizeOpenAIRequest(payload, {
-      adapter: adapterForEndpoint(route, adapter),
-      capabilities,
-    });
+  payload.model = model.upstreamModel;
+  // Embeddings are a separate wire contract. Forward the body unchanged apart
+  // from the gateway model id; chat adapters must never rewrite it.
+  if (route === "/embeddings") {
+    const endpoint = endpointForModel(model);
+    return { body: Buffer.from(JSON.stringify(payload), "utf8"), model, provider, endpoint, payload };
   }
 
   // OpenAI Chat Completions providers place terminal usage in a final empty
@@ -593,7 +587,6 @@ function normalizeBody(buffer, contentType, route) {
     };
   }
 
-  payload.model = model.upstreamModel;
   // Google's OpenAI-compatible endpoint (/v1beta/openai/chat/completions)
   // rejects any field outside the OpenAI schema with a hard 400
   // (INVALID_ARGUMENT: Unknown name "..."). Two such fields reach this hop for
@@ -1013,12 +1006,7 @@ async function handleRequest(request, response) {
       "/chat/completions",
       "/messages",
       "/responses",
-      "/completions",
       "/embeddings",
-      "/moderations",
-      "/images/generations",
-      "/audio/speech",
-      "/batches",
     ].includes(route)
   ) {
     writeJson(response, 404, {

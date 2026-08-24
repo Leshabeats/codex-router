@@ -10,11 +10,11 @@ import {
 } from "../src/openai-endpoint-policy.mjs";
 
 test("endpoint declarations are closed, deduplicated and protocol-aware", () => {
-  assert.deepEqual(normalizeSupportedEndpoints(["/completions", "/completions"]), ["/completions"]);
+  assert.deepEqual(normalizeSupportedEndpoints(["/embeddings", "/embeddings"]), ["/embeddings"]);
   assert.equal(protocolEndpoint("openai-completions"), "/completions");
   assert.equal(protocolEndpoint("openai-responses"), "/responses");
   assert.equal(adapterForEndpoint("/completions", "openai-chat"), "openai-completions");
-  assert.throws(() => normalizeSupportedEndpoints(["/unknown"]), /unsupported endpoint/);
+  assert.throws(() => normalizeSupportedEndpoints(["/completions"]), /unsupported endpoint/);
 });
 
 test("models need an explicit declaration for non-native endpoints", () => {
@@ -26,6 +26,13 @@ test("models need an explicit declaration for non-native endpoints", () => {
       model: { supportedEndpoints: ["/chat/completions", "/embeddings"] },
     }),
     true,
+  );
+  assert.equal(
+    supportsOpenAIEndpoint("/responses", {
+      adapter: "openai-chat",
+      model: { supportedEndpoints: ["/chat/completions", "/responses"] },
+    }),
+    false,
   );
   const error = endpointCapabilityError("/embeddings", { displayName: "Text model" });
   assert.equal(error.status, 400);
