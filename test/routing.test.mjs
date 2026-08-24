@@ -4437,6 +4437,19 @@ test("API forwarder opts streamed Chat Completions into usage without changing l
       return;
     }
     if (request.url.endsWith("/responses")) {
+      if (body.stream === true) {
+        response.writeHead(200, { "Content-Type": "text/event-stream" });
+        response.end([
+          'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_stream_options"}}\n\n',
+          'event: response.output_item.added\ndata: {"type":"response.output_item.added","item":{"id":"item-a","type":"function_call","call_id":"call-a"}}\n\n',
+          'event: response.function_call_arguments.delta\ndata: {"type":"response.function_call_arguments.delta","call_id":"call-a","delta":"{}"}\n\n',
+          'event: response.output_item.added\ndata: {"type":"response.output_item.added","item":{"id":"item-b","type":"function_call","call_id":"call-b"}}\n\n',
+          'event: response.function_call_arguments.delta\ndata: {"type":"response.function_call_arguments.delta","call_id":"call-b","delta":"{}"}\n\n',
+          'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":2,"output_tokens":2}}}\n\n',
+          "data: [DONE]\n\n",
+        ].join(""));
+        return;
+      }
       json(response, 200, {
         id: "resp_stream_options",
         object: "response",
@@ -4569,6 +4582,11 @@ test("API forwarder opts streamed Chat Completions into usage without changing l
     assert.equal(responses.status, 200);
     assert.equal(upstreamRequests.at(-1).url, "/v1/responses");
     assert.deepEqual(upstreamRequests.at(-1).body.stream_options, { custom_option: "keep" });
+    const responseStream = await responses.text();
+    assert.match(responseStream, /response\.function_call_arguments\.delta/);
+    assert.match(responseStream, /"output_index":0/);
+    assert.match(responseStream, /"output_index":1/);
+    assert.match(responseStream, /"input_tokens":2/);
   } finally {
     await stopChild(forwarder);
     await closeServer(upstream.server);
