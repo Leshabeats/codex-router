@@ -314,7 +314,7 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
 
   const loadConnectedCatalogs = async () => {
     if (!api || loadingConnectedCatalogs) return;
-    const requests = directory.flatMap((entry) => !catalogEligible(entry)
+    const requests = directory.flatMap((entry) => !catalogEligible(entry) || !providerConnected(entry, enabledProviders)
       ? []
       : (entry.setup?.catalogSources ?? []).map((source) => ({ entry, sourceId: source.id })));
     setLoadingConnectedCatalogs(true);
@@ -1009,6 +1009,13 @@ function CredentialDialog({ provider, onSave, onClose }: { provider: ProviderSet
 }
 
 function providerConnected(entry: ProviderDirectoryEntry, enabledProviders: Set<string>): boolean {
+  // An anonymous endpoint has no stored account or credential that can make it
+  // connected on its own. Treating `configured: true` as a connection here
+  // both mislabels an unselected provider and includes its off-box catalog in
+  // the bulk "connected" request. Its explicit provider selection is the
+  // connection boundary instead; opening its own card remains an explicit way
+  // to browse the catalog before enabling routed prompts.
+  if (entry.setup?.kind === "anonymous") return enabledProviders.has(entry.id);
   if (entry.setup) return entry.setup.configured;
   return entry.models.some((model) => model.native) || enabledProviders.has(entry.id);
 }
@@ -1029,6 +1036,7 @@ function connectionMethod(entry: ProviderDirectoryEntry): string {
 function connectionDetail(entry: ProviderDirectoryEntry, accountStatus?: string, accountMessage?: string, needsCuration?: boolean, canOpenTerminal?: boolean): string {
   if (entry.id === "openai") return "Uses the signed-in ChatGPT session available to this Codex installation.";
   if (!entry.setup) return "This provider catalog is managed by the router and has no separate credential action here.";
+  if (entry.setup.kind === "anonymous") return "No API key is required. Enable this provider explicitly before routed prompts or bulk catalog loading can use its endpoint.";
   if (needsCuration) return "The credential is ready, but this catalog-only provider has no locally selected models.";
   if (accountStatus === "unavailable") return accountMessage || "Account usage is unavailable. Reconnect if the session expired.";
   if (entry.setup.configured) return "Credential ready. You can disable routing without disconnecting the account.";

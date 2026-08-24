@@ -1681,8 +1681,9 @@ signing and notarization are available; it is not attached to public releases.
 Windows 11 hides new tray icons in the `^` overflow next to the clock; drag the
 icon onto the taskbar to pin it.
 
-On Linux desktops without a compatible tray host, a tray-only launch falls
-back to a visible Control Center window. See the
+On Linux, a tray-only launch stays windowless only when the desktop reports a
+registered StatusNotifier host. Otherwise it keeps a visible Control Center
+window so the process cannot disappear without a recoverable surface. See the
 [Windows and Linux tray guide](docs/DESKTOP-TRAY.md) for prerequisites,
 packaging, and the platform behavior matrix.
 

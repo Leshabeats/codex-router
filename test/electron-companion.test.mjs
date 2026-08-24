@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -138,13 +139,20 @@ test("the Linux packager can stage without touching the live package", () => {
   assert.match(script, /--stage-only DESTINATION/);
   assert.match(script, /if \[ "\$build_mode" = stage-only \]/);
   assert.match(script, /Refusing to overwrite staged Control Center destination/);
+  assert.match(script, /control_center_root_is_safe\(\)/);
+  assert.match(script, /release_root_is_safe\(\)[\s\S]*! -L "\$release_dir"/);
+  assert.match(script, /Refusing an unsafe Control Center release directory/);
+  assert.match(script, /Refusing a linked live Control Center package/);
   const stageBranch = script.indexOf('if [ "$build_mode" = stage-only ]');
   const liveMove = script.indexOf('mv "$target_dir" "$backup_dir"');
   assert.ok(stageBranch >= 0 && liveMove > stageBranch, "stage-only must return before the live-package transaction");
   assert.match(script.slice(stageBranch, liveMove), /mv "\$staged_dir" "\$stage_destination"[\s\S]*exit 0/);
   assert.match(script, /trap cleanup EXIT/);
   assert.doesNotMatch(script, /trap cleanup EXIT HUP INT TERM/);
-  assert.match(script, /if \[ -d "\$backup_dir" \]; then[\s\S]*mv "\$backup_dir" "\$target_dir"/);
+  assert.match(
+    script,
+    /if \[ -d "\$backup_dir" \] \|\| \[ -L "\$backup_dir" \]; then[\s\S]*Refusing Control Center rollback from a linked backup[\s\S]*release_root_is_safe[\s\S]*mv "\$backup_dir" "\$target_dir"/,
+  );
 });
 
 test("the Windows packager can retain an exact rollback package for its caller", () => {
@@ -204,12 +212,12 @@ test("Linux rebuilds use exact process identity and recover from package failure
   const stage = linux.indexOf('build-electron-companion.sh" --stage-only "$staged_dir"');
   const capture = linux.indexOf("detect_running_companions", stage);
   const drain = linux.indexOf("stop_recorded_processes", capture);
-  const swap = linux.indexOf('mv "$staged_dir" "$target_dir"');
+  const swap = linux.indexOf('durable_linux_move "$staged_dir" "$target_dir"');
   const ready = linux.indexOf('[ "$queried_ready" -eq 1 ]', swap);
   const commit = linux.indexOf("write_phase committed", ready);
-  const precommitCompleteness = linux.lastIndexOf('linux_package_complete "$target_dir"', commit);
+  const precommitCompleteness = linux.lastIndexOf('sync_linux_package "$target_dir"', commit);
   const destructiveCompleteness = linux.indexOf('linux_package_complete "$target_dir"', commit);
-  const cleanup = linux.indexOf('rm -rf "$transaction_dir"', destructiveCompleteness);
+  const cleanup = linux.indexOf('durable_linux_remove "$transaction_dir"', destructiveCompleteness);
   const stamp = linux.indexOf('install-plan.mjs" record-tray', commit);
   assert.ok(stage >= 0 && capture > stage && drain > capture && swap > drain, "build/capture/drain/swap order must be transactional");
   assert.ok(ready > swap && commit > ready && stamp > commit, "package and stamp must remain rollback-safe until exact readiness");
@@ -218,8 +226,18 @@ test("Linux rebuilds use exact process identity and recover from package failure
   assert.ok(destructiveCompleteness > commit && cleanup > destructiveCompleteness,
     "the live package must be revalidated immediately before rollback cleanup");
   assert.match(linux, /linux_package_complete\(\)[\s\S]*app\.asar[\s\S]*! -L[\s\S]*-s/);
-  assert.ok(linux.indexOf('rm -f "$legacy_tauri_binary"', commit) > commit);
+  assert.ok(linux.indexOf("remove_obsolete_linux_tauri", commit) > commit);
+  assert.match(linux, /remove_obsolete_linux_tauri\(\)[\s\S]*legacy_directory[\s\S]*! -L[\s\S]*legacy_tauri_binary[\s\S]*! -L/);
   assert.doesNotMatch(linux, /rm -f[\s\S]{0,160}apps\/electron\/node_modules\/electron\/dist\/electron/);
+  assert.match(linux, /prepare_linux_release_root\(\)[\s\S]*validate_linux_release_root/);
+  assert.match(linux, /validate_linux_release_root\(\)[\s\S]*pwd -P[\s\S]*control_center_real\/release/);
+  assert.match(linux, /sync_linux_entries\(\)[\s\S]*O_NOFOLLOW[\s\S]*fsyncSync/);
+  const phaseWrite = linux.slice(linux.indexOf("write_phase()"), linux.indexOf("validate_transaction_tree()"));
+  assert.match(phaseWrite, /sync_linux_entries "\$next_phase_file"[\s\S]*durable_linux_move "\$next_phase_file" "\$phase_file"/);
+  assert.ok(
+    linux.indexOf('sync_linux_package "$target_dir"') < commit,
+    "the ready package data and directories must be durable before commit",
+  );
 });
 
 test("Linux lifecycle owners cannot be stale PIDs or Electron Node helpers", () => {
@@ -319,6 +337,43 @@ test("Linux recovery refuses ambiguous live and pre-replacement packages", {
     assert.equal(readFileSync(path.join(item.transaction, "previous", "identity"), "utf8"), "old");
   } finally {
     rmSync(item.fixture, { recursive: true, force: true });
+  }
+});
+
+test("Linux refuses a linked release root before build or recovery mutation", {
+  skip: process.platform === "win32",
+}, () => {
+  const fixture = mkdtempSync(path.join(os.tmpdir(), "router-linux-linked-release-"));
+  const external = mkdtempSync(path.join(os.tmpdir(), "router-linux-linked-release-external-"));
+  try {
+    mkdirSync(path.join(fixture, "bin"), { recursive: true });
+    mkdirSync(path.join(fixture, "scripts"), { recursive: true });
+    mkdirSync(path.join(fixture, "tools"), { recursive: true });
+    mkdirSync(path.join(fixture, "apps", "control-center"), { recursive: true });
+    const launcher = path.join(fixture, "bin", "model-router-tray");
+    writeFileSync(launcher, readFileSync(path.join(root, "bin", "model-router-tray"), "utf8"));
+    chmodSync(launcher, 0o700);
+    const builderMarker = path.join(external, "builder-ran");
+    const builder = path.join(fixture, "scripts", "build-electron-companion.sh");
+    writeFileSync(builder, `#!/bin/sh\nprintf ran >${JSON.stringify(builderMarker)}\nexit 42\n`);
+    chmodSync(builder, 0o700);
+    const uname = path.join(fixture, "tools", "uname");
+    writeFileSync(uname, "#!/bin/sh\nprintf 'Linux\\n'\n");
+    chmodSync(uname, 0o700);
+    writeFileSync(path.join(external, "sentinel"), "outside");
+    symlinkSync(external, path.join(fixture, "apps", "control-center", "release"), "dir");
+
+    const result = spawnSync("sh", [launcher, "--tray-only"], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${path.join(fixture, "tools")}:${process.env.PATH}` },
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /unsafe Linux Control Center release directory/);
+    assert.equal(readFileSync(path.join(external, "sentinel"), "utf8"), "outside");
+    assert.equal(existsSync(builderMarker), false);
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+    rmSync(external, { recursive: true, force: true });
   }
 });
 

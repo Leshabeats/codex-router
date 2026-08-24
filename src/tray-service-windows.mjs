@@ -235,7 +235,11 @@ function registeredTaskAction() {
     "if ($actions.Count -ne 1) { exit 1 }",
     "$action = $actions[0]",
     "if ($null -eq $action) { exit 1 }",
-    "[Console]::Out.Write((@{ execute = [string]$action.Execute; argument = [string]$action.Arguments } | ConvertTo-Json -Compress))",
+    "$principalId = [string]$task.Principal.UserId",
+    "try { $principalSid = ([Security.Principal.SecurityIdentifier]::new($principalId)).Value } catch { $principalSid = ([Security.Principal.NTAccount]::new($principalId)).Translate([Security.Principal.SecurityIdentifier]).Value }",
+    "$currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
+    "$logonType = $task.Principal.LogonType.ToString()",
+    "[Console]::Out.Write((@{ execute = [string]$action.Execute; argument = [string]$action.Arguments; principalSid = $principalSid; currentSid = $currentSid; logonType = $logonType } | ConvertTo-Json -Compress))",
   ].join("; ");
   const perHostTimeout = Math.floor(TASK_COMMAND_TIMEOUT_MS / 2);
   for (const executable of ["powershell.exe", "pwsh.exe"]) {
@@ -251,7 +255,16 @@ function registeredTaskAction() {
           windowsHide: true,
         },
       ));
-      if (typeof value?.execute === "string" && value.execute) return value;
+      if (
+        typeof value?.execute === "string"
+        && value.execute
+        && typeof value.principalSid === "string"
+        && value.principalSid
+        && typeof value.currentSid === "string"
+        && value.currentSid
+        && typeof value.logonType === "string"
+        && value.logonType
+      ) return value;
     } catch {
       // Try the other PowerShell host before reporting an unreadable action.
     }
@@ -259,11 +272,46 @@ function registeredTaskAction() {
   return undefined;
 }
 
+function isCurrentUserInteractiveTask(registered) {
+  return typeof registered?.principalSid === "string"
+    && typeof registered?.currentSid === "string"
+    && registered.principalSid.toLowerCase() === registered.currentSid.toLowerCase()
+    && String(registered.logonType || "").toLowerCase() === "interactive";
+}
+
+function requireRecognizedCurrentUserTask(registered, operation) {
+  if (!isCurrentUserInteractiveTask(registered)) {
+    throw new Error(
+      `The named ${TRAY_TASK_NAME} task is not an interactive task owned by the current user; it was not ${operation}.`,
+    );
+  }
+  if (!isRecognizedControlCenterAction(registered) && !recognizedLegacyCompanionAction(registered)) {
+    throw new Error(
+      `The named ${TRAY_TASK_NAME} task has an unrecognized action; it was not ${operation}.`,
+    );
+  }
+  return registered;
+}
+
+function sameRegisteredTaskIdentity(left, right) {
+  if (!isCurrentUserInteractiveTask(left) || !isCurrentUserInteractiveTask(right)) return false;
+  try {
+    return path.win32.normalize(left.execute).toLowerCase()
+        === path.win32.normalize(right.execute).toLowerCase()
+      && String(left.argument || "") === String(right.argument || "")
+      && left.principalSid.toLowerCase() === right.principalSid.toLowerCase()
+      && String(left.logonType).toLowerCase() === String(right.logonType).toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
 function requireCanonicalRegisteredAction() {
   const registered = registeredTaskAction();
   if (!registered) {
     throw new Error("Task Scheduler did not return one registered tray action.");
   }
+  requireRecognizedCurrentUserTask(registered, "used");
   if (!isCanonicalTrayTaskAction(registered)) {
     throw new Error(
       `The registered tray action is not the canonical Control Center at ${TRAY_BINARY}. ` +
@@ -712,6 +760,7 @@ function endTask() {
   // deadline on a question that cannot be answered.
   if (skipServiceManagerCall({ hostManaged: HOST_MANAGED })) return;
   const registered = registeredTaskAction();
+  if (registered) requireRecognizedCurrentUserTask(registered, "stopped or replaced");
   const registeredLegacy = recognizedLegacyCompanionAction(registered);
   const registeredCanonical = isRecognizedControlCenterAction(registered) && !registeredLegacy;
   if (registeredCanonical) {
@@ -729,10 +778,6 @@ function endTask() {
       // Missing or already idle: the state the caller asked for either way.
     }
     waitForTaskState((state) => state !== "running", TASK_STOP_TIMEOUT_MS, "stop");
-  } else if (registered) {
-    throw new Error(
-      `The named ${TRAY_TASK_NAME} task has an unrecognized action; it was not stopped or replaced.`,
-    );
   } else {
     const existence = taskExists();
     if (existence !== "missing") {
@@ -883,7 +928,7 @@ if (command === "render" || command === "render-task") {
         state: loaded ? "running" : "stopped",
         path: companionPath,
         argument: action?.argument || "",
-        canonical: installed && isCanonicalTrayTaskAction(action),
+        canonical: installed && isCurrentUserInteractiveTask(action) && isCanonicalTrayTaskAction(action),
       })}\n`,
     );
   }
@@ -901,7 +946,7 @@ if (command === "render" || command === "render-task") {
   process.stdout.write(`${JSON.stringify({ valid: true, ...action, lifecycle })}\n`);
 } else if (command === "lifecycle") {
   const registered = registeredTaskAction();
-  const executable = isRecognizedControlCenterAction(registered)
+  const executable = isCurrentUserInteractiveTask(registered) && isRecognizedControlCenterAction(registered)
     ? registered.execute
     : builtCompanionPath();
   process.stdout.write(`${JSON.stringify(queryControlCenterLifecycle(executable))}\n`);
@@ -912,17 +957,35 @@ if (command === "render" || command === "render-task") {
   startTask();
   process.stdout.write(`${JSON.stringify({ installed: true, path: TRAY_BINARY })}\n`);
 } else if (command === "uninstall") {
-  // A scheduler that cannot answer a stop must not block the real uninstall:
-  // endTask failing here only means the wait could not be satisfied, and the
-  // deletion below -- plus the verification that follows -- is what decides
-  // whether the task is actually gone.
-  try {
+  const initial = registeredTaskAction();
+  if (!initial) {
+    const existence = taskExists();
+    if (existence !== "missing") {
+      throw new Error(
+        `The named ${TRAY_TASK_NAME} task exists or is unreadable, but its identity could not be verified; it was not deleted.`,
+      );
+    }
+  } else {
+    requireRecognizedCurrentUserTask(initial, "deleted");
     endTask();
-  } catch {
-    // Best effort stop; continue to the /Delete attempt.
+  }
+  const beforeDelete = registeredTaskAction();
+  if (beforeDelete) {
+    requireRecognizedCurrentUserTask(beforeDelete, "deleted");
+    if (!sameRegisteredTaskIdentity(initial, beforeDelete)) {
+      throw new Error(
+        `The named ${TRAY_TASK_NAME} task changed while uninstall was draining it; it was not deleted.`,
+      );
+    }
+  } else if (taskExists() !== "missing") {
+    throw new Error(
+      `The named ${TRAY_TASK_NAME} task became unreadable during uninstall; it was not deleted.`,
+    );
   }
   try {
-    schtasks(["/Delete", "/TN", TRAY_TASK_NAME, "/F"], { quiet: true, mutating: true });
+    if (beforeDelete) {
+      schtasks(["/Delete", "/TN", TRAY_TASK_NAME, "/F"], { quiet: true, mutating: true });
+    }
   } catch (error) {
     // Missing is already the requested state. A task that still exists means
     // Task Scheduler rejected the deletion, which must not be reported as a

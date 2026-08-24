@@ -38,6 +38,30 @@ case $(uname -s) in
         ));
       '
     }
+    tray_app_identity() {
+      expected_bundle=$1
+      # Count every outer host, then separately count only instances whose
+      # AppKit bundle URL is the exact live replacement. One stale copy with the
+      # same identifier must not satisfy readiness for a failed new binary.
+      # Dollar expressions below are JXA template literals.
+      # shellcheck disable=SC2016
+      EXPECTED_BUNDLE="$expected_bundle" /usr/bin/osascript -l JavaScript -e '
+        ObjC.import("AppKit");
+        ObjC.import("Foundation");
+        const environment = $.NSProcessInfo.processInfo.environment;
+        const expectedBundle = ObjC.unwrap(environment.objectForKey("EXPECTED_BUNDLE"));
+        const applications = $.NSRunningApplication.runningApplicationsWithBundleIdentifier(
+          "io.github.codex-router.tray"
+        );
+        let matches = 0;
+        for (let index = 0; index < applications.count; index += 1) {
+          const bundleURL = applications.objectAtIndex(index).bundleURL;
+          const bundlePath = bundleURL ? ObjC.unwrap(bundleURL.path) : "";
+          if (bundlePath === expectedBundle) matches += 1;
+        }
+        `${Number(ObjC.unwrap(applications.count))} ${matches}`;
+      '
+    }
     router_app_count() {
       /usr/bin/osascript -l JavaScript -e '
         ObjC.import("AppKit");
@@ -457,15 +481,24 @@ RESTORE_MACOS_SUPERVISION
     trap 'exit 143' TERM
 
     # Registration is not readiness: bootstrap can return just before the app
-    # crashes, or a stale duplicate can satisfy the bundle identifier. Commit
-    # only while AppKit reports exactly one outer native host.
+    # crashes, or a stale copy can satisfy the bundle identifier. Commit only
+    # while AppKit reports exactly one outer host and its bundle URL is the exact
+    # live replacement path.
     replacement_ready=0
     readiness_count=unknown
+    readiness_matches=unknown
     readiness_wait=0
     while [ "$readiness_wait" -lt 120 ]; do
-      if ! readiness_count=$(tray_app_count); then break; fi
+      if ! readiness_identity=$(tray_app_identity "$bundle_dir"); then break; fi
+      # The JXA program emits exactly two decimal fields.
+      # shellcheck disable=SC2086
+      set -- $readiness_identity
+      [ "$#" -eq 2 ] || break
+      readiness_count=$1
+      readiness_matches=$2
       case "$readiness_count" in *[!0-9]*|'') break ;; esac
-      if [ "$readiness_count" -eq 1 ]; then
+      case "$readiness_matches" in *[!0-9]*|'') break ;; esac
+      if [ "$readiness_count" -eq 1 ] && [ "$readiness_matches" -eq 1 ]; then
         replacement_ready=1
         break
       fi
@@ -476,7 +509,7 @@ RESTORE_MACOS_SUPERVISION
       sleep 0.25
     done
     if [ "$replacement_ready" -ne 1 ]; then
-      printf 'codex-router: the rebuilt Model Router did not start as exactly one native host (count: %s); the previous app will be restored.\n' "$readiness_count" >&2
+      printf 'codex-router: the rebuilt Model Router did not start as the exact live native host (count: %s, live matches: %s); the previous app will be restored.\n' "$readiness_count" "$readiness_matches" >&2
       exit 1
     fi
     write_macos_phase replacement-ready
@@ -573,6 +606,104 @@ RESTORE_MACOS_SUPERVISION
     legacy_tauri_binary="$repo_dir/apps/desktop/src-tauri/target/release/codex-router-desktop"
     legacy_electron_binary="$repo_dir/apps/electron/node_modules/electron/dist/electron"
     legacy_electron_app="$repo_dir/apps/electron"
+
+    validate_linux_release_root() {
+      for required_directory in \
+        "$repo_dir/apps" \
+        "$repo_dir/apps/control-center" \
+        "$release_dir"; do
+        [ -d "$required_directory" ] && [ ! -L "$required_directory" ] || return 1
+      done
+      control_center_real=$(CDPATH='' cd -P -- "$repo_dir/apps/control-center" && pwd -P) || return 1
+      release_real=$(CDPATH='' cd -P -- "$release_dir" && pwd -P) || return 1
+      [ "$release_real" = "$control_center_real/release" ]
+    }
+
+    prepare_linux_release_root() {
+      for required_directory in "$repo_dir/apps" "$repo_dir/apps/control-center"; do
+        [ -d "$required_directory" ] && [ ! -L "$required_directory" ] || return 1
+      done
+      if [ -L "$release_dir" ] || { [ -e "$release_dir" ] && [ ! -d "$release_dir" ]; }; then
+        return 1
+      fi
+      mkdir -p "$release_dir" || return 1
+      validate_linux_release_root
+    }
+
+    sync_linux_entries() {
+      # A journal rename is not durable until both the file and containing
+      # directory have reached stable storage. O_NOFOLLOW plus inode equality
+      # also prevents this helper from turning a late symlink swap into an
+      # fsync of an unrelated current-user path.
+      # Dollar expressions below are JavaScript template literals.
+      # shellcheck disable=SC2016
+      node -e '
+        const fs = require("node:fs");
+        for (const entry of process.argv.slice(1)) {
+          const before = fs.lstatSync(entry);
+          if (before.isSymbolicLink()) throw new Error(`refusing linked durability path: ${entry}`);
+          let flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0);
+          if (before.isDirectory()) flags |= fs.constants.O_DIRECTORY || 0;
+          const descriptor = fs.openSync(entry, flags);
+          try {
+            const opened = fs.fstatSync(descriptor);
+            if (opened.dev !== before.dev || opened.ino !== before.ino) {
+              throw new Error(`durability path changed while opening: ${entry}`);
+            }
+            fs.fsyncSync(descriptor);
+          } finally {
+            fs.closeSync(descriptor);
+          }
+        }
+      ' "$@"
+    }
+
+    durable_linux_move() {
+      move_source=$1
+      move_destination=$2
+      validate_linux_release_root || {
+        printf 'codex-router: refusing a Linux Control Center move through an unsafe release directory.\n' >&2
+        return 1
+      }
+      case "$move_source" in "$release_dir"/*) ;; *) return 1 ;; esac
+      case "$move_destination" in "$release_dir"/*) ;; *) return 1 ;; esac
+      move_source_parent=${move_source%/*}
+      move_destination_parent=${move_destination%/*}
+      mv "$move_source" "$move_destination" || return 1
+      if [ "$move_source_parent" = "$move_destination_parent" ]; then
+        sync_linux_entries "$move_source_parent"
+      else
+        sync_linux_entries "$move_source_parent" "$move_destination_parent"
+      fi
+    }
+
+    durable_linux_remove() {
+      remove_target=$1
+      validate_linux_release_root || {
+        printf 'codex-router: refusing Linux Control Center cleanup through an unsafe release directory.\n' >&2
+        return 1
+      }
+      case "$remove_target" in "$release_dir"/*) ;; *) return 1 ;; esac
+      remove_parent=${remove_target%/*}
+      rm -rf "$remove_target" || return 1
+      sync_linux_entries "$remove_parent"
+    }
+
+    remove_obsolete_linux_tauri() {
+      legacy_tauri_removed=0
+      [ -e "$legacy_tauri_binary" ] || [ -L "$legacy_tauri_binary" ] || return 0
+      for legacy_directory in \
+        "$repo_dir/apps" \
+        "$repo_dir/apps/desktop" \
+        "$repo_dir/apps/desktop/src-tauri" \
+        "$repo_dir/apps/desktop/src-tauri/target" \
+        "$repo_dir/apps/desktop/src-tauri/target/release"; do
+        [ -d "$legacy_directory" ] && [ ! -L "$legacy_directory" ] || return 1
+      done
+      [ -f "$legacy_tauri_binary" ] && [ ! -L "$legacy_tauri_binary" ] || return 1
+      rm -f "$legacy_tauri_binary" || return 1
+      legacy_tauri_removed=1
+    }
 
     pid_running() {
       case ${1:-} in ''|*[!0-9]*) return 1 ;; esac
@@ -725,6 +856,17 @@ RESTORE_MACOS_SUPERVISION
         && [ -s "$package_binary" ] && [ -x "$package_binary" ] \
         && [ -f "$package_archive" ] && [ ! -L "$package_archive" ] \
         && [ -s "$package_archive" ]
+    }
+
+    sync_linux_package() {
+      package_dir=$1
+      linux_package_complete "$package_dir" || return 1
+      sync_linux_entries \
+        "$package_dir/codex-router-control-center" \
+        "$package_dir/resources/app.asar" \
+        "$package_dir/resources" \
+        "$package_dir" \
+        "$release_dir"
     }
 
     stop_control_center_gracefully() {
@@ -961,7 +1103,8 @@ RESTORE_MACOS_SUPERVISION
     write_phase() {
       journal_value=$1
       (umask 077; printf '%s\n' "$journal_value" >"$next_phase_file")
-      mv "$next_phase_file" "$phase_file"
+      sync_linux_entries "$next_phase_file"
+      durable_linux_move "$next_phase_file" "$phase_file"
     }
 
     validate_transaction_tree() {
@@ -997,7 +1140,11 @@ RESTORE_MACOS_SUPERVISION
 
     read_transaction() {
       if [ -f "$next_phase_file" ]; then
-        if [ -f "$phase_file" ]; then rm -f "$next_phase_file"; else mv "$next_phase_file" "$phase_file"; fi
+        if [ -f "$phase_file" ]; then
+          durable_linux_remove "$next_phase_file" || return 1
+        else
+          durable_linux_move "$next_phase_file" "$phase_file" || return 1
+        fi
       fi
       [ -f "$phase_file" ] || return 2
       journal_phase=$(cat "$phase_file")
@@ -1012,6 +1159,10 @@ RESTORE_MACOS_SUPERVISION
 
     recover_linux_transaction() {
       [ -e "$transaction_dir" ] || return 0
+      validate_linux_release_root || {
+        printf 'codex-router: refusing Linux Control Center recovery through an unsafe release directory.\n' >&2
+        return 1
+      }
       if ! validate_transaction_tree; then
         printf 'codex-router: refusing ambiguous Linux Control Center recovery data at %s.\n' "$transaction_dir" >&2
         return 1
@@ -1025,7 +1176,7 @@ RESTORE_MACOS_SUPERVISION
           printf 'codex-router: refusing a Linux Control Center transaction without a phase marker.\n' >&2
           return 1
         fi
-        rm -rf "$transaction_dir"
+        durable_linux_remove "$transaction_dir"
         return 0
       fi
       if [ "$read_status" -ne 0 ]; then
@@ -1037,7 +1188,7 @@ RESTORE_MACOS_SUPERVISION
           printf 'codex-router: the committed Linux Control Center package is incomplete or linked; recovery debris and the rollback package were preserved.\n' >&2
           return 1
         fi
-        rm -rf "$transaction_dir"
+        durable_linux_remove "$transaction_dir"
         return 0
       fi
 
@@ -1057,7 +1208,7 @@ RESTORE_MACOS_SUPERVISION
                 return 1
               fi
               [ ! -e "$failed_dir" ] || return 1
-              mv "$target_dir" "$failed_dir" || return 1
+              durable_linux_move "$target_dir" "$failed_dir" || return 1
               ;;
             *)
               printf 'codex-router: both old and live Linux packages exist before replacement; recovery was refused.\n' >&2
@@ -1066,7 +1217,7 @@ RESTORE_MACOS_SUPERVISION
           esac
         fi
         [ ! -e "$target_dir" ] || return 1
-        mv "$backup_dir" "$target_dir" || return 1
+        durable_linux_move "$backup_dir" "$target_dir" || return 1
       elif [ "$had_previous" -eq 1 ]; then
         if [ -d "$failed_dir" ] && [ -d "$target_dir" ]; then
           # Recovery already restored the old package before the prior crash.
@@ -1086,20 +1237,22 @@ RESTORE_MACOS_SUPERVISION
             if [ -d "$target_dir" ]; then
               if ! stop_all_control_centers "$binary_path"; then return 1; fi
               [ ! -e "$failed_dir" ] || return 1
-              mv "$target_dir" "$failed_dir" || return 1
+              durable_linux_move "$target_dir" "$failed_dir" || return 1
             fi
             ;;
         esac
       fi
 
-      rm -rf "$staged_dir" "$failed_dir"
+      if [ -e "$staged_dir" ]; then durable_linux_remove "$staged_dir" || return 1; fi
+      if [ -e "$failed_dir" ]; then durable_linux_remove "$failed_dir" || return 1; fi
       binary_path="$target_dir/codex-router-control-center"
       restart_recorded_processes
-      rm -rf "$transaction_dir"
+      durable_linux_remove "$transaction_dir"
       return 0
     }
 
     recover_pid_transactions() {
+      validate_linux_release_root || return 1
       orphan_staged=
       orphan_previous=
       for orphan in "$release_dir"/.linux-unpacked.staged.*; do
@@ -1129,9 +1282,9 @@ RESTORE_MACOS_SUPERVISION
           printf 'codex-router: both a live package and an unjournaled legacy backup exist; recovery was refused.\n' >&2
           return 1
         fi
-        mv "$orphan_previous" "$target_dir" || return 1
+        durable_linux_move "$orphan_previous" "$target_dir" || return 1
       fi
-      if [ -n "$orphan_staged" ]; then rm -rf "$orphan_staged"; fi
+      if [ -n "$orphan_staged" ]; then durable_linux_remove "$orphan_staged" || return 1; fi
     }
 
     cleanup_linux() {
@@ -1144,7 +1297,10 @@ RESTORE_MACOS_SUPERVISION
       exit "$cleanup_status"
     }
 
-    mkdir -p "$release_dir"
+    if ! prepare_linux_release_root; then
+      printf 'codex-router: refusing an unsafe Linux Control Center release directory at %s.\n' "$release_dir" >&2
+      exit 1
+    fi
     if [ -L "$target_dir" ] || { [ -e "$target_dir" ] && [ ! -d "$target_dir" ]; }; then
       printf 'codex-router: refusing a non-directory Linux Control Center target at %s.\n' "$target_dir" >&2
       exit 1
@@ -1159,6 +1315,7 @@ RESTORE_MACOS_SUPERVISION
     had_previous=0
     if [ -d "$target_dir" ]; then had_previous=1; fi
     (umask 077; printf '%s\n' "$had_previous" >"$had_previous_file")
+    sync_linux_entries "$had_previous_file" "$transaction_dir" "$release_dir"
     write_phase staging
     trap cleanup_linux EXIT
     trap 'exit 129' HUP
@@ -1179,6 +1336,7 @@ RESTORE_MACOS_SUPERVISION
     # Record every exact current-user GUI identity before stopping any of them.
     # The record is rollback evidence for both a normal error and a later crash.
     detect_running_companions
+    sync_linux_entries "$restart_records_file" "$transaction_dir"
     write_phase draining
     stop_recorded_processes
     write_phase drained
@@ -1187,10 +1345,10 @@ RESTORE_MACOS_SUPERVISION
     if [ "$launch_mode" = interactive ] || [ "$prior_visible" -eq 1 ]; then open_control_center=1; fi
 
     write_phase previous-moving
-    if [ -d "$target_dir" ]; then mv "$target_dir" "$backup_dir"; fi
+    if [ -d "$target_dir" ]; then durable_linux_move "$target_dir" "$backup_dir"; fi
     write_phase previous-moved
     write_phase replacement-moving
-    if ! mv "$staged_dir" "$target_dir"; then
+    if ! durable_linux_move "$staged_dir" "$target_dir"; then
       printf 'codex-router: the staged Control Center could not be installed.\n' >&2
       exit 1
     fi
@@ -1227,7 +1385,7 @@ RESTORE_MACOS_SUPERVISION
     # before it restores the previous package; a crash after it retains the
     # verified replacement and only removes recovery debris.
     write_phase replacement-ready
-    if ! linux_package_complete "$target_dir"; then
+    if ! sync_linux_package "$target_dir"; then
       printf 'codex-router: the ready Linux Control Center package became incomplete or linked before commit; restoring the previous package.\n' >&2
       exit 1
     fi
@@ -1240,18 +1398,18 @@ RESTORE_MACOS_SUPERVISION
       exit 1
     fi
     transaction_committed=1
-    rm -rf "$transaction_dir"
+    durable_linux_remove "$transaction_dir"
     node "$repo_dir/src/install-plan.mjs" record-tray >/dev/null \
       || printf 'codex-router: could not stamp the Control Center build; the next update will rebuild it.\n' >&2
     # Only the standalone Tauri executable is an obsolete installed artifact.
-    # The legacy Electron runtime remains a repository dependency and is used
-    # only as exact migration/process evidence.
-    if [ -f "$legacy_tauri_binary" ]; then
-      if rm -f "$legacy_tauri_binary"; then
+    # Any surviving legacy Electron runtime is used only as exact migration
+    # and process evidence; it is never launched as a second app.
+    if remove_obsolete_linux_tauri; then
+      if [ "$legacy_tauri_removed" -eq 1 ]; then
         printf 'Removed the superseded standalone desktop executable: %s\n' "$legacy_tauri_binary"
-      else
-        printf 'codex-router: the Control Center is ready, but the superseded Tauri executable could not be removed: %s\n' "$legacy_tauri_binary" >&2
       fi
+    else
+      printf 'codex-router: the Control Center is ready, but the superseded Tauri path was unsafe or could not be removed: %s\n' "$legacy_tauri_binary" >&2
     fi
     trap - EXIT HUP INT TERM
     printf 'Control Center built and launched with its native Linux tray: %s\n' "$binary_path"

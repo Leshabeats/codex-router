@@ -34,8 +34,10 @@ The Control Center and tray ship as one visible application on every platform.
 On macOS, `Model Router.app` keeps the existing Swift-native menu-bar item,
 notch overlay, and desktop widget, and embeds this Electron window inside the
 same signed bundle. On Windows and Linux, this Electron process owns the
-operating system tray directly. Closing the window leaves the tray running;
-opening the app or clicking the tray restores the existing window.
+operating system tray directly. Closing the window leaves a proven tray owner
+running; opening the app or clicking the tray restores the existing window.
+When Linux cannot positively verify a registered StatusNotifier host, tray-only
+startup keeps the window visible and closing that fallback exits the process.
 
 ## Platform support
 

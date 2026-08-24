@@ -90,7 +90,7 @@ test("tray restarts wait for Task Scheduler to stop before starting again", () =
   assert.doesNotMatch(source, /if \(command === "restart"\) endTask\(\);\s*\n\s*schtasks\(\["\/Run"/);
 });
 
-test("tray uninstall verifies that Task Scheduler removed the task", () => {
+test("tray uninstall deletes only one unchanged recognized current-user task", () => {
   const source = readFileSync(path.join(root, "src", "tray-service-windows.mjs"), "utf8");
   const uninstall = source.slice(
     source.indexOf('command === "uninstall"'),
@@ -101,16 +101,36 @@ test("tray uninstall verifies that Task Scheduler removed the task", () => {
   // report success as "missing".
   assert.match(uninstall, /if \(taskExists\(\) === "exists"\)[\s\S]*?throw/);
   assert.match(uninstall, /if \(existence === "error"\)[\s\S]*?did not answer whether the tray task was removed/);
-  assert.doesNotMatch(uninstall, /catch \{\s*\/\/ The task may not exist/);
-  // endTask() can throw when the scheduler is unreadable; that must not block
-  // the /Delete attempt that is the actual uninstall.
-  assert.match(uninstall, /catch \{[\s\S]*?Best effort stop/);
-  const endTaskTry = uninstall.indexOf("try {");
+  assert.match(uninstall, /requireRecognizedCurrentUserTask\(initial, "deleted"\)/);
+  assert.match(uninstall, /requireRecognizedCurrentUserTask\(beforeDelete, "deleted"\)/);
+  assert.match(uninstall, /sameRegisteredTaskIdentity\(initial, beforeDelete\)/);
+  assert.match(uninstall, /if \(beforeDelete\) \{\s+schtasks\(\["\/Delete"/);
+  assert.doesNotMatch(uninstall, /Best effort stop|continue to the \/Delete attempt/);
   const endTaskCall = uninstall.indexOf("endTask()");
   const deleteCall = uninstall.indexOf('schtasks(["/Delete"');
   assert.ok(
-    endTaskTry >= 0 && endTaskCall > endTaskTry && endTaskCall < deleteCall,
-    "endTask must be isolated so /Delete always runs",
+    endTaskCall >= 0 && deleteCall > endTaskCall,
+    "the verified task must drain before its guarded deletion",
+  );
+});
+
+test("every Windows task mutation verifies the interactive current-user principal", () => {
+  const source = readFileSync(path.join(root, "src", "tray-service-windows.mjs"), "utf8");
+  const query = source.slice(
+    source.indexOf("function registeredTaskAction("),
+    source.indexOf("function requireCanonicalRegisteredAction("),
+  );
+  assert.match(query, /WindowsIdentity\]::GetCurrent\(\)\.User\.Value/);
+  assert.match(query, /principalSid/);
+  assert.match(query, /LogonType\.ToString\(\)/);
+  assert.match(query, /isCurrentUserInteractiveTask/);
+  assert.match(query, /logonType \|\| ""\)\.toLowerCase\(\) === "interactive"/);
+  assert.match(query, /isRecognizedControlCenterAction\(registered\)[\s\S]*recognizedLegacyCompanionAction\(registered\)/);
+  const endTask = source.slice(source.indexOf("function endTask("), source.indexOf("function startTask("));
+  assert.match(endTask, /requireRecognizedCurrentUserTask\(registered, "stopped or replaced"\)/);
+  assert.ok(
+    endTask.indexOf("requireRecognizedCurrentUserTask") < endTask.indexOf('schtasks(["/End"'),
+    "principal and action identity must be proven before /End",
   );
 });
 
@@ -183,7 +203,7 @@ test("graceful update drain is verified and lifecycle failure never authorizes a
   assert.match(drain, /!lifecycleWasVerified\(lifecycle\)[\s\S]*exactCanonicalProcessCount/);
   assert.match(drain, /Close it normally and retry; it was not force-stopped/);
   assert.doesNotMatch(endTask, /stopExactUserAction\(\{ execute: (?:registered\.execute|TRAY_BINARY)/);
-  assert.match(endTask, /else if \(registered\)[\s\S]*unrecognized action; it was not stopped or replaced/);
+  assert.match(endTask, /if \(registered\) requireRecognizedCurrentUserTask\(registered, "stopped or replaced"\)/);
   assert.match(endTask, /const existence = taskExists\(\)[\s\S]*existence !== "missing"[\s\S]*action could not be verified/);
   assert.match(endTask, /stopKnownLegacyProcesses\(registered\)/);
   assert.doesNotMatch(endTask, /path\.resolve|===\s*path\.resolve/);
@@ -456,6 +476,7 @@ test("Windows replacement recovery journals the package and exact prior Schedule
     /Assert-ControlCenterRecoveryState \$Transaction\s+Assert-ControlCenterPackageComplete \$Transaction\s+Write-ControlCenterTransactionJournal \$Transaction "committed"/,
   );
   assert.match(transaction, /Length -le 0/);
+  assert.match(transaction, /Assert-ControlCenterTransactionPath \$Resources "packaged resources directory" "Directory"/);
   assert.match(
     transaction,
     /MatchesRecoveringPrior = \$Transaction\.Phase -eq "recovering" -and \$MatchesPriorDocument/,
@@ -513,13 +534,26 @@ test("refresh is plan-gated and preserves the prior window lifecycle", () => {
   assert.match(script, /if \(\$RefreshOnly\) \{ exit 0 \}/);
   assert.match(script, /Invoke-RouterNode "src\\tray-service\.mjs" @\("install"\)[\s\S]*Record-ControlCenterBuild/);
   assert.match(script, /if \(\$OpenAfterAction\)[\s\S]*Open-ControlCenterWindow/);
+  const skip = script.slice(
+    script.indexOf('if ($Plan.Trim() -eq "skip")'),
+    script.indexOf("} else {", script.indexOf('if ($Plan.Trim() -eq "skip")')),
+  );
+  assert.match(skip, /New-ControlCenterUpdateTransaction[\s\S]*tray-service\.mjs" @\("install"\)[\s\S]*Complete-ControlCenterReplacement/);
+  assert.match(skip, /Undo-ControlCenterReplacement[\s\S]*Companion registration failed/);
 });
 
 test("successful Windows install removes only the standalone legacy executable", () => {
   const script = readFileSync(path.join(root, "codex-router.ps1"), "utf8");
+  const cleanup = script.slice(
+    script.indexOf("function Get-ObsoleteTauriExecutableForRemoval"),
+    script.indexOf("function Get-ControlCenterLifecycle"),
+  );
+  assert.match(cleanup, /"apps", "desktop", "src-tauri", "target", "release"/);
+  assert.match(cleanup, /Assert-ControlCenterTransactionPath \$Cursor "obsolete Tauri path component" "Directory"/);
+  assert.match(cleanup, /Assert-ControlCenterTransactionPath \$LegacyBinary "obsolete Tauri executable" "File"/);
+  assert.doesNotMatch(cleanup, /apps\\electron\\node_modules\\electron\\dist\\electron\.exe/);
   const installResult = script.slice(script.indexOf('Invoke-RouterNode "src\\tray-service.mjs" @($Action)'));
-  assert.match(installResult, /apps\\desktop\\src-tauri\\target\\release\\codex-router-desktop\.exe/);
-  assert.doesNotMatch(installResult, /apps\\electron\\node_modules\\electron\\dist\\electron\.exe/);
+  assert.match(installResult, /Get-ObsoleteTauriExecutableForRemoval/);
   assert.match(installResult, /Remove-Item -LiteralPath \$LegacyBinary -Force/);
   assert.doesNotMatch(installResult, /Remove-Item[^\n]+-Recurse/);
 });

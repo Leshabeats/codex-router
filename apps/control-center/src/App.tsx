@@ -290,6 +290,11 @@ export default function App() {
       const message = readableError(error);
       setToast({ tone: "danger", message });
       setOperation({ action: label, status: "failed", message });
+      // Some control transactions persist their safe local decision before
+      // republishing installed client catalogs. A later publication failure
+      // rejects the command even though the durable state changed, so reconcile
+      // immediately instead of displaying the opposite consent for five minutes.
+      await Promise.allSettled([refreshCore(), refreshUsage()]);
       return;
     }
     setOperation({ action: label, status: "completed", message: `${label} completed.` });

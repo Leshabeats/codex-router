@@ -325,8 +325,8 @@ export function SettingsPage({ target, health, presence, chatgptSession, api, th
               <Button variant="ghost" disabled={!api || trayControlsUnavailable} onClick={() => setConfirmTrayDisable(true)}>{t("settings.desktop.disable")}</Button>
             </div>
             {trayControlsUnavailable ? (
-              <InlineNotice tone="neutral" title="Tray supervision controls unavailable">
-                {trayCapability?.why || "This desktop can run the Control Center and its native tray directly, but it has no supported OS supervision contract."}
+              <InlineNotice tone="neutral" title={t("settings.desktop.unavailable.title")}>
+                {t("settings.desktop.unavailable.body")}
               </InlineNotice>
             ) : null}
           </section>

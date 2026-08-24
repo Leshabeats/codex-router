@@ -15,6 +15,7 @@ import {
   createOpenRequestGate,
   createRendererReadyGate,
   lifecycleStatePath,
+  linuxStatusNotifierHostAvailable,
   LIFECYCLE_QUERY_ARGUMENT,
   queryLifecycleState,
   shouldQuitOnLastWindowClosed,
@@ -238,10 +239,12 @@ function createTray() {
 
 function trayIsAvailable() {
   if (nativeTrayOwnedByHost) return true;
-  // Electron has no cross-desktop API that proves a Linux StatusNotifier host
-  // actually rendered the icon. The strongest bounded check it exposes is a
-  // non-empty image plus a successfully constructed, non-destroyed Tray.
-  return Boolean(tray && !tray.isDestroyed());
+  if (!tray || tray.isDestroyed()) return false;
+  // Electron exposes construction, not Linux panel visibility. Keep tray-only
+  // launches visible unless the desktop's StatusNotifierWatcher positively
+  // reports a registered host; a missing probe is deliberately not success.
+  if (process.platform === "linux") return linuxStatusNotifierHostAvailable();
+  return true;
 }
 
 function trustedRendererSender(event) {

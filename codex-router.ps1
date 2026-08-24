@@ -272,9 +272,12 @@ function Assert-ControlCenterRecoveryState($Transaction) {
 }
 
 function Assert-ControlCenterPackageComplete($Transaction) {
+  Assert-ControlCenterTransactionPath $Transaction.ReleaseDirectory "release directory" "Directory"
   Assert-ControlCenterTransactionPath $Transaction.TargetDirectory "live package" "Directory"
+  $Resources = Join-Path $Transaction.TargetDirectory "resources"
+  Assert-ControlCenterTransactionPath $Resources "packaged resources directory" "Directory"
   $Binary = Join-Path $Transaction.TargetDirectory "Codex Router.exe"
-  $Archive = Join-Path $Transaction.TargetDirectory "resources\app.asar"
+  $Archive = Join-Path $Resources "app.asar"
   foreach ($Artifact in @(
     [pscustomobject]@{ Path = $Binary; Label = "packaged executable" },
     [pscustomobject]@{ Path = $Archive; Label = "packaged app archive" }
@@ -498,6 +501,22 @@ function Record-ControlCenterBuild {
   if ($LASTEXITCODE -ne 0) {
     Write-Warning "Could not stamp the companion build; the next update will rebuild it."
   }
+}
+
+function Get-ObsoleteTauriExecutableForRemoval {
+  # apps\desktop is intentionally no longer tracked. Treat every surviving
+  # component as hostile migration residue: a junction at any ancestor could
+  # otherwise turn a successful update into deletion outside this checkout.
+  $Cursor = $Root
+  foreach ($Segment in @("apps", "desktop", "src-tauri", "target", "release")) {
+    $Cursor = Join-Path $Cursor $Segment
+    if (-not (Test-Path -LiteralPath $Cursor)) { return $null }
+    Assert-ControlCenterTransactionPath $Cursor "obsolete Tauri path component" "Directory"
+  }
+  $LegacyBinary = Join-Path $Cursor "codex-router-desktop.exe"
+  if (-not (Test-Path -LiteralPath $LegacyBinary)) { return $null }
+  Assert-ControlCenterTransactionPath $LegacyBinary "obsolete Tauri executable" "File"
+  return $LegacyBinary
 }
 
 function Get-ControlCenterLifecycle {
@@ -952,6 +971,24 @@ switch ($Command) {
       if ($Plan.Trim() -eq "skip") {
         Write-Output "Control Center already built from these sources; skipping the rebuild."
         if ($RefreshOnly) { exit 0 }
+        # Even without a package swap, install may migrate an exact legacy task
+        # or repair the canonical registration. Snapshot and journal that task
+        # before Register-ScheduledTask replaces it so a DACL/start/readiness
+        # failure restores the byte-exact XML, SDDL, and running state.
+        $Transaction = New-ControlCenterUpdateTransaction
+        try {
+          Invoke-RouterNode "src\tray-service.mjs" @("install")
+          Complete-ControlCenterReplacement $Transaction
+        } catch {
+          $RegistrationFailure = $_
+          try {
+            Undo-ControlCenterReplacement $Transaction $false "Companion registration failed"
+          } catch {
+            throw "Companion registration failed ($($RegistrationFailure.Exception.Message)) and rollback failed: $($_.Exception.Message)"
+          }
+          throw $RegistrationFailure
+        }
+        $ActionHandled = $true
       } else {
         $TrayWasRunning = $Plan.Trim() -eq "rebuild"
         if ($TrayWasRunning) {
@@ -1004,17 +1041,17 @@ switch ($Command) {
       Open-ControlCenterWindow
     }
     if ($Action -in @("install", "refresh")) {
-      # The old Tauri binary was a standalone competing app. The Electron
-      # runtime under apps\electron\node_modules is a build dependency, not an
-      # installed duplicate, and must remain intact.
-      $LegacyBinary = Join-Path $Root "apps\desktop\src-tauri\target\release\codex-router-desktop.exe"
-      if (Test-Path -LiteralPath $LegacyBinary -PathType Leaf) {
-        try {
+      # The old Tauri binary was a standalone competing app. Any surviving
+      # apps\electron runtime is legacy process evidence, not a second app to
+      # launch or an update target.
+      try {
+        $LegacyBinary = Get-ObsoleteTauriExecutableForRemoval
+        if ($null -ne $LegacyBinary) {
           Remove-Item -LiteralPath $LegacyBinary -Force
           Write-Output "Removed superseded desktop executable: $LegacyBinary"
-        } catch {
-          Write-Warning "The unified Control Center is installed, but a superseded executable could not be removed: $LegacyBinary"
         }
+      } catch {
+        Write-Warning "The unified Control Center is installed, but the superseded Tauri path was unsafe or could not be removed: $($_.Exception.Message)"
       }
       Write-Output "Tray installed and started by Task Scheduler; it returns at every logon."
       Write-Output "Windows 11 hides new tray icons: click the ^ chevron by the clock, then drag the icon onto the taskbar to pin it."

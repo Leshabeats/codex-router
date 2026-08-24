@@ -39,6 +39,14 @@ test("releases are tag-driven and validate every asset before publishing", () =>
   assert.doesNotMatch(release, /branches:\s*\[?main/);
   assert.match(release, /Verify tag matches package version/);
   assert.match(release, /test "v\$package_version" = "\$GITHUB_REF_NAME"/);
+  assert.match(release, /actions: read/);
+  assert.match(release, /git fetch --no-tags origin main:refs\/remotes\/origin\/main/);
+  assert.match(release, /test "\$tag_commit" = "\$GITHUB_SHA"/);
+  assert.match(release, /test "\$tag_commit" = "\$main_commit"/);
+  assert.match(release, /actions\/workflows\/ci\.yml\/runs\?head_sha=\$\{GITHUB_SHA\}/);
+  assert.match(release, /select\(\.conclusion == "success"/);
+  assert.match(release, /needs: release-preflight/);
+  assert.match(release, /needs: \[release-preflight, unified-app\]/);
   assert.ok(
     release.indexOf("- run: npm test") < release.indexOf("gh release create"),
     "the release must pass the full test suite before publishing assets",
@@ -48,6 +56,12 @@ test("releases are tag-driven and validate every asset before publishing", () =>
   assert.match(release, /name: Unsigned tester app \(\$\{\{ matrix\.platform \}\}\)/);
   assert.match(release, /electron-builder --win --publish never/);
   assert.match(release, /electron-builder --linux --publish never/);
+  assert.match(release, /Smoke the packaged Linux application/);
+  assert.match(release, /Smoke the packaged Windows application/);
+  assert.match(release, /--no-sandbox --tray-only/);
+  assert.match(release, /--no-sandbox --quit-for-update/);
+  assert.match(release, /-ArgumentList "--tray-only"/);
+  assert.match(release, /-ArgumentList "--quit-for-update"/);
   assert.match(release, /install -m 0755/);
   assert.match(release, /model-router-\$\{version\}-linux-x64\.tar\.gz/);
   assert.doesNotMatch(release, /platform: macos|macos-latest|model-router-\$\{version\}-macos/);

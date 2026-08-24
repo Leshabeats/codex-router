@@ -991,3 +991,18 @@ test("the tray usage advertises rebuild alongside the supervised actions", () =>
     rmSync(stateDir, { recursive: true, force: true });
   }
 });
+
+test("Windows tray enable uses the durable package and task transaction", () => {
+  const source = readFileSync(path.join(root, "src", "control.mjs"), "utf8");
+  const tray = source.slice(source.indexOf("function handleTray("), source.indexOf("async function handleNativeRedirect("));
+  assert.match(tray, /value === "enable" && process\.platform === "win32"/);
+  assert.match(
+    tray,
+    /powershell\.exe[\s\S]*codex-router\.ps1[\s\S]*"tray"[\s\S]*"install"[\s\S]*"--preserve-window"/,
+  );
+  assert.ok(
+    tray.indexOf('path.join(REPO_ROOT, "codex-router.ps1")')
+      < tray.indexOf('path.join(REPO_ROOT, "src", "tray-service.mjs"), subcommand'),
+    "Windows enable must choose the transaction before the raw supervisor fallback",
+  );
+});

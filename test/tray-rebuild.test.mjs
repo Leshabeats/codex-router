@@ -309,6 +309,67 @@ test("a stamped but incomplete packaged companion is rebuilt on every desktop pl
   }
 });
 
+test("Windows and Linux never trust linked package ancestors or resources", () => {
+  const directoryLinkType = process.platform === "win32" ? "junction" : "dir";
+  for (const platform of ["linux", "win32"]) {
+    const fakeRoot = scratch();
+    const home = scratch();
+    const externalPackageRoot = scratch();
+    const externalResources = scratch();
+    const externalReleaseRoot = scratch();
+    try {
+      const [directory, executable] = platform === "win32"
+        ? ["win-unpacked", "Codex Router.exe"]
+        : ["linux-unpacked", "codex-router-control-center"];
+      const releaseParent = path.join(fakeRoot, "apps", "control-center", "release");
+      const packageRoot = path.join(releaseParent, directory);
+      mkdirSync(releaseParent, { recursive: true });
+
+      mkdirSync(path.join(externalPackageRoot, "resources"), { recursive: true });
+      writeFileSync(path.join(externalPackageRoot, executable), "binary");
+      writeFileSync(path.join(externalPackageRoot, "resources", "app.asar"), "archive");
+      symlinkSync(externalPackageRoot, packageRoot, directoryLinkType);
+      recordTrayBuild({ root: fakeRoot, platform, home });
+      assert.equal(
+        trayRebuildPlan({ root: fakeRoot, platform: platform, home }),
+        "rebuild",
+        `${platform} must not certify a linked package root`,
+      );
+
+      rmSync(packageRoot, { force: true });
+      mkdirSync(packageRoot, { recursive: true });
+      writeFileSync(path.join(packageRoot, executable), "binary");
+      writeFileSync(path.join(externalResources, "app.asar"), "archive");
+      symlinkSync(externalResources, path.join(packageRoot, "resources"), directoryLinkType);
+      recordTrayBuild({ root: fakeRoot, platform, home });
+      assert.equal(
+        trayRebuildPlan({ root: fakeRoot, platform: platform, home }),
+        "rebuild",
+        `${platform} must not certify a linked resources directory`,
+      );
+
+      rmSync(releaseParent, { recursive: true, force: true });
+      const externalPackage = path.join(externalReleaseRoot, directory);
+      mkdirSync(path.join(externalPackage, "resources"), { recursive: true });
+      writeFileSync(path.join(externalPackage, executable), "binary");
+      writeFileSync(path.join(externalPackage, "resources", "app.asar"), "archive");
+      symlinkSync(externalReleaseRoot, releaseParent, directoryLinkType);
+      recordTrayBuild({ root: fakeRoot, platform, home });
+      assert.equal(
+        trayRebuildPlan({ root: fakeRoot, platform: platform, home }),
+        "rebuild",
+        `${platform} must not certify a linked release ancestor`,
+      );
+    } finally {
+      rmSync(fakeRoot, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+      rmSync(externalPackageRoot, { recursive: true, force: true });
+      rmSync(externalResources, { recursive: true, force: true });
+      rmSync(externalReleaseRoot, { recursive: true, force: true });
+    }
+  }
+});
+
 test("each companion fingerprints its own sources", () => {
   // A shared fingerprint would make a Swift edit look like a reason to rebuild
   // the Tauri app, and vice versa.
@@ -664,6 +725,15 @@ test("tray updates journal every macOS swap before replacing the live app", () =
   assert.match(mac, /run_embedded_control_center "\$staged_embedded_binary" --quit-for-update/);
   assert.match(mac, /run_embedded_control_center "\$embedded_binary" --tray-only/);
   assert.match(mac, /query_embedded_lifecycle[\s\S]*control_center_identity_matches/);
+  assert.match(
+    mac,
+    /tray_app_identity\(\)[\s\S]*EXPECTED_BUNDLE="\$expected_bundle"[\s\S]*bundlePath === expectedBundle/,
+    "outer-host readiness must bind the shared bundle identifier to the exact live app",
+  );
+  assert.match(
+    mac,
+    /readiness_identity=\$\(tray_app_identity "\$bundle_dir"\)[\s\S]*"\$readiness_count" -eq 1[\s\S]*"\$readiness_matches" -eq 1/,
+  );
   assert.match(mac, /readiness_count" -gt 1/);
   assert.doesNotMatch(mac, /killall -QUIT ModelRouterTray|pgrep[\s\S]*(?:ModelRouterTray|Codex Router)/);
 

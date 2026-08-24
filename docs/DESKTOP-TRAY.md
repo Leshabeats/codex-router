@@ -15,16 +15,19 @@ Control Center's native Electron tray.
 | Windows 10/11 | Electron `Tray` | Electron window | Left-click the tray icon or use **Open Control Center** |
 | Linux | Electron `Tray` | Electron window | Left-click the tray icon or use **Open Control Center** |
 
-Closing the full Control Center window never quits its tray owner. On Windows
-and Linux, clicking the Electron tray item restores the window in the same
-process. On macOS, reopen `Model Router.app` or choose **Control Center** from
-the native menu-bar panel. Use the tray menu's **Quit** action to end the
-complete Windows/Linux app; quitting the native macOS host also terminates its
-embedded Control Center.
+Closing the full Control Center window never quits a proven tray owner. On
+Windows, and on Linux while a registered StatusNotifier host is available,
+clicking the Electron tray item restores the window in the same process. On
+macOS, reopen `Model Router.app` or choose **Control Center** from the native
+menu-bar panel. Use the tray menu's **Quit** action to end the complete
+Windows/Linux app; quitting the native macOS host also terminates its embedded
+Control Center.
 
-If a Linux desktop does not expose a compatible tray host, a tray-only launch
-falls back to a visible Control Center window instead of leaving an invisible
-background process.
+Linux tray-only startup verifies the desktop's registered StatusNotifier host.
+If that proof is unavailable or negative, including when the system `gdbus`
+probe is missing, the launch keeps a visible Control Center window instead of
+leaving an invisible background process. Closing that fallback window exits
+the process because there is no proven tray surface from which to reopen it.
 
 ## What the Control Center shows
 

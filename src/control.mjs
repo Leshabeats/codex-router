@@ -2448,8 +2448,8 @@ function handleTray(action) {
     // the launcher directly. The launcher quits the running tray only after
     // the staged replacement passes verification. `bin/model-router-tray` is
     // a POSIX shell script; Windows reaches the same sequence through
-    // `codex-router.ps1 tray rebuild`, which owns the cargo-or-Electron
-    // choice so it exists once instead of drifting between here and there.
+    // `codex-router.ps1 tray rebuild`, which owns the same unified Electron
+    // replacement transaction so it exists once instead of drifting.
     const result = process.platform === "win32"
       ? spawnSync(
           "powershell.exe",
@@ -2464,7 +2464,7 @@ function handleTray(action) {
             "rebuild",
             "--preserve-window",
           ],
-          { stdio: "inherit", env: process.env },
+          { stdio: "inherit", env: process.env, windowsHide: true },
         )
       : spawnSync(path.join(REPO_ROOT, "bin", "model-router-tray"), ["--preserve-window"], {
           stdio: "inherit",
@@ -2480,11 +2480,32 @@ function handleTray(action) {
   if (!subcommand) {
     throw new Error(`Usage: control tray ${[...Object.keys(TRAY_COMMANDS), "refresh", "rebuild"].join("|")}`);
   }
-  const result = spawnSync(
-    process.execPath,
-    [path.join(REPO_ROOT, "src", "tray-service.mjs"), subcommand],
-    { stdio: "inherit", env: process.env },
-  );
+  // Enabling can replace both a package and a pre-existing recognized task.
+  // On Windows that must go through the durable PowerShell transaction, which
+  // snapshots the exact task XML/SDDL and rollback package before touching
+  // either. Calling tray-service.mjs install directly would strand a partial
+  // registration when Task Scheduler or the ready handshake fails midway.
+  const result = value === "enable" && process.platform === "win32"
+    ? spawnSync(
+        "powershell.exe",
+        [
+          "-NoLogo",
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          path.join(REPO_ROOT, "codex-router.ps1"),
+          "tray",
+          "install",
+          "--preserve-window",
+        ],
+        { stdio: "inherit", env: process.env, windowsHide: true },
+      )
+    : spawnSync(
+        process.execPath,
+        [path.join(REPO_ROOT, "src", "tray-service.mjs"), subcommand],
+        { stdio: "inherit", env: process.env, windowsHide: true },
+      );
   if (result.error) throw result.error;
   if (result.status !== 0) {
     throw new Error(`Tray ${value} failed with exit code ${result.status}.`);

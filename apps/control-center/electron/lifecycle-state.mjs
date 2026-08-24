@@ -1,4 +1,6 @@
+import { spawnSync } from "node:child_process";
 import {
+  existsSync,
   mkdirSync,
   readFileSync,
   renameSync,
@@ -12,6 +14,43 @@ import path from "node:path";
 export const LIFECYCLE_QUERY_ARGUMENT = "--query-lifecycle";
 export const LIFECYCLE_STATE_VERSION = 1;
 const MAX_STATE_BYTES = 4_096;
+const STATUS_NOTIFIER_QUERY = Object.freeze([
+  "call",
+  "--session",
+  "--dest", "org.kde.StatusNotifierWatcher",
+  "--object-path", "/StatusNotifierWatcher",
+  "--method", "org.freedesktop.DBus.Properties.Get",
+  "org.kde.StatusNotifierWatcher",
+  "IsStatusNotifierHostRegistered",
+]);
+
+// A constructed Electron Tray does not prove that a Linux desktop rendered it.
+// StatusNotifierWatcher exposes the one positive signal the app can verify: a
+// registered panel host. Missing gdbus, a missing watcher, a false property, a
+// timeout, or an unfamiliar reply all fail open to the visible window.
+export function linuxStatusNotifierHostAvailable({
+  platform = process.platform,
+  executable = "/usr/bin/gdbus",
+  executableExists = existsSync,
+  spawn = spawnSync,
+  environment = process.env,
+} = {}) {
+  if (platform !== "linux" || !executableExists(executable)) return false;
+  try {
+    const result = spawn(executable, STATUS_NOTIFIER_QUERY, {
+      encoding: "utf8",
+      env: environment,
+      maxBuffer: 4_096,
+      shell: false,
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 1_000,
+      windowsHide: true,
+    });
+    return result.status === 0 && /^\(\s*<true>\s*,?\s*\)\s*$/.test(result.stdout || "");
+  } catch {
+    return false;
+  }
+}
 
 export function lifecycleStatePath(environment = process.env, home = os.homedir()) {
   if (environment.MODEL_ROUTER_CONTROL_CENTER_STATE) {

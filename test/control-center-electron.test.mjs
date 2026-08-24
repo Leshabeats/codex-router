@@ -37,6 +37,7 @@ import {
   createOpenRequestGate,
   createRendererReadyGate,
   lifecycleStatePath,
+  linuxStatusNotifierHostAvailable,
   queryLifecycleState,
   shouldQuitOnLastWindowClosed,
   writeLifecycleState,
@@ -300,6 +301,59 @@ test("a windowless desktop process survives only while a real tray owner exists"
   assert.equal(shouldQuitOnLastWindowClosed({ platform: "win32", nativeTrayOwnedByHost: false, trayAvailable: false }), true);
   assert.equal(shouldQuitOnLastWindowClosed({ platform: "linux", nativeTrayOwnedByHost: false, trayAvailable: true }), false);
   assert.equal(shouldQuitOnLastWindowClosed({ platform: "linux", nativeTrayOwnedByHost: false, trayAvailable: false }), true);
+});
+
+test("Linux tray-only mode trusts only a positively registered StatusNotifier host", () => {
+  const calls = [];
+  const available = linuxStatusNotifierHostAvailable({
+    platform: "linux",
+    executableExists: () => true,
+    environment: { DBUS_SESSION_BUS_ADDRESS: "unix:path=/test/session-bus" },
+    spawn(executable, args, options) {
+      calls.push({ executable, args, options });
+      return { status: 0, stdout: "(<true>,)\n" };
+    },
+  });
+  assert.equal(available, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].executable, "/usr/bin/gdbus");
+  assert.deepEqual(calls[0].args, [
+    "call",
+    "--session",
+    "--dest", "org.kde.StatusNotifierWatcher",
+    "--object-path", "/StatusNotifierWatcher",
+    "--method", "org.freedesktop.DBus.Properties.Get",
+    "org.kde.StatusNotifierWatcher",
+    "IsStatusNotifierHostRegistered",
+  ]);
+  assert.equal(calls[0].options.shell, false);
+
+  for (const result of [
+    { status: 0, stdout: "(<false>,)\n" },
+    { status: 0, stdout: "unexpected\n" },
+    { status: 1, stdout: "(<true>,)\n" },
+  ]) {
+    assert.equal(linuxStatusNotifierHostAvailable({
+      platform: "linux",
+      executableExists: () => true,
+      spawn: () => result,
+    }), false);
+  }
+  assert.equal(linuxStatusNotifierHostAvailable({
+    platform: "linux",
+    executableExists: () => false,
+    spawn: () => assert.fail("a missing probe must fail open without spawning"),
+  }), false);
+  assert.equal(linuxStatusNotifierHostAvailable({
+    platform: "linux",
+    executableExists: () => true,
+    spawn: () => { throw new Error("session bus unavailable"); },
+  }), false);
+  assert.equal(linuxStatusNotifierHostAvailable({
+    platform: "win32",
+    executableExists: () => true,
+    spawn: () => assert.fail("non-Linux platforms must not query D-Bus"),
+  }), false);
 });
 
 async function waitForProcessExit(pid, timeoutMs = 4_000) {
@@ -664,6 +718,7 @@ test("electron boundary does not enable node integration or shell argv", async (
   assert.match(main, /CODEX_ROUTER_EMBEDDED_CONTROL_CENTER/);
   assert.match(main, /image\.isEmpty\(\)[\s\S]*tray icon could not be loaded/);
   assert.match(main, /const trayAvailable = trayIsAvailable\(\)/);
+  assert.match(main, /process\.platform === "linux"[\s\S]{0,100}linuxStatusNotifierHostAvailable\(\)/);
   assert.doesNotMatch(main, /nativeImage\.createEmpty\(\)/);
   assert.match(
     main,
@@ -1011,8 +1066,17 @@ test("settings keeps model choice out and exposes durable app preferences", asyn
     const occurrences = i18n.split(`"${key}"`).length - 1;
     assert.equal(occurrences, 6, `${key} must be translated in all six locales`);
   }
+  for (const key of [
+    "settings.desktop.unavailable.title",
+    "settings.desktop.unavailable.body",
+  ]) {
+    const occurrences = i18n.split(`"${key}"`).length - 1;
+    assert.equal(occurrences, 6, `${key} must be translated in all six locales`);
+    assert.ok(settings.includes(`t("${key}")`), `${key} must be rendered through the translator`);
+  }
   assert.doesNotMatch(settings, /["`]Sharing (?:enabled|disabled|status unavailable)/);
   assert.doesNotMatch(settings, /["`]Login (?:usable|expired|unavailable)/);
+  assert.doesNotMatch(settings, /Tray supervision controls unavailable|no supported OS supervision contract/);
 });
 
 test("the model directory combines provider setup with de-duplicated model-family routes", async () => {

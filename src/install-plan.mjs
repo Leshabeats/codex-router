@@ -91,6 +91,14 @@ function regularFileExists(target) {
   }
 }
 
+function realDirectoryExists(target) {
+  try {
+    return lstatSync(target).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 export function requirementParts(requirement) {
   const [specifier, version] = String(requirement).split("==");
   return { name: specifier.replace(/\[[^\]]*\]$/, "").trim(), version: (version || "").trim() };
@@ -276,6 +284,13 @@ const TRAY_PLATFORMS = {
     sources: controlCenterSources,
     artifactRoot: (root) =>
       path.join(root, "apps", "control-center", "release", "linux-unpacked"),
+    artifactDirectories: (root) => {
+      const apps = path.join(root, "apps");
+      const controlCenter = path.join(apps, "control-center");
+      const releaseRoot = path.join(controlCenter, "release");
+      const release = path.join(releaseRoot, "linux-unpacked");
+      return [apps, controlCenter, releaseRoot, release, path.join(release, "resources")];
+    },
     artifacts: (root) => {
       const release = path.join(root, "apps", "control-center", "release", "linux-unpacked");
       return [
@@ -295,6 +310,13 @@ const TRAY_PLATFORMS = {
     sources: controlCenterSources,
     artifactRoot: (root) =>
       path.join(root, "apps", "control-center", "release", "win-unpacked"),
+    artifactDirectories: (root) => {
+      const apps = path.join(root, "apps");
+      const controlCenter = path.join(apps, "control-center");
+      const releaseRoot = path.join(controlCenter, "release");
+      const release = path.join(releaseRoot, "win-unpacked");
+      return [apps, controlCenter, releaseRoot, release, path.join(release, "resources")];
+    },
     artifacts: (root) => {
       const release = path.join(root, "apps", "control-center", "release", "win-unpacked");
       return [
@@ -391,7 +413,9 @@ export function trayRebuildPlan({
     if (!automaticTraySupervisionAllowed(preference)) return "unavailable";
   }
   const artifacts = definition.artifacts(root, home);
-  const complete = artifacts.every((artifact) => regularFileExists(artifact));
+  const artifactDirectories = definition.artifactDirectories?.(root, home) ?? [];
+  const complete = artifactDirectories.every((directory) => realDirectoryExists(directory))
+    && artifacts.every((artifact) => regularFileExists(artifact));
   if (!complete) {
     // A package root or any one required file is installation evidence. Treat
     // the missing remainder as corruption and rebuild it; calling a partial
