@@ -172,9 +172,11 @@ test(
       writeFileSync(
         wrapper,
         `#!/bin/sh
-printf '%s\\t%s\\t' "$CODEX_ROUTER_NODE_BIN" "$PATH" >>"$CODEX_ROUTER_WRAPPER_LOG"
-printf '<%s>' "$@" >>"$CODEX_ROUTER_WRAPPER_LOG"
-printf '\\n' >>"$CODEX_ROUTER_WRAPPER_LOG"
+logged_arguments=
+for argument in "$@"; do
+  logged_arguments="\${logged_arguments}<\${argument}>"
+done
+printf '%s\\t%s\\t%s\\n' "$CODEX_ROUTER_NODE_BIN" "$PATH" "$logged_arguments" >>"$CODEX_ROUTER_WRAPPER_LOG"
 if [ "\${1:-}" = src/install-plan.mjs ] && [ "\${2:-}" = status ]; then
   printf 'skip\\n'
 fi

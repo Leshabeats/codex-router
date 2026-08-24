@@ -128,6 +128,46 @@ export function runtimeEnvironment(
   };
 }
 
+function pathIsInside(candidate, directory, platform = process.platform) {
+  const pathApi = platform === "win32" ? path.win32 : path;
+  const relative = pathApi.relative(pathApi.resolve(directory), pathApi.resolve(candidate));
+  return relative === "" || (!relative.startsWith(`..${pathApi.sep}`) && !pathApi.isAbsolute(relative));
+}
+
+// Detached tray maintenance outlives the packaged UI and may replace its
+// directory. On
+// POSIX the mapped Electron executable can be unlinked safely; Windows locks
+// it until every process exits, so running `control tray refresh` through that
+// same executable makes the updater wait on its own package forever. The
+// installer already requires and records a real Node runtime: use that exact
+// external node.exe on Windows, and refuse rather than falling back to the
+// packaged Electron binary.
+export function detachedControlRuntime(
+  environment = process.env,
+  {
+    platform = process.platform,
+    execPath = process.execPath,
+    electron = Boolean(process.versions.electron),
+  } = {},
+) {
+  const childEnvironment = runtimeEnvironment(environment, { platform });
+  if (platform === "win32" && electron) {
+    const executable = discoverExecutable(childEnvironment, "node", platform);
+    const packageDirectory = path.win32.dirname(execPath);
+    if (
+      !executable
+      || path.win32.basename(executable).toLowerCase() !== "node.exe"
+      || pathIsInside(executable, packageDirectory, platform)
+    ) {
+      throw new Error("A trusted external node.exe is required to refresh the Windows Control Center.");
+    }
+    delete childEnvironment.ELECTRON_RUN_AS_NODE;
+    return { executable, environment: childEnvironment };
+  }
+  if (electron) childEnvironment.ELECTRON_RUN_AS_NODE = "1";
+  return { executable: execPath, environment: childEnvironment };
+}
+
 function validSourceRoot(candidate) {
   if (!candidate || typeof candidate !== "string") return undefined;
   try {
@@ -400,16 +440,33 @@ async function terminateProcessTree(child) {
  * Run one of the fixed router commands. `args` are always an argv array and
  * never pass through a shell. `stdin` is used solely for API credentials.
  */
-function runEntrypoint(entry, args = [], { stdin, timeoutMs = DEFAULT_TIMEOUT_MS, maxOutputBytes = MAX_OUTPUT_BYTES, allowNonZero = false } = {}) {
+function runEntrypoint(entry, args = [], {
+  stdin,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  maxOutputBytes = MAX_OUTPUT_BYTES,
+  allowNonZero = false,
+  environmentOverrides = {},
+} = {}) {
   if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string" || arg.includes("\0"))) {
     throw new TypeError("Router command arguments must be strings.");
   }
+  if (
+    !environmentOverrides
+    || typeof environmentOverrides !== "object"
+    || Array.isArray(environmentOverrides)
+    || Object.entries(environmentOverrides).some(([key, value]) => (
+      !/^[A-Z][A-Z0-9_]*$/.test(key)
+      || typeof value !== "string"
+      || value.includes("\0")
+    ))
+  ) throw new TypeError("Router command environment overrides must be string values.");
   const sourceRoot = discoverSourceRoot();
   const childEnvironment = {
     ...runtimeEnvironment(process.env),
     MODEL_ROUTER_SOURCE_ROOT: sourceRoot,
     MODEL_ROUTER_TARGET: "codex",
     ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: "1" } : {}),
+    ...environmentOverrides,
   };
   const recordedInstall = recordedInstallManifest();
   if (recordedInstall?.sourceRoot === sourceRoot && recordedInstall.packageManager !== undefined) {
@@ -484,6 +541,56 @@ function runEntrypoint(entry, args = [], { stdin, timeoutMs = DEFAULT_TIMEOUT_MS
         child.stdin.end(stdin);
       }
     }
+  });
+}
+
+export function runControlDetached(
+  args = [],
+  {
+    sourceRoot = discoverSourceRoot(),
+    runtime = detachedControlRuntime(),
+    spawnImpl = spawn,
+  } = {},
+) {
+  if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string" || arg.includes("\0"))) {
+    throw new TypeError("Router command arguments must be strings.");
+  }
+  const childEnvironment = {
+    ...runtime.environment,
+    MODEL_ROUTER_SOURCE_ROOT: sourceRoot,
+    MODEL_ROUTER_TARGET: "codex",
+  };
+  return new Promise((resolve, reject) => {
+    const child = spawnImpl(
+      runtime.executable,
+      [path.join(sourceRoot, "src", "control.mjs"), ...args],
+      {
+        cwd: sourceRoot,
+        detached: true,
+        env: childEnvironment,
+        shell: false,
+        windowsHide: true,
+        stdio: "ignore",
+      },
+    );
+    let settled = false;
+    // `spawn()` returning a ChildProcess is not proof that the OS accepted the
+    // executable. Resolve only at Node's spawn event; a missing or denied
+    // runtime emits error first and must reach the UI as a failed action.
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(safeFailure(error?.message || "Detached router command could not start.")));
+    });
+    child.once("spawn", () => {
+      if (settled) return;
+      settled = true;
+      // Tray maintenance may atomically replace this very packaged app. With
+      // no pipe owned by the UI and a detached process group, it remains alive
+      // after the parent accepts the updater's graceful quit request.
+      child.unref();
+      resolve(child.pid);
+    });
   });
 }
 

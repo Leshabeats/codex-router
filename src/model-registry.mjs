@@ -716,14 +716,55 @@ function modelProblem(model, providers, slugs, gatewayModels) {
   return undefined;
 }
 
+const STATIC_MODEL_SLUG_ALIASES = new Map([
+  // OpenCode moved Grok 4.5 from Chat Completions to Responses. Keep the old
+  // public slug routable while catalog publication carries picker state to
+  // the protocol-namespaced replacement.
+  ["opencode-go/grok-4.5", "opencode-go-responses/grok-4.5"],
+]);
+
+function validatedStaticModelSlugAliases({ models, providers }) {
+  const modelBySlug = new Map(models.map((model) => [model.slug, model]));
+  const aliases = new Map();
+  for (const [from, to] of STATIC_MODEL_SLUG_ALIASES) {
+    if (modelBySlug.has(from)) {
+      fail(`static model slug alias ${from} collides with a checked-in model`);
+    }
+    const replacement = modelBySlug.get(to);
+    if (!replacement) {
+      // A registry override may intentionally omit this whole provider family;
+      // in that case the repository-specific compatibility alias is irrelevant.
+      // Once the target provider is present, though, a missing target is a typo
+      // or incomplete protocol migration and must stop the load before picker
+      // state or MODEL_BY_SLUG can be rewritten around it.
+      const targetProvider = String(to).split("/", 1)[0];
+      if (providers.has(targetProvider)) {
+        fail(`static model slug alias ${from} points to unknown model ${to}`);
+      }
+      continue;
+    }
+    aliases.set(from, to);
+  }
+  return aliases;
+}
+
 // User-curated models extend the checked-in registry. A broken entry (or a
 // collision after an upstream update ships the same model) must never take
 // the whole router down, so problems skip the entry and surface as warnings.
-function mergeUserModels(base) {
+function mergeUserModels(base, staticAliases) {
   const warnings = [];
   const models = [...base.models];
   const slugs = new Set(models.map((model) => model.slug));
   const gatewayModels = new Set(models.map((model) => model.gatewayModel));
+  // Curation used to publish opaque provider ids before a checked-in entry
+  // gave the same route a stable public slug. Treat provider + upstream id as
+  // routing identity too, not only the public slug: otherwise both names reach
+  // the exact same endpoint and the picker shows a duplicate model. Keep the
+  // replacement so persisted visibility can follow the canonical slug.
+  const checkedInRoutes = new Map(
+    models.map((model) => [`${model.provider}\0${model.upstreamModel}`, model]),
+  );
+  const aliases = new Map();
   const userModels = new Set();
   for (const model of readUserModels()) {
     // A mutable local overlay may describe routing and presentation, but it
@@ -735,6 +776,37 @@ function mergeUserModels(base) {
       warnings.push(
         `Skipped user model: model ${model?.slug || "<unknown>"} may not declare multiAgentVersion v2`,
       );
+      continue;
+    }
+    const checkedIn = checkedInRoutes.get(`${model?.provider}\0${model?.upstreamModel}`);
+    if (checkedIn) {
+      if (typeof model?.slug === "string" && model.slug && model.slug !== checkedIn.slug) {
+        // An old curation slug is safe as an alias only while nothing else
+        // owns that public name. Otherwise the alias loop below would replace
+        // a real checked-in/user model (or a repository migration alias) in
+        // MODEL_BY_SLUG, changing which upstream a trusted slug reaches.
+        if (
+          slugs.has(model.slug)
+          || staticAliases.has(model.slug)
+          || aliases.has(model.slug)
+        ) {
+          warnings.push(
+            `Skipped user model: alias ${model.slug} for checked-in route ${checkedIn.slug} collides with an existing model or alias`,
+          );
+          continue;
+        }
+        aliases.set(model.slug, checkedIn.slug);
+      }
+      warnings.push(
+        `Skipped user model: ${model?.slug || "<unknown>"} duplicates checked-in route ${checkedIn.slug}`,
+      );
+      continue;
+    }
+    if (
+      typeof model?.slug === "string"
+      && (staticAliases.has(model.slug) || aliases.has(model.slug))
+    ) {
+      warnings.push(`Skipped user model: model slug ${model.slug} collides with an existing model alias`);
       continue;
     }
     const problem = modelProblem(model, base.providers, slugs, gatewayModels);
@@ -760,11 +832,16 @@ function mergeUserModels(base) {
     }
     return true;
   });
-  return { models: Object.freeze(kept), warnings: Object.freeze(warnings) };
+  return {
+    models: Object.freeze(kept),
+    warnings: Object.freeze(warnings),
+    aliases: new Map(aliases),
+  };
 }
 
 const registry = loadRegistry();
-const merged = mergeUserModels(registry);
+const staticAliases = validatedStaticModelSlugAliases(registry);
+const merged = mergeUserModels(registry, staticAliases);
 
 export const PROVIDERS = registry.providers;
 // The immutable registry shipped by this checkout, before the operator's
@@ -774,11 +851,22 @@ export const PROVIDERS = registry.providers;
 export const CHECKED_IN_MODELS = registry.models;
 export const MODELS = merged.models;
 export const USER_MODEL_WARNINGS = merged.warnings;
+// Old curated public slugs that now resolve to a checked-in route. Catalog
+// publication migrates picker decisions through these aliases before applying
+// defaults, so an update removes the duplicate without hiding the model.
+export const MODEL_SLUG_ALIASES = new Map([
+  ...staticAliases,
+  ...merged.aliases,
+]);
 export const LISTED_MODELS = Object.freeze(MODELS.filter((model) => model.listed));
 export const API_MODELS = Object.freeze(
   MODELS.filter((model) => PROVIDERS.get(model.provider)?.kind === "openai-compatible"),
 );
 export const MODEL_BY_SLUG = new Map(MODELS.map((model) => [model.slug, model]));
+for (const [from, to] of MODEL_SLUG_ALIASES) {
+  const replacement = MODEL_BY_SLUG.get(to);
+  if (replacement) MODEL_BY_SLUG.set(from, replacement);
+}
 export const MODEL_BY_GATEWAY_ID = new Map(
   MODELS.map((model) => [model.gatewayModel, model]),
 );

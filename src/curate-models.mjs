@@ -179,7 +179,9 @@ export function mergeCurationIntoCurrent(
 export function normalizeCurationModels(models, providerId) {
   const normalized = new Map();
   for (const model of models) {
-    const targetProvider = curatedModelProviderId(providerId, model.upstreamModel);
+    const targetProvider = curatedModelProviderId(providerId, model.upstreamModel, {
+      existingProvider: model.provider,
+    });
     const routed = model.provider === targetProvider
       ? model
       : {
@@ -357,8 +359,8 @@ async function main() {
   // a network round trip it does not need. `--refresh` re-asks.
   const discovery = removeOption === undefined
     ? await discoverProviderModels(providerId, { refresh: refreshCatalog })
-    : { unregistered: [] };
-  const candidates = [...new Set([...discovery.unregistered, ...curated])].sort();
+    : { unregistered: [], addable: [], blocked: {} };
+  const candidates = [...new Set([...(discovery.addable || discovery.unregistered), ...curated])].sort();
 
   if (freeOnly && !Array.isArray(discovery.free)) {
     throw new Error(`${provider.displayName} does not publish a supported free-model catalog.`);
@@ -370,10 +372,16 @@ async function main() {
     throw new Error(`${provider.displayName} currently advertises no unregistered free OpenAI-compatible models.`);
   }
 
-  if (candidates.length === 0 && removeOption === undefined) {
-    process.stdout.write(
-      `Every model ${provider.displayName} advertises is already in the registry.\n`,
-    );
+  if (candidates.length === 0 && removeOption === undefined && modelsOption === undefined) {
+    const blockedCandidates = Object.entries(discovery.blocked || {});
+    if (blockedCandidates.length) {
+      process.stdout.write(`No newly advertised ${provider.displayName} models have a certified protocol route yet.\n`);
+      for (const [id, reason] of blockedCandidates) process.stdout.write(`${id}: ${reason}\n`);
+    } else {
+      process.stdout.write(
+        `Every model ${provider.displayName} advertises is already in the registry.\n`,
+      );
+    }
     return;
   }
 
@@ -388,6 +396,7 @@ async function main() {
   if (removeOption === undefined) {
     for (const id of chosen) {
       if (candidates.includes(id)) continue;
+      if (discovery.blocked?.[id]) throw new Error(discovery.blocked[id]);
       throw new Error(
         `${id} is not an available candidate for ${providerId}. Candidates: ${candidates.join(", ")}`,
       );

@@ -12,9 +12,11 @@ credentials, or service logic in the renderer.
   added to the router total.
 - Status: running chats and agents, live requests, model speed, cached-context
   savings, and upcoming quota resets.
-- Models: one provider directory combining enablement, API credential entry,
-  CLI sign-in, plan notes, account metrics, and each provider's catalog
-  visibility and native v2 subagent controls.
+- Models: one provider-first directory showing every canonical provider,
+  combining enablement, API credential entry, CLI sign-in, plan notes, account
+  metrics, backend-advertised catalog sources, picker visibility, and native v2
+  subagent controls. Live catalogs are cached for review and never bulk-added
+  without an explicit model selection.
 - Local: Ollama runtime controls, installable and installed models, downloads,
   enablement, removal, benchmarks, and local image readers.
 - Harness: launch Codex in its app or a terminal, and install or launch the
@@ -28,9 +30,12 @@ credentials, or service logic in the renderer.
   appearance, old tool-result compaction, vision, and read-only maintenance
   guidance. Updates and repairs remain interactive-terminal workflows.
 
-The existing macOS tray remains the owner of its notch overlay and desktop
-widget. This application controls that companion through the router's supported
-tray commands.
+The Control Center and tray ship as one visible application on every platform.
+On macOS, `Model Router.app` keeps the existing Swift-native menu-bar item,
+notch overlay, and desktop widget, and embeds this Electron window inside the
+same signed bundle. On Windows and Linux, this Electron process owns the
+operating system tray directly. Closing the window leaves the tray running;
+opening the app or clicking the tray restores the existing window.
 
 ## Platform support
 
@@ -39,6 +44,10 @@ Windows, and Linux. They use the same installed router state and fixed
 `control.mjs` commands on every platform; provider selection, API credentials,
 models, local runtime controls, health, usage, and settings are the cross-platform
 contract for this beta.
+
+The macOS host sets `CODEX_ROUTER_EMBEDDED_CONTROL_CENTER=1` only for its
+bundled Electron child. That suppresses a duplicate Electron tray and Dock
+icon; standalone development and Windows/Linux packages keep their own tray.
 
 Service stop and restart remain intentional terminal operations during the
 beta because either can interrupt active turns or downloads. The Control Center
@@ -93,12 +102,13 @@ npm run build
 npm run electron:build
 ```
 
-`electron:build` creates the current host platform's artifacts in `release/`:
-DMG/ZIP on macOS, NSIS on Windows, and AppImage on Linux. Beta CI artifacts are
-unsigned unless signing credentials are explicitly configured. macOS public
-distribution additionally requires Developer ID signing and notarization;
-Windows public distribution needs an Authenticode certificate. Treat unsigned
-artifacts as tester builds, not production installers.
+`electron:build` can create a standalone developer artifact for the current
+host. Shipped Windows and Linux artifacts are NSIS/AppImage packages. Shipped
+macOS builds use `scripts/build-macos-tray-app.sh`, which embeds the packaged
+Electron child inside the one outer `Model Router.app`; CI and releases do not
+publish the child separately. Beta artifacts are unsigned unless signing
+credentials are configured. Public macOS distribution additionally requires
+Developer ID signing/notarization, and Windows requires Authenticode.
 
 ## Security boundary
 

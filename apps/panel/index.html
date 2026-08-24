@@ -242,6 +242,9 @@
           </button>
           <div class="accordion-body is-open" data-accordion-body="picker">
             <p class="accordion-note" data-i18n="models.pickerHiddenExplanation">Models hidden here stay connected but are not offered by Codex.</p>
+            <div class="model-picker-search">
+              <input id="picker-model-search" type="search" autocomplete="off" spellcheck="false" data-i18n-placeholder="models.searchEnabledModels" placeholder="Search enabled models" data-i18n-aria-label="models.searchEnabledModels" aria-label="Search enabled models" />
+            </div>
             <div class="accordion-toolbar">
               <button class="text-button" type="button" data-model-action="picker" data-action="show-all" data-command="set_picker_models" data-i18n="actions.showAll">Show all</button>
               <button class="text-button" type="button" data-model-action="picker" data-action="hide-all" data-command="set_picker_models" data-i18n="actions.hideAll">Hide all</button>

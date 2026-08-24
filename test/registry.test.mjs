@@ -20,6 +20,7 @@ const {
   endpointForModel,
   LISTED_MODELS,
   MODEL_BY_SLUG,
+  MODEL_SLUG_ALIASES,
   MODELS,
   PROVIDERS,
   providerNeedsNoKey,
@@ -108,12 +109,12 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "ollama-cloud/glm-5.2",
       "ollama-cloud/kimi-k2.7-code",
       "ollama-cloud/minimax-m3",
+      "opencode-go/deepseek-v4-flash-vision-exp",
       "opencode-go/deepseek-v4-flash",
       "opencode-go/deepseek-v4-pro",
       "opencode-go/glm-5.1",
       "opencode-go/glm-5.2",
       "opencode-go/glm-5.3",
-      "opencode-go/grok-4.5",
       "opencode-go/hy3",
       "opencode-go/kimi-k2.6",
       "opencode-go/kimi-k2.7-code",
@@ -121,6 +122,7 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "opencode-go/mimo-v2.5-pro",
       "opencode-go/mimo-v2.5",
       "opencode-go/ox-alpha",
+      "opencode-go-messages/minimax-m2.5",
       "opencode-go-messages/minimax-m2.7",
       "opencode-go-messages/minimax-m3",
       "opencode-go-messages/qwen3.6-plus",
@@ -128,6 +130,7 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "opencode-go-messages/qwen3.7-plus",
       "opencode-go-messages/qwen3.8-max",
       "opencode-go-responses/gpt-5.6-luna",
+      "opencode-go-responses/grok-4.5",
       "opencode-go-responses/muse-spark-1.2-contributor",
       "opencode-free/ox-alpha",
       "openrouter/ox-alpha",
@@ -868,6 +871,61 @@ test("instruction overlays must name a shipped overlay", async () => {
   }
 });
 
+test("static aliases fail closed on checked-in source collisions and missing targets", async () => {
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const nodePath = (await import("node:path")).default;
+  const { spawnSync } = await import("node:child_process");
+  const dir = mkdtempSync(nodePath.join(tmpdir(), "registry-static-alias-test-"));
+  const load = (mutate, name) => {
+    const document = readRegistryDocument("config");
+    mutate(document);
+    const registryPath = nodePath.join(dir, name);
+    writeFileSync(registryPath, JSON.stringify(document));
+    return spawnSync(
+      process.execPath,
+      [
+        "-e",
+        "import('./src/model-registry.mjs')"
+          + ".catch((e)=>{console.error(e.message);process.exit(1);})",
+      ],
+      { encoding: "utf8", env: { ...process.env, MODEL_ROUTER_REGISTRY: registryPath } },
+    );
+  };
+  try {
+    const collision = load((document) => {
+      const source = document.models.find((model) => model.provider === "opencode-go");
+      document.models.push({
+        ...source,
+        slug: "opencode-go/grok-4.5",
+        gatewayModel: "opencode-go-static-alias-collision",
+        upstreamModel: "static-alias-collision",
+        displayName: "Static alias collision",
+        description: "Negative registry fixture.",
+        compHash: "static-alias-collision-v1",
+      });
+    }, "collision.json");
+    assert.equal(collision.status, 1);
+    assert.match(
+      collision.stderr,
+      /static model slug alias opencode-go\/grok-4\.5 collides with a checked-in model/,
+    );
+
+    const missing = load((document) => {
+      document.models = document.models.filter(
+        (model) => model.slug !== "opencode-go-responses/grok-4.5",
+      );
+    }, "missing-target.json");
+    assert.equal(missing.status, 1);
+    assert.match(
+      missing.stderr,
+      /static model slug alias .* points to unknown model opencode-go-responses\/grok-4\.5/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // The router's vision bridge is what gives a text-only model images, so the
 // registry may only record an opt-out. A `true` would read as a capability the
 // model itself has, which is exactly the claim the bridge must never make.
@@ -1368,7 +1426,15 @@ test("opencode's DeepSeek models never receive a forced tool_choice", () => {
   // The sibling opencode routes keep their defaults: the probe proved nothing
   // about them, and a provider-wide default is what the rule forbids. (kimi-k3
   // carries its own effort profile, so it is not a clean control here.)
-  for (const slug of ["opencode-go/glm-5.3", "opencode-go/grok-4.5", "opencode-go/mimo-v2.5"]) {
+  for (const slug of ["opencode-go/glm-5.3", "opencode-go-responses/grok-4.5", "opencode-go/mimo-v2.5"]) {
     assert.equal(MODEL_BY_SLUG.get(slug).requestProfile, undefined, slug);
   }
+  const goGrok = MODEL_BY_SLUG.get("opencode-go-responses/grok-4.5");
+  assert.equal(goGrok.provider, "opencode-go-responses");
+  assert.equal(PROVIDERS.get(goGrok.provider).protocol, "openai-responses");
+  assert.equal(
+    MODEL_SLUG_ALIASES.get("opencode-go/grok-4.5"),
+    "opencode-go-responses/grok-4.5",
+  );
+  assert.equal(MODEL_BY_SLUG.get("opencode-go/grok-4.5"), goGrok);
 });

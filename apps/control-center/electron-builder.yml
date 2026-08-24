@@ -16,17 +16,17 @@ electronFuses:
   enableEmbeddedAsarIntegrityValidation: true
   onlyLoadAppFromAsar: true
 extraResources:
-  - from: ../desktop/src-tauri/icons/icon.png
+  - from: assets/icon.png
     to: icon.png
 mac:
   category: public.app-category.developer-tools
-  icon: ../desktop/src-tauri/icons/icon.png
+  icon: assets/icon.png
   target: [dmg, zip]
 linux:
-  icon: ../desktop/src-tauri/icons/icon.png
+  icon: assets/icon.png
   category: Development
   executableName: codex-router-control-center
   target: [AppImage]
 win:
-  icon: ../desktop/src-tauri/icons/icon.ico
+  icon: assets/icon.ico
   target: [nsis]

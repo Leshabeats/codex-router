@@ -231,6 +231,15 @@ export interface RouterSnapshot {
   targets: { codex?: RouterTarget; [target: string]: RouterTarget | undefined };
   /** The router-owned model policy, independent of any client adapter. */
   catalog?: RouterCatalogSnapshot;
+  /** Safe consent/login projection. Never contains token, account, or path data. */
+  chatgptSession?: ChatGptSessionStatus;
+}
+
+export interface ChatGptSessionStatus {
+  sharing: "enabled" | "disabled";
+  session: "usable" | "expired" | "unavailable";
+  present: boolean;
+  expiresInHours?: number;
 }
 
 export interface RouterCatalogSnapshot {
@@ -249,6 +258,11 @@ export interface ProviderSetup {
   configured: boolean;
   action: string;
   planNote?: string;
+  catalogSources?: Array<{
+    id: string;
+    displayName: string;
+    kind: "models-endpoint" | "devin" | string;
+  }>;
   credentialLabel?: string;
   cliInstalled?: boolean;
   cliRunnable?: boolean;
@@ -262,6 +276,10 @@ export interface ProviderCatalog {
   discovered: string[];
   registered: string[];
   unregistered: string[];
+  /** Unregistered models whose protocol route is certified for curation. */
+  addable: string[];
+  /** Non-addable model id to the reason its route is withheld. */
+  blocked: Record<string, string>;
   unavailable: string[];
   contextLengths?: Record<string, number>;
   free?: string[];
@@ -535,6 +553,7 @@ export interface RouterControlApi {
   toggleMaximizeWindow(): Promise<unknown>;
   closeWindow(): Promise<unknown>;
   getSnapshot(): Promise<RouterSnapshot>;
+  getChatGptSession(): Promise<ChatGptSessionStatus>;
   getHealth(): Promise<RouterHealth>;
   getProviders(): Promise<ProviderSetupSnapshot>;
   discoverProviderModels(provider: string, options?: { refresh?: boolean }): Promise<ProviderCatalog>;
@@ -580,6 +599,7 @@ export interface RouterControlApi {
   setRouterDefault(model: string): Promise<unknown>;
   clearRouterDefault(): Promise<unknown>;
   setSignedRouting(enabled: boolean): Promise<unknown>;
+  setChatGptSessionSharing(enabled: boolean): Promise<ChatGptSessionStatus>;
   setPresence(mode: "always" | "follow-codex"): Promise<PresenceSnapshot>;
   controlService(action: "status" | "start"): Promise<unknown>;
   controlTray(action: "enable" | "disable" | "status" | "restart"): Promise<unknown>;

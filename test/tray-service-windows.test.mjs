@@ -33,15 +33,13 @@ function trayDispatch(command, platform) {
   );
 }
 
-test("the registered action points at the Tauri release binary", () => {
+test("the registered action points at the packaged Control Center", () => {
   const result = trayService("render-task");
   assert.equal(result.status, 0, result.stderr);
   const action = JSON.parse(result.stdout);
-  assert.ok(action.execute.endsWith("codex-router-desktop.exe"), action.execute);
-  assert.ok(action.execute.includes(path.join("src-tauri", "target", "release")), action.execute);
-  // A GUI binary takes no arguments; the router's task needs them, this one
-  // must not inherit that shape.
-  assert.equal(action.argument, "");
+  assert.ok(action.execute.endsWith("Codex Router.exe"), action.execute);
+  assert.ok(action.execute.includes(path.join("control-center", "release", "win-unpacked")), action.execute);
+  assert.equal(action.argument, "--tray-only");
 });
 
 test("a render resolves the path for the platform it is rendering for", () => {
@@ -51,7 +49,7 @@ test("a render resolves the path for the platform it is rendering for", () => {
 });
 
 test("Task Scheduler commands refuse to run off Windows", () => {
-  for (const command of ["install", "uninstall", "start", "stop", "restart", "status"]) {
+  for (const command of ["install", "uninstall", "start", "stop", "restart", "validate", "lifecycle", "status"]) {
     const result = trayService(command, { platform: "linux" });
     assert.notEqual(result.status, 0, `${command} should have refused`);
     assert.match(result.stderr, /runs on Windows only/);
@@ -71,7 +69,7 @@ test("install refuses before the tray has been built", () => {
   const result = trayService("install");
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /not built at/);
-  assert.match(result.stderr, /build-desktop-tray\.ps1/);
+  assert.match(result.stderr, /build-electron-companion\.ps1/);
 });
 
 test("the dispatcher routes Windows to the Task Scheduler manager", () => {
@@ -157,6 +155,136 @@ test("tray status reports the registered action and reads task state once", () =
   assert.doesNotMatch(source, /loaded: installed && taskRunning\(\)/);
 });
 
+test("graceful update drain is verified and lifecycle failure never authorizes a force-stop", () => {
+  const source = readFileSync(path.join(root, "src", "tray-service-windows.mjs"), "utf8");
+  const endTask = source.slice(source.indexOf("function endTask("), source.indexOf("function startTask("));
+  const drain = source.slice(
+    source.indexOf("function drainCanonicalExecutable("),
+    source.indexOf("function endTask("),
+  );
+  assert.match(endTask, /isRecognizedControlCenterAction\(registered\)/);
+  assert.match(endTask, /drainCanonicalExecutable\(registered\.execute, \{ schedulerOwned: true \}\)/);
+  assert.match(drain, /spawnSync\(executable, \["--quit-for-update"\]/);
+  assert.match(drain, /exactUserExecutableOwnsPid\(executable, lifecycle\.pid\)/);
+  const processIdentity = source.slice(
+    source.indexOf("function exactUserExecutableOwnsPid("),
+    source.indexOf("function stopExactUserAction("),
+  );
+  assert.match(processIdentity, /candidate\.CreationDate/);
+  assert.match(processIdentity, /process\.StartTime\.ToUniversalTime\(\)\.Ticks/);
+  assert.ok(
+    drain.indexOf("exactUserExecutableOwnsPid(executable, lifecycle.pid)")
+      < drain.indexOf('spawnSync(executable, ["--quit-for-update"]'),
+    "the lifecycle PID must be verified before it scopes the drain",
+  );
+  assert.match(drain, /request\.status !== 0/);
+  assert.match(drain, /MUTATION_DRAIN_TIMEOUT_MS/);
+  assert.match(drain, /waitForExactUserExecutableExit\(executable/);
+  assert.match(drain, /!lifecycleWasVerified\(lifecycle\)[\s\S]*exactCanonicalProcessCount/);
+  assert.match(drain, /Close it normally and retry; it was not force-stopped/);
+  assert.doesNotMatch(endTask, /stopExactUserAction\(\{ execute: (?:registered\.execute|TRAY_BINARY)/);
+  assert.match(endTask, /else if \(registered\)[\s\S]*unrecognized action; it was not stopped or replaced/);
+  assert.match(endTask, /const existence = taskExists\(\)[\s\S]*existence !== "missing"[\s\S]*action could not be verified/);
+  assert.match(endTask, /stopKnownLegacyProcesses\(registered\)/);
+  assert.doesNotMatch(endTask, /path\.resolve|===\s*path\.resolve/);
+});
+
+test("Windows legacy drain binds exact argv and process creation identity", () => {
+  const source = readFileSync(path.join(root, "src", "tray-service-windows.mjs"), "utf8");
+  const exact = source.slice(
+    source.indexOf("function stopExactUserAction("),
+    source.indexOf("function stopKnownLegacyProcesses("),
+  );
+  assert.match(exact, /CommandLineToArgvW/);
+  assert.match(exact, /argv\.Count -eq 1/);
+  assert.match(exact, /argv\.Count -eq 2/);
+  assert.match(exact, /GetOwnerSid/);
+  assert.match(exact, /Get-SameRouterProcessHandle/);
+  assert.match(exact, /ProcessId = \$pidValue/);
+  assert.match(exact, /fresh\.CreationDate[^\n]+Candidate\.CreationDate/);
+  assert.match(exact, /process\.StartTime\.ToUniversalTime\(\)\.Ticks/);
+  assert.match(exact, /\$process\.Kill\(\)/);
+  assert.match(exact, /if \(-not \$stopMatches\)[^\n]+exit 0/);
+  assert.match(exact, /exact companion process query returned an invalid count/);
+  assert.doesNotMatch(exact, /Stop-Process -Id \$candidate\.ProcessId/);
+  assert.match(source, /legacyCompanionActions\("win32", SOURCE_ROOT\)/);
+  assert.match(source, /recognizedLegacyCompanionAction\(registeredAction\)/);
+});
+
+test("graceful update drain waits for the exact current-user executable", () => {
+  const source = readFileSync(path.join(root, "src", "tray-service-windows.mjs"), "utf8");
+  const wait = source.slice(
+    source.indexOf("function waitForExactUserExecutableExit("),
+    source.indexOf("function waitForTaskState("),
+  );
+  assert.match(wait, /CODEX_ROUTER_TRAY_EXECUTE/);
+  assert.match(wait, /ExecutablePath/);
+  assert.match(wait, /OrdinalIgnoreCase/);
+  assert.match(wait, /WindowsIdentity\]\:\:GetCurrent\(\)\.User\.Value/);
+  assert.match(wait, /GetOwnerSid/);
+  assert.match(wait, /owner\.Sid -eq \$currentSid/);
+  assert.match(wait, /did not finish its active operation/);
+});
+
+test("start restart and open require the exact canonical registered action", () => {
+  const source = readFileSync(path.join(root, "src", "tray-service-windows.mjs"), "utf8");
+  const wrapper = readFileSync(path.join(root, "codex-router.ps1"), "utf8");
+  assert.match(source, /function isCanonicalTrayTaskAction\(/);
+  assert.match(source, /path\.win32\.normalize\(action\.execute\.trim\(\)\)/);
+  assert.match(source, /actual === expected/);
+  assert.match(source, /\$actions\.Count -ne 1/);
+  assert.match(source, /function startTask\(\)[\s\S]*?requireCanonicalRegisteredAction\(\)[\s\S]*?schtasks\(\["\/Run"/);
+  const restart = source.slice(source.indexOf("// start and restart"));
+  assert.ok(
+    restart.indexOf("requireCanonicalRegisteredAction()") < restart.indexOf('if (command === "restart") endTask()'),
+    "restart must validate before stopping anything",
+  );
+  const open = wrapper.slice(wrapper.indexOf("function Open-ControlCenterWindow"), wrapper.indexOf("function New-ControlCenterUpdateTransaction"));
+  assert.match(open, /tray-service\.mjs" @\("validate"\)/);
+  assert.ok(open.indexOf('tray-service.mjs" @("validate")') < open.indexOf("Start-Process"));
+});
+
+test("Task Scheduler start waits for the packaged lifecycle-ready contract", () => {
+  const source = readFileSync(path.join(root, "src", "tray-service-windows.mjs"), "utf8");
+  assert.match(source, /spawnSync\(executable, \["--query-lifecycle"\]/);
+  assert.match(source, /state\.running !== \(state\.pid !== null\)/);
+  assert.match(source, /lifecycle\.running[\s\S]{0,120}lifecycle\.ready[\s\S]{0,120}exactUserExecutableOwnsPid/);
+  const start = source.slice(source.indexOf("function startTask("), source.indexOf("function requireBuiltTray("));
+  assert.match(start, /waitForTaskState[^\n]+"running"/);
+  assert.match(start, /waitForControlCenterReady\(registered\.execute\)/);
+  assert.match(start, /taskState\(\) !== "running"/);
+  const validate = source.slice(source.indexOf('command === "validate"'), source.indexOf('command === "lifecycle"'));
+  assert.match(validate, /exactUserExecutableOwnsPid\(action\.execute, lifecycle\.pid\)/);
+  assert.match(validate, /canonical Control Center is not ready/);
+});
+
+test("direct packaged GUI launches clear inherited Electron Node mode", () => {
+  const source = readFileSync(path.join(root, "src", "tray-service-windows.mjs"), "utf8");
+  const wrapper = readFileSync(path.join(root, "codex-router.ps1"), "utf8");
+  const guiEnvironment = source.slice(
+    source.indexOf("function packagedGuiEnvironment("),
+    source.indexOf("function queryControlCenterLifecycle("),
+  );
+  assert.match(guiEnvironment, /delete environment\.ELECTRON_RUN_AS_NODE/);
+  const query = source.slice(
+    source.indexOf("function queryControlCenterLifecycle("),
+    source.indexOf("function exactUserExecutableOwnsPid("),
+  );
+  assert.match(query, /--query-lifecycle[\s\S]*env: packagedGuiEnvironment\(\)/);
+  const drain = source.slice(
+    source.indexOf("function drainCanonicalExecutable("),
+    source.indexOf("function endTask("),
+  );
+  assert.match(drain, /--quit-for-update[\s\S]*env: packagedGuiEnvironment\(\)/);
+  const open = wrapper.slice(
+    wrapper.indexOf("function Open-ControlCenterWindow"),
+    wrapper.indexOf("function New-ControlCenterUpdateTransaction"),
+  );
+  assert.match(open, /Remove-Item Env:ELECTRON_RUN_AS_NODE/);
+  assert.ok(open.indexOf("Remove-Item Env:ELECTRON_RUN_AS_NODE") < open.indexOf("Start-Process"));
+  assert.match(open, /Set-Item Env:ELECTRON_RUN_AS_NODE \$PreviousElectronRunAsNode/);
+});
+
 test("status stays a JSON exit-0 document when Task Scheduler is unreadable", () => {
   // With no scheduler hosts reachable (empty PATH forces both PowerShell
   // hosts to fail), taskExists() returns "error" and status must print
@@ -211,11 +339,14 @@ test("tray registration leaves its interactive principal able to update the task
 
 test("a platform with no supervisor says so instead of reporting success", () => {
   const result = trayDispatch("install", "linux");
-  assert.equal(result.status, 0, "an install must not fail over an unsupervised companion");
+  assert.notEqual(result.status, 0, "an unsupported mutation must not report success");
   assert.match(result.stdout, /"supported":false/);
-  assert.match(result.stderr, /not supervised on linux/);
+  assert.match(result.stdout, /"state":"unsupported"/);
+  assert.match(result.stderr, /supervision is unavailable on linux/);
   // `status` is machine-readable and stays quiet.
-  assert.equal(trayDispatch("status", "linux").stderr, "");
+  const status = trayDispatch("status", "linux");
+  assert.equal(status.status, 0);
+  assert.equal(status.stderr, "");
 });
 
 // macOS and Linux each have one command that builds the companion and hands it
@@ -228,7 +359,7 @@ test("the Windows CLI exposes tray as a first-class command", () => {
   assert.match(script, /"tray" \{/);
   // Build only when the sources moved, then stamp it, then register.
   assert.match(script, /install-plan\.mjs"\) tray-plan/);
-  assert.match(script, /build-desktop-tray\.ps1"\) -BinaryOnly/);
+  assert.match(script, /build-electron-companion\.ps1/);
   assert.match(script, /install-plan\.mjs"\) record-tray/);
   assert.match(script, /tray-service\.mjs" @\(\$Action\)/);
   // Every action the supervisor accepts is reachable.
@@ -241,20 +372,156 @@ test("tray rebuild registers the artifact it just built", () => {
   const script = readFileSync(path.join(root, "codex-router.ps1"), "utf8");
   const rebuild = script.slice(
     script.indexOf('if ($Action -eq "rebuild")'),
-    script.indexOf('if ($Action -eq "install" -and'),
+    script.indexOf('$RefreshOnly = $Action -eq "refresh"'),
   );
   assert.match(rebuild, /tray-service\.mjs" @\("install"\)/);
-  assert.match(rebuild, /tray-service\.mjs" @\("install-electron"\)/);
+  assert.doesNotMatch(rebuild, /tray-service\.mjs" @\("install-electron"\)/);
   assert.doesNotMatch(rebuild, /tray-service\.mjs" @\("restart"\)/);
   // Windows locks running tray binaries, so the supervised task is stopped
   // BEFORE the in-place build, and a failed rebuild restores the old instance.
   const stopBeforeBuild = rebuild.indexOf('tray-service.mjs" @("stop")');
-  const build = rebuild.indexOf("build-desktop-tray.ps1");
+  const build = rebuild.indexOf("Build-ControlCenterReplacement");
   assert.ok(stopBeforeBuild >= 0 && stopBeforeBuild < build,
     "the running tray must be stopped before the in-place build");
   assert.match(rebuild, /\$TrayWasRunning\s*=\s*\$/);
-  assert.match(rebuild, /tray-service\.mjs" @\("start"\)/);
+  assert.match(rebuild, /New-ControlCenterUpdateTransaction/);
+  assert.match(rebuild, /Undo-ControlCenterReplacement/);
   assert.match(rebuild, /Companion rebuild failed/);
+  const statusCatch = rebuild.match(/try \{[\s\S]*?tray-service\.mjs"\) status[\s\S]*?\} catch \{([\s\S]*?)\n\s*\}/)?.[1] || "";
+  assert.ok(statusCatch, "the rebuild status fallback should remain readable");
+  assert.doesNotMatch(statusCatch, /\$TrayWasRunning\s*=\s*\$false/);
+});
+
+test("normal Windows tray install restarts the previous app when a rebuild fails", () => {
+  const script = readFileSync(path.join(root, "codex-router.ps1"), "utf8");
+  const install = script.slice(
+    script.indexOf('$RefreshOnly = $Action -eq "refresh"'),
+    script.indexOf('if (-not $ActionHandled)'),
+  );
+  assert.match(install, /\$TrayWasRunning/);
+  assert.match(install, /New-ControlCenterUpdateTransaction/);
+  assert.match(install, /try \{[\s\S]*?Build-ControlCenterReplacement[\s\S]*?\} catch \{/);
+  assert.match(install, /Undo-ControlCenterReplacement \$Transaction \$TrayWasRunning/);
+  assert.match(script, /exact previous companion package and Scheduled Task were restored and restarted/);
+});
+
+test("Windows replacement commits only after lifecycle-ready start and stamps after commit", () => {
+  const script = readFileSync(path.join(root, "codex-router.ps1"), "utf8");
+  const rebuild = script.slice(
+    script.indexOf('if ($Action -eq "rebuild")'),
+    script.indexOf('$RefreshOnly = $Action -eq "refresh"'),
+  );
+  const build = rebuild.indexOf("Build-ControlCenterReplacement");
+  const start = rebuild.indexOf('tray-service.mjs" @("install")', build);
+  const ready = rebuild.indexOf('Write-ControlCenterTransactionJournal $Transaction "replacement-ready"', start);
+  const commit = rebuild.indexOf("Complete-ControlCenterReplacement", ready);
+  const stamp = rebuild.indexOf("Record-ControlCenterBuild", commit);
+  assert.ok(build >= 0 && start > build && ready > start && commit > ready && stamp > commit,
+    "build -> ready supervisor start -> durable commit -> stamp must stay ordered");
+
+  const helpers = script.slice(
+    script.indexOf("function Get-ControlCenterUpdateLayout"),
+    script.indexOf("function Resolve-AccountSid"),
+  );
+  assert.match(helpers, /-BackupDirectory \$Transaction\.BackupDirectory -KeepPrevious/);
+  assert.match(helpers, /Restore-ControlCenterReplacement/);
+  assert.match(helpers, /Remove-Item -LiteralPath \$Transaction\.TargetDirectory -Recurse -Force/);
+  assert.match(helpers, /Move-Item -LiteralPath \$Transaction\.BackupDirectory -Destination \$Transaction\.TargetDirectory/);
+  assert.ok(
+    helpers.indexOf("Invoke-RouterNode \"src\\tray-service.mjs\" @(\"stop\")")
+      < helpers.indexOf("Restore-ControlCenterReplacement $Transaction"),
+    "rollback must stop the replacement before restoring files",
+  );
+  const record = helpers.slice(helpers.indexOf("function Record-ControlCenterBuild"));
+  assert.match(record, /Record only after Task Scheduler and the app-ready handshake/);
+});
+
+test("Windows replacement recovery journals the package and exact prior Scheduled Task", () => {
+  const script = readFileSync(path.join(root, "codex-router.ps1"), "utf8");
+  const transaction = script.slice(
+    script.indexOf("function Get-ControlCenterUpdateLayout"),
+    script.indexOf("function Record-ControlCenterBuild"),
+  );
+  assert.match(transaction, /\.win-control-center-transaction\.json/);
+  assert.match(transaction, /\.win-unpacked\.previous-transaction/);
+  assert.match(transaction, /Export-ScheduledTask/);
+  assert.match(transaction, /GetSecurityDescriptor\(7\)/);
+  assert.match(transaction, /Register-ScheduledTask -TaskName \$TaskName -Xml/);
+  assert.match(transaction, /SetSecurityDescriptor\(\[string\]\$TaskSnapshot\.Sddl, 0x10\)/);
+  assert.match(transaction, /TaskSnapshot\.WasRunning[\s\S]*Start-ScheduledTask/);
+  assert.match(transaction, /Write-ControlCenterTransactionJournal \$Transaction "recovering"/);
+  assert.match(transaction, /Write-ControlCenterTransactionJournal \$Transaction "committed"/);
+  assert.match(
+    transaction,
+    /Assert-ControlCenterRecoveryState \$Transaction\s+Assert-ControlCenterPackageComplete \$Transaction\s+Write-ControlCenterTransactionJournal \$Transaction "committed"/,
+  );
+  assert.match(transaction, /Length -le 0/);
+  assert.match(
+    transaction,
+    /MatchesRecoveringPrior = \$Transaction\.Phase -eq "recovering" -and \$MatchesPriorDocument/,
+  );
+  assert.match(
+    transaction,
+    /-not \$MatchesReplacement -and -not \$MatchesPrior -and -not \$MatchesRecoveringPrior/,
+  );
+  assert.match(
+    transaction,
+    /Write-ControlCenterTransactionJournal \$Transaction "committed"[\s\S]*Assert-ControlCenterRecoveryState \$Transaction[\s\S]*Remove-Item -LiteralPath \$Transaction\.BackupDirectory/,
+  );
+  assert.match(transaction, /FileOptions\]::WriteThrough/);
+  assert.match(transaction, /Stream\.Flush\(\$true\)/);
+  assert.match(
+    transaction,
+    /if \(\[IO\.File\]::Exists\(\$Temporary\)\) \{\s+Assert-ControlCenterTransactionPath \$Temporary "temporary transaction journal" "File"\s+\[IO\.File\]::Delete\(\$Temporary\)/,
+  );
+  assert.match(transaction, /unexpected rollback packages coexist with the journal/);
+  assert.match(transaction, /rollback package exists without its transaction journal/);
+  assert.match(transaction, /reparse point/);
+  const recoveryBody = transaction.slice(
+    transaction.indexOf("function Recover-ControlCenterUpdateTransaction"),
+    transaction.indexOf("function New-ControlCenterUpdateTransaction"),
+  );
+  assert.ok(
+    recoveryBody.indexOf('Assert-ControlCenterTransactionPath $Layout.ReleaseDirectory')
+      < recoveryBody.indexOf("Remove-ControlCenterJournalTemps $Layout"),
+    "recovery must reject a linked release tree before deleting journal temporaries",
+  );
+  assert.ok(
+    transaction.indexOf("Get-ControlCenterTaskSnapshot")
+      < transaction.indexOf('Invoke-RouterNode "src\\tray-service.mjs" @("stop")'),
+    "recovery must reject an unknown named task before stopping anything",
+  );
+  assert.ok(
+    transaction.indexOf("Restore-ControlCenterReplacement $Transaction")
+      < transaction.indexOf("Restore-ControlCenterTaskSnapshot $Transaction.TaskSnapshot"),
+    "the prior package must be restored before its exact task is restarted",
+  );
+  const tray = script.slice(script.indexOf('"tray" {'), script.indexOf('"companion" {'));
+  const recovery = tray.indexOf("Recover-ControlCenterUpdateTransaction");
+  const repair = tray.indexOf("Repair-TrayTaskPermissions");
+  const dispatch = tray.indexOf('Invoke-RouterNode "src\\tray-service.mjs" @($Action)');
+  assert.ok(recovery >= 0 && repair > recovery && dispatch > recovery,
+    "every mutating tray action must reconcile an interrupted transaction first");
+  assert.match(tray, /if \(\$Action -ne "status"\)[\s\S]*Recover-ControlCenterUpdateTransaction/);
+});
+
+test("refresh is plan-gated and preserves the prior window lifecycle", () => {
+  const script = readFileSync(path.join(root, "codex-router.ps1"), "utf8");
+  assert.match(script, /"install", "refresh", "status"/);
+  assert.match(script, /Get-ControlCenterLifecycle/);
+  assert.match(script, /PreviousLifecycle\.running[\s\S]*PreviousLifecycle\.visible/);
+  assert.match(script, /if \(\$RefreshOnly\) \{ exit 0 \}/);
+  assert.match(script, /Invoke-RouterNode "src\\tray-service\.mjs" @\("install"\)[\s\S]*Record-ControlCenterBuild/);
+  assert.match(script, /if \(\$OpenAfterAction\)[\s\S]*Open-ControlCenterWindow/);
+});
+
+test("successful Windows install removes only the standalone legacy executable", () => {
+  const script = readFileSync(path.join(root, "codex-router.ps1"), "utf8");
+  const installResult = script.slice(script.indexOf('Invoke-RouterNode "src\\tray-service.mjs" @($Action)'));
+  assert.match(installResult, /apps\\desktop\\src-tauri\\target\\release\\codex-router-desktop\.exe/);
+  assert.doesNotMatch(installResult, /apps\\electron\\node_modules\\electron\\dist\\electron\.exe/);
+  assert.match(installResult, /Remove-Item -LiteralPath \$LegacyBinary -Force/);
+  assert.doesNotMatch(installResult, /Remove-Item[^\n]+-Recurse/);
 });
 
 test("PowerShell children that emit parsed text pin their output encoding to UTF-8", () => {
@@ -283,7 +550,9 @@ test("tray repair validates the task and grants only its current principal contr
   // A task registered from another checkout must still be recognized by shape,
   // so a dev user whose task points at %LOCALAPPDATA% is not rejected.
   assert.doesNotMatch(script, /this checkout's tray companion/);
-  assert.match(script, /not a Codex Router tray companion/);
+  assert.match(script, /apps\\control-center\\release\\win-unpacked\\Codex Router\.exe/);
+  assert.match(script, /--tray-only/);
+  assert.match(script, /not a recognized Codex Router Control Center/);
   assert.match(script, /RawSecurityDescriptor/);
   assert.match(script, /SetSecurityDescriptor\([^\n]+0x10\)/);
   // The elevated PowerShell host must be named absolutely so ShellExecuteEx
@@ -303,6 +572,14 @@ test("tray repair validates the task and grants only its current principal contr
   assert.match(script, /-EncodedCommand/);
   assert.match(script, /if \(-not \(Test-TrayTaskFullControl/);
   assert.doesNotMatch(script, /icacls|takeown/i);
+  const repair = script.slice(
+    script.indexOf("function Repair-TrayTaskPermissions"),
+    script.indexOf("switch ($Command)"),
+  );
+  assert.match(script, /legacy Tauri action deliberately has no argv/);
+  assert.match(repair, /foreach \(\$Field in "Name", "Sid", "Execute"\)/);
+  assert.doesNotMatch(repair, /foreach \(\$Field in [^\n]*"Argument"/);
+  assert.match(repair, /__TRAY_ARGUMENT__/);
 });
 
 test("the POSIX tray launcher points Windows at that command", () => {

@@ -21,6 +21,7 @@ import {
   assertMutationCompatibility,
   discoverSourceRoot,
   runControl,
+  runControlDetached,
   runControlJson,
   runRouterScript,
 } from "./command-runner.mjs";
@@ -514,6 +515,20 @@ async function validateProvider(providerId, capability) {
   return { id, provider };
 }
 
+async function validateCatalogProvider(providerId) {
+  const id = stringValue(providerId, "Provider catalog", PROVIDER_ID);
+  const providers = await providerEntries();
+  for (const provider of providers) {
+    const sources = Array.isArray(provider.catalogSources) ? provider.catalogSources : [];
+    const source = sources.find((entry) => String(entry?.id) === id);
+    if (source) return { id, provider, source };
+    // Compatibility with an older router snapshot: its canonical row has no
+    // source descriptors, but discovery of that exact id was already allowed.
+    if (String(provider.id) === id && sources.length === 0) return { id, provider };
+  }
+  throw new Error(`Unknown provider catalog: ${id}`);
+}
+
 async function validateModel(slug) {
   const value = stringValue(slug, "Model", MODEL_SLUG);
   const models = await modelEntries();
@@ -630,6 +645,7 @@ export function registerIpcHandlers({ ipcMain, BrowserWindow, shell, fetchImpl =
   });
 
   handle("getSnapshot", async () => snapshot());
+  handle("getChatGptSession", async () => runJson(["chatgpt-session", "status"]));
   const windowFor = (event) => {
     const window = BrowserWindow?.fromWebContents?.(event.sender);
     if (!window || window.isDestroyed?.()) throw new Error("Application window is unavailable.");
@@ -659,7 +675,7 @@ export function registerIpcHandlers({ ipcMain, BrowserWindow, shell, fetchImpl =
   }, { requiresCompatibleRouter: false });
   handle("getProviders", async () => runJson(["providers"]));
   handle("discoverProviderModels", async ({ providerId, refresh = false } = {}) => {
-    const { id } = await validateProvider(providerId);
+    const { id } = await validateCatalogProvider(providerId);
     if (typeof refresh !== "boolean") throw new Error("refresh must be boolean.");
     // Without --refresh the router answers from the provider's cached list, so
     // opening a provider costs no round trip and works offline. Refreshing is
@@ -702,17 +718,31 @@ export function registerIpcHandlers({ ipcMain, BrowserWindow, shell, fetchImpl =
   // when it is needed. Repair is also the one action that must work while the
   // service is down, which is why it reinstalls rather than merely restarting.
   handleAction("repairInstall", async () => {
-    const result = await runRouterScript("doctor.mjs", ["--fix", "--json"], {
-      timeoutMs: REPAIR_TIMEOUT_MS,
-      allowNonZero: true,
-    });
-    let report;
-    try { report = JSON.parse(result.stdout.trim()); }
-    catch { throw new Error("Repair returned invalid JSON."); }
-    // A non-zero exit here means repair ran and some check still fails, not
-    // that repair itself failed. Report that as a completed run with failing
-    // checks so the page can name them; throwing would hide the report.
-    return { ...report, ok: result.code === 0 && report.ok !== false };
+    let response;
+    try {
+      const result = await runRouterScript("doctor.mjs", ["--fix", "--json"], {
+        timeoutMs: REPAIR_TIMEOUT_MS,
+        allowNonZero: true,
+        environmentOverrides: { CODEX_ROUTER_DEFER_TRAY_REBUILD: "1" },
+      });
+      let report;
+      try { report = JSON.parse(result.stdout.trim()); }
+      catch { throw new Error("Repair returned invalid JSON."); }
+      // A non-zero exit here means repair ran and some check still fails, not
+      // that repair itself failed. Report that as a completed run with failing
+      // checks so the page can name them; throwing would hide the report.
+      response = { ...report, ok: result.code === 0 && report.ok !== false };
+    } finally {
+      // Start the detached refresh before this handler settles and releases the
+      // mutation drain, including a partial repair whose final check failed. A
+      // quit already waiting on repair resumes as soon as the drain clears, so
+      // a timer scheduled for later can be discarded with the process and
+      // strand the old companion. Spawn is nonblocking; the updater stages its
+      // replacement before it asks this process to quit.
+      try { await runControlDetached(["tray", "refresh"]); }
+      catch { /* the next update retries a stale tray if spawn itself is unavailable */ }
+    }
+    return response;
   }, { requiresCompatibleRouter: false });
   // The public health leaf deliberately omits per-service payloads. The
   // control command reads the protected leaf with the local caller capability
@@ -734,7 +764,7 @@ export function registerIpcHandlers({ ipcMain, BrowserWindow, shell, fetchImpl =
     return updateProviderSelection(id, enabled);
   });
   handleAction("addProviderModels", async ({ providerId, modelIds } = {}) => {
-    const { id } = await validateProvider(providerId);
+    const { id } = await validateCatalogProvider(providerId);
     if (!Array.isArray(modelIds) || modelIds.length < 1 || modelIds.length > 200) {
       throw new Error("Choose between 1 and 200 provider models.");
     }
@@ -769,6 +799,11 @@ export function registerIpcHandlers({ ipcMain, BrowserWindow, shell, fetchImpl =
     if (!login) throw new Error(`Interactive sign-in is not available for ${id}.`);
     const executable = executablePath(login.executable);
     if (!executable) throw new Error(`The official ${login.executable} CLI was not found after installation.`);
+    // The terminal belongs to the provider CLI, so Electron cannot observe
+    // whether it switches accounts. Clear any account-specific model list
+    // before handing off; cancellation costs one later fetch, while retaining
+    // the previous account's entitlements for a day would be incorrect.
+    await runControl(["catalog-cache", "invalidate", id]);
     // OAuth CLIs own browser/device authorization and may require a real TTY.
     // Never hide those prompts behind Electron's piped child-process stdio.
     return {
@@ -922,6 +957,16 @@ export function registerIpcHandlers({ ipcMain, BrowserWindow, shell, fetchImpl =
     if (typeof enabled !== "boolean") throw new Error("enabled must be boolean.");
     return runJson(["signed-routing", enabled ? "on" : "off"], { timeoutMs: CATALOG_MUTATION_TIMEOUT_MS });
   });
+  handleAction("setChatGptSessionSharing", async ({ enabled } = {}) => {
+    if (typeof enabled !== "boolean") throw new Error("enabled must be boolean.");
+    // Renderer input selects one of two fixed control verbs. The upstream
+    // transaction records/revokes consent and republishes every installed
+    // client catalog before this result is returned.
+    return runJson(
+      ["chatgpt-session", enabled ? "enable" : "disable"],
+      { timeoutMs: CATALOG_MUTATION_TIMEOUT_MS },
+    );
+  });
   handleAction("setPresence", async ({ mode } = {}) => runJson(["presence", "set", oneOf(mode, PRESENCE_MODES, "Presence mode")]));
   handleAction("controlService", async ({ action = "status" } = {}) => {
     const value = oneOf(action, SERVICE_COMMANDS, "Service action");
@@ -931,8 +976,26 @@ export function registerIpcHandlers({ ipcMain, BrowserWindow, shell, fetchImpl =
   });
   handleAction("controlTray", async ({ action = "status" } = {}) => {
     const value = oneOf(action, TRAY_COMMANDS, "Tray action");
-    await runControl(["tray", value], { timeoutMs: 120_000 });
-    return { action: value, ok: true };
+    const status = await runControlJson(["tray", "status"], { timeoutMs: 120_000 });
+    if (value === "status") {
+      return { action: value, ok: true, status };
+    }
+    if (status?.supported === false) {
+      throw new Error(
+        cleanText(
+          status.why,
+          "Tray supervision is unavailable on this platform. Launch the Control Center directly.",
+        ),
+      );
+    }
+    // enable/disable/restart may ask this very GUI to drain and quit. Waiting
+    // for that child while the IPC mutation remains active creates a cycle:
+    // the child waits for the mutation, and the mutation waits for the child.
+    // Accept the validated action once the OS confirms the detached control
+    // process spawned, then let it outlive this window and perform the
+    // lifecycle transaction.
+    await runControlDetached(["tray", value]);
+    return { action: value, ok: true, accepted: true };
   });
   handleAction("launchHarness", async ({ harnessId, surface } = {}) => {
     const harness = oneOf(harnessId, HARNESS_IDS, "Harness");

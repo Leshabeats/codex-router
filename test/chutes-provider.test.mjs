@@ -161,6 +161,8 @@ test("Chutes public-catalog fixtures drive discovery, deterministic curation, an
       discovered: ["moonshotai/Kimi-K3-TEE", "zai-org/GLM-5.2-TEE"],
       registered: [],
       unregistered: ["moonshotai/Kimi-K3-TEE", "zai-org/GLM-5.2-TEE"],
+      addable: ["moonshotai/Kimi-K3-TEE", "zai-org/GLM-5.2-TEE"],
+      blocked: {},
       unavailable: [],
       contextLengths: { "moonshotai/Kimi-K3-TEE": 262144 },
       cached: undefined,

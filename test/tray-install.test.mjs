@@ -79,7 +79,7 @@ test("trayBundleDir is undefined on other platforms", () => {
   assert.equal(trayBundleDir("linux", "/home/example"), undefined);
 });
 
-test("desktopTrayBinary names the Tauri release binary per platform", () => {
+test("desktopTrayBinary preserves the legacy Tauri identity per platform", () => {
   assert.equal(
     desktopTrayBinary("win32", "C:\\repo"),
     ["C:\\repo", "apps", "desktop", "src-tauri", "target", "release", "codex-router-desktop.exe"].join(

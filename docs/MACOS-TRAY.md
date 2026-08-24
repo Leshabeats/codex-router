@@ -1,12 +1,13 @@
-# macOS tray app
+# macOS native tray and Control Center
 
-Model Router Tray is a native macOS Dynamic-Island-style overlay plus menu-bar
-control panel for the local Codex router. The top-center island follows the
-provider handling the latest request, reveals live usage on hover, expands on
-click, and surfaces concurrent model requests when more than one agent is
-active. The tray shows Codex service state, an all-provider usage overview,
-active-provider detail, and provider setup shared with the existing
-command-line control plane.
+`Model Router.app` is one installed macOS app with two coordinated surfaces.
+Its Swift host owns the native menu-bar item and optional Dynamic-Island-style
+overlay; its embedded Electron app supplies the full Control Center window.
+The top-center island follows the provider handling the latest request, reveals
+live usage on hover, expands on click, and surfaces concurrent model requests
+when more than one agent is active. The native tray shows Codex service state,
+an all-provider usage overview, active-provider detail, and provider setup
+shared with the existing command-line control plane.
 
 The tray focuses on Codex and does not disable, uninstall, or change the
 existing router configuration.
@@ -20,37 +21,29 @@ SVG and run `scripts/build-app-icon.sh` to regenerate the committed
 `AppIcon.icns`. That script needs `sips` and `iconutil`, which is why the
 `.icns` is committed rather than rasterized during a normal tray build.
 
-The app stays `LSUIElement`, so opening it produces a menu bar item rather than
-a window or a Dock icon. Opening it deliberately does three things: it makes the
-surfaces visible for 20 seconds even if **With Codex** would otherwise hide
-them, it starts the router, and it pulses the status dot so the click gets an
-answer. Without that, opening the app in follow mode with Codex closed looked
-like nothing had happened — on exactly the launch that having an icon is for.
-The reveal is time-boxed rather than sticky so follow mode resumes on its own
-instead of silently leaving you in always-on.
+The Swift host stays `LSUIElement`, so it does not add a second Dock icon. A
+person opening `Model Router.app` gets the embedded Control Center as a normal
+window and also reveals the native tray surfaces for 20 seconds if **With
+Codex** would otherwise hide them. Closing the Control Center window leaves the
+native host running; reopen the app or choose **Control Center** from the
+menu-bar panel to restore it. The temporary reveal also starts the router and
+pulses the status dot, then follow mode resumes on its own.
 
-launchd passes `--supervised` when it starts the tray at login, which is how a
-login start is told apart from a person opening the app. A login start must not
-force the surfaces visible, or follow mode would be overridden every morning.
+launchd passes `--supervised` when it starts the native host at login. That
+starts the menu-bar host without opening the Control Center window or forcing
+hidden surfaces visible, so follow mode is not overridden every morning.
 
-## Start at login
+## launchd supervision and login startup
 
-The first time the tray runs from its app bundle, it registers itself as a
-macOS login item so it reopens automatically after a reboot — no more manual
-`./bin/model-router-tray` after every sign-in. macOS shows its standard
-"added a login item" notice, and the Settings tab gains a **Start at login**
-toggle backed by `SMAppService`, so the item is also visible and removable
-under System Settings › General › Login Items. The automatic registration
-happens only once: if you turn the item off in either place, the tray never
-re-adds it. The login item points at the built bundle (`dist/Model
-Router.app` by default), so rerun `./bin/model-router-tray` after an update
-to rebuild the binary the login item launches. If the bundle moves after that
-first launch (for example from a checkout on a removable volume to the stable
-install), the next launch replaces the old login-item path with the current
-bundle instead of leaving a broken item behind. Running the bare executable
-via `swift run` provides no bundle identity, so the toggle is hidden there.
-The router's background service is a separate launchd agent and keeps running
-regardless of this setting.
+`./bin/model-router-tray` installs a per-user LaunchAgent for the native host.
+It starts the app at login and restarts it after an abnormal exit, while a clean
+**Quit** remains a quit until the next login or manual launch. The app does not
+register a second startup mechanism; there is one startup owner and therefore
+only one tray host.
+
+The router background service is a separate launchd agent. Reinstalling or
+rebuilding the desktop app updates its own agent without merging the two
+services or creating another copy of the app.
 
 The Settings tab's **Models** section has two accordions. **Subagent models**
 controls which registry-proven v2 models remain available as Codex subagent
@@ -72,13 +65,12 @@ reported "Codex is not running" for every terminal session, which hid the menu
 bar item immediately and then stopped the router 30 seconds into the work it
 was needed for. The watcher therefore also scans the process table (via
 `sysctl`, not by spawning `pgrep`, since this runs every five seconds).
-The tray process itself
-stays resident as a lightweight watcher; quitting on app exit would leave
-nothing around to notice the next launch. Combined with **Start at login**,
-this makes the tray fully automatic: it waits invisibly after a reboot and
-shows up exactly while Codex is open. While hidden, reopen Codex (or run
-`defaults write io.github.codex-router.tray ModelRouterTray.presenceMode
-always` and relaunch) to reach the toggle again. In **With Codex** mode the
+The native host itself stays resident as a lightweight watcher; quitting on app
+exit would leave nothing around to notice the next launch. Combined with
+launchd supervision, this makes the tray automatic: it waits invisibly after a
+reboot and shows up exactly while Codex is open. Opening `Model Router.app`
+temporarily reveals the native surfaces and opens the Control Center even while
+Codex is closed, so the setting remains reachable. In **With Codex** mode the
 router endpoint starts as soon as Codex or ChatGPT appears and stops only after
 both remain absent for 30 seconds and active requests have drained. The watcher
 also polls the process list every five seconds so a missed workspace
@@ -208,15 +200,15 @@ Run it from a stable checkout on macOS:
 ./bin/model-router-tray
 ```
 
-The app builds a local `dist/Model Router.app` bundle and opens it. The bundle
-records the checkout path used at build time, so rebuild it after moving the
-repository.
+The command builds and verifies a staging bundle, atomically installs it as
+`~/Applications/Model Router.app`, and registers the native host with launchd.
+The installed bundle records the checkout path used at build time, so rebuild
+it after moving the repository.
 
-`bin/model-router-tray` replaces an already-running tray with the rebuilt
-bundle before opening it, and `codex update` rebuilds and relaunches an
-installed tray from the updated checkout whether it lives in the checkout's
-`dist` directory, `~/Applications`, or the registered login-item bundle, so
-the companion stays current without a manual rerun.
+`bin/model-router-tray` lets active Control Center mutations drain, replaces the
+already-running bundle, and restarts its launchd agent. `codex update` rebuilds
+and relaunches the installed app from the updated checkout, so the companion
+stays current without creating a second app copy.
 
 Provider changes apply automatically. Enabling, disabling, signing in, or
 adding an API key updates Codex immediately; the provider row shows progress

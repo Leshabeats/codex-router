@@ -1,8 +1,6 @@
-// One command table for every surface that drives apps/desktop/ui: the Tauri
-// tray, the Electron shell, and the router's own browser panel. Each call is a
-// single shell-out to the control CLI, so a shell is only a window and an IPC
-// hop -- not a second implementation of what the companion does. Duplicating
-// this table is how the surfaces would drift apart, so they all import it.
+// Fixed command table for the router's read-only browser panel. Each call is a
+// single shell-out to the control CLI, so the panel remains a view over the
+// same control plane rather than a second implementation of router behavior.
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";

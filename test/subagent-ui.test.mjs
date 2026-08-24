@@ -6,8 +6,8 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-test("desktop subagent settings show native and unverified enabled models", () => {
-  const source = readFileSync(path.join(root, "apps", "desktop", "ui", "app.js"), "utf8");
+test("browser panel subagent settings show native and unverified enabled models", () => {
+  const source = readFileSync(path.join(root, "apps", "panel", "app.js"), "utf8");
   assert.match(source, /const subagentModels = enabledModels;/);
   assert.doesNotMatch(source, /!model\.native\s*&&\s*model\.visible/);
   assert.match(source, /selectedSubagents\.has\(model\.slug\)/);
@@ -33,13 +33,13 @@ test("Control Center keeps legacy local proofs as candidates, not active v2 rout
   assert.match(source, /const selectedAsSubagent = certified && selectedInSettings/);
   assert.match(source, /const certified = certification === "v2"/);
   assert.match(source, /model\.multiAgentVersion === "v1" \? "v1" : "unknown"/);
-  assert.match(source, /\{eligible \? "v2 relay" : knownV1 \? "v1 only" : checking/);
+  assert.match(source, /\{certified \? "v2 relay" : knownV1 \? "v1 only" : checking/);
   assert.match(source, /if \(!model \|\| model\.visible === false\) return false/);
   assert.match(source, /if \(subagentCertification\(model\) === "v2"\)/);
   assert.match(source, /settings\.mode === "selected" && settings\.enabled\.includes\(slug\)/);
   assert.match(source, /\["candidate", "experimental", "proven"\]\.includes\(proof\?\.status \?\? ""\)/);
   assert.match(source, /const testActive = !certified && !knownV1 && !candidate && selectedInSettings/);
-  assert.match(source, /disabled=\{!api \|\| candidate \|\| knownV1\}/);
+  assert.match(source, /disabled=\{!apiAvailable \|\| candidate \|\| knownV1\}/);
 });
 
 test("macOS subagent settings show native and unverified enabled models", () => {
@@ -75,4 +75,17 @@ test("macOS subagent settings show native and unverified enabled models", () => 
   assert.match(source, /Text\(routerLocalized\("Subagent"\)\)/);
   assert.match(source, /settings\?\.subagents\.efforts\?\[model\.slug\]/);
   assert.match(source, /subagentEffortRow\(for: model\)/);
+});
+
+test("the browser and macOS tray model pickers can search enabled models", () => {
+  const panel = readFileSync(path.join(root, "apps", "panel", "app.js"), "utf8");
+  const html = readFileSync(path.join(root, "apps", "panel", "index.html"), "utf8");
+  const macos = readFileSync(
+    path.join(root, "apps", "macos", "ModelRouterTray", "Sources", "ModelRouterTrayApp.swift"),
+    "utf8",
+  );
+  assert.match(html, /id="picker-model-search"/);
+  assert.match(panel, /modelMatchesQuery\(model, state\.pickerModelFilter/);
+  assert.match(macos, /private var filteredPickerModels: \[RouterModel\]/);
+  assert.match(macos, /ForEach\(providerGroups\(filteredPickerModels\)\)/);
 });

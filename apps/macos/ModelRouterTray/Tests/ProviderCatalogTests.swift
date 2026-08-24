@@ -24,33 +24,27 @@ struct ProviderCatalogTests {
 
   // MARK: - Parity with the Electron surface
 
-  @Test("the live-catalog exclusions match NO_LIVE_CATALOG in the Electron app")
-  func exclusionsMatchElectron() throws {
-    let source = try Self.repositoryFile("apps/control-center/src/pages/ModelsPage.tsx")
-    guard let line = source
-      .split(separator: "\n")
-      .first(where: { $0.contains("const NO_LIVE_CATALOG") })
-    else {
-      Issue.record("ModelsPage.tsx no longer declares NO_LIVE_CATALOG")
-      return
-    }
-
-    let ids = try Self.quotedStrings(in: String(line))
-    #expect(!ids.isEmpty, "parsed no ids out of: \(line)")
-    #expect(
-      Set(ids) == ProviderSetupState.liveModelCatalogExclusions,
-      "tray: \(ProviderSetupState.liveModelCatalogExclusions.sorted()), Electron: \(ids.sorted())"
+  @Test("catalog eligibility follows backend source descriptors")
+  func catalogEligibilityFollowsBackendSources() throws {
+    #expect(Self.providerSetup(id: "openai").supportsLiveModelCatalog == false)
+    let deepseek = Self.providerSetup(
+      id: "deepseek",
+      catalogSources: [("deepseek", "DeepSeek", "models-endpoint")]
     )
+    #expect(deepseek.supportsLiveModelCatalog)
+    #expect(deepseek.catalogSources?.map(\.id) == ["deepseek"])
   }
 
-  @Test("supportsLiveModelCatalog answers per provider id")
-  func supportsLiveModelCatalogPerProvider() throws {
-    for excluded in ProviderSetupState.liveModelCatalogExclusions {
-      #expect(Self.providerSetup(id: excluded).supportsLiveModelCatalog == false)
-    }
-    for included in ["deepseek", "kimi", "zai", "orca"] {
-      #expect(Self.providerSetup(id: included).supportsLiveModelCatalog)
-    }
+  @Test("one credential card can expose several independent catalogs")
+  func decodesMultipleCatalogSources() throws {
+    let provider = Self.providerSetup(
+      id: "opencode-go",
+      catalogSources: [
+        ("opencode-go", "opencode Go", "models-endpoint"),
+        ("opencode-zen", "opencode Zen", "models-endpoint"),
+      ]
+    )
+    #expect(provider.catalogSources?.map(\.id) == ["opencode-go", "opencode-zen"])
   }
 
   @Test("the model-id rule is the one ipc.mjs declares")
@@ -76,6 +70,37 @@ struct ProviderCatalogTests {
     #expect(RouterScriptWatchdog.catalogMutationTimeout == 330)
   }
 
+  @Test("credential boundaries supersede only their in-flight catalog reads")
+  func credentialBoundaryInvalidatesCatalogGeneration() {
+    var ledger = ProviderCatalogGenerationLedger()
+    let oldGo = ledger.begin("opencode-go")
+    let oldZen = ledger.begin("opencode-zen")
+    let deepseek = ledger.begin("deepseek")
+    ledger.invalidate(["opencode-go", "opencode-zen"])
+    #expect(!ledger.isCurrent(oldGo, for: "opencode-go"))
+    #expect(!ledger.isCurrent(oldZen, for: "opencode-zen"))
+    #expect(ledger.isCurrent(deepseek, for: "deepseek"))
+    let freshGo = ledger.begin("opencode-go")
+    #expect(ledger.isCurrent(freshGo, for: "opencode-go"))
+  }
+
+  @Test("bulk catalog reload reports every failure instead of replacing it with success")
+  func bulkReloadPreservesFailures() {
+    var failed = ProviderCatalogReloadBatch()
+    failed.record(.failed("deepseek: provider unavailable"), sourceID: "deepseek")
+    #expect(failed.message == "Catalog reload failed: deepseek: provider unavailable")
+
+    var partial = ProviderCatalogReloadBatch()
+    partial.record(.loaded, sourceID: "deepseek")
+    partial.record(.failed("opencode-go: unauthorized"), sourceID: "opencode-go")
+    #expect(partial.message.contains("Reloaded 1 catalog; 1 failed"))
+    #expect(partial.message.contains("opencode-go: unauthorized"))
+
+    var superseded = ProviderCatalogReloadBatch()
+    superseded.record(.superseded, sourceID: "opencode-zen")
+    #expect(superseded.message.contains("superseded by a credential change"))
+  }
+
   // MARK: - Decoding the discovery payload
 
   /// Verbatim `node src/model-discovery.mjs deepseek --fixture … --json`.
@@ -98,6 +123,10 @@ struct ProviderCatalogTests {
     "unregistered": [
       "deepseek-v5-preview"
     ],
+    "addable": [
+      "deepseek-v5-preview"
+    ],
+    "blocked": {},
     "unavailable": [
       "deepseek-chat",
       "deepseek-reasoner",
@@ -121,6 +150,8 @@ struct ProviderCatalogTests {
     #expect(catalog.provider == "deepseek")
     #expect(catalog.discovered == ["deepseek-v4-pro", "deepseek-v5-preview"])
     #expect(catalog.unregistered == ["deepseek-v5-preview"])
+    #expect(catalog.addableModelIDs == ["deepseek-v5-preview"])
+    #expect(catalog.blocked == [:])
     #expect(catalog.unavailable.count == 4)
     #expect(catalog.registered.contains("deepseek-v4-pro"))
     #expect(catalog.cached == false)
@@ -145,6 +176,31 @@ struct ProviderCatalogTests {
     #expect(catalog.cached == nil)
     #expect(catalog.stale == nil)
     #expect(catalog.fetchedAt == nil)
+    #expect(catalog.addable == nil)
+    #expect(catalog.blocked == nil)
+    #expect(catalog.addableModelIDs == ["kimi-k2.6"])
+  }
+
+  @Test("protocol-uncertified candidates decode as visible but non-addable")
+  func decodesBlockedCandidates() throws {
+    let reason = "future-model has no certified opencode-go protocol route yet."
+    let catalog = try JSONDecoder().decode(
+      ProviderModelCatalog.self,
+      from: Data("""
+      {
+        "provider": "opencode-go",
+        "discovered": ["future-model"],
+        "registered": [],
+        "unregistered": ["future-model"],
+        "addable": [],
+        "blocked": {"future-model": "\(reason)"},
+        "unavailable": []
+      }
+      """.utf8)
+    )
+    #expect(catalog.unregistered == ["future-model"])
+    #expect(catalog.addableModelIDs.isEmpty)
+    #expect(catalog.blocked?["future-model"] == reason)
   }
 
   @Test("every discovered id the router can publish passes the tray's own rule")
@@ -270,14 +326,21 @@ struct ProviderCatalogTests {
 
   // MARK: - Helpers
 
-  static func providerSetup(id: String) -> ProviderSetupState {
+  static func providerSetup(
+    id: String,
+    catalogSources: [(String, String, String)] = []
+  ) -> ProviderSetupState {
+    let sources = catalogSources.map { id, displayName, kind in
+      "{\"id\":\"\(id)\",\"displayName\":\"\(displayName)\",\"kind\":\"\(kind)\"}"
+    }.joined(separator: ",")
     let json = """
     {
       "id": "\(id)",
       "displayName": "\(id)",
       "kind": "api",
       "configured": true,
-      "action": "connect"
+      "action": "connect",
+      "catalogSources": [\(sources)]
     }
     """
     // Force-tried: a decode failure here means the struct's own contract broke,
@@ -285,13 +348,6 @@ struct ProviderCatalogTests {
     return try! JSONDecoder().decode(ProviderSetupState.self, from: Data(json.utf8))
   }
 
-  static func quotedStrings(in line: String) throws -> [String] {
-    let pattern = try NSRegularExpression(pattern: "\"([^\"]*)\"")
-    let range = NSRange(line.startIndex..., in: line)
-    return pattern.matches(in: line, range: range).compactMap {
-      Range($0.range(at: 1), in: line).map { String(line[$0]) }
-    }
-  }
 }
 
 /// `runRouterScript` is private, so these exercise the watchdog it installs

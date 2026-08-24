@@ -11,16 +11,30 @@ import {
   compactTokens,
   dailySeries,
   metricRemainingPercent,
+  modelMatchesQuery,
   observedModelSpeed,
   quotaWindow,
   readOnlyCapabilities,
   serviceHealthRows,
   toolResultAgingChecked,
   visibleLocalDownload,
-} from "../apps/desktop/ui/model.mjs";
+} from "../apps/panel/model.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-import { availableLanguages, getLanguage, setLanguage, t, translationKeys } from "../apps/desktop/ui/i18n.mjs";
+import { availableLanguages, getLanguage, setLanguage, t, translationKeys } from "../apps/panel/i18n.mjs";
+
+test("model picker search matches names, slugs, and provider labels", () => {
+  const model = {
+    displayName: "Ox Alpha (OpenCode Free)",
+    slug: "opencode-free/ox-alpha",
+    provider: "opencode-free",
+  };
+  assert.equal(modelMatchesQuery(model, "ox alpha", "OpenCode Free"), true);
+  assert.equal(modelMatchesQuery(model, "opencode-free/ox", "OpenCode Free"), true);
+  assert.equal(modelMatchesQuery(model, "OpenCode", "OpenCode Free"), true);
+  assert.equal(modelMatchesQuery(model, "venice", "OpenCode Free"), false);
+  assert.equal(modelMatchesQuery(model, "   ", "OpenCode Free"), true);
+});
 
 test("desktop usage series fills missing local calendar days", () => {
   const series = dailySeries(
@@ -293,8 +307,7 @@ test("a read-only surface refuses only what it did not advertise", () => {
   assert.equal(commandRefused(capabilities, "set_tool_result_aging"), true);
   assert.equal(commandRefused(capabilities, "control_snapshot"), false);
   assert.equal(commandRefused(capabilities, "hide_panel"), false);
-  // A shell that advertises no limit carries the full table and refuses
-  // nothing, which is how the tray and the Electron window stay unaffected.
+  // A future unrestricted host can omit a limit and retain the full table.
   assert.equal(commandRefused(null, "set_tool_result_aging"), false);
   assert.equal(readOnlyCapabilities({ os: "darwin" }), null);
   assert.equal(readOnlyCapabilities({ capabilities: { readOnly: false } }), null);
@@ -309,38 +322,25 @@ test("the macOS tray tool-result-aging switch mirrors the same off default", () 
   assert.doesNotMatch(source, /toolResultAging\?\.enabled \?\? true/);
 });
 
-test("native tray provider toggles use the atomic selection command", () => {
-  const rust = readFileSync(
-    path.join(root, "apps", "desktop", "src-tauri", "src", "main.rs"),
-    "utf8",
-  ).match(/fn update_provider_selection\([\s\S]*?\r?\n}\r?\n\r?\nfn run_control_json/)?.[0];
+test("the macOS tray provider toggle uses the atomic selection command", () => {
   const swift = readFileSync(
     path.join(root, "apps", "macos", "ModelRouterTray", "Sources", "ModelRouterTrayApp.swift"),
     "utf8",
   ).match(/private func updateProviderSelection[\s\S]*?\r?\n  }\r?\n\r?\n  private func refreshActivity/)?.[0];
-  assert.ok(rust, "Tauri provider-toggle helper should be readable");
   assert.ok(swift, "macOS provider-toggle helper should be readable");
-  for (const source of [rust, swift]) {
-    assert.match(source, /["\[]set-apply/);
-    assert.match(source, /--activate/);
-    assert.doesNotMatch(source, /was_enabled|wasEnabled|["\[]apply["\]]/);
-  }
+  assert.match(swift, /["\[]set-apply/);
+  assert.match(swift, /--activate/);
+  assert.doesNotMatch(swift, /wasEnabled|["\[]apply["\]]/);
 });
 
-test("native credential actions do not race atomic selection publication", () => {
-  const rust = readFileSync(
-    path.join(root, "apps", "desktop", "src-tauri", "src", "main.rs"),
-    "utf8",
-  );
+test("macOS tray credential actions do not race atomic selection publication", () => {
   const swift = readFileSync(
     path.join(root, "apps", "macos", "ModelRouterTray", "Sources", "ModelRouterTrayApp.swift"),
     "utf8",
   );
-  const rustSave = rust.match(/async fn save_api_key[\s\S]*?\r?\n}\r?\n\r?\n\/\//)?.[0];
-  const rustRemove = rust.match(/async fn remove_api_key[\s\S]*?\r?\n}\r?\n\r?\n#\[tauri::command\]/)?.[0];
   const swiftSave = swift.match(/func saveProviderKey[\s\S]*?\r?\n  }\r?\n\r?\n  \/\//)?.[0];
   const swiftRemove = swift.match(/func removeProviderKey[\s\S]*?\r?\n  }\r?\n\r?\n  func dailyTokens/)?.[0];
-  for (const [name, source] of Object.entries({ rustSave, rustRemove, swiftSave, swiftRemove })) {
+  for (const [name, source] of Object.entries({ swiftSave, swiftRemove })) {
     assert.ok(source, `${name} should be readable`);
     assert.match(source, /credential/);
     assert.doesNotMatch(source, /update_provider_selection|updateProviderSelection|["\[]apply["\]]/);
@@ -349,10 +349,10 @@ test("native credential actions do not race atomic selection publication", () =>
 
 // The disabled set is derived from data-command, so a control that drives a
 // command without carrying one would stay live on a surface that refuses it.
-test("every mutating control in the desktop UI names the command it drives", () => {
+test("every mutating control in the browser panel names the command it drives", () => {
   const markup = [
-    readFileSync(path.join(root, "apps", "desktop", "ui", "index.html"), "utf8"),
-    readFileSync(path.join(root, "apps", "desktop", "ui", "app.js"), "utf8"),
+    readFileSync(path.join(root, "apps", "panel", "index.html"), "utf8"),
+    readFileSync(path.join(root, "apps", "panel", "app.js"), "utf8"),
   ].join("\n");
   for (const command of [
     "set_tool_result_aging",
@@ -376,7 +376,7 @@ test("every mutating control in the desktop UI names the command it drives", () 
   }
 });
 
-test("desktop UI exposes translations with matching keys for every language", () => {
+test("browser panel exposes translations with matching keys for every language", () => {
   assert.deepEqual(
     availableLanguages().map(({ id }) => id),
     ["en", "zh-CN", "ar", "hi", "ja", "ko"],
@@ -414,7 +414,7 @@ test("desktop UI exposes translations with matching keys for every language", ()
   assert.equal(t("nav.usage"), "Usage");
 });
 
-test("desktop UI marks Arabic as the only right-to-left language", () => {
+test("browser panel marks Arabic as the only right-to-left language", () => {
   for (const { id, dir } of availableLanguages()) {
     if (id === "ar") assert.equal(dir, "rtl");
     else assert.notEqual(dir, "rtl", `unexpected right-to-left direction for ${id}`);

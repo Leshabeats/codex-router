@@ -45,10 +45,51 @@ test("releases are tag-driven and validate every asset before publishing", () =>
   );
   assert.match(release, /git archive --format=tar\.gz/);
   assert.match(release, /git archive --format=zip/);
-  assert.match(release, /sha256sum codex-router-\* > SHA256SUMS/);
+  assert.match(release, /name: Unsigned tester app \(\$\{\{ matrix\.platform \}\}\)/);
+  assert.match(release, /electron-builder --win --publish never/);
+  assert.match(release, /electron-builder --linux --publish never/);
+  assert.match(release, /install -m 0755/);
+  assert.match(release, /model-router-\$\{version\}-linux-x64\.tar\.gz/);
+  assert.doesNotMatch(release, /platform: macos|macos-latest|model-router-\$\{version\}-macos/);
+  assert.match(release, /unsigned tester artifacts/);
+  assert.match(release, /matching Codex Router version/);
+  assert.match(release, /sha256sum codex-router-\* model-router-\* > SHA256SUMS/);
+  assert.doesNotMatch(release, /codex-router-desktop|build-desktop-tray/);
   assert.match(release, /actions\/attest-build-provenance@v4/);
   assert.match(release, /gh release create "\$GITHUB_REF_NAME" dist\/\* --verify-tag/);
   assert.match(release, /generate-formula\.mjs/);
   assert.match(release, /git push origin main/);
   assert.doesNotMatch(release, /HOMEBREW_TAP_TOKEN/);
+
+  // macOS stays a CI-only artifact until it can be signed for distribution.
+  // CI requests both architectures and verifies the actual nested executables,
+  // rather than trusting the builder's output filename.
+  assert.match(ci, /MODEL_ROUTER_TRAY_UNIVERSAL: "1"/);
+  assert.match(ci, /CFBundleShortVersionString/);
+  assert.match(ci, /ModelRouterControlVersion/);
+  assert.match(ci, /CFBundleVersion/);
+  assert.match(ci, /test "\$actual_build_version" = "\$GITHUB_RUN_NUMBER"/);
+  assert.match(ci, /lipo -verify_arch x86_64 arm64 "\$app\/Contents\/MacOS\/ModelRouterTray"/);
+  assert.match(
+    ci,
+    /lipo -verify_arch x86_64 arm64 "\$app\/Contents\/Resources\/Control Center\.app\/Contents\/MacOS\/Codex Router"/,
+  );
+  assert.match(ci, /Smoke the unified macOS app lifecycle/);
+  assert.match(ci, /"\$outer" --supervised/);
+  assert.match(ci, /"\$embedded" --query-lifecycle/);
+  assert.match(ci, /terminate_bundle io\.github\.codex-router\.control-center/);
+  assert.match(ci, /terminate_bundle io\.github\.codex-router\.tray/);
+  assert.match(ci, /assert_single_outer_host/);
+  assert.equal(
+    (ci.match(/^[ ]+assert_single_outer_host$/gm) || []).length,
+    2,
+    "each macOS reopen must prove it did not create a second native host",
+  );
+  assert.match(ci, /test "\$second_pid" != "\$first_pid"/);
+
+  // A process merely disappearing is not a successful lifecycle smoke test.
+  assert.match(ci, /if wait "\$pid"; then/);
+  assert.match(ci, /if \(\$open\.ExitCode -ne 0\)/);
+  assert.match(ci, /if \(\$quit\.ExitCode -ne 0\)/);
+  assert.match(ci, /if \(\$process\.ExitCode -ne 0\)/);
 });

@@ -3,8 +3,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
-  readProviderCatalogCache,
-  writeProviderCatalogCache,
+  providerCatalogIdentityFingerprint,
+  withProviderCatalogCacheTransaction,
 } from "./model-catalog-cache.mjs";
 import {
   anonymousModelAllowed,
@@ -12,7 +12,8 @@ import {
   PROVIDERS,
   resolveProviderBaseUrl,
 } from "./model-registry.mjs";
-import { curationProviderIds } from "./opencode-curation.mjs";
+import { curatedModelBlockReason } from "./opencode-curation.mjs";
+import { providerCatalogRouteIds } from "./provider-catalogs.mjs";
 import { credentialStatus, resolveProviderCredential } from "./provider-credentials.mjs";
 import {
   ensureFreshGitHubCopilotSession,
@@ -135,15 +136,76 @@ export function modelContextLengths(payload, provider) {
   return lengths;
 }
 
-async function providerPayload(provider) {
+async function providerDiscoveryIdentity(provider) {
+  if (provider.id === "devin-cli") {
+    const { readDevinSession } = await import("./devin-cli-session.mjs");
+    return { kind: "devin", session: readDevinSession() };
+  }
+  const credential = resolveProviderCredential(provider);
+  if (!credential) throw new Error(credentialStatus(provider).setup);
+  return {
+    kind: "api",
+    credential,
+    baseUrl: resolveProviderBaseUrl(provider).baseUrl,
+  };
+}
+
+function sameProviderDiscoveryIdentity(left, right) {
+  return providerDiscoveryIdentityFingerprint(left)
+    === providerDiscoveryIdentityFingerprint(right);
+}
+
+export function providerDiscoveryIdentityFingerprint(identity) {
+  if (!identity || typeof identity !== "object") {
+    return providerCatalogIdentityFingerprint(["missing"]);
+  }
+  if (identity.kind === "devin") {
+    return providerCatalogIdentityFingerprint([
+      "devin",
+      identity.session?.apiKey,
+      identity.session?.apiServerUrl,
+      identity.session?.devinApiUrl,
+    ]);
+  }
+  return providerCatalogIdentityFingerprint([
+    "api",
+    identity.baseUrl,
+    identity.credential?.value,
+  ]);
+}
+
+function credentialChangedError(provider) {
+  const error = new Error(
+    `${provider.displayName} credentials changed while its model catalog was loading. Reload the catalog for the current account.`,
+  );
+  error.code = "provider_catalog_credential_changed";
+  return error;
+}
+
+async function providerPayload(provider, identity) {
   const fixture = option("--fixture");
   if (fixture) return JSON.parse(readFileSync(path.resolve(fixture), "utf8"));
-  const credential = resolveProviderCredential(provider);
+  if (provider.id === "devin-cli") {
+    const { listCascadeModels } = await import("./devin-cli-forwarder.mjs");
+    const models = await listCascadeModels({
+      session: identity?.session,
+      signal: AbortSignal.timeout(30_000),
+    });
+    return {
+      object: "list",
+      data: models.map((model) => ({
+        id: model.id,
+        object: "model",
+        owned_by: "devin",
+      })),
+    };
+  }
+  const credential = identity?.credential || resolveProviderCredential(provider);
   if (!credential) throw new Error(credentialStatus(provider).setup);
   // The same loopback guard the api-forwarder applies: a keyless provider's
   // placeholder credential passes the check above, so an unguarded override
   // would send `Bearer local` to whatever host the environment names.
-  let baseUrl = resolveProviderBaseUrl(provider).baseUrl;
+  let baseUrl = identity?.baseUrl || resolveProviderBaseUrl(provider).baseUrl;
   let headers = provider.authMode === "anonymous"
     ? {}
     : provider.protocol === "anthropic"
@@ -175,7 +237,10 @@ async function providerPayload(provider) {
  * `refresh` re-asks the provider; `cache: false` keeps a run out of the cache
  * entirely, which is what fixture-driven runs and tests want.
  */
-export async function discoverProviderModels(providerId, { refresh = false, cache = true } = {}) {
+export async function discoverProviderModels(
+  providerId,
+  { refresh = false, cache = true, loadPayload = providerPayload } = {},
+) {
   const provider = PROVIDERS.get(providerId);
   if (!provider) throw new Error(`Unknown provider: ${providerId}`);
   // Discovery asks one endpoint what it serves. A per-model-endpoint provider
@@ -188,7 +253,7 @@ export async function discoverProviderModels(providerId, { refresh = false, cach
         "Discovery runs against a single endpoint, so there is nothing to list here.",
     );
   }
-  if (provider.kind !== "openai-compatible") {
+  if (provider.kind !== "openai-compatible" && provider.id !== "devin-cli") {
     throw new Error(`${provider.displayName} does not expose a supported model-list endpoint.`);
   }
   // A fixture is a file the caller handed in, not what the provider serves.
@@ -196,37 +261,83 @@ export async function discoverProviderModels(providerId, { refresh = false, cach
   // whichever entrypoint asked -- discovery's own CLI or curation's.
   const usingFixture = option("--fixture") !== undefined;
   const storeAnswer = cache && !usingFixture;
-  const cached = refresh || !storeAnswer ? undefined : readProviderCatalogCache(providerId);
+  let cached;
+  let identity;
+  if (storeAnswer) {
+    // The initial read and credential snapshot linearize against credential
+    // write+family invalidation. Network IO happens after this short critical
+    // section, so other providers can still load in parallel.
+    ({ cached, identity } = await withProviderCatalogCacheTransaction(async (catalog) => {
+      const currentIdentity = await providerDiscoveryIdentity(provider);
+      const currentFingerprint = providerDiscoveryIdentityFingerprint(currentIdentity);
+      const held = refresh ? undefined : catalog.read(providerId);
+      if (held?.identityFingerprint === currentFingerprint) {
+        return { cached: held, identity: currentIdentity };
+      }
+      if (held) catalog.forget([providerId]);
+      return { cached: undefined, identity: currentIdentity };
+    }));
+  }
   let discovered;
   let free;
   let contextLengths;
   let fetchedAt;
   if (cached) {
-
     discovered = cached.discovered;
     free = cached.free || [];
     contextLengths = cached.contextLengths || {};
     fetchedAt = cached.fetchedAt;
   } else {
-    const payload = await providerPayload(provider);
+    identity ||= usingFixture ? undefined : await providerDiscoveryIdentity(provider);
+    const payload = await loadPayload(provider, identity);
     discovered = modelIds(payload, provider);
     free = freeModelIds(payload, provider);
     contextLengths = modelContextLengths(payload, provider);
     fetchedAt = new Date().toISOString();
-    if (storeAnswer) writeProviderCatalogCache(providerId, { discovered, free, contextLengths, fetchedAt });
+    if (storeAnswer) {
+      await withProviderCatalogCacheTransaction(async (catalog) => {
+        const currentIdentity = await providerDiscoveryIdentity(provider);
+        if (!sameProviderDiscoveryIdentity(identity, currentIdentity)) {
+          throw credentialChangedError(provider);
+        }
+        catalog.write(providerId, {
+          discovered,
+          free,
+          contextLengths,
+          fetchedAt,
+          identityFingerprint: providerDiscoveryIdentityFingerprint(identity),
+        });
+      });
+    }
   }
-  const curationProviders = new Set(curationProviderIds(providerId));
+  // A catalog endpoint can back several protocol routes. Compare against all
+  // routes on that exact endpoint so Command Code Messages and OpenCode Go
+  // Messages/Responses models do not reappear as unregistered duplicates.
+  // Zen shares the Go credential but has a different endpoint and therefore
+  // remains a separate empty catalog until the operator curates it.
+  const curationProviders = new Set(providerCatalogRouteIds(providerId));
   const registered = MODELS
     .filter((model) => curationProviders.has(model.provider))
     .map((model) => model.upstreamModel)
     .sort();
   const discoveredSet = new Set(discovered);
   const registeredSet = new Set(registered);
+  const unregistered = discovered.filter((id) => !registeredSet.has(id));
+  const blocked = Object.fromEntries(unregistered.flatMap((id) => {
+    const reason = curatedModelBlockReason(providerId, id);
+    return reason ? [[id, reason]] : [];
+  }));
+  const addable = unregistered.filter((id) => !Object.hasOwn(blocked, id));
   return {
     provider: providerId,
     discovered,
     registered,
-    unregistered: discovered.filter((id) => !registeredSet.has(id)),
+    // `unregistered` describes the provider-vs-registry comparison. `addable`
+    // is the narrower set a control surface may actually submit; `blocked`
+    // carries a stable, user-facing reason for every withheld candidate.
+    unregistered,
+    addable,
+    blocked,
     unavailable: registered.filter((id) => !discoveredSet.has(id)),
     // Sizing the provider published for itself. Curation stores it rather than
     // guessing a window for a model whose catalog entry already names one.
@@ -269,7 +380,10 @@ the checked-in config/ registry tree. Credential values are never printed or wri
       }\n`,
     );
     process.stdout.write(`Registered: ${result.registered.join(", ") || "none"}\n`);
-    process.stdout.write(`New candidates: ${result.unregistered.join(", ") || "none"}\n`);
+    process.stdout.write(`New addable candidates: ${result.addable.join(", ") || "none"}\n`);
+    for (const [id, reason] of Object.entries(result.blocked)) {
+      process.stdout.write(`Blocked candidate ${id}: ${reason}\n`);
+    }
     process.stdout.write(`Unavailable registered ids: ${result.unavailable.join(", ") || "none"}\n`);
     process.stdout.write(`${result.note}\n`);
   }

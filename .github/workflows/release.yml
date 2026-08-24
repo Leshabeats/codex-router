@@ -11,55 +11,61 @@ permissions:
   attestations: write
 
 jobs:
-  # Releases shipped source archives only, so the desktop companion could be
-  # obtained exactly one way: install a Rust toolchain and compile it. Building
-  # it here turns that into a download.
-  desktop:
+  unified-app:
+    name: Unsigned tester app (${{ matrix.platform }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+          - platform: linux
+            os: ubuntu-latest
+          - platform: windows
+            os: windows-latest
     runs-on: ${{ matrix.os }}
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
           cache: npm
-          cache-dependency-path: apps/desktop/package-lock.json
-      - name: Select stable Rust
-        run: |
-          rustup update stable
-          rustup default stable
-      - name: Install Linux desktop libraries
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-      - run: npm ci --prefix apps/desktop
-      - run: npm run build:binary --prefix apps/desktop
-      # Named for the release rather than the build tree, so a downloaded asset
-      # still says which version and platform it is.
-      - name: Stage the companion under its release name
+          cache-dependency-path: apps/control-center/package-lock.json
+      - name: Build the unsigned tester application
         shell: bash
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          built=apps/desktop/src-tauri/target/release
           mkdir -p staged
+          npm ci --prefix apps/control-center
+          npm run check --prefix apps/control-center
+          npm test --prefix apps/control-center
+          npm run build --prefix apps/control-center
           if [ "$RUNNER_OS" = Windows ]; then
-            cp "$built/codex-router-desktop.exe" "staged/codex-router-tray-${version}-windows-x64.exe"
+            (cd apps/control-center && npx --no-install electron-builder --win --publish never)
+            mapfile -t installers < <(find apps/control-center/release -maxdepth 1 -type f -name '*.exe' -print)
+            test "${#installers[@]}" -eq 1
+            cp "${installers[0]}" \
+              "staged/model-router-${version}-windows-x64.exe"
           else
-            cp "$built/codex-router-desktop" "staged/codex-router-tray-${version}-linux-x64"
+            (cd apps/control-center && npx --no-install electron-builder --linux --publish never)
+            mapfile -t appimages < <(find apps/control-center/release -maxdepth 1 -type f -name '*.AppImage' -print)
+            test "${#appimages[@]}" -eq 1
+            package_dir="$RUNNER_TEMP/model-router-linux-package"
+            package_name="model-router-${version}-linux-x64.AppImage"
+            mkdir -p "$package_dir"
+            install -m 0755 "${appimages[0]}" "$package_dir/$package_name"
+            tar -czf "staged/model-router-${version}-linux-x64.tar.gz" \
+              -C "$package_dir" "$package_name"
           fi
       - uses: actions/upload-artifact@v7
         with:
-          name: tray-${{ runner.os }}
+          name: unified-app-${{ matrix.platform }}
           path: staged/*
           if-no-files-found: error
 
   release:
-    needs: desktop
+    needs: unified-app
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -84,32 +90,27 @@ jobs:
           prefix="codex-router-${GITHUB_REF_NAME#v}/"
           git archive --format=tar.gz --prefix="$prefix" -o "dist/codex-router-${GITHUB_REF_NAME#v}.tar.gz" "$GITHUB_REF_NAME"
           git archive --format=zip --prefix="$prefix" -o "dist/codex-router-${GITHUB_REF_NAME#v}.zip" "$GITHUB_REF_NAME"
-      # Before the checksums are taken, so the companion binaries are covered by
-      # SHA256SUMS and the provenance attestation like every other asset.
-      - name: Collect the companion binaries
+      - name: Collect unified platform apps
         uses: actions/download-artifact@v8
         with:
-          pattern: tray-*
+          pattern: unified-app-*
           path: dist
           merge-multiple: true
       - name: Checksum every asset
         shell: bash
         run: |
           cd dist
-          sha256sum codex-router-* > SHA256SUMS
+          sha256sum codex-router-* model-router-* > SHA256SUMS
       - uses: actions/attest-build-provenance@v4
         with:
           subject-path: "dist/*"
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
-      # This repository is its own Homebrew tap, so the formula is committed back
-      # to main rather than pushed to a second repository. It points at the
-      # release asset built above, whose checksum this job computed itself:
-      # GitHub's generated archive/refs/tags tarballs are not stable enough to
-      # pin a sha256 against. Pushing to main cannot retrigger this workflow,
-      # which only runs on v* tags.
+        shell: bash
+        run: |
+          warning="The Windows and Linux desktop packages are unsigned tester artifacts. Install the matching Codex Router version before running them. macOS is excluded until its app can be Developer ID signed and notarized."
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --notes "$warning"
       - name: Update Homebrew formula
         run: |
           set -euo pipefail
@@ -117,8 +118,6 @@ jobs:
           tarball="codex-router-${version}.tar.gz"
           sha=$(awk -v file="$tarball" '$2 == file { print $1 }' dist/SHA256SUMS)
           test -n "$sha"
-          # The job checked out the tag, which leaves HEAD detached. Reset a
-          # local main onto the remote tip rather than assuming a branch exists.
           git fetch origin main
           git checkout -B main origin/main
           node packaging/homebrew/generate-formula.mjs \

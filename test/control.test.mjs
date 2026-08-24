@@ -105,7 +105,7 @@ test("codex probe reports enabled models", () => {
   assert.ok(deepseek.length > 0 && deepseek.every((m) => m.enabled));
 });
 
-test("desktop snapshots expose Ox Alpha Free instead of its opaque OpenCode id", () => {
+test("desktop snapshots expose the canonical Ox Alpha route instead of its opaque OpenCode id", () => {
   const stored = {
     ...userModelEntry({
       providerId: "opencode-free",
@@ -118,9 +118,9 @@ test("desktop snapshots expose Ox Alpha Free instead of its opaque OpenCode id",
     displayName: "x-preview-f-free (curated)",
   };
   const slice = probe("codex", ["opencode-free"], [], { userModels: [stored] });
-  const model = slice.models.find((entry) => entry.slug === "opencode-free/x-preview-f-free");
-  assert.equal(model.displayName, "Ox Alpha Free");
-  assert.equal(model.slug, "opencode-free/x-preview-f-free");
+  const model = slice.models.find((entry) => entry.slug === "opencode-free/ox-alpha");
+  assert.equal(model.displayName, "Ox Alpha (OpenCode Free)");
+  assert.equal(model.slug, "opencode-free/ox-alpha");
   assert.equal(model.provider, "opencode-free");
   assert.equal(model.enabled, true);
 });
@@ -983,7 +983,7 @@ test("the tray usage advertises rebuild alongside the supervised actions", () =>
           },
         ),
       (error) => {
-        assert.match(String(error.stderr), /Usage: control tray enable\|disable\|status\|restart\|rebuild/);
+        assert.match(String(error.stderr), /Usage: control tray enable\|disable\|status\|restart\|refresh\|rebuild/);
         return true;
       },
     );

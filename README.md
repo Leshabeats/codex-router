@@ -407,10 +407,14 @@ v2 models can run as subagents and which models appear in installed client
 pickers. Local settings cannot promote an unverified model. Fully quit and
 reopen Codex after changing either list; DeepSeek Harness hot-reloads its route,
 and the next Gemini CLI invocation reads the new environment.
+The Control Center keeps Go and pay-per-use Zen under this one credential card,
+but exposes each live catalog as a separate source. Loading a catalog only
+caches and previews its candidates; models are added to the picker only after
+the operator explicitly selects them.
 
 | Picker label | Model ID |
 | --- | --- |
-| Grok 4.5 (opencode Go) | `opencode-go/grok-4.5` |
+| Grok 4.5 (opencode Go) | `opencode-go-responses/grok-4.5` |
 | GLM-5.3 (opencode Go) | `opencode-go/glm-5.3` |
 | GLM-5.2 (opencode Go) | `opencode-go/glm-5.2` |
 | GLM-5.1 (opencode Go) | `opencode-go/glm-5.1` |
@@ -419,11 +423,13 @@ and the next Gemini CLI invocation reads the new environment.
 | Kimi K2.6 (opencode Go) | `opencode-go/kimi-k2.6` |
 | DeepSeek V4 Pro (opencode Go) | `opencode-go/deepseek-v4-pro` |
 | DeepSeek V4 Flash (opencode Go) | `opencode-go/deepseek-v4-flash` |
+| DeepSeek V4 Flash Vision Exp (opencode Go) | `opencode-go/deepseek-v4-flash-vision-exp` |
 | MiMo-V2.5 (opencode Go) | `opencode-go/mimo-v2.5` |
 | MiMo-V2.5-Pro (opencode Go) | `opencode-go/mimo-v2.5-pro` |
 | Hy3 (opencode Go) | `opencode-go/hy3` |
 | MiniMax M3 (opencode Go) | `opencode-go-messages/minimax-m3` |
 | MiniMax M2.7 (opencode Go) | `opencode-go-messages/minimax-m2.7` |
+| MiniMax M2.5 (opencode Go) | `opencode-go-messages/minimax-m2.5` |
 | Qwen3.8 Max (opencode Go) | `opencode-go-messages/qwen3.8-max` |
 | Qwen3.7 Max (opencode Go) | `opencode-go-messages/qwen3.7-max` |
 | Qwen3.7 Plus (opencode Go) | `opencode-go-messages/qwen3.7-plus` |
@@ -431,7 +437,8 @@ and the next Gemini CLI invocation reads the new environment.
 | GPT 5.6 Luna (opencode Go) | `opencode-go-responses/gpt-5.6-luna` |
 
 `opencode-go` carries the Chat Completions models, `opencode-go-messages` the
-Anthropic Messages models, `opencode-go-responses` the Responses models, and
+Anthropic Messages models, `opencode-go-responses` the Responses models
+(including Grok 4.5), and
 `opencode-zen` the pay-per-use Zen endpoint (no preselected models — curate
 the ones you want). All four are one selectable family: they share a single
 stored key, and enabling or disabling any of them toggles all of them
@@ -683,6 +690,12 @@ often for the repository to pin and live-verify individual entries:
 | GitHub Copilot | `github-copilot` | Account-specific GitHub Copilot endpoint |
 | Chutes | `chutes` | `https://llm.chutes.ai/v1` |
 | OrcaRouter | `orca` | `https://api.orcarouter.ai/v1` |
+| NanoGPT | `nano-gpt` | `https://nano-gpt.com/api/v1` |
+
+`devin-cli` is the OAuth exception to this API-key table. After `devin auth
+login`, the Control Center and `./bin/curate-models devin-cli` read the model
+configuration available to that account through the installed Devin CLI; the
+provider still ships no preselected models.
 
 Three more providers work the same way but arrive with the single checked-in
 [Ox Alpha](#ox-alpha) entry, so their picker is not empty once a key is stored:
@@ -1605,28 +1618,28 @@ a byte-count estimate rather than by spending a real turn upstream.
 above: after the one-time shared-plane authorization, while this machine has a
 usable Codex session, and withheld the moment either condition stops holding.
 
-## macOS tray control panel
+## macOS native tray host and Control Center
 
-On macOS, build and open the native menu-bar control panel with:
+On macOS, build and install the unified app with:
 
 ```sh
 ./bin/model-router-tray
 ```
 
-It shows Codex health, detailed usage for the active provider, a seven-day
-overview of every configured or previously used provider, and auto-applied
-provider controls in a native glass macOS interface. On first launch the app
-registers itself as a login item, so it reopens automatically after a reboot;
-the Settings tab's **Start at login** toggle or System Settings › Login Items
-turns that off, and the choice is never re-applied behind your back. A
-**Show tray** setting can additionally tie every tray surface to the Codex
-and ChatGPT desktop apps, appearing when they launch and hiding when they
-quit. In **With Codex** mode the endpoint starts with either app and stops only
-after both remain closed for 30 seconds and active requests have drained. A
-periodic process recheck backs up workspace notifications so a missed launch
-cannot strand Codex without its endpoint. **Always** keeps it continuously on.
-See the [macOS tray guide](docs/MACOS-TRAY.md) for behavior and
-rebuild notes.
+`Model Router.app` contains the Swift-native menu-bar host and the embedded
+Electron Control Center window. Opening the app shows the Control Center;
+closing that window leaves the native tray running so it can be reopened. A
+per-user launchd agent starts the host at login and restarts abnormal exits.
+There is one supervisor and one installed app in `~/Applications`.
+
+The native panel shows Codex health, detailed provider usage, and provider
+controls. Its **Show tray** setting can tie the native tray surfaces to Codex
+and ChatGPT, while a user-opened Control Center window remains available. In
+**With Codex** mode the endpoint starts with either app and stops only after
+both remain closed for 30 seconds and active requests have drained. A periodic
+process recheck backs up workspace notifications; **Always** keeps the endpoint
+continuously on. See the [macOS tray guide](docs/MACOS-TRAY.md) for behavior
+and rebuild notes.
 
 The app can also place a Dynamic-Island-style overlay at the top center of the
 active display. It follows the provider handling the latest request, reveals
@@ -1635,12 +1648,14 @@ under **Dynamic Island** in the tray Settings. The menu-bar panel is the
 primary surface for the all-provider overview and configuration, and stays
 available whether or not the overlay is on.
 
-## Windows and Linux tray control panel
+## Unified desktop app
 
-Windows and Linux use the shared Tauri tray companion in `apps/desktop`. It
-provides the same connected-provider filtering, normalized quota cards, daily
-token graph, secure provider setup, and animated activity status as the macOS
-surface.
+`Model Router.app` on macOS combines the Swift-native menu-bar host with an
+embedded Electron Control Center. launchd supervises the host, and opening the
+app or choosing **Control Center** shows the embedded window. Windows and Linux
+package that same Control Center as one Electron process with the native OS
+tray; closing its window leaves the tray running, and clicking the tray restores
+the window.
 
 ```sh
 # Linux
@@ -1651,22 +1666,23 @@ surface.
 # Windows PowerShell -- build, launch, and start at logon
 .\install.ps1 -CheckoutInstall -WithTray
 
-# or build and launch it by hand
-.\scripts\build-desktop-tray.ps1 -BinaryOnly
-Start-Process .\apps\desktop\src-tauri\target\release\codex-router-desktop.exe
+# or build and register it by hand
+.\scripts\build-electron-companion.ps1
+.\codex-router.ps1 tray install
 ```
 
-Or skip the build entirely: every release attaches
-`codex-router-tray-<version>-windows-x64.exe`, and every CI run publishes the
-same binary as an artifact. Windows already ships the WebView2 runtime it
-needs.
+Tagged releases provide unsigned Windows and Linux tester packages for this
+unified application family: `model-router-<version>-windows-x64.exe` and
+`model-router-<version>-linux-x64.tar.gz` (containing the executable AppImage).
+They are frontends, so install the matching Codex Router version first. The
+universal macOS bundle remains an ad-hoc-signed CI artifact until Developer ID
+signing and notarization are available; it is not attached to public releases.
 
 Windows 11 hides new tray icons in the `^` overflow next to the clock; drag the
 icon onto the taskbar to pin it.
 
-Windows and Linux on X11 receive the floating top-center activity pill. Linux
-on Wayland uses the tray panel without the pill because the compositor owns
-absolute window placement. See the
+On Linux desktops without a compatible tray host, a tray-only launch falls
+back to a visible Control Center window. See the
 [Windows and Linux tray guide](docs/DESKTOP-TRAY.md) for prerequisites,
 packaging, and the platform behavior matrix.
 

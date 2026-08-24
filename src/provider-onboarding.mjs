@@ -14,6 +14,10 @@ import { antigravityOAuthStatus } from "./antigravity-oauth-status.mjs";
 import { removeAntigravityToken } from "./antigravity-oauth-session.mjs";
 import { KIMI_CLI_NPM_PACKAGE } from "./kimi-oauth-onboarding.mjs";
 import { MODELS, PROVIDERS, providerNeedsNoKey } from "./model-registry.mjs";
+import {
+  forgetProviderCatalogFamilyCache,
+  providerCatalogSources,
+} from "./provider-catalogs.mjs";
 import { curationProviderIds } from "./opencode-curation.mjs";
 import { kimiOAuthStatus } from "./oauth-status.mjs";
 import {
@@ -97,6 +101,7 @@ export function providerOnboardingSnapshot() {
   const selectable = [...PROVIDERS.values()].filter((provider) => !provider.variantOf);
   return {
     providers: selectable.map((provider) => {
+      const catalogSources = providerCatalogSources(provider.id);
       if (provider.kind === "oauth") {
         // Antigravity has no vendor CLI to install or reuse: its sign-in is
         // this router's own browser OAuth flow.
@@ -115,6 +120,7 @@ export function providerOnboardingSnapshot() {
             cliInstalled: true,
             cliRunnable: true,
             action: configured ? "ready" : "login",
+            ...(catalogSources.length ? { catalogSources } : {}),
           };
         }
         const cliPath = oauthCliPath(provider.id);
@@ -137,6 +143,7 @@ export function providerOnboardingSnapshot() {
               : configured
                 ? "ready"
                 : "login",
+          ...(catalogSources.length ? { catalogSources } : {}),
         };
       }
       const configured = providerNeedsNoKey(provider)
@@ -149,6 +156,7 @@ export function providerOnboardingSnapshot() {
         ...(provider.credential?.label ? { credentialLabel: credentialLabel(provider) } : {}),
         configured,
         action: configured ? "ready" : "add-key",
+        ...(catalogSources.length ? { catalogSources } : {}),
         // Carried to the tray so the plan requirement is visible at the
         // moment someone decides to connect, not after Codex 403s.
         ...(provider.planNote ? { planNote: provider.planNote } : {}),
@@ -228,6 +236,9 @@ export async function loginOauthProvider(providerId) {
     if (!oauthConfigured(providerId)) {
       throw new Error("Sign-in finished without a usable Antigravity OAuth session. Please try again.");
     }
+    if (providerCatalogSources(providerId).length) {
+      await forgetProviderCatalogFamilyCache(providerId);
+    }
     return;
   }
   const executable = oauthCliPath(providerId);
@@ -261,6 +272,9 @@ export async function loginOauthProvider(providerId) {
   }
   if (!oauthConfigured(providerId)) {
     throw new Error("Sign-in finished without a usable OAuth session. Please try again.");
+  }
+  if (providerCatalogSources(providerId).length) {
+    await forgetProviderCatalogFamilyCache(providerId);
   }
 }
 

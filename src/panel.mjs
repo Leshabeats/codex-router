@@ -1,4 +1,4 @@
-// The companion in a browser. The router already serves apps/desktop/ui at
+// The companion in a browser. The router already serves apps/panel at
 // /panel behind the caller capability, so nothing here builds, downloads, or
 // installs anything -- the only thing missing was a way to reach it, because
 // the URL carries the capability and no surface ever produced one.

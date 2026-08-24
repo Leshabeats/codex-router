@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 prepare_only=false
 migrate_known=false
 adopt_native_catalog=false
@@ -321,10 +321,6 @@ node src/service.mjs install
 # desktop app resolves its source root from that field.
 node src/install-manifest.mjs record >/dev/null
 node src/wait-health.mjs
-# Adopt an already-built companion into launchd's care. Installs that never
-# added the tray skip this; the point is that anyone who has one ends up
-# supervised without having to know the agent exists.
-node src/tray-service.mjs install >/dev/null 2>&1 || true
 # A companion that is never rebuilt drifts behind the router on every update
 # and keeps running its old binary. Rebuild only when one is already installed
 # -- an update must not add a tray the user never asked for -- and only when
@@ -334,20 +330,51 @@ node src/tray-service.mjs install >/dev/null 2>&1 || true
 tray_plan=$(node src/install-plan.mjs tray-plan 2>/dev/null || echo absent)
 case "$tray_plan" in
   rebuild)
-    # Keep the build output instead of discarding it: a swallowed failure here
-    # is indistinguishable from success, and the companion would silently stay
-    # on its old binary exactly as it did before this step existed.
-    tray_log=$(mktemp)
-    if "$repo_dir/bin/model-router-tray" >"$tray_log" 2>&1; then
-      echo "Menu-bar companion rebuilt from the updated sources."
+    if [ "${CODEX_ROUTER_DEFER_TRAY_REBUILD:-0}" = 1 ]; then
+      # A desktop UI can be the parent of doctor/update. Rebuilding it here
+      # would ask that parent to quit while its mutation drain is waiting for
+      # this installer, a circular wait. The UI launches `control tray refresh`
+      # detached after this transaction returns.
+      echo "Desktop companion rebuild deferred until the calling app drains."
     else
-      echo "Menu-bar companion could not be rebuilt; the router is installed. Retry with ./bin/model-router-tray." >&2
-      sed 's/^/  /' "$tray_log" >&2
+      # Keep the build output instead of discarding it: a swallowed failure here
+      # is indistinguishable from success, and the companion would silently stay
+      # on its old binary exactly as it did before this step existed.
+      tray_log=$(mktemp)
+      if "$repo_dir/bin/model-router-tray" --preserve-window >"$tray_log" 2>&1; then
+        echo "Menu-bar companion rebuilt from the updated sources."
+      else
+        echo "Menu-bar companion could not be rebuilt; the router is installed. Retry with ./bin/model-router-tray." >&2
+        sed 's/^/  /' "$tray_log" >&2
+      fi
+      rm -f "$tray_log"
     fi
-    rm -f "$tray_log"
     ;;
   skip)
+    # A matching companion needs no process restart. Adopt it only when no
+    # supervisor registration exists at all; calling `install` unconditionally
+    # bootouts a loaded macOS host and also resurrects an app the user cleanly
+    # quit. The status document is tri-state/fail-closed, so an unreadable or
+    # unsupported supervisor is left untouched.
+    if tray_status=$(node src/tray-service.mjs status 2>/dev/null) \
+      && node -e '
+        try {
+          const status = JSON.parse(process.argv[1]);
+          process.exit(status?.installed === false && status?.supported !== false ? 0 : 1);
+        } catch {
+          process.exit(1);
+        }
+      ' "$tray_status"
+    then
+      node src/tray-service.mjs install >/dev/null 2>&1 || true
+    fi
     echo "Menu-bar companion already matches its sources; skipping the tray build."
+    ;;
+  disabled)
+    echo "Menu-bar companion supervision is explicitly disabled; leaving it disabled."
+    ;;
+  unavailable)
+    echo "Menu-bar companion supervision preference is unreadable; leaving the companion untouched." >&2
     ;;
 esac
 config_enabled=false

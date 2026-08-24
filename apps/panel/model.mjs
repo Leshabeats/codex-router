@@ -19,6 +19,16 @@ export function exactTokens(value) {
   return Math.max(0, Math.round(Number(value) || 0)).toLocaleString(getLocale());
 }
 
+export function modelMatchesQuery(model, query, providerName = "") {
+  const needle = String(query || "").trim().toLocaleLowerCase();
+  if (!needle) return true;
+  return [model?.displayName, model?.slug, model?.provider, providerName]
+    .filter(Boolean)
+    .join(" ")
+    .toLocaleLowerCase()
+    .includes(needle);
+}
+
 export function localDateKey(date) {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -318,10 +328,9 @@ export function serviceHealthRows(health) {
   return rows;
 }
 
-// The router's own browser panel serves this same UI but answers only the
-// reading half of the command table, and says so in platform_info. A surface
-// that advertises nothing -- the Tauri tray, the Electron window -- carries the
-// full table, so nothing is refused there and nothing about it changes.
+// The router's browser panel answers only the reading half of the command
+// table, and says so in platform_info. A future surface that advertises no
+// restriction still carries the full table, so nothing is refused there.
 export function readOnlyCapabilities(platform) {
   const capabilities = platform?.capabilities;
   return capabilities?.readOnly === true ? capabilities : null;
