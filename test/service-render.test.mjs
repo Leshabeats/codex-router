@@ -634,6 +634,50 @@ test(
 );
 
 test(
+  "Windows status does not claim an idle task from an external launcher",
+  { skip: process.platform === "win32" },
+  () => {
+    const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-win-status-external-"));
+    try {
+      const stubs = schedulerStubs(path.join(testRoot, "scheduler"), {
+        authoritativeState: "0|267009|1",
+      });
+      const result = runWindowsService(testRoot, "status", { PATH: stubs.path });
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(JSON.parse(result.stdout), {
+        installed: true,
+        loaded: false,
+        state: "ready",
+      });
+    } finally {
+      rmSync(testRoot, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "Windows status keeps Ready when launcher evidence is incomplete",
+  { skip: process.platform === "win32" },
+  () => {
+    const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-win-status-partial-"));
+    try {
+      const stubs = schedulerStubs(path.join(testRoot, "scheduler"), {
+        authoritativeState: "1|267009",
+      });
+      const result = runWindowsService(testRoot, "status", { PATH: stubs.path });
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(JSON.parse(result.stdout), {
+        installed: true,
+        loaded: false,
+        state: "ready",
+      });
+    } finally {
+      rmSync(testRoot, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
   "Windows status keeps Ready when authoritative launcher state is inconclusive",
   { skip: process.platform === "win32" },
   async (context) => {

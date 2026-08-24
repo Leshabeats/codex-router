@@ -417,10 +417,10 @@ async function taskRunning(state) {
     platform: effectivePlatform,
     timeoutMs: TASK_STATE_TIMEOUT_MS,
   });
-  return (
-    corroborated?.launcherAlive === true ||
-    (corroborated?.launcherAlive === undefined && corroborated?.instanceCount > 0)
-  );
+  // Neither signal is sufficient alone: COM instances can outlive their
+  // process, while the machine-wide launcher scan can also see a manually
+  // started router. Only their conjunction corroborates this task.
+  return corroborated?.instanceCount > 0 && corroborated?.launcherAlive === true;
 }
 
 if (
