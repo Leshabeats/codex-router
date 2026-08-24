@@ -205,3 +205,18 @@ test("start.mjs launches every child through the Windows-safe spawn helper", () 
   // answers a `.cmd` launcher with EINVAL and takes the service down.
   assert.doesNotMatch(runBody, /spawn\(command, args/);
 });
+
+// A failed startup must still hand its supervisor a real exit code (#370).
+// Terminating synchronously with process.exit() races libuv's Windows
+// async-handle close path and can abort with UV_HANDLE_CLOSING (0xC0000409),
+// discarding the code an EADDRINUSE forwarder was trying to report. The
+// launcher therefore records `process.exitCode` and lets Node drain its child
+// bookkeeping; this pins that shape so the drain cannot be refactored away.
+test("start.mjs ends by draining libuv, never by exiting mid-teardown", () => {
+  const source = readFileSync(path.join(root, "src", "start.mjs"), "utf8");
+  // Anchored to column zero: only a top-level exit call reintroduces the
+  // abort race this contract exists to prevent.
+  assert.doesNotMatch(source, /^process\.exit\(/m);
+  assert.doesNotMatch(source, /return process\.exit\(/);
+  assert.match(source, /process\.exitCode = exitCode;/);
+});

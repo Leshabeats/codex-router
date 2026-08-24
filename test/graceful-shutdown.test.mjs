@@ -168,7 +168,17 @@ test("a pending server close is bounded when no response remains tracked", async
   });
   process.emit(signal);
 
-  assert.equal(await exited, 0);
-  assert.equal(forced, 1);
-  process.removeAllListeners(signal);
+  // The shutdown backstop runs on timers it deliberately unrefs, because a
+  // real process always has the listening socket keeping the loop alive. This
+  // fake server holds nothing, so without a ref'd handle of our own the loop
+  // can empty -- and the runner cancel this still-pending test -- before the
+  // 25ms drain window ever fires. Hold the loop open until the exit lands.
+  const keepLoopAlive = setInterval(() => {}, 10);
+  try {
+    assert.equal(await exited, 0);
+    assert.equal(forced, 1);
+  } finally {
+    clearInterval(keepLoopAlive);
+    process.removeAllListeners(signal);
+  }
 });
