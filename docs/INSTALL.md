@@ -75,7 +75,7 @@ menu bar app, or the Windows/Linux tray). `--with-tray` installs it without
 asking, `--no-tray` never offers it, and automatic mode skips it. On Windows
 the same choice is `-WithTray` / `-NoTray`.
 
-On macOS one `Model Router.app` bundle is placed in `~/Applications`. It keeps
+On macOS one `Codex Router.app` bundle is placed in `~/Applications`. It keeps
 the Swift-native menu-bar tray and embeds the Electron Control Center, so the
 build needs the Swift toolchain plus the Node runtime the router already
 requires; a missing toolchain skips the step with guidance instead of failing

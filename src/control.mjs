@@ -404,6 +404,7 @@ async function emitProbeSet(provider, desired) {
 async function routerCatalogSnapshot() {
   const { canonicalProviderId, readProviderSelection, selectedConfiguredListedModels } =
     await import("./provider-selection.mjs");
+  const { CHECKED_IN_MODELS } = await import("./model-registry.mjs");
   const { modelPickerSnapshot } = await import("./model-picker-state.mjs");
   const { subagentSettingsSnapshot } = await import("./multi-agent-state.mjs");
   const { applySubagentProofs } = await import("./subagent-proofs.mjs");
@@ -425,13 +426,31 @@ async function routerCatalogSnapshot() {
     subagentCertification: subagentCertification(model),
     visible: picker.hasExplicitVisibility ? visible.has(model.slug) : !hidden.has(model.slug),
     isFree: model.isFree === true,
+    ...(Number.isFinite(model.contextWindow) ? { contextWindow: model.contextWindow } : {}),
+    ...(Array.isArray(model.inputModalities) ? { inputModalities: model.inputModalities } : {}),
     ...reasoningLevelField(model.reasoningLevels),
+  }));
+  const availableSlugs = new Set(models.map((model) => model.slug));
+  // Research inventory is intentionally separate from the routable catalog.
+  // A desktop surface may explain that a checked-in route exists before the
+  // provider is connected, but only `models` may reach a client publisher or
+  // picker mutation. Keep this projection metadata-only: endpoints and
+  // credential descriptors do not belong in the overview snapshot.
+  const knownModels = CHECKED_IN_MODELS.filter((model) => model.listed).map((model) => ({
+    slug: model.slug,
+    displayName: model.displayName,
+    provider: canonicalProviderId(model.provider),
+    available: availableSlugs.has(model.slug),
+    isFree: model.isFree === true,
+    ...(Number.isFinite(model.contextWindow) ? { contextWindow: model.contextWindow } : {}),
+    ...(Array.isArray(model.inputModalities) ? { inputModalities: model.inputModalities } : {}),
   }));
   return {
     source: "codex-router",
     configured: existsSync(PROVIDER_SELECTION_PATH),
     enabledProviders: readProviderSelection(),
     models,
+    knownModels,
     picker,
     subagents: settings,
   };

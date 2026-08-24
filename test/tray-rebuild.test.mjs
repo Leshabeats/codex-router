@@ -36,16 +36,20 @@ function macosTransactionFixture({
   live = true,
   previous = true,
   failed = false,
+  targetName,
 } = {}) {
   const parent = scratch();
   const transaction = path.join(parent, ".model-router-tray-transaction");
-  const bundle = path.join(parent, "Model Router.app");
+  const bundle = path.join(parent, "Codex Router.app");
   mkdirSync(transaction, { mode: 0o700 });
   chmodSync(transaction, 0o700);
   mkdirSync(path.join(transaction, "staged"), { mode: 0o700 });
   chmodSync(path.join(transaction, "staged"), 0o700);
   writePrivateLine(path.join(transaction, "phase"), phase);
   writePrivateLine(path.join(transaction, "had-previous"), hadPrevious ? "1" : "0");
+  if (targetName !== undefined) {
+    writePrivateLine(path.join(transaction, "target-name"), targetName);
+  }
   if (live) mkdirSync(bundle, { mode: 0o755 });
   if (previous) mkdirSync(path.join(transaction, "previous"), { mode: 0o755 });
   if (failed) mkdirSync(path.join(transaction, "failed"), { mode: 0o755 });
@@ -54,6 +58,11 @@ function macosTransactionFixture({
 
 function installCompleteMacosTrayBundle(bundle) {
   mkdirSync(path.join(bundle, "Contents", "MacOS"), { recursive: true });
+  writeFileSync(
+    path.join(bundle, "Contents", "Info.plist"),
+    "<plist><dict><key>CFBundleIdentifier</key><string>io.github.codex-router.tray</string></dict></plist>",
+    "utf8",
+  );
   const nativeBinary = path.join(bundle, "Contents", "MacOS", "ModelRouterTray");
   writeFileSync(nativeBinary, "binary", "utf8");
   chmodSync(nativeBinary, 0o755);
@@ -142,6 +151,18 @@ test("a companion left inside a checkout is migrated, not abandoned", () => {
     const legacy = path.join(fakeRoot, "dist", "Model Router.app", "Contents", "MacOS");
     mkdirSync(legacy, { recursive: true });
     writeFileSync(path.join(legacy, "ModelRouterTray"), "old binary", "utf8");
+    assert.equal(trayRebuildPlan({ root: fakeRoot, platform: "darwin", home }), "rebuild");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(fakeRoot, { recursive: true, force: true });
+  }
+});
+
+test("the old user-level app name is migration evidence, not an absent tray", () => {
+  const home = scratch();
+  const fakeRoot = scratch();
+  try {
+    mkdirSync(path.join(home, "Applications", "Model Router.app"), { recursive: true });
     assert.equal(trayRebuildPlan({ root: fakeRoot, platform: "darwin", home }), "rebuild");
   } finally {
     rmSync(home, { recursive: true, force: true });
@@ -397,8 +418,8 @@ test("one companion location: the Node and shell sides name the same directory",
   // script default, and trayBundleDir -- which is how a machine ends up with a
   // separate tray per checkout and launchd pointing at whichever built last.
   const script = readFileSync(path.join(root, "scripts", "build-macos-tray-app.sh"), "utf8");
-  assert.match(script, /bundle_dir=\$\{1:-"\$HOME\/Applications\/Model Router\.app"\}/);
-  assert.equal(trayBundleDir("darwin", "/Users/example"), "/Users/example/Applications/Model Router.app");
+  assert.match(script, /bundle_dir=\$\{1:-"\$HOME\/Applications\/Codex Router\.app"\}/);
+  assert.equal(trayBundleDir("darwin", "/Users/example"), "/Users/example/Applications/Codex Router.app");
   assert.doesNotMatch(script, /\$repo_dir\/dist\/Model Router\.app"\}/);
 });
 
@@ -456,6 +477,16 @@ test("the macOS swap recovery planner stays deterministic without filesystem sem
     }, { liveExists: true }),
     "keep-live-intact",
   );
+  assert.equal(
+    planMacosTrayRecovery({
+      phase: "staged",
+      hadPrevious: true,
+      previous: false,
+      failed: false,
+    }, { liveExists: false, legacyLiveExists: true }),
+    "keep-live-intact",
+    "an unmarked pre-rename journal keeps its legacy live bundle before the swap",
+  );
   for (const phase of ["restoring-previous", "previous-restored"]) {
     assert.equal(
       planMacosTrayRecovery({
@@ -495,6 +526,26 @@ test("the macOS swap recovery planner stays deterministic without filesystem sem
     }, { liveExists: false }),
     /previous bundle backup is missing/,
   );
+});
+
+test("macOS transaction target markers are fixed-enum and old journals remain identifiable", {
+  skip: process.platform === "win32",
+}, async () => {
+  const legacy = macosTransactionFixture({ targetName: undefined });
+  const current = macosTransactionFixture({ targetName: "codex-router" });
+  const unknown = macosTransactionFixture({ targetName: "guess-a-target" });
+  try {
+    assert.equal((await inspectMacosTrayTransaction(legacy.transaction)).targetName, null);
+    assert.equal((await inspectMacosTrayTransaction(current.transaction)).targetName, "codex-router");
+    await assert.rejects(
+      inspectMacosTrayTransaction(unknown.transaction),
+      /target-name contains an unknown value/,
+    );
+  } finally {
+    for (const fixture of [legacy, current, unknown]) {
+      rmSync(fixture.parent, { recursive: true, force: true });
+    }
+  }
 });
 
 test("macOS swap journals produce a deterministic crash-recovery plan", {
@@ -639,7 +690,7 @@ test("macOS swap journals reject symlinks, unsafe modes, unknown entries, and im
     for (const fixture of cases) {
       await assert.rejects(
         inspectMacosTrayTransaction(fixture.transaction),
-        /refusing ambiguous macOS Model Router transaction/,
+        /refusing ambiguous macOS Codex Router transaction/,
       );
     }
 
@@ -692,7 +743,8 @@ test("tray updates journal every macOS swap before replacing the live app", () =
   const stop = mac.indexOf('tray-service.mjs" stop', drained);
   const previousMoving = mac.indexOf("write_macos_phase previous-moving", stop);
   const previousMove = mac.indexOf('mv "$bundle_dir" "$previous_bundle"', previousMoving);
-  const replacementMoving = mac.indexOf("write_macos_phase replacement-moving", previousMove);
+  const legacyPreviousMove = mac.indexOf('mv "$legacy_user_bundle" "$previous_bundle"', previousMove);
+  const replacementMoving = mac.indexOf("write_macos_phase replacement-moving", legacyPreviousMove);
   const replacementMove = mac.indexOf('mv "$staged_bundle" "$bundle_dir"', replacementMoving);
   const serviceInstall = mac.indexOf('tray-service.mjs" install', replacementMove);
   const outerReady = mac.indexOf("write_macos_phase replacement-ready", serviceInstall);
@@ -703,21 +755,25 @@ test("tray updates journal every macOS swap before replacing the live app", () =
   assert.match(mac, /transaction_dir="\$bundle_parent\/\.model-router-tray-transaction"/);
   assert.doesNotMatch(mac, /mktemp -d "\$bundle_parent\/\.model-router-tray/);
   assert.ok(recover >= 0 && recover < createJournal, "a stale journal is recovered before a new one is created");
-  assert.match(mac, /macos-tray-transaction\.mjs"[\s\S]*plan "\$transaction_dir" "\$bundle_dir"/);
+  assert.match(mac, /recovery_bundle_dir=\$bundle_dir[\s\S]*plan "\$transaction_dir" "\$recovery_bundle_dir"/);
+  assert.match(mac, /if \[ ! -e "\$target_name_file" \]; then[\s\S]*recovery_bundle_dir=\$legacy_user_bundle[\s\S]*recovery_service_action=restart/);
   assert.match(mac, /mkdir -m 700 "\$transaction_dir"[\s\S]*chmod 600 "\$had_previous_file"/);
+  assert.match(mac, /printf '%s\\n' codex-router >"\$target_name_file"[\s\S]*chmod 600 "\$target_name_file"/);
+  assert.match(mac, /both Codex Router\.app and the legacy Model Router\.app exist; refusing an ambiguous replacement/);
   assert.match(mac, /next_phase_file="\$transaction_dir\/phase\.next"[\s\S]*write_macos_phase\(\)[\s\S]*mv "\$next_phase_file" "\$phase_file"/);
   assert.ok(
     build > createJournal && draining > build && terminate > draining && drained > terminate
       && stop > drained && previousMoving > stop && previousMove > previousMoving
-      && replacementMoving > previousMove && replacementMove > replacementMoving
+      && legacyPreviousMove > previousMove && replacementMoving > legacyPreviousMove
+      && replacementMove > replacementMoving
       && serviceInstall > replacementMove && outerReady > serviceInstall
       && embeddedReady > outerReady && commit > embeddedReady && removeJournal > commit,
     "the durable phases must bracket every destructive and readiness boundary",
   );
-  assert.match(mac, /recover_macos_transaction\(\)[\s\S]*replace-live-with-previous\)[\s\S]*stop_uncommitted_tray[\s\S]*mv "\$bundle_dir" "\$failed_bundle"[\s\S]*mv "\$previous_bundle" "\$bundle_dir"/);
+  assert.match(mac, /recover_macos_transaction\(\)[\s\S]*replace-live-with-previous\)[\s\S]*stop_uncommitted_tray[\s\S]*mv "\$recovery_bundle_dir" "\$failed_bundle"[\s\S]*mv "\$previous_bundle" "\$recovery_bundle_dir"/);
   assert.match(
     mac,
-    /restore-previous\)[\s\S]*write_macos_phase restoring-previous[\s\S]*mv "\$previous_bundle" "\$bundle_dir"[\s\S]*write_macos_phase previous-restored[\s\S]*restore_supervision=1/,
+    /restore-previous\)[\s\S]*write_macos_phase restoring-previous[\s\S]*mv "\$previous_bundle" "\$recovery_bundle_dir"[\s\S]*write_macos_phase previous-restored[\s\S]*restore_supervision=1/,
     "restoration must remain retryable after the previous bundle becomes live",
   );
   assert.match(mac, /cleanup_macos\(\)[\s\S]*recover_macos_transaction/);
@@ -771,15 +827,15 @@ test("a broken embedded renderer remains journaled and rolls back the exact live
   const commit = mac.indexOf("write_macos_phase committed", failure);
   const recovery = mac.indexOf("replace-live-with-previous)");
   const recoveryStop = mac.indexOf("if ! stop_uncommitted_tray", recovery);
-  const failedMove = mac.indexOf('mv "$bundle_dir" "$failed_bundle"', recoveryStop);
-  const restoreMove = mac.indexOf('mv "$previous_bundle" "$bundle_dir"', failedMove);
+  const failedMove = mac.indexOf('mv "$recovery_bundle_dir" "$failed_bundle"', recoveryStop);
+  const restoreMove = mac.indexOf('mv "$previous_bundle" "$recovery_bundle_dir"', failedMove);
 
   assert.ok(probe >= 0 && failure > probe && embeddedReady > failure && commit > embeddedReady);
   assert.match(mac.slice(failure, embeddedReady), /Control Center renderer did not become ready[\s\S]*exit 1/);
   assert.ok(recovery >= 0 && recoveryStop > recovery && failedMove > recoveryStop && restoreMove > failedMove);
   assert.match(
     mac.slice(mac.indexOf("stop_uncommitted_tray()"), mac.indexOf("schedule_macos_supervision_restore()")),
-    /run_embedded_control_center "\$embedded_binary" --quit-for-update[\s\S]*tray-service\.mjs" stop[\s\S]*router_app_count/,
+    /recovery_embedded_binary="\$recovery_bundle[\s\S]*run_embedded_control_center "\$recovery_embedded_binary" --quit-for-update[\s\S]*tray-service\.mjs" stop[\s\S]*router_app_count/,
   );
   assert.match(
     mac,

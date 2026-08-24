@@ -161,7 +161,9 @@ export function trayRefreshRequired({
   const registered = registeredPath ?? registeredTrayBundlePath();
   const candidates = [
     path.join(sourceRoot, "dist", "Model Router.app"),
+    path.join(sourceRoot, "dist", "Codex Router.app"),
     path.join(home, "Applications", "Model Router.app"),
+    path.join(home, "Applications", "Codex Router.app"),
   ];
   return (
     candidates.some((candidate) => existsSync(candidate)) ||

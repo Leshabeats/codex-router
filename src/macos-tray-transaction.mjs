@@ -40,13 +40,14 @@ const ALLOWED_ENTRIES = new Set([
   "phase",
   "phase.next",
   "had-previous",
+  "target-name",
   "staged",
   "previous",
   "failed",
 ]);
 
 function refusal(message) {
-  return new Error(`refusing ambiguous macOS Model Router transaction: ${message}`);
+  return new Error(`refusing ambiguous macOS Codex Router transaction: ${message}`);
 }
 
 async function statOrNull(candidate) {
@@ -120,7 +121,7 @@ export async function inspectMacosTrayTransaction(
   }
 
   const entries = Object.fromEntries(await Promise.all(
-    ["staged", "previous", "failed", "phase", "phase.next", "had-previous"].map(
+    ["staged", "previous", "failed", "phase", "phase.next", "had-previous", "target-name"].map(
       async (name) => [name, await statOrNull(path.join(transactionDirectory, name))],
     ),
   ));
@@ -143,6 +144,14 @@ export async function inspectMacosTrayTransaction(
       new Set(["0", "1"]),
     )
     : null;
+  const targetName = entries["target-name"]
+    ? await readJournalValue(
+      path.join(transactionDirectory, "target-name"),
+      uid,
+      "target-name",
+      new Set(["codex-router"]),
+    )
+    : null;
   if (effectivePhase && hadPreviousValue === null) {
     throw refusal("a phase exists without the had-previous marker");
   }
@@ -154,6 +163,7 @@ export async function inspectMacosTrayTransaction(
     previous: Boolean(entries.previous),
     failed: Boolean(entries.failed),
     nextAction: nextPhase === null ? "none" : phase === null ? "promote" : "discard",
+    targetName,
   };
 }
 
@@ -191,6 +201,7 @@ export async function inspectMacosTrayCommittedBundle(
     requireDirectory(stats, uid, `live bundle ${relative}`);
   }
   for (const [relative, executable] of [
+    ["Contents/Info.plist", false],
     ["Contents/MacOS/ModelRouterTray", true],
     ["Contents/Resources/Control Center.app/Contents/MacOS/Codex Router", true],
     ["Contents/Resources/Control Center.app/Contents/Resources/app.asar", false],
@@ -202,7 +213,10 @@ export async function inspectMacosTrayCommittedBundle(
   return true;
 }
 
-export function planMacosTrayRecovery(transaction, { liveExists, liveComplete = false }) {
+export function planMacosTrayRecovery(
+  transaction,
+  { liveExists, liveComplete = false, legacyLiveExists = false },
+) {
   if (!transaction) return "none";
   const { phase, hadPrevious, previous, failed } = transaction;
   if (!phase) {
@@ -240,7 +254,9 @@ export function planMacosTrayRecovery(transaction, { liveExists, liveComplete = 
       return "finish-restored";
     }
     if (failed && liveExists) return "finish-restored";
-    if (failed || !liveExists) throw refusal("the previous bundle backup is missing");
+    if (failed || (!liveExists && !legacyLiveExists)) {
+      throw refusal("the previous bundle backup is missing");
+    }
     if (phase === "staging" || phase === "staged") return "keep-live-intact";
     if (PRE_SWAP_PHASES.has(phase)) return "keep-live";
     throw refusal(`the previous bundle backup is missing in phase ${phase}`);
@@ -259,8 +275,21 @@ export function planMacosTrayRecovery(transaction, { liveExists, liveComplete = 
 }
 
 async function main() {
-  if (process.argv[2] !== "plan" || process.argv.length !== 5) {
-    process.stderr.write("Usage: node src/macos-tray-transaction.mjs plan TRANSACTION_DIR LIVE_BUNDLE\n");
+  if (process.argv[2] === "validate-bundle" && process.argv.length === 4) {
+    if (!await inspectMacosTrayCommittedBundle(process.argv[3])) {
+      throw refusal("the candidate bundle is incomplete");
+    }
+    process.stdout.write("complete\n");
+    return;
+  }
+  if (
+    process.argv[2] !== "plan"
+    || ![5, 6].includes(process.argv.length)
+  ) {
+    process.stderr.write(
+      "Usage: node src/macos-tray-transaction.mjs plan TRANSACTION_DIR LIVE_BUNDLE [LEGACY_LIVE_BUNDLE]\n"
+      + "   or: node src/macos-tray-transaction.mjs validate-bundle BUNDLE\n",
+    );
     process.exitCode = 2;
     return;
   }
@@ -273,7 +302,14 @@ async function main() {
   const liveComplete = transaction.phase === "committed"
     ? await inspectMacosTrayCommittedBundle(process.argv[4])
     : false;
-  const action = planMacosTrayRecovery(transaction, { liveExists, liveComplete });
+  const legacyLiveExists = process.argv[5]
+    ? await inspectMacosTrayCommittedBundle(process.argv[5])
+    : false;
+  const action = planMacosTrayRecovery(transaction, {
+    liveExists,
+    liveComplete,
+    legacyLiveExists,
+  });
   process.stdout.write(`${action} ${transaction.nextAction}\n`);
 }
 

@@ -164,7 +164,14 @@ export const TRAY_LAUNCH_AGENT_PATH = path.join(
 // resolves by name and can be found and quit like any other. This constant and
 // scripts/build-macos-tray-app.sh's default must name the same directory.
 export const TRAY_APP_PATH =
-  trayBundleDir("darwin", os.homedir()) ?? path.join(os.homedir(), "Applications", "Model Router.app");
+  trayBundleDir("darwin", os.homedir()) ?? path.join(os.homedir(), "Applications", "Codex Router.app");
+// The previous unified native host used this visible name. It is migration
+// evidence only: launch, status, and new packages must resolve TRAY_APP_PATH.
+export const LEGACY_USER_TRAY_APP_PATH = path.join(
+  os.homedir(),
+  "Applications",
+  "Model Router.app",
+);
 export const LEGACY_TRAY_APP_PATH = path.join(SOURCE_ROOT, "dist", "Model Router.app");
 export const TRAY_APP_BINARY = path.join(TRAY_APP_PATH, "Contents", "MacOS", "ModelRouterTray");
 // Task Scheduler names the tray separately from the router's own task so

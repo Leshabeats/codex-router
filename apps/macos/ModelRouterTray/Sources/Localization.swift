@@ -163,7 +163,7 @@ enum RouterChineseText {
     "Status": "状态",
     "Settings": "设置",
     "Control Center": "控制中心",
-    "Model Router": "模型路由",
+    "Codex Router": "Codex Router",
     "Updated": "已更新",
     "None": "无",
     "none": "无",

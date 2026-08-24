@@ -27,16 +27,41 @@ const bridgeSource = String.raw`
     contextWindow: 128000,
     inputModalities: ["text"],
   };
+  const oxProviders = [
+    { id: "commandcode", displayName: "Command Code", kind: "api", configured: false },
+    { id: "nousresearch", displayName: "Nous Research", kind: "api", configured: false },
+    { id: "opencode-free", displayName: "OpenCode Free", kind: "anonymous", configured: true },
+    { id: "opencode-go", displayName: "opencode Go/Zen", kind: "api", configured: true },
+    { id: "openrouter", displayName: "OpenRouter", kind: "api", configured: false },
+    { id: "venice", displayName: "Venice", kind: "api", configured: false },
+  ];
+  const knownOxModels = oxProviders.map((provider) => ({
+    slug: provider.id + "/ox-alpha",
+    displayName: "Ox Alpha (" + provider.displayName + ")",
+    provider: provider.id,
+    available: provider.id === "opencode-free" || provider.id === "opencode-go",
+    contextWindow: 1048576,
+    inputModalities: ["text", "image"],
+    isFree: true,
+  }));
+  const activeOxModels = knownOxModels.filter((model) => model.available).map((model) => ({
+    ...model,
+    enabled: true,
+    visible: false,
+    multiAgentVersion: "v1",
+    subagentCertification: "unknown",
+  }));
   const target = {
     target: "codex",
     configured: true,
     active: true,
-    enabledProviders: ["deepseek"],
+    enabledProviders: ["deepseek", "opencode-free", "opencode-go"],
     providers: [
       { id: "deepseek", displayName: "DeepSeek", kind: "api" },
       { id: "kilo-free", displayName: "Kilo Free", kind: "anonymous" },
+      ...oxProviders.map(({ id, displayName, kind }) => ({ id, displayName, kind })),
     ],
-    models: [selectedModel],
+    models: [selectedModel, ...activeOxModels],
     modelSettings: {
       subagents,
       picker: { hidden: [], visible: [selectedModel.slug], hasExplicitVisibility: true },
@@ -49,8 +74,9 @@ const bridgeSource = String.raw`
     catalog: {
       source: "codex-router",
       configured: true,
-      enabledProviders: ["deepseek"],
-      models: [selectedModel],
+      enabledProviders: ["deepseek", "opencode-free", "opencode-go"],
+      models: [selectedModel, ...activeOxModels],
+      knownModels: knownOxModels,
       picker: { hidden: [], visible: [selectedModel.slug], hasExplicitVisibility: true },
       subagents,
     },
@@ -76,6 +102,11 @@ const bridgeSource = String.raw`
         credentialLabel: "No API key",
         catalogSources: [{ id: "kilo-free", displayName: "Kilo Free", kind: "models-endpoint" }],
       },
+      ...oxProviders.map((provider) => ({
+        ...provider,
+        action: provider.configured ? "ready" : "provider-key",
+        credentialLabel: provider.kind === "anonymous" ? "No API key" : provider.displayName + " API key",
+      })),
     ],
   };
 
@@ -221,7 +252,33 @@ test("the production renderer exposes model discovery and picker actions", { tim
     await page.goto(url, { waitUntil: "domcontentloaded" });
     await page.getByRole("navigation", { name: "Control center sections" }).waitFor();
     await page.getByRole("button", { name: "Models", exact: true }).click();
-    await page.locator('input[placeholder="Search all providers"]').waitFor();
+    const providerSearch = page.locator('input[placeholder="Search providers or known models"]');
+    await providerSearch.waitFor();
+
+    await providerSearch.fill("Ox Alpha");
+    const oxProviderRows = page.locator(".pm-provider-row");
+    await oxProviderRows.filter({ hasText: "Command Code" }).waitFor();
+    assert.equal(await oxProviderRows.count(), 6);
+    assert.deepEqual(
+      (await oxProviderRows.locator(".pm-provider-title-line > strong").allTextContents()).sort(),
+      ["Command Code", "Nous Research", "OpenCode Free", "OpenRouter", "Venice", "opencode Go/Zen"].sort(),
+    );
+    assert.equal(await oxProviderRows.filter({ hasText: "not connected" }).count(), 4);
+    assert.equal(await oxProviderRows.filter({ hasText: "1 known match" }).count(), 6);
+
+    const knownModelSearch = page.locator('input[placeholder="Search active, known, or loaded catalog models"]');
+    await knownModelSearch.fill("Ox Alpha");
+    const oxFamily = page.locator(".pm-family-row").filter({ hasText: "Ox Alpha" });
+    await oxFamily.waitFor();
+    assert.match(await oxFamily.innerText(), /6 providers/);
+    assert.match(await oxFamily.innerText(), /6 routes/i);
+    await oxFamily.locator(".pm-family-summary").click();
+    assert.equal(await oxFamily.locator(".pm-route-row").count(), 6);
+    assert.equal(await oxFamily.locator('.pm-route-row[data-availability="known"]').count(), 4);
+    assert.equal(await oxFamily.getByText("Enable or connect provider", { exact: true }).count(), 4);
+
+    await providerSearch.fill("");
+    await knownModelSearch.fill("");
 
     const anonymousRow = page.locator(".pm-provider-row").filter({ hasText: "Kilo Free" });
     await anonymousRow.waitFor();
@@ -236,7 +293,7 @@ test("the production renderer exposes model discovery and picker actions", { tim
       .map((call) => call.args[0]));
     assert.deepEqual(bulkCatalogProviders, ["deepseek"]);
 
-    const search = page.locator('input[placeholder="Search selected models or loaded catalogs"]');
+    const search = page.locator('input[placeholder="Search active, known, or loaded catalog models"]');
     await search.fill("catalog-addable");
     const addableRow = page.locator(".pm-catalog-search-row").filter({ hasText: "catalog-addable" });
     await addableRow.waitFor();

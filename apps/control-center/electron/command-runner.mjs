@@ -285,6 +285,7 @@ function companionSourceRoots() {
   }
   if (process.platform === "darwin") {
     candidates.push(
+      path.join(os.homedir(), "Applications", "Codex Router.app", "Contents", "Resources", "router-root"),
       path.join(os.homedir(), "Applications", "Model Router.app", "Contents", "Resources", "router-root"),
     );
   }

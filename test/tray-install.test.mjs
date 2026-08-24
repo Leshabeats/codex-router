@@ -64,7 +64,7 @@ test("trayDecision skips silently in automatic mode", () => {
 test("trayBundleDir places the macOS bundle in the user's Applications folder", () => {
   assert.equal(
     trayBundleDir("darwin", "/Users/example"),
-    "/Users/example/Applications/Model Router.app",
+    "/Users/example/Applications/Codex Router.app",
   );
 });
 

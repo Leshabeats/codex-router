@@ -33,7 +33,7 @@ function xml(value) {
 // exits cleanly — an unconditional KeepAlive would make Quit impossible.
 //
 // `--supervised` marks the launch as launchd's rather than the user's. Opening
-// Model Router by hand reveals the menu bar item and starts the router on
+// Codex Router by hand reveals the menu bar item and starts the router on
 // purpose; a login start must not, or follow mode would be overridden every
 // time the user logs in. AppDelegate.launchedByUser reads this argument.
 function plist() {

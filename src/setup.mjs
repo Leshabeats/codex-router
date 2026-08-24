@@ -389,7 +389,7 @@ function installTray() {
       // running embedded Control Center, swaps atomically, stamps the build,
       // and hands the native host to launchd.
       run(path.join(SOURCE_ROOT, "bin", "model-router-tray"), []);
-      process.stdout.write("Model Router installed with its native menu-bar tray and Control Center.\n");
+      process.stdout.write("Codex Router installed with its native menu-bar tray and Control Center.\n");
     } else if (process.platform === "win32") {
       // Windows had no path through here at all: the tray was built by hand or
       // not at all, and nothing brought it back after a reboot. `tray install`

@@ -1036,6 +1036,17 @@
   background: var(--surface-0);
 }
 
+.pm-route-row-unavailable {
+  background: color-mix(in srgb, var(--surface-1) 70%, var(--surface-0));
+}
+
+.pm-model-unavailable-copy {
+  max-width: 260px;
+  color: var(--ink-faint);
+  font-size: 8.5px;
+  line-height: 1.45;
+}
+
 .providers-models-page :is(input, select):focus-visible,
 .providers-models-page .segmented-control button:focus-visible,
 .pm-credential-form input:focus-visible {

@@ -32,7 +32,7 @@ enum RouterArabicText {
     "Status": "الحالة",
     "Settings": "الإعدادات",
     "Control Center": "مركز التحكم",
-    "Model Router": "موجّه النماذج",
+    "Codex Router": "Codex Router",
     "Updated": "محدَّث",
     "None": "لا شيء",
     "none": "لا شيء",

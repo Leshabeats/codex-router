@@ -31,7 +31,7 @@ credentials, or service logic in the renderer.
   guidance. Updates and repairs remain interactive-terminal workflows.
 
 The Control Center and tray ship as one visible application on every platform.
-On macOS, `Model Router.app` keeps the existing Swift-native menu-bar item,
+On macOS, `Codex Router.app` keeps the existing Swift-native menu-bar item,
 notch overlay, and desktop widget, and embeds this Electron window inside the
 same signed bundle. On Windows and Linux, this Electron process owns the
 operating system tray directly. Closing the window leaves a proven tray owner
@@ -107,7 +107,7 @@ npm run electron:build
 `electron:build` can create a standalone developer artifact for the current
 host. Shipped Windows and Linux artifacts are NSIS/AppImage packages. Shipped
 macOS builds use `scripts/build-macos-tray-app.sh`, which embeds the packaged
-Electron child inside the one outer `Model Router.app`; CI and releases do not
+Electron child inside the one outer `Codex Router.app`; CI and releases do not
 publish the child separately. Beta artifacts are unsigned unless signing
 credentials are configured. Public macOS distribution additionally requires
 Developer ID signing/notarization, and Windows requires Authenticode.
