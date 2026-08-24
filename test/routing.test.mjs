@@ -1291,6 +1291,48 @@ test("router sends standalone web search only to the native OpenAI backend", asy
   }
 });
 
+test("native web search fails closed without a ChatGPT session", async () => {
+  let nativeRequests = 0;
+  const native = await mockServer(async (request, response) => {
+    nativeRequests += 1;
+    await bodyJson(request);
+    json(response, 200, { output: "unexpected native response" });
+  });
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_NATIVE_BASE_URL: `http://127.0.0.1:${native.port}/backend-api/codex`,
+    CODEX_ROUTER_NATIVE_SESSION_FALLBACK: "0",
+    CODEX_ROUTER_QUIET: "1",
+  });
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const response = await fetch(`${routerBase(routerPort)}/alpha/search?source=codex`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${CALLER_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "deepseek/deepseek-v4-flash",
+        commands: { search_query: [{ q: "OpenAI news" }] },
+      }),
+    });
+    assert.equal(response.status, 401);
+    assert.deepEqual(await response.json(), {
+      error: {
+        type: "native_session_required",
+        message: "This native OpenAI route requires an active ChatGPT/Codex session.",
+      },
+    });
+    assert.equal(nativeRequests, 0);
+  } finally {
+    await stopChild(router);
+    await closeServer(native.server);
+  }
+});
+
 test("router synthesizes routed compaction and safely replays it to native models", async () => {
   const gatewayRequests = [];
   const finalContract = JSON.stringify({
