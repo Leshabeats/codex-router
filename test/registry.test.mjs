@@ -108,6 +108,7 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "ollama-cloud/deepseek-v4-pro",
       "ollama-cloud/glm-5.2",
       "ollama-cloud/kimi-k2.7-code",
+      "ollama-cloud/kimi-k3",
       "ollama-cloud/minimax-m3",
       "opencode-go/deepseek-v4-flash-vision-exp",
       "opencode-go/deepseek-v4-flash",
@@ -473,6 +474,19 @@ test("provider registry exposes configured API and OAuth model families", () => 
     assert.equal(k3.defaultEffort, "max", slug);
     assert.equal(k3.requestProfile, "kimi-k3", slug);
   }
+  // Kimi K3 on Ollama Cloud uses the :cloud upstream tag and the shared
+  // ollama-cloud request profile; the ladder matches the other K3 providers.
+  const ollamaK3 = MODEL_BY_SLUG.get("ollama-cloud/kimi-k3");
+  assert.equal(ollamaK3.upstreamModel, "kimi-k3:cloud");
+  assert.equal(ollamaK3.requestProfile, "ollama-cloud");
+  assert.deepEqual(
+    ollamaK3.reasoningLevels.map((level) => level.effort),
+    ["low", "high", "max"],
+  );
+  assert.equal(ollamaK3.defaultEffort, "max");
+  assert.equal(ollamaK3.contextWindow, 1_048_576);
+  assert.equal(ollamaK3.autoCompact, 940_000);
+  assert.deepEqual(ollamaK3.inputModalities, ["text", "image"]);
   // Hosted search is an xAI-backend behavior. Standalone search is limited to
   // provider/model pairs verified against Codex's client-side replay path.
   for (const slug of ["grok-oauth/grok-4.5", "grok-oauth/grok-4.6"]) {
