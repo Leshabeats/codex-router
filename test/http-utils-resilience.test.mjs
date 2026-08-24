@@ -34,3 +34,21 @@ test("upstream response bytes are bounded while streaming and canceled on overfl
   });
   assert.equal(canceled, true);
 });
+
+test("a canceled upstream body read releases the reader instead of waiting forever", async () => {
+  let canceled = false;
+  const body = new ReadableStream({
+    pull() {},
+    cancel() {
+      canceled = true;
+    },
+  });
+  const controller = new AbortController();
+  const reading = readResponseBody(new Response(body), { signal: controller.signal });
+  controller.abort();
+  await assert.rejects(reading, (error) => {
+    assert.equal(error.name, "AbortError");
+    return true;
+  });
+  assert.equal(canceled, true);
+});

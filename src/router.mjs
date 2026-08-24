@@ -342,6 +342,16 @@ function retentionPayload() {
 }
 
 function beginRequestActivity({ request, response, controller } = {}) {
+  pruneStaleActivity();
+  if (activeRequests.size >= MAX_ACTIVE_REQUESTS) {
+    request?.resume?.();
+    const error = new Error(
+      `The router is at its active request limit (${MAX_ACTIVE_REQUESTS}).`,
+    );
+    error.status = 429;
+    error.code = "ERR_ROUTER_ACTIVE_REQUEST_LIMIT";
+    throw error;
+  }
   const requestId = ++requestSequence;
   const startedAt = Date.now();
   let finished = false;
@@ -362,9 +372,9 @@ function beginRequestActivity({ request, response, controller } = {}) {
     error.status = 504;
     controller?.abort(error);
     request?.resume?.();
-    // Release admission only after aborting the operation that was retaining
-    // the request. The handler's catch path settles the response and usage.
-    finish(504);
+    // Keep the activity entry until the handler's catch/finally path has
+    // settled the aborted operation and usage. Removing it here would make
+    // health report an idle router while the request still retains buffers.
   };
   staleTimer = setTimeout(abortStale, STALE_ACTIVITY_MS + 1);
   staleTimer.unref?.();
@@ -755,10 +765,15 @@ function responseWithBody(upstream, body) {
   });
 }
 
-async function boundedResponseText(upstream, maxBytes = MAX_BUFFERED_RESPONSE_BYTES) {
+async function boundedResponseText(
+  upstream,
+  maxBytes = MAX_BUFFERED_RESPONSE_BYTES,
+  signal,
+) {
   try {
-    return (await readResponseBody(upstream, { maxBytes })).toString("utf8");
-  } catch {
+    return (await readResponseBody(upstream, { maxBytes, signal })).toString("utf8");
+  } catch (error) {
+    if (signal?.aborted) throw error;
     return "";
   }
 }
@@ -1260,7 +1275,10 @@ async function relayEncryptedAgentPayloadOnce(request, item, encrypted, signal) 
     body: JSON.stringify(body),
     signal,
   });
-  const bytes = await readResponseBody(upstream, { maxBytes: 4 * 1024 * 1024 });
+  const bytes = await readResponseBody(upstream, {
+    maxBytes: 4 * 1024 * 1024,
+    signal,
+  });
   if (!upstream.ok) {
     const error = new Error(
       `Native collaboration payload relay failed with HTTP ${upstream.status}.`,
@@ -2037,6 +2055,7 @@ async function summarize(request, payload, route, signal) {
     try {
       bytes = await readResponseBody(sent.upstream, {
         maxBytes: 32 * 1024 * 1024,
+        signal,
       });
     } catch (error) {
       if (error?.code === "ERR_UPSTREAM_RESPONSE_TOO_LARGE") {
@@ -2723,7 +2742,7 @@ async function attemptModelFailover({
     // model's own problem and not evidence about the operator's chosen one.
     const hopVerdict = classifyRoutedFailure({
       status: upstream.status,
-      bodyText: await boundedResponseText(upstream),
+      bodyText: await boundedResponseText(upstream, MAX_BUFFERED_RESPONSE_BYTES, signal),
       retryAfterSeconds: Number(upstream.headers.get("retry-after")),
     });
     if (hopVerdict.swap) recordProviderCooldown(model.provider, hopVerdict);
@@ -2790,7 +2809,7 @@ async function handleResponses(request, response, requestUrl) {
   });
   try {
     if (!requireCodexTransport(request, response)) return;
-    const encoded = await readRequestBody(request);
+    const encoded = await readRequestBody(request, { signal: controller.signal });
     const body = decodeBody(encoded, request.headers["content-encoding"]);
     const payload = await parseBodyAsync(body);
     controller.signal.throwIfAborted();
@@ -3052,7 +3071,11 @@ async function handleResponses(request, response, requestUrl) {
     // once. Nothing is relayed either way, so reading it is free.
     let failedBodyText;
     if (route && !upstream.ok) {
-      failedBodyText = await boundedResponseText(upstream);
+      failedBodyText = await boundedResponseText(
+        upstream,
+        MAX_BUFFERED_RESPONSE_BYTES,
+        controller.signal,
+      );
       const verdict = classifyRoutedFailure({
         status: upstream.status,
         bodyText: failedBodyText,
@@ -3712,7 +3735,7 @@ async function handleNativeRequest(request, response, requestUrl, defaultModel) 
       });
       return;
     }
-    const encoded = await readRequestBody(request);
+    const encoded = await readRequestBody(request, { signal: controller.signal });
     const body = decodeBody(encoded, request.headers["content-encoding"]);
     const payload = await parseBodyAsync(body);
     controller.signal.throwIfAborted();
@@ -3931,7 +3954,7 @@ const server = http.createServer((request, response) => {
       writeJson(response, status, {
         error: {
           type: "local_router_error",
-          code: transport?.code,
+          code: transport?.code || error?.code,
           message: transport
             ? `The local router could not complete the request: ${transport.cause}.${transport.hint}`
             : "The local router could not complete the request.",

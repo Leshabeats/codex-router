@@ -389,6 +389,71 @@ test("same encrypted payload shares one relay and expiry removes the retained pl
   }
 });
 
+test("active request admission is bounded and rejects later bodies after draining them", async () => {
+  let gatewayRequests = 0;
+  let firstRequestSeen;
+  const firstRequestReady = new Promise((resolve) => {
+    firstRequestSeen = resolve;
+  });
+  const gateway = await mockServer((request, response) => {
+    if (request.method === "GET" && request.url === "/health") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    gatewayRequests += 1;
+    firstRequestSeen();
+    request.once("aborted", () => {
+      response.destroy();
+    });
+  });
+  const routerPort = await openPort();
+  const router = run({
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_MAX_ACTIVE_REQUESTS: "1",
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_API_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_GROK_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_GATEWAY_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+  });
+  const firstAbort = new AbortController();
+  try {
+    await waitFor(`http://127.0.0.1:${routerPort}/health`, router);
+    const first = fetch(`${callerBaseUrl(routerPort, CALLER_KEY)}/responses`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer codex-caller-auth",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ model: "deepseek/deepseek-v4-pro", input: "hold" }),
+      signal: firstAbort.signal,
+    }).catch((error) => error);
+    await firstRequestReady;
+
+    const rejected = await fetch(`${callerBaseUrl(routerPort, CALLER_KEY)}/responses`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer codex-caller-auth",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ model: "deepseek/deepseek-v4-pro", input: "reject" }),
+    });
+    const rejectedBody = await rejected.json();
+    assert.equal(rejected.status, 429, JSON.stringify(rejectedBody));
+    assert.equal(rejectedBody.error.code, "ERR_ROUTER_ACTIVE_REQUEST_LIMIT");
+    assert.equal(gatewayRequests, 1);
+
+    firstAbort.abort();
+    const firstResult = await first;
+    assert.ok(firstResult instanceof Error, `expected aborted first request, got ${firstResult}`);
+  } finally {
+    firstAbort.abort();
+    await stopChild(router);
+    await closeServer(gateway.server);
+  }
+});
+
 // A client that cancels mid-stream is not an upstream failure: the router
 // meters the turn as 0 rather than the committed 200 or a fabricated 5xx.
 test("a client cancel mid-stream meters 0 and never claims an upstream failure", async () => {

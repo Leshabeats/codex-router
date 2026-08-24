@@ -317,7 +317,7 @@ export const MAX_BODY_BYTES = Number(
     (TARGET === "codex"
       ? process.env.CODEX_ROUTER_MAX_BODY_BYTES || process.env.KIMI_PROXY_MAX_BODY_BYTES
       : undefined) ||
-    TARGET === "codex" ? 16 * 1024 * 1024 : 64 * 1024 * 1024,
+    (TARGET === "codex" ? 16 * 1024 * 1024 : 64 * 1024 * 1024),
 );
 
 export const MAX_BUFFERED_RESPONSE_BYTES = Number(
@@ -509,25 +509,74 @@ export function reportListenFailure(server, { label, host, port }) {
   return server;
 }
 
-export async function readRequestBody(request, { maxBytes = MAX_BODY_BYTES } = {}) {
+function abortReason(signal) {
+  if (signal?.reason instanceof Error) return signal.reason;
+  const error = new Error("The operation was aborted.");
+  error.name = "AbortError";
+  return error;
+}
+
+function readWithAbort(reader, signal) {
+  if (!signal) return reader.read();
+  if (signal.aborted) return Promise.reject(abortReason(signal));
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      void reader.cancel().catch(() => {});
+      cleanup();
+      reject(abortReason(signal));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    reader.read().then(
+      (result) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(result);
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
+
+export async function readRequestBody(
+  request,
+  { maxBytes = MAX_BODY_BYTES, signal } = {},
+) {
   const chunks = [];
   let total = 0;
   let overflow;
-  for await (const chunk of request) {
-    if (overflow) continue;
-    total += chunk.length;
-    if (total > maxBytes) {
-      // Stop retaining caller-controlled bytes immediately, but keep consuming
-      // the stream so the response can stay keep-alive and the next request
-      // cannot be parsed out of the rejected body's tail.
-      overflow = new Error(`Request body exceeds ${maxBytes} bytes.`);
-      overflow.status = 413;
-      continue;
+  const limit = Number.isFinite(maxBytes) && maxBytes > 0 ? Math.floor(maxBytes) : MAX_BODY_BYTES;
+  const onAbort = () => request?.destroy?.(abortReason(signal));
+  signal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    for await (const chunk of request) {
+      if (overflow) continue;
+      total += chunk.length;
+      if (total > limit) {
+        // Stop retaining caller-controlled bytes immediately, but keep consuming
+        // the stream so the response can stay keep-alive and the next request
+        // cannot be parsed out of the rejected body's tail.
+        overflow = new Error(`Request body exceeds ${limit} bytes.`);
+        overflow.status = 413;
+        continue;
+      }
+      chunks.push(chunk);
     }
-    chunks.push(chunk);
+    if (overflow) throw overflow;
+    if (signal?.aborted) throw abortReason(signal);
+    return Buffer.concat(chunks);
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
   }
-  if (overflow) throw overflow;
-  return Buffer.concat(chunks);
 }
 
 // Read an upstream body with the limit applied while bytes arrive. The
@@ -537,23 +586,26 @@ export async function readRequestBody(request, { maxBytes = MAX_BODY_BYTES } = {
 // is crossed.
 export async function readResponseBody(
   upstream,
-  { maxBytes = MAX_BUFFERED_RESPONSE_BYTES } = {},
+  { maxBytes = MAX_BUFFERED_RESPONSE_BYTES, signal } = {},
 ) {
   if (!upstream?.body) return Buffer.alloc(0);
   const reader = upstream.body.getReader();
   const chunks = [];
   let total = 0;
+  const limit = Number.isFinite(maxBytes) && maxBytes > 0
+    ? Math.floor(maxBytes)
+    : MAX_BUFFERED_RESPONSE_BYTES;
   try {
     while (true) {
-      const result = await reader.read();
+      const result = await readWithAbort(reader, signal);
       if (result.done) break;
       const chunk = result.value instanceof Uint8Array
         ? result.value
         : new Uint8Array(result.value || []);
       total += chunk.byteLength;
-      if (total > maxBytes) {
+      if (total > limit) {
         await reader.cancel().catch(() => {});
-        const error = new Error(`Upstream response exceeds ${maxBytes} bytes.`);
+        const error = new Error(`Upstream response exceeds ${limit} bytes.`);
         error.status = 502;
         error.code = "ERR_UPSTREAM_RESPONSE_TOO_LARGE";
         throw error;
@@ -563,6 +615,8 @@ export async function readResponseBody(
   } catch (error) {
     await reader.cancel().catch(() => {});
     throw error;
+  } finally {
+    reader.releaseLock?.();
   }
   return Buffer.concat(chunks, total);
 }
