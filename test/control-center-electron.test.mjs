@@ -1493,7 +1493,7 @@ for (const mode of ["timeout", "overflow"]) {
       }
       if (priorRoot === undefined) delete process.env.CODEX_ROUTER_SOURCE_ROOT;
       else process.env.CODEX_ROUTER_SOURCE_ROOT = priorRoot;
-      await rm(root, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 }
