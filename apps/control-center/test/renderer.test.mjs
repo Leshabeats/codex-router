@@ -293,6 +293,18 @@ test("the production renderer exposes model discovery and picker actions", { tim
       .map((call) => call.args[0]));
     assert.deepEqual(bulkCatalogProviders, ["deepseek"]);
 
+    const deepseekProvider = page.locator(".pm-provider-row").filter({ hasText: "DeepSeek" });
+    await deepseekProvider.locator(".pm-provider-summary").click();
+    const providerBlockedRow = deepseekProvider
+      .locator(".pm-live-catalog-row")
+      .filter({ hasText: "blocked-preview" });
+    await providerBlockedRow.waitFor();
+    assert.equal(await providerBlockedRow.getAttribute("data-blocked"), "true");
+    assert.equal(
+      await providerBlockedRow.getByText("Not yet supported", { exact: true }).count(),
+      1,
+    );
+
     const search = page.locator('input[placeholder="Search active, known, or loaded catalog models"]');
     await search.fill("catalog-addable");
     const addableRow = page.locator(".pm-catalog-search-row").filter({ hasText: "catalog-addable" });
@@ -304,7 +316,7 @@ test("the production renderer exposes model discovery and picker actions", { tim
     await search.fill("blocked-preview");
     const blockedRow = page.locator(".pm-catalog-search-row").filter({ hasText: "blocked-preview" });
     await blockedRow.waitFor();
-    const blockedButton = blockedRow.getByRole("button", { name: "Protocol pending", exact: true });
+    const blockedButton = blockedRow.getByRole("button", { name: "Not yet supported", exact: true });
     assert.equal(await blockedButton.isDisabled(), true);
     assert.equal(
       await blockedRow.locator(".pm-catalog-block-reason").innerText(),

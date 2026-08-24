@@ -22,8 +22,9 @@ const {
 } = await import("../src/provider-account-usage.mjs");
 
 // One model, six routes, and each route names it differently. Every id here was
-// read from that provider's own live catalog, so a rename upstream shows up as
-// a failing assertion rather than as a 404 in someone's session.
+// read from that provider's own live catalog. These assertions keep the local
+// registry from drifting; only a fresh catalog read or inference probe can
+// detect a later upstream rename or withdrawal.
 //
 // The ladder is the model's, not the reseller's: its upstream answers an
 // off-ladder rung with "[1210] This model always engages in thinking and cannot
@@ -266,7 +267,11 @@ test("Nous Portal degrades to its dashboard because it publishes no credits rout
 });
 
 test("an unconfigured Venice or Nous account reports setup rather than an error", async () => {
+  const savedVenice = process.env.VENICE_API_KEY;
+  const savedNous = process.env.NOUS_API_KEY;
   const savedDiscovery = process.env.CODEX_ROUTER_NO_DISCOVERY;
+  delete process.env.VENICE_API_KEY;
+  delete process.env.NOUS_API_KEY;
   process.env.CODEX_ROUTER_NO_DISCOVERY = "1";
   try {
     const snapshot = await providerAccountUsageSnapshot({
@@ -278,6 +283,10 @@ test("an unconfigured Venice or Nous account reports setup rather than an error"
     assert.equal(snapshot.venice.status, "not-configured");
     assert.equal(snapshot.nousresearch.status, "not-configured");
   } finally {
+    if (savedVenice === undefined) delete process.env.VENICE_API_KEY;
+    else process.env.VENICE_API_KEY = savedVenice;
+    if (savedNous === undefined) delete process.env.NOUS_API_KEY;
+    else process.env.NOUS_API_KEY = savedNous;
     if (savedDiscovery === undefined) delete process.env.CODEX_ROUTER_NO_DISCOVERY;
     else process.env.CODEX_ROUTER_NO_DISCOVERY = savedDiscovery;
   }

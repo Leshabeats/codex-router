@@ -79,8 +79,9 @@ over the content while the sidebar controls and page toolbar share the same top
 row as Codex; the renderer marks that row draggable without recreating the
 controls. Other platforms retain their standard native frame. Close, minimize,
 maximize, keyboard shortcuts, accessibility behavior, and platform-specific
-placement remain native. The router artwork is used consistently for the
-window, Dock, application bundle, and installer.
+placement remain native. The Hermes artwork is used consistently for the
+Electron window, standalone Dock entry, application bundle, and installer; the
+unified macOS host keeps its separate outer-bundle icon.
 
 ## Development
 

@@ -44,7 +44,11 @@ import {
   writeJson,
   writeStreamErrorEvent,
 } from "./http-utils.mjs";
-import { EmptyCompletionGuard } from "./empty-completion-guard.mjs";
+import {
+  EmptyCompletionGuard,
+  EmptyCompletionTerminalGuard,
+  isEmptyCompletionPreludeLimitError,
+} from "./empty-completion-guard.mjs";
 import {
   ZaiResponsesCompatTransform,
   zaiResponsesCompatTransform,
@@ -196,6 +200,22 @@ const ZERO_INPUT_ESTIMATE = process.env.CODEX_ROUTER_ZERO_INPUT_ESTIMATE !== "0"
 // turn it off without downgrading the router.
 const EMPTY_COMPLETION_RETRY =
   process.env.CODEX_ROUTER_EMPTY_COMPLETION_RETRY !== "0";
+const configuredEmptyCompletionPreludeMs = Number(
+  process.env.CODEX_ROUTER_EMPTY_COMPLETION_PRELUDE_MS || 30_000,
+);
+const EMPTY_COMPLETION_PRELUDE_MS =
+  Number.isFinite(configuredEmptyCompletionPreludeMs) &&
+  configuredEmptyCompletionPreludeMs >= 0
+    ? configuredEmptyCompletionPreludeMs
+    : 30_000;
+const configuredEmptyCompletionPreludeBytes = Number(
+  process.env.CODEX_ROUTER_EMPTY_COMPLETION_PRELUDE_BYTES || 1024 * 1024,
+);
+const EMPTY_COMPLETION_PRELUDE_BYTES =
+  Number.isFinite(configuredEmptyCompletionPreludeBytes) &&
+  configuredEmptyCompletionPreludeBytes >= 0
+    ? Math.floor(configuredEmptyCompletionPreludeBytes)
+    : 1024 * 1024;
 const ERROR_STATUS_DURATION_MS = 8_000;
 const configuredDecodedBodyBytes = Number(
   process.env.MODEL_ROUTER_MAX_DECODED_BODY_BYTES ||
@@ -2620,7 +2640,8 @@ async function handleResponses(request, response, requestUrl) {
   // failure the router absorbed, the other a failure it had to hand to the
   // client, and only the second is visible to the user.
   let emptyCompletionUnrepairable = false;
-  let guardReleasedForBudget = false;
+  let emptyCompletionPreludeLimit;
+  let preludeLimitRetryable = false;
   let finalStatus;
   let activityStatus;
   let usageRecorded = false;
@@ -3042,18 +3063,54 @@ async function handleResponses(request, response, requestUrl) {
       }
       const guard =
         route && EMPTY_COMPLETION_RETRY
-          ? new EmptyCompletionGuard(contentType)
+          ? new EmptyCompletionGuard(contentType, {
+              maxPreludeBytes: EMPTY_COMPLETION_PRELUDE_BYTES,
+              maxPreludeMs: EMPTY_COMPLETION_PRELUDE_MS,
+            })
           : undefined;
-      if (guard) transforms.push(guard);
+      if (guard) {
+        transforms.push(
+          guard,
+          new EmptyCompletionTerminalGuard(guard, contentType, {
+            maxHeldTerminalBytes: EMPTY_COMPLETION_PRELUDE_BYTES,
+          }),
+        );
+      }
       return { transforms, usageObserver, guard };
     };
     const firstPipeline = createResponsePipeline(upstreamContentType);
     usageTransform = firstPipeline.usageObserver;
     emptyCompletionGuard = firstPipeline.guard;
     const relayOpen = Boolean(emptyCompletionGuard);
-    await pipeResponse(upstream, response, HOP_BY_HOP_HEADERS, firstPipeline.transforms, {
-      leaveOpen: relayOpen,
-    });
+    let streamedPreludeFailureKind;
+    try {
+      await pipeResponse(
+        upstream,
+        response,
+        HOP_BY_HOP_HEADERS,
+        firstPipeline.transforms,
+        { leaveOpen: relayOpen },
+      );
+    } catch (error) {
+      if (isEmptyCompletionPreludeLimitError(error) && !clientGone) {
+        emptyCompletionPreludeLimit = error.kind;
+        if (nothingRelayed(response)) {
+          preludeLimitRetryable = true;
+        } else {
+          streamedPreludeFailureKind = error.kind;
+          emptyCompletionUnrepairable = true;
+          writeStreamErrorEvent(response, {
+            code: "precontent_limit",
+            message:
+              error.kind === "time"
+                ? "The model stopped producing output before the router's stream deadline."
+                : "The model exceeded the router's bounded stream parser before producing output.",
+          });
+        }
+      } else {
+        throw error;
+      }
+    }
     usage = usageTransform?.tokenUsage();
     // Time to the first generated token, which is what an output-tokens-per-
     // second figure has to divide by. `upstreamLatencyMs` stops at the response
@@ -3072,14 +3129,16 @@ async function handleResponses(request, response, requestUrl) {
       (clientGone || (response.destroyed && !response.writableFinished)) &&
       !nativeCompletedBeforeClose;
     finalStatus = clientWalkedAway ? 0 : upstream.status;
+    if (streamedPreludeFailureKind && !clientWalkedAway) finalStatus = 502;
     emptyCompletion = emptyCompletionGuard?.isEmpty() === true && !clientWalkedAway;
-    // The guard releases long turns at its byte/time budget without a verdict.
-    // Those turns may have been empty completions the router chose not to
-    // retry, which must stay distinguishable from healthy long turns in the
-    // meter — otherwise a 40-second reasoning-only empty completion reads as a
-    // successful 40-second turn.
-    guardReleasedForBudget =
-      emptyCompletionGuard?.releasedForBudget() === true && !clientWalkedAway;
+    emptyCompletionPreludeLimit ||=
+      emptyCompletionGuard?.preludeLimitKind?.();
+    // A pre-content limit used to release the staged bytes and stop parsing,
+    // which could turn an unknown stream into a successful-looking empty
+    // response. The byte limit now fails while every byte is replaceable so
+    // the retry below can recover it. The time limit still releases for
+    // latency, but keeps parsing so a terminal empty turn becomes a stated SSE
+    // error instead of a blank success.
     // The turn produced nothing, but the guard had already released it: the
     // upstream proved it was generating (reasoning), so the head, response id,
     // and prologue are on the wire. A second attempt would graft a second
@@ -3090,11 +3149,15 @@ async function handleResponses(request, response, requestUrl) {
     if (emptyCompletion && emptyCompletionGuard?.suppressedPrologue() !== true) {
       emptyCompletionUnrepairable = true;
       writeStreamErrorEvent(response, {
-        code: "empty_completion",
-        message:
-          "The model streamed reasoning but produced no output. The router could not retry because the response had already started.",
+        code: emptyCompletionPreludeLimit
+          ? "precontent_limit"
+          : "empty_completion",
+        message: emptyCompletionPreludeLimit
+          ? "The model produced no output before the router's safety limit and then completed without output. The response had already started, so the router could not retry it safely."
+          : "The model streamed reasoning but produced no output. The router could not retry because the response had already started.",
       });
-    } else if (emptyCompletion) {
+      finalStatus = 502;
+    } else if (emptyCompletion || preludeLimitRetryable) {
       // The upstream answered 200 with nothing and never proved otherwise, so
       // the guard still holds every byte. Retry the identical request once:
       // same bytes, same headers, same signal. The discarded first stream means
@@ -3126,8 +3189,12 @@ async function handleResponses(request, response, requestUrl) {
         );
         writeEmptyCompletionError(
           response,
-          "empty_completion_retry_failed",
-          "The model returned an empty completion and the router's retry failed upstream.",
+          emptyCompletionPreludeLimit
+            ? "precontent_limit_retry_failed"
+            : "empty_completion_retry_failed",
+          emptyCompletionPreludeLimit
+            ? "The model produced no output before the router's safety limit and the retry failed upstream."
+            : "The model returned an empty completion and the router's retry failed upstream.",
         );
         finalStatus = 502;
       }
@@ -3153,12 +3220,20 @@ async function handleResponses(request, response, requestUrl) {
           await rejectedResponse.body?.cancel().catch(() => {});
           writeEmptyCompletionError(
             response,
-            upstream2.ok
-              ? "empty_completion_retry_protocol_error"
-              : "empty_completion_retry_failed",
-            upstream2.ok
-              ? "The model returned an empty completion and the router's retry returned an incompatible response."
-              : "The model returned an empty completion and the router's retry failed upstream.",
+            emptyCompletionPreludeLimit
+              ? upstream2.ok
+                ? "precontent_limit_retry_protocol_error"
+                : "precontent_limit_retry_failed"
+              : upstream2.ok
+                ? "empty_completion_retry_protocol_error"
+                : "empty_completion_retry_failed",
+            emptyCompletionPreludeLimit
+              ? upstream2.ok
+                ? "The model produced no output before the router's safety limit and the retry returned an incompatible response."
+                : "The model produced no output before the router's safety limit and the retry failed upstream."
+              : upstream2.ok
+                ? "The model returned an empty completion and the router's retry returned an incompatible response."
+                : "The model returned an empty completion and the router's retry failed upstream.",
           );
           finalStatus = 502;
         } else {
@@ -3168,22 +3243,66 @@ async function handleResponses(request, response, requestUrl) {
           const secondPipeline = createResponsePipeline(retryContentType);
           retryUsageTransform = secondPipeline.usageObserver;
           retryEmptyCompletionGuard = secondPipeline.guard;
-          await pipeResponse(
-            upstream2,
-            response,
-            HOP_BY_HOP_HEADERS,
-            secondPipeline.transforms,
-            { leaveOpen: true },
-          );
+          let retryPreludeFailureKind;
+          let retryStreamedPreludeFailureKind;
+          try {
+            await pipeResponse(
+              upstream2,
+              response,
+              HOP_BY_HOP_HEADERS,
+              secondPipeline.transforms,
+              { leaveOpen: true },
+            );
+          } catch (error) {
+            if (isEmptyCompletionPreludeLimitError(error) && !clientGone) {
+              emptyCompletionPreludeLimit ||= error.kind;
+              if (nothingRelayed(response)) {
+                retryPreludeFailureKind = error.kind;
+              } else {
+                retryStreamedPreludeFailureKind = error.kind;
+                emptyCompletionUnrepairable = true;
+                writeStreamErrorEvent(response, {
+                  code: "precontent_limit",
+                  message:
+                    error.kind === "time"
+                      ? "The retry stopped producing output before the router's stream deadline."
+                      : "The retry exceeded the router's bounded stream parser before producing output.",
+                });
+              }
+            } else {
+              throw error;
+            }
+          }
           const retryClientWalkedAway =
             clientGone || (response.destroyed && !response.writableFinished);
-          guardReleasedForBudget =
-            guardReleasedForBudget ||
-            (retryEmptyCompletionGuard?.releasedForBudget() === true &&
-              !retryClientWalkedAway);
+          emptyCompletionPreludeLimit ||=
+            retryEmptyCompletionGuard?.preludeLimitKind?.();
           if (retryClientWalkedAway) {
             finalStatus = 0;
             if (secondPipeline.guard.hasContent()) emptyCompletion = false;
+          } else if (retryStreamedPreludeFailureKind) {
+            finalStatus = 502;
+          } else if (
+            retryEmptyCompletionGuard.isEmpty() &&
+            retryEmptyCompletionGuard.suppressedPrologue() !== true
+          ) {
+            emptyCompletionUnrepairable = true;
+            writeStreamErrorEvent(response, {
+              code: emptyCompletionPreludeLimit
+                ? "precontent_limit"
+                : "empty_completion",
+              message: emptyCompletionPreludeLimit
+                ? "The retry produced no output before the router's safety limit and then completed without output."
+                : "The retry streamed reasoning but completed without output.",
+            });
+            finalStatus = 502;
+          } else if (retryPreludeFailureKind) {
+            writeEmptyCompletionError(
+              response,
+              "precontent_limit",
+              "The model produced no output before the router's safety limit. The router retried once and the retry reached a safety limit again.",
+            );
+            finalStatus = 502;
           } else if (secondPipeline.guard.isEmpty()) {
             writeEmptyCompletionError(
               response,
@@ -3234,7 +3353,9 @@ async function handleResponses(request, response, requestUrl) {
       ...(emptyCompletionRetried ? { emptyCompletionRetried: true } : {}),
       ...(usage?.progressOnlyRetried ? { progressOnlyRetried: true } : {}),
       ...(emptyCompletionUnrepairable ? { emptyCompletionUnrepairable: true } : {}),
-      ...(guardReleasedForBudget ? { emptyCompletionGuardReleased: true } : {}),
+      ...(emptyCompletionPreludeLimit
+        ? { emptyCompletionPreludeLimit }
+        : {}),
       ...(failoverFrom ? { failoverFrom } : {}),
     });
     // The same usage this turn just metered, and the same two disqualifiers
@@ -3264,6 +3385,10 @@ async function handleResponses(request, response, requestUrl) {
         }${
           emptyCompletionUnrepairable ? " empty-completion-unrepairable=true" : ""
         }${emptyCompletion ? " empty-completion=true" : ""}${
+          emptyCompletionPreludeLimit
+            ? ` empty-completion-prelude-limit=${emptyCompletionPreludeLimit}`
+            : ""
+        }${
           failoverFrom ? ` failover-from=${failoverFrom}` : ""
         }`,
       );
@@ -3271,15 +3396,6 @@ async function handleResponses(request, response, requestUrl) {
   } catch (error) {
     upstreamLatencyMs ??= Date.now() - startedAt;
     if (retryEmptyCompletionGuard?.hasContent()) emptyCompletion = false;
-    if (!clientGone) {
-      // A pipeline can fail after either guard has released its held bytes but
-      // before the success path samples the accessor. Preserve that verdict in
-      // the failure event too.
-      guardReleasedForBudget =
-        guardReleasedForBudget ||
-        emptyCompletionGuard?.releasedForBudget() === true ||
-        retryEmptyCompletionGuard?.releasedForBudget() === true;
-    }
     if (usageTransform) {
       usage = mergeTokenUsage(
         usageTransform.tokenUsage(),
@@ -3370,7 +3486,9 @@ async function handleResponses(request, response, requestUrl) {
         ...(response.headersSent ? { streamAborted: true } : {}),
         ...(emptyCompletion ? { emptyCompletion: true } : {}),
         ...(emptyCompletionRetried ? { emptyCompletionRetried: true } : {}),
-        ...(guardReleasedForBudget ? { emptyCompletionGuardReleased: true } : {}),
+        ...(emptyCompletionPreludeLimit
+          ? { emptyCompletionPreludeLimit }
+          : {}),
       });
       usageRecorded = true;
     }

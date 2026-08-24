@@ -283,8 +283,10 @@ function curatedModelRouteSelection(providerId, upstreamModel, { existingProvide
       } or ${protocols.at(-1)}`;
     return {
       blockedReason:
-        `${upstreamModel} has no certified ${primary} protocol route yet. `
-        + `Update Codex Router after that model's ${protocolList} route is verified.`,
+        `The provider catalog lists ${upstreamModel}. `
+        + `This Codex Router version has not verified whether the model uses ${protocolList}, `
+        + `so it cannot be added safely. This is a router compatibility limitation; `
+        + `a future update can enable it after testing.`,
     };
   }
   return { providerId: primary };

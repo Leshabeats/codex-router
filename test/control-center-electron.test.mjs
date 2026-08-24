@@ -1160,7 +1160,7 @@ test("the model directory combines provider setup with de-duplicated model-famil
   assert.match(models, /Select up to 200/);
   assert.match(models, /state\.data\.addable \?\? state\.data\.unregistered/);
   assert.match(models, /addable\.has\(id\)/);
-  assert.match(models, /Protocol pending/);
+  assert.match(models, /Not yet supported/);
   assert.match(models, /pm-catalog-block-reason/);
   assert.match(models, /Show 120 more/);
   // Opening a provider shows its stored list; only an explicit reload re-asks.
@@ -1493,7 +1493,7 @@ for (const mode of ["timeout", "overflow"]) {
       }
       if (priorRoot === undefined) delete process.env.CODEX_ROUTER_SOURCE_ROOT;
       else process.env.CODEX_ROUTER_SOURCE_ROOT = priorRoot;
-      await rm(root, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 }

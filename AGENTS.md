@@ -1,5 +1,14 @@
 # Model Router installation instructions
 
+## Repository maintenance workflow
+
+- Use `$repo-maintainer` for incoming-change adoption decisions and consequential
+  maintenance that can cross modules, clients, operating systems, installers,
+  providers, credentials, protocols, generated artifacts, or release surfaces.
+- Use its impact analysis and risk-proportional verification before calling such
+  work complete. Skip it for factual replies and obviously isolated trivial
+  edits.
+
 These instructions apply when a user asks an agent to install this repository.
 
 ## Choose the target
@@ -1102,8 +1111,9 @@ each under its own id: `x-preview-f-free` on `opencode-free`, `ox-alpha-free`
 on `opencode-go`, `stealth/ox-alpha` on `openrouter`, `commandcode` and
 `nousresearch`, and `stealth-ox-alpha` on `venice`. Every one of those was read
 from that provider's own live `/models` response; `test/ox-alpha.test.mjs` pins
-them so a rename upstream fails a test rather than 404-ing inside someone's
-session.
+the repository values against local drift. A later upstream rename or withdrawal
+still needs a fresh authenticated catalog read or live inference probe; a static
+test cannot discover remote state.
 
 The effort ladder is `low`/`high`/`max` on all six, and it is the **model's**
 ladder rather than any reseller's. The model always thinks, and its upstream

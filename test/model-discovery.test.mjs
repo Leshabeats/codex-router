@@ -57,7 +57,7 @@ test("OpenCode Go discovery blocks live ids whose protocol route is not certifie
     assert.deepEqual(Object.keys(result.blocked).sort(), result.unregistered);
     assert.match(
       result.blocked["future-responses-only-model"],
-      /no certified opencode-go protocol route yet.*Chat, Messages, or Responses route is verified/s,
+      /provider catalog lists future-responses-only-model.*has not verified whether the model uses Chat, Messages, or Responses.*router compatibility limitation.*future update/s,
     );
   } finally {
     rmSync(testRoot, { recursive: true, force: true });
@@ -86,7 +86,7 @@ test("Command Code discovery parses the Provider API model list", () => {
     assert.deepEqual(Object.keys(result.blocked), ["claude-sonnet-4-6"]);
     assert.match(
       result.blocked["claude-sonnet-4-6"],
-      /no certified commandcode protocol route yet.*Chat or Messages route is verified/s,
+      /provider catalog lists claude-sonnet-4-6.*has not verified whether the model uses Chat or Messages.*router compatibility limitation.*future update/s,
     );
     assert.ok(result.unavailable.includes("deepseek/deepseek-v4-pro"));
     assert.doesNotMatch(output, /Bearer|api[_-]?key/i);

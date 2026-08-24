@@ -276,6 +276,38 @@ test("a guard budget release persists its marker and reads back", async () => {
   }
 });
 
+test("a guard pre-content limit persists its kind and rejects unknown values", async () => {
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "model-router-usage-"));
+  const previousStateDir = process.env.MODEL_ROUTER_STATE_DIR;
+  process.env.MODEL_ROUTER_STATE_DIR = stateDir;
+  try {
+    const usage = await import(`../src/usage-events.mjs?precontent=1&ts=${Date.now()}`);
+    usage.recordUsageEvent({
+      model: "opencode-go/deepseek-v4-flash",
+      provider: "opencode-go",
+      status: 502,
+      durationMs: 30_100,
+      emptyCompletionPreludeLimit: "time",
+    });
+    usage.recordUsageEvent({
+      model: "opencode-go/deepseek-v4-flash",
+      provider: "opencode-go",
+      status: 502,
+      durationMs: 10,
+      emptyCompletionPreludeLimit: "unknown",
+    });
+    const events = usage.recentUsageEvents().filter((event) => event.status === 502);
+    const timed = events.find((event) => event.durationMs === 30_100);
+    const unknown = events.find((event) => event.durationMs === 10);
+    assert.equal(timed.emptyCompletionPreludeLimit, "time");
+    assert.equal("emptyCompletionPreludeLimit" in unknown, false);
+  } finally {
+    if (previousStateDir === undefined) delete process.env.MODEL_ROUTER_STATE_DIR;
+    else process.env.MODEL_ROUTER_STATE_DIR = previousStateDir;
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
 // An operator who enables aging on a workload of medium-sized results saw an
 // all-zero ledger and reasonably concluded the hook had never loaded. The
 // evaluated counter is what separates "ran and nothing qualified" from "never
