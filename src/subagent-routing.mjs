@@ -31,13 +31,6 @@ function identityOf(model) {
   return slug && provider ? `${slug}\u0000${provider}` : "";
 }
 
-function identityParts(value) {
-  const identity = identityOf(value);
-  if (!identity) return undefined;
-  const separator = identity.indexOf("\u0000");
-  return { slug: identity.slice(0, separator), provider: identity.slice(separator + 1) };
-}
-
 function authorityMap(authority) {
   const map = new Map();
   for (const model of Array.isArray(authority) ? authority : []) {
@@ -49,8 +42,21 @@ function authorityMap(authority) {
 }
 
 function eligibleAuthority(authority, settings) {
-  const verified = subagentEligibleModels(authority, settings || readMultiAgentSettings());
-  return authorityMap(verified);
+  const configured = settings || readMultiAgentSettings();
+  const checkedIn = authorityMap(
+    subagentEligibleModels(CHECKED_IN_MODELS, configured),
+  );
+  if (authority === undefined || authority === CHECKED_IN_MODELS) return checkedIn;
+
+  // A caller may provide a runtime projection to limit or order the checked-in
+  // routes, but its metadata is never an authority. Intersect by exact identity
+  // and always return the immutable checked-in record.
+  const requested = new Set(
+    (Array.isArray(authority) ? authority : [])
+      .map((model) => identityOf(model))
+      .filter(Boolean),
+  );
+  return new Map([...checkedIn].filter(([identity]) => requested.has(identity)));
 }
 
 function supports(record, capability) {
@@ -220,15 +226,35 @@ export function subagentFallbackPlan(
     selectionIndex = 0,
     failedTarget,
     maxAttempts = MAX_SUBAGENT_ATTEMPTS,
+    settings,
   } = {},
 ) {
   const kind = text(failureKind).toLowerCase();
   if (committed || !FAILURE_KINDS.has(kind)) return undefined;
-  const entries = Array.isArray(ranked) ? ranked : [];
+  const authority = eligibleAuthority(undefined, settings);
+  const entriesByIdentity = new Map();
+  for (const entry of Array.isArray(ranked) ? ranked : []) {
+    const model = entry?.model || entry;
+    const record = authority.get(identityOf(model));
+    if (!record) continue;
+    const identity = identityOf(record);
+    if (!entriesByIdentity.has(identity)) {
+      entriesByIdentity.set(identity, {
+        ...(entry && typeof entry === "object" ? entry : {}),
+        model: record,
+        slug: record.slug,
+        provider: record.provider,
+      });
+    }
+  }
+  const entries = [...entriesByIdentity.values()];
   const excluded = new Set();
   if (failedTarget) {
     const identity = identityOf(failedTarget.model || failedTarget);
-    if (identity) excluded.add(identity);
+    // A failed route without both fields cannot be excluded safely. Refuse a
+    // retry instead of guessing by slug and risking the same provider again.
+    if (!identity) return undefined;
+    excluded.add(identity);
   }
   const candidates = entries.filter((entry) => !excluded.has(identityOf(entry.model || entry)));
   const target = selectWeightedSubagentTarget(candidates, { selectionIndex });

@@ -15,71 +15,51 @@ import {
 } from "../src/subagent-routing.mjs";
 
 const SETTINGS = { mode: "proven", enabled: [], disabled: [] };
-const AUTHORITY = [
-  {
-    slug: "shared/model",
-    provider: "provider-a",
-    multiAgentVersion: "v2",
-    inputModalities: ["text"],
-    contextWindow: 100_000,
-  },
-  {
-    slug: "shared/model",
-    provider: "provider-b",
-    multiAgentVersion: "v2",
-    inputModalities: ["text", "image"],
-    contextWindow: 100_000,
-  },
-  {
-    slug: "other/model",
-    provider: "provider-c",
-    multiAgentVersion: "v2",
-    inputModalities: ["text"],
-    contextWindow: 100_000,
-  },
-  {
-    slug: "old/model",
-    provider: "provider-old",
-    multiAgentVersion: "v1",
-    inputModalities: ["text", "image"],
-    contextWindow: 100_000,
-  },
-  {
-    slug: "fourth/model",
-    provider: "provider-d",
-    multiAgentVersion: "v2",
-    inputModalities: ["text"],
-    contextWindow: 100_000,
-  },
-];
+const AUTHORITY = CHECKED_IN_MODELS.filter((model) => model.multiAgentVersion === "v2");
+const GROK_API = AUTHORITY.find((model) => model.slug === "grok-api/grok-4.5");
+const GROK_OAUTH = AUTHORITY.find((model) => model.slug === "grok-oauth/grok-4.5");
+const KIMI_API = AUTHORITY.find((model) => model.slug === "kimi-api/kimi-k3");
+const GLM = AUTHORITY.find((model) => model.slug === "zai-coding/glm-5.3");
+
+assert.ok(GROK_API && GROK_OAUTH && KIMI_API && GLM, "expected checked-in v2 fixtures");
 
 test("only checked-in v2 records can authorize a target", () => {
   assert.equal(
     subagentEligibility(
+      { slug: "invented/model", provider: "invented", multiAgentVersion: "v2" },
       {
-        slug: "old/model",
-        provider: "provider-old",
-        multiAgentVersion: "v2",
+        authority: [{ slug: "invented/model", provider: "invented", multiAgentVersion: "v2" }],
+        settings: SETTINGS,
       },
-      { authority: AUTHORITY, settings: SETTINGS },
     ),
     "unverified-model",
   );
   assert.equal(
     subagentEligibility(
       {
-        slug: "shared/model",
-        provider: "provider-a",
+        slug: GROK_API.slug,
+        provider: GROK_API.provider,
+        multiAgentVersion: "v2",
+      },
+      { authority: [{ ...GROK_API, multiAgentVersion: "v1" }], settings: SETTINGS },
+    ),
+    undefined,
+  );
+  assert.equal(
+    subagentEligibility(
+      {
+        slug: GLM.slug,
+        provider: GLM.provider,
         multiAgentVersion: "v2",
         supportsVision: true,
       },
-      { authority: AUTHORITY, settings: SETTINGS, requiredCapabilities: ["vision"] },
+      { authority: [{ ...GLM, inputModalities: ["text", "image"] }], settings: SETTINGS, requiredCapabilities: ["vision"] },
     ),
     "missing-capability:vision",
   );
   assert.equal(
     subagentEligibility(
-      { slug: "shared/model", provider: "provider-b", multiAgentVersion: "v1" },
+      { slug: GROK_API.slug, provider: GROK_API.provider, multiAgentVersion: "v1" },
       { authority: AUTHORITY, settings: SETTINGS, requiredCapabilities: ["vision"] },
     ),
     undefined,
@@ -89,14 +69,14 @@ test("only checked-in v2 records can authorize a target", () => {
 test("chain normalization requires a model and bounds duplicate weights", () => {
   assert.deepEqual(
     normalizeSubagentChain([
-      { provider: "provider-a", weight: 2 },
-      { model: "shared/model", provider: "provider-a", weight: MAX_SUBAGENT_WEIGHT + 9 },
-      { model: "shared/model", provider: "provider-a", weight: 2 },
-      { model: "shared/model", weight: 0 },
+      { provider: GROK_API.provider, weight: 2 },
+      { model: GROK_API.slug, provider: GROK_API.provider, weight: MAX_SUBAGENT_WEIGHT + 9 },
+      { model: GROK_API.slug, provider: GROK_API.provider, weight: 2 },
+      { model: GROK_API.slug, weight: 0 },
     ]),
     [
-      { model: "shared/model", provider: "provider-a", weight: MAX_SUBAGENT_WEIGHT },
-      { model: "shared/model", weight: 1 },
+      { model: GROK_API.slug, provider: GROK_API.provider, weight: MAX_SUBAGENT_WEIGHT },
+      { model: GROK_API.slug, weight: 1 },
     ],
   );
 });
@@ -104,25 +84,25 @@ test("chain normalization requires a model and bounds duplicate weights", () => 
 test("rank preserves provider identity and ignores caller capability claims", () => {
   const ranked = rankSubagentCandidates(
     [
-      { ...AUTHORITY[0], supportsVision: true },
-      { ...AUTHORITY[0], supportsVision: true },
-      { ...AUTHORITY[1], multiAgentVersion: "v1" },
-      { ...AUTHORITY[2] },
+      { ...GROK_API, supportsVision: true },
+      { ...GROK_API, supportsVision: true },
+      { ...GROK_OAUTH, multiAgentVersion: "v1" },
+      { ...KIMI_API },
       { slug: "invented/model", provider: "provider-x", multiAgentVersion: "v2" },
     ],
     {
       authority: AUTHORITY,
       settings: SETTINGS,
       chain: [
-        { model: "shared/model", provider: "provider-b", weight: 2 },
-        "shared/model",
-        "other/model",
+        { model: GROK_OAUTH.slug, provider: GROK_OAUTH.provider, weight: 2 },
+        GROK_API.slug,
+        KIMI_API.slug,
       ],
     },
   );
   assert.deepEqual(
     ranked.map((entry) => `${entry.slug}@${entry.provider}`),
-    ["shared/model@provider-b", "other/model@provider-c"],
+    ["grok-oauth/grok-4.5@grok-oauth", "grok-api/grok-4.5@grok-api", "kimi-api/kimi-k3@kimi-api"],
   );
   assert.equal(ranked[0].model.supportsVision, undefined);
   assert.equal(ranked[0].weight, 2);
@@ -131,32 +111,32 @@ test("rank preserves provider identity and ignores caller capability claims", ()
 test("ambiguous bare model names do not lose provider identity", () => {
   const ranked = rankSubagentCandidates(
     [AUTHORITY[0], AUTHORITY[1]],
-    { authority: AUTHORITY, settings: SETTINGS, chain: ["shared/model"] },
+    { authority: AUTHORITY, settings: SETTINGS, chain: ["grok-api/grok-4.5"] },
   );
-  assert.deepEqual(ranked, []);
+  assert.deepEqual(ranked.map((entry) => `${entry.slug}@${entry.provider}`), ["grok-api/grok-4.5@grok-api"]);
 });
 
 test("weighted selection is deterministic without expanding the cycle", () => {
   const ranked = rankSubagentCandidates(
-    [AUTHORITY[0], AUTHORITY[2]],
+    [GROK_API, KIMI_API],
     {
       authority: AUTHORITY,
       settings: SETTINGS,
       chain: [
-        { model: "shared/model", provider: "provider-a", weight: 2 },
-        { model: "other/model", provider: "provider-c", weight: 1 },
+        { model: GROK_API.slug, provider: GROK_API.provider, weight: 2 },
+        { model: KIMI_API.slug, provider: KIMI_API.provider, weight: 1 },
       ],
     },
   );
   assert.deepEqual(
     [0, 1, 2, 3].map((selectionIndex) => selectWeightedSubagentTarget(ranked, { selectionIndex }).provider),
-    ["provider-a", "provider-a", "provider-c", "provider-a"],
+    ["grok-api", "grok-api", "kimi-api", "grok-api"],
   );
 });
 
 test("fallback is bounded, pre-response, and excludes only the exact failed identity", () => {
   const ranked = rankSubagentCandidates(
-    [AUTHORITY[0], AUTHORITY[1], AUTHORITY[2], AUTHORITY[4]],
+    [GROK_API, GROK_OAUTH, KIMI_API, GLM],
     { authority: AUTHORITY, settings: SETTINGS },
   );
   assert.equal(
@@ -169,13 +149,45 @@ test("fallback is bounded, pre-response, and excludes only the exact failed iden
   );
   const plan = subagentFallbackPlan(ranked, {
     failureKind: "connection",
-    failedTarget: { slug: "shared/model", provider: "provider-a" },
+    failedTarget: { slug: GROK_API.slug, provider: GROK_API.provider },
     maxAttempts: 99,
   });
-  assert.equal(plan.target.provider, "provider-b");
-  assert.deepEqual(plan.fallbacks.map((entry) => entry.provider), ["provider-c", "provider-d"]);
+  assert.equal(plan.target.provider, "grok-oauth");
+  assert.deepEqual(plan.fallbacks.map((entry) => entry.provider), ["kimi-api", "zai-coding"]);
   assert.equal(plan.maxAttempts, MAX_SUBAGENT_ATTEMPTS);
   assert.equal(plan.attempts.length, MAX_SUBAGENT_ATTEMPTS);
+  assert.equal(
+    subagentFallbackPlan(ranked, {
+      failureKind: "connection",
+      failedTarget: { slug: GROK_API.slug },
+      settings: SETTINGS,
+    }),
+    undefined,
+  );
+});
+
+test("fallback refuses ranked entries outside the checked-in v2 registry", () => {
+  assert.equal(
+    subagentFallbackPlan(
+      [{ model: { slug: "invented/model", provider: "invented", multiAgentVersion: "v2" }, weight: 1 }],
+      { failureKind: "timeout", settings: SETTINGS },
+    ),
+    undefined,
+  );
+});
+
+test("fallback deduplicates exact model/provider identities before retrying", () => {
+  const plan = subagentFallbackPlan(
+    [
+      { model: GROK_API, weight: 2 },
+      { model: GROK_API, weight: 9 },
+      { model: GROK_OAUTH, weight: 1 },
+    ],
+    { failureKind: "timeout", failedTarget: GROK_API, settings: SETTINGS },
+  );
+  assert.deepEqual(plan.attempts.map((entry) => `${entry.slug}@${entry.provider}`), [
+    "grok-oauth/grok-4.5@grok-oauth",
+  ]);
 });
 
 test("verified target list follows the actual checked-in v2 delegation contract", () => {
@@ -192,14 +204,14 @@ test("target diagnostics contain only identity and bounded attempt metadata", ()
   assert.deepEqual(
     subagentTargetDiagnostic({
       agentId: "P11",
-      target: { model: { slug: "shared/model", provider: "provider-b" } },
+      target: { model: { slug: GROK_OAUTH.slug, provider: GROK_OAUTH.provider } },
       attempt: 1,
       source: "chain",
     }),
     {
       agentId: "P11",
-      target: "shared/model",
-      provider: "provider-b",
+      target: GROK_OAUTH.slug,
+      provider: GROK_OAUTH.provider,
       attempt: 1,
       source: "chain",
     },
