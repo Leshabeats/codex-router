@@ -185,9 +185,11 @@ Codex sends the search result back through the normal routed Responses turn.
 This is a per-model compatibility declaration, not a claim that the upstream
 provider hosts search. Only enable it after verifying that the provider's
 model accepts Codex's web-search result items and preserves tool/function-call
-history. The managed Codex provider table must also set
-`supports_standalone_web_search = true` (on Codex versions that support that
-field); older clients ignore the field and continue without standalone search.
+history. Do not enable a global Codex feature or provider flag for this: Codex
+does not use those settings to gate the tool per model, so they would expose
+`web.run` to unrelated routed models and could select a native OpenAI search
+path without the required ChatGPT session. The registry declaration is the
+only capability switch, and it is scoped to the exact model/provider route.
 
 The checked-in registry currently enables this mode for DeepSeek V4 Flash on
 its direct API and opencode Go routes, DeepSeek V4 Flash Vision Exp, Xiaomi

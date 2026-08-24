@@ -374,97 +374,6 @@ function withManagedMultiAgentV2(input) {
   return `${lines.join("\n").trimEnd()}\n`;
 }
 
-function hasStandaloneWebSearchConfig(input) {
-  const lines = input.split("\n");
-  if (lines.some((line) => /^\s*features\.standalone_web_search\s*=/.test(line))) {
-    return true;
-  }
-  const featuresHeader = lines.findIndex((line) =>
-    /^\s*\[features\]\s*(?:#.*)?$/.test(line),
-  );
-  if (featuresHeader === -1) return false;
-  let tableEnd = featuresHeader + 1;
-  while (tableEnd < lines.length && !/^\s*\[/.test(lines[tableEnd])) tableEnd += 1;
-  return lines
-    .slice(featuresHeader + 1, tableEnd)
-    .some((line) => /^\s*standalone_web_search\s*=/.test(line));
-}
-
-// Standalone web search is a Codex feature flag, not a router-side tool. Probe
-// the installed Codex schema before writing it so older clients keep loading
-// their config instead of failing on an unknown feature.
-let codexSupportsStandaloneWebSearch;
-function installedCodexSupportsStandaloneWebSearch() {
-  if (codexSupportsStandaloneWebSearch !== undefined) {
-    return codexSupportsStandaloneWebSearch;
-  }
-  codexSupportsStandaloneWebSearch = probeStandaloneWebSearchSupport();
-  return codexSupportsStandaloneWebSearch;
-}
-
-function probeStandaloneWebSearchSupport() {
-  const binary = findCodexBinary();
-  if (!binary) return false;
-  const probeHome = mkdtempSync(path.join(os.tmpdir(), "codex-router-search-probe-"));
-  try {
-    writeFileSync(
-      path.join(probeHome, "config.toml"),
-      "[features]\nstandalone_web_search = true\n",
-      { encoding: "utf8", mode: 0o600 },
-    );
-    const probe = spawnableCommand(binary, ["login", "status"]);
-    const result = spawnSync(probe.command, probe.args, {
-      ...probe.options,
-      encoding: "utf8",
-      timeout: 10_000,
-      windowsHide: true,
-      env: { ...process.env, CODEX_HOME: probeHome },
-    });
-    if (result.error) return false;
-    return !/Error loading configuration/i.test(
-      `${result.stdout || ""}\n${result.stderr || ""}`,
-    );
-  } catch {
-    return false;
-  } finally {
-    rmSync(probeHome, { recursive: true, force: true });
-  }
-}
-
-function withManagedStandaloneWebSearch(input) {
-  const cleaned = removeMarkerPair(
-    input,
-    standaloneWebSearchStartMarker,
-    standaloneWebSearchEndMarker,
-  );
-  if (
-    hasStandaloneWebSearchConfig(cleaned) ||
-    !installedCodexSupportsStandaloneWebSearch()
-  ) {
-    return cleaned;
-  }
-
-  const managedLines = [
-    standaloneWebSearchStartMarker,
-    "standalone_web_search = true",
-    standaloneWebSearchEndMarker,
-  ];
-  const lines = cleaned.split("\n");
-  const featuresHeader = lines.findIndex((line) =>
-    /^\s*\[features\]\s*(?:#.*)?$/.test(line),
-  );
-  if (featuresHeader === -1) {
-    const firstTable = lines.findIndex((line) => /^\s*\[/.test(line));
-    const insertionIndex = firstTable === -1 ? lines.length : firstTable;
-    lines.splice(insertionIndex, 0, "", "[features]", ...managedLines);
-    return `${lines.join("\n").trimEnd()}\n`;
-  }
-  let tableEnd = featuresHeader + 1;
-  while (tableEnd < lines.length && !/^\s*\[/.test(lines[tableEnd])) tableEnd += 1;
-  lines.splice(tableEnd, 0, ...managedLines, "");
-  return `${lines.join("\n").trimEnd()}\n`;
-}
-
 // Some Codex builds reject a managed concurrency scalar and block the whole
 // config from loading. Ask the installed binary instead of maintaining a
 // version table: have it load a config containing only the root-level scalar
@@ -649,19 +558,11 @@ function managedSignedProviderBlock(providerId, baseUrl) {
     `base_url = ${JSON.stringify(baseUrl)}`,
     'wire_api = "responses"',
     "requires_openai_auth = true",
-    // Codex 0.146+ performs standalone web search on the client and sends
-    // the resulting items back through the selected custom provider. Keep
-    // this opt-in on the managed provider table; older Codex versions ignore
-    // the unknown field and retain their existing behavior.
-    "supports_standalone_web_search = true",
     "supports_websockets = false",
     signedProviderEndMarker,
   ].join("\n");
 }
 
-// Keep accepting the pre-standalone-search managed block while upgrading it
-// in place. Existing signed state must not become "user-owned" merely because
-// this optional Codex capability was added.
 function managedSignedProviderBlockLegacy(providerId, baseUrl) {
   const headerId = /^[A-Za-z0-9_-]+$/.test(providerId)
     ? providerId
@@ -678,10 +579,28 @@ function managedSignedProviderBlockLegacy(providerId, baseUrl) {
   ].join("\n");
 }
 
+function managedSignedProviderBlockWithSearch(providerId, baseUrl) {
+  const headerId = /^[A-Za-z0-9_-]+$/.test(providerId)
+    ? providerId
+    : JSON.stringify(providerId);
+  return [
+    signedProviderStartMarker,
+    `[model_providers.${headerId}]`,
+    'name = "Codex Router (with ChatGPT)"',
+    `base_url = ${JSON.stringify(baseUrl)}`,
+    'wire_api = "responses"',
+    "requires_openai_auth = true",
+    "supports_standalone_web_search = true",
+    "supports_websockets = false",
+    signedProviderEndMarker,
+  ].join("\n");
+}
+
 function managedSignedProviderBlockMatches(actual, providerId, baseUrl) {
   return [
     managedSignedProviderBlock(providerId, baseUrl),
     managedSignedProviderBlockLegacy(providerId, baseUrl),
+    managedSignedProviderBlockWithSearch(providerId, baseUrl),
   ].includes(actual);
 }
 
@@ -1176,13 +1095,10 @@ function enabledContents(contents) {
     'name = "Codex Router (external models)"',
     `base_url = ${JSON.stringify(routerBaseUrl)}`,
     'wire_api = "responses"',
-    "supports_standalone_web_search = true",
     providerEndMarker,
   ];
-  return withManagedStandaloneWebSearch(
-    withManagedAgentConcurrency(
-      `${withManagedMultiAgentV2(`${next.join("\n").trimEnd()}\n`).trimEnd()}\n\n${providerBlock.join("\n")}\n`,
-    ),
+  return withManagedAgentConcurrency(
+    `${withManagedMultiAgentV2(`${next.join("\n").trimEnd()}\n`).trimEnd()}\n\n${providerBlock.join("\n")}\n`,
   );
 }
 
