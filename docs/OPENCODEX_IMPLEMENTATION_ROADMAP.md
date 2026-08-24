@@ -20,8 +20,8 @@ current `main`:
 
 | Area | Shipped behavior | Evidence |
 | --- | --- | --- |
-| Client integrations | One shared router plane can publish routed models for Codex, DeepSeek Harness, and Gemini CLI. | `src/paths.mjs`, `src/target-integration.mjs`, `test/target-integration.test.mjs`, `README.md` |
-| Native Codex path | Native GPT catalog, login, default model, reasoning metadata, and native speed controls remain client-owned. | `src/native-catalog-source.mjs`, `src/catalog.mjs`, `src/config-manager.mjs`, `test/native-catalog-source.test.mjs`, `test/config-manager.test.mjs`, `README.md` |
+| Client integrations | One shared router plane can publish routed models for Codex, DeepSeek Harness, and Gemini CLI. These are the only supported client targets on `main`; OpenCode and Cursor are not shipped targets. | `src/paths.mjs`, `src/target-integration.mjs`, `test/target-integration.test.mjs`, `README.md` |
+| Native Codex path | Native GPT catalog and login remain client-owned. The native default model, reasoning metadata, and speed controls remain client-owned by default; a routed default requires an explicit opt-in. | `src/native-catalog-source.mjs`, `src/catalog.mjs`, `src/config-manager.mjs`, `test/native-catalog-source.test.mjs`, `test/config-manager.test.mjs`, `README.md` |
 | Routed inference | Codex requests use the local Responses route. Supported providers are translated through Responses, Chat Completions, or Anthropic Messages adapters where their registry entry declares that protocol. | `src/router.mjs`, `src/api-forwarder.mjs`, `test/routing.test.mjs`, `test/anthropic-api-integration.test.mjs` |
 | Provider registry | Providers and model metadata are checked in under `config/`; local model files and explicit curation extend the catalog without adding request-path branches. | `src/model-registry.mjs`, `src/user-models.mjs`, `src/curate-models.mjs`, `README.md` |
 | Model discovery | Selected API providers can be queried through their `/models` endpoint. Results are cached and merged with the checked-in registry; discovery does not replace user model state. | `src/model-discovery.mjs`, `src/model-catalog-cache.mjs`, `test/model-discovery.test.mjs`, `test/provider-catalog-cache.test.mjs` |
@@ -33,11 +33,11 @@ current `main`:
 | Local models | Ollama, LM Studio, MLX, and other explicitly configured local paths are opt-in and remain loopback-bound. | `src/local-models.mjs`, `src/lmstudio-models.mjs`, `src/local-mlx.mjs`, `test/lmstudio-provider.test.mjs`, `test/local-models.test.mjs`, `README.md` |
 | Control surfaces | The macOS tray and Control Center expose the shipped provider, model, usage, health, local-model, and target controls using the existing visual language. | `apps/macos/ModelRouterTray`, `apps/control-center`, `test/control-center-electron.test.mjs`, Swift package tests |
 
-The router currently has one credential per configured API provider. It does not
-provide a provider-neutral API-key pool or a multi-account ChatGPT pool on
-`main`. It also does not provide virtual combo models, a browser dashboard, or
-general client configuration exports. These are proposed items below, not
-completed modules.
+The router currently has one active credential per configured API-provider
+entry. It does not provide a provider-neutral API-key pool or a multi-account
+ChatGPT pool on `main`. It also does not provide virtual combo models, a browser
+dashboard, or general client configuration exports. These are proposed items
+below, not completed modules.
 
 The router-managed sub-agent setting intentionally remains at six concurrent
 threads. A request to raise that value is a separate configuration change and

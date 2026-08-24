@@ -10,16 +10,23 @@ claim that any item is already available. The current `README.md`, source, and
 tests are authoritative for shipped behavior. An implementation must re-check
 those sources and the upstream provider contract before changing code.
 
+The comparison reference is the public [OpenCodex repository](https://github.com/lidge-jun/opencodex).
+OpenCodex behavior is a comparison input, not a claim about Codex Router. Re-check
+the referenced project and its current contracts before implementing a proposal.
+
 ## 1. Verified current baseline
 
 The current router already provides a shared local service for Codex, with
-optional publication to DeepSeek Harness and Gemini CLI. It preserves the
-native GPT catalog, login, default model, reasoning metadata, and speed
-controls. It routes the checked-in provider registry and explicitly curated
-local models through the Responses path, with protocol-specific forwarding for
-supported providers. It also has model discovery, usage/cooldown handling,
-model failover, capability-aware vision handling, provider-specific hosted
-search where available, verified sub-agent metadata, a macOS tray, and a
+optional publication to DeepSeek Harness and Gemini CLI. These are the only
+supported client targets on `main`; no OpenCode or Cursor client target is
+shipped. It preserves the native GPT catalog and login, and keeps the native
+default model, reasoning metadata, and speed controls client-owned by default.
+A routed default is available only through an explicit router-owned opt-in. It
+routes the checked-in provider registry and explicitly curated local models
+through the Responses path, with protocol-specific forwarding for supported
+providers. It also has selected-provider model discovery, usage/cooldown
+handling, model failover, capability-aware vision handling, provider-specific
+hosted search where available, verified sub-agent metadata, a macOS tray, and a
 Control Center.
 
 The current credential boundary is protected owner-only files or documented
