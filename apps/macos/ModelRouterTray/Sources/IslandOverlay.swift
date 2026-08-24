@@ -951,10 +951,15 @@ struct ProviderIcon: View {
           .resizable()
           .interpolation(.high)
           .scaledToFit()
+          // Keep provider marks inside the same point-sized slot as preset
+          // icons in both the menu bar and Dynamic Island.
+          .frame(width: size, height: size)
+          .clipped()
       } else {
         Image(systemName: "cpu")
           .font(.system(size: size * 0.5, weight: .semibold))
           .foregroundStyle(routerMuted)
+          .frame(width: size, height: size)
       }
     }
     .frame(width: size, height: size)
