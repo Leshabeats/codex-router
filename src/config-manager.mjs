@@ -66,6 +66,10 @@ const agentConcurrencyStartMarker = "# BEGIN codex-router-agent-concurrency-mana
 const agentConcurrencyEndMarker = "# END codex-router-agent-concurrency-managed";
 const multiAgentV2StartMarker = "# BEGIN codex-router-multi-agent-v2-managed";
 const multiAgentV2EndMarker = "# END codex-router-multi-agent-v2-managed";
+const standaloneWebSearchStartMarker =
+  "# BEGIN codex-router-standalone-web-search-managed";
+const standaloneWebSearchEndMarker =
+  "# END codex-router-standalone-web-search-managed";
 const createdAgentsTableMarker = "# codex-router-created-agents-table";
 const managedAgentMaxConcurrency = 6;
 // Codex 0.147 records a child's FINAL_ANSWER as subAgentActivity
@@ -110,6 +114,7 @@ const markerPairs = [
   ],
   [agentConcurrencyStartMarker, agentConcurrencyEndMarker],
   [multiAgentV2StartMarker, multiAgentV2EndMarker],
+  [standaloneWebSearchStartMarker, standaloneWebSearchEndMarker],
   ["# BEGIN kimi-codex-router-managed", "# END kimi-codex-router-managed"],
   ["# BEGIN kimi-codex-proxy-managed", "# END kimi-codex-proxy-managed"],
 ];
@@ -352,6 +357,97 @@ function withManagedMultiAgentV2(input) {
     multiAgentV2StartMarker,
     featureLine,
     multiAgentV2EndMarker,
+  ];
+  const lines = cleaned.split("\n");
+  const featuresHeader = lines.findIndex((line) =>
+    /^\s*\[features\]\s*(?:#.*)?$/.test(line),
+  );
+  if (featuresHeader === -1) {
+    const firstTable = lines.findIndex((line) => /^\s*\[/.test(line));
+    const insertionIndex = firstTable === -1 ? lines.length : firstTable;
+    lines.splice(insertionIndex, 0, "", "[features]", ...managedLines);
+    return `${lines.join("\n").trimEnd()}\n`;
+  }
+  let tableEnd = featuresHeader + 1;
+  while (tableEnd < lines.length && !/^\s*\[/.test(lines[tableEnd])) tableEnd += 1;
+  lines.splice(tableEnd, 0, ...managedLines, "");
+  return `${lines.join("\n").trimEnd()}\n`;
+}
+
+function hasStandaloneWebSearchConfig(input) {
+  const lines = input.split("\n");
+  if (lines.some((line) => /^\s*features\.standalone_web_search\s*=/.test(line))) {
+    return true;
+  }
+  const featuresHeader = lines.findIndex((line) =>
+    /^\s*\[features\]\s*(?:#.*)?$/.test(line),
+  );
+  if (featuresHeader === -1) return false;
+  let tableEnd = featuresHeader + 1;
+  while (tableEnd < lines.length && !/^\s*\[/.test(lines[tableEnd])) tableEnd += 1;
+  return lines
+    .slice(featuresHeader + 1, tableEnd)
+    .some((line) => /^\s*standalone_web_search\s*=/.test(line));
+}
+
+// Standalone web search is a Codex feature flag, not a router-side tool. Probe
+// the installed Codex schema before writing it so older clients keep loading
+// their config instead of failing on an unknown feature.
+let codexSupportsStandaloneWebSearch;
+function installedCodexSupportsStandaloneWebSearch() {
+  if (codexSupportsStandaloneWebSearch !== undefined) {
+    return codexSupportsStandaloneWebSearch;
+  }
+  codexSupportsStandaloneWebSearch = probeStandaloneWebSearchSupport();
+  return codexSupportsStandaloneWebSearch;
+}
+
+function probeStandaloneWebSearchSupport() {
+  const binary = findCodexBinary();
+  if (!binary) return false;
+  const probeHome = mkdtempSync(path.join(os.tmpdir(), "codex-router-search-probe-"));
+  try {
+    writeFileSync(
+      path.join(probeHome, "config.toml"),
+      "[features]\nstandalone_web_search = true\n",
+      { encoding: "utf8", mode: 0o600 },
+    );
+    const probe = spawnableCommand(binary, ["login", "status"]);
+    const result = spawnSync(probe.command, probe.args, {
+      ...probe.options,
+      encoding: "utf8",
+      timeout: 10_000,
+      windowsHide: true,
+      env: { ...process.env, CODEX_HOME: probeHome },
+    });
+    if (result.error) return false;
+    return !/Error loading configuration/i.test(
+      `${result.stdout || ""}\n${result.stderr || ""}`,
+    );
+  } catch {
+    return false;
+  } finally {
+    rmSync(probeHome, { recursive: true, force: true });
+  }
+}
+
+function withManagedStandaloneWebSearch(input) {
+  const cleaned = removeMarkerPair(
+    input,
+    standaloneWebSearchStartMarker,
+    standaloneWebSearchEndMarker,
+  );
+  if (
+    hasStandaloneWebSearchConfig(cleaned) ||
+    !installedCodexSupportsStandaloneWebSearch()
+  ) {
+    return cleaned;
+  }
+
+  const managedLines = [
+    standaloneWebSearchStartMarker,
+    "standalone_web_search = true",
+    standaloneWebSearchEndMarker,
   ];
   const lines = cleaned.split("\n");
   const featuresHeader = lines.findIndex((line) =>
@@ -1083,8 +1179,10 @@ function enabledContents(contents) {
     "supports_standalone_web_search = true",
     providerEndMarker,
   ];
-  return withManagedAgentConcurrency(
-    `${withManagedMultiAgentV2(`${next.join("\n").trimEnd()}\n`).trimEnd()}\n\n${providerBlock.join("\n")}\n`,
+  return withManagedStandaloneWebSearch(
+    withManagedAgentConcurrency(
+      `${withManagedMultiAgentV2(`${next.join("\n").trimEnd()}\n`).trimEnd()}\n\n${providerBlock.join("\n")}\n`,
+    ),
   );
 }
 

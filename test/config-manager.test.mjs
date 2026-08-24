@@ -60,6 +60,18 @@ exit 1
   writeFileSync(file, contents, { mode: 0o755 });
   return file;
 })();
+const standaloneRejectingCodex = (() => {
+  const isWindows = process.platform === "win32";
+  const file = path.join(
+    codexStubDir,
+    isWindows ? "codex-no-standalone-search.cmd" : "codex-no-standalone-search",
+  );
+  const contents = isWindows
+    ? `@echo off\r\nfindstr /c:"standalone_web_search" "%CODEX_HOME%\\config.toml" >nul 2>&1\r\nif %errorlevel% equ 0 (\r\n  echo Error loading configuration: unknown feature standalone_web_search 1>&2\r\n  exit /b 1\r\n)\r\necho Not logged in 1>&2\r\nexit /b 1\r\n`
+    : `#!/bin/sh\nif grep -q standalone_web_search "$CODEX_HOME/config.toml" 2>/dev/null; then\n  echo 'Error loading configuration: unknown feature standalone_web_search' >&2\n  exit 1\nfi\necho 'Not logged in' >&2\nexit 1\n`;
+  writeFileSync(file, contents, { mode: 0o755 });
+  return file;
+})();
 
 function run(
   command,
@@ -118,6 +130,8 @@ approval_policy = "never"
     assert.match(configured, /# BEGIN codex-router-managed/);
     assert.match(configured, /# BEGIN codex-router-provider-managed/);
     assert.match(configured, /# BEGIN codex-router-multi-agent-v2-managed/);
+    assert.match(configured, /# BEGIN codex-router-standalone-web-search-managed/);
+    assert.match(configured, /^standalone_web_search = true$/m);
     assert.match(
       configured,
       /multi_agent_v2 = \{ enabled = true, max_concurrent_threads_per_session = 6, expose_spawn_agent_model_overrides = true, usage_hint_enabled = true, root_agent_usage_hint_text = "When a child agent finishes \(FINAL_ANSWER, task_complete, or an idle\/errored wait snapshot\), call interrupt_agent on that child so Codex can mark it done\. Do not leave finished children in the working state\." \}/,
@@ -161,6 +175,12 @@ approval_policy = "never"
         .length,
       1,
     );
+    assert.equal(
+      (readFileSync(configPath, "utf8").match(
+        /# BEGIN codex-router-standalone-web-search-managed/g,
+      ) || []).length,
+      1,
+    );
 
     const disabled = run("disable", codexHome);
     assert.equal(disabled.mode, "native");
@@ -168,13 +188,59 @@ approval_policy = "never"
     const restored = readFileSync(configPath, "utf8");
     assert.doesNotMatch(
       restored,
-      /codex-router-(?:(?:provider|agent-concurrency|multi-agent-v2)-)?managed|codex-router-created-agents-table|openai_base_url|model_catalog_json|experimental_realtime_(?:webrtc_call|ws)_base_url/,
+      /codex-router-(?:(?:provider|agent-concurrency|multi-agent-v2|standalone-web-search)-)?managed|codex-router-created-agents-table|openai_base_url|model_catalog_json|experimental_realtime_(?:webrtc_call|ws)_base_url/,
     );
     assert.doesNotMatch(restored, /\[agents\]|max_concurrent_threads_per_session/);
     assert.match(restored, /model = "gpt-5\.6-sol"/);
     assert.match(restored, /model_provider = "openai"/);
     assert.match(restored, /model_reasoning_effort = "xhigh"/);
     assert.match(restored, /\[profiles\.work\]/);
+  } finally {
+    rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
+test("config manager preserves a user-owned standalone web search setting", () => {
+  const codexHome = mkdtempSync(path.join(os.tmpdir(), "codex-router-config-"));
+  const configPath = path.join(codexHome, "config.toml");
+  const original = `model = "gpt-5.6-sol"
+model_provider = "openai"
+
+[features]
+standalone_web_search = false
+apps = true
+`;
+  writeFileSync(configPath, original, { mode: 0o600 });
+
+  try {
+    run("enable", codexHome);
+    const configured = readFileSync(configPath, "utf8");
+    assert.match(configured, /^standalone_web_search = false$/m);
+    assert.doesNotMatch(configured, /codex-router-standalone-web-search-managed/);
+
+    run("disable", codexHome);
+    const restored = readFileSync(configPath, "utf8");
+    assert.match(restored, /^standalone_web_search = false$/m);
+    assert.match(restored, /^apps = true$/m);
+  } finally {
+    rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
+test("config manager skips standalone web search on unsupported Codex builds", () => {
+  const codexHome = mkdtempSync(path.join(os.tmpdir(), "codex-router-config-"));
+  const configPath = path.join(codexHome, "config.toml");
+  writeFileSync(
+    configPath,
+    'model = "gpt-5.6-sol"\nmodel_provider = "openai"\n',
+    { mode: 0o600 },
+  );
+
+  try {
+    run("enable", codexHome, undefined, [], { CODEX_BIN: standaloneRejectingCodex });
+    const configured = readFileSync(configPath, "utf8");
+    assert.doesNotMatch(configured, /codex-router-standalone-web-search-managed/);
+    assert.doesNotMatch(configured, /^standalone_web_search = true$/m);
   } finally {
     rmSync(codexHome, { recursive: true, force: true });
   }
