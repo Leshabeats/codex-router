@@ -83,10 +83,10 @@ test("releases are tag-driven and validate every asset before publishing", () =>
   assert.match(ci, /ModelRouterControlVersion/);
   assert.match(ci, /CFBundleVersion/);
   assert.match(ci, /test "\$actual_build_version" = "\$GITHUB_RUN_NUMBER"/);
-  assert.match(ci, /lipo -verify_arch x86_64 arm64 "\$app\/Contents\/MacOS\/ModelRouterTray"/);
+  assert.match(ci, /lipo "\$app\/Contents\/MacOS\/ModelRouterTray" -verify_arch x86_64 arm64/);
   assert.match(
     ci,
-    /lipo -verify_arch x86_64 arm64 "\$app\/Contents\/Resources\/Control Center\.app\/Contents\/MacOS\/Codex Router"/,
+    /lipo "\$app\/Contents\/Resources\/Control Center\.app\/Contents\/MacOS\/Codex Router" -verify_arch x86_64 arm64/,
   );
   assert.match(ci, /Smoke the unified macOS app lifecycle/);
   assert.match(ci, /"\$outer" --supervised/);

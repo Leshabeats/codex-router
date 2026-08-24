@@ -499,6 +499,7 @@ test("Windows detached tray refresh runs outside the package on external node.ex
       ),
       /trusted external node\.exe is required/,
     );
+    await rm(inPackageNode);
     assert.throws(
       () => detachedControlRuntime(
         { PATH: "" },

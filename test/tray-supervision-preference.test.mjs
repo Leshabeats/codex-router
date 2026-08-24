@@ -29,7 +29,9 @@ test("tray supervision preference is private, explicit, and fail closed", () => 
     setTraySupervisionPreference(false, { file });
     assert.deepEqual(readTraySupervisionPreference({ file }), { state: "disabled", enabled: false });
     assert.equal(automaticTraySupervisionAllowed(readTraySupervisionPreference({ file })), false);
-    assert.equal(statSync(file).mode & 0o777, 0o600);
+    // Windows privacy is enforced with an owner-only ACL; its stat mode does
+    // not expose POSIX chmod bits. The file-security suite verifies that ACL.
+    if (process.platform !== "win32") assert.equal(statSync(file).mode & 0o777, 0o600);
     assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { version: 1, enabled: false });
 
     setTraySupervisionPreference(true, { file });

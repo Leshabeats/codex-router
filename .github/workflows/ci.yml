@@ -307,8 +307,8 @@ jobs:
           test "$actual_short_version" = "$expected_short_version"
           test "$actual_control_version" = "$expected_control_version"
           test "$actual_build_version" = "$GITHUB_RUN_NUMBER"
-          lipo -verify_arch x86_64 arm64 "$app/Contents/MacOS/ModelRouterTray"
-          lipo -verify_arch x86_64 arm64 "$app/Contents/Resources/Control Center.app/Contents/MacOS/Codex Router"
+          lipo "$app/Contents/MacOS/ModelRouterTray" -verify_arch x86_64 arm64
+          lipo "$app/Contents/Resources/Control Center.app/Contents/MacOS/Codex Router" -verify_arch x86_64 arm64
           codesign --verify --deep --strict "$app"
       - name: Smoke the unified macOS app lifecycle
         env:

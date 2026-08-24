@@ -19,13 +19,17 @@ const SECRET_WORD = /(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|password
 const APP_CONTRACT_LIMIT = 1024 * 1024;
 const WINDOWS_EXECUTABLE_EXTENSIONS = [".exe", ".com", ".cmd", ".bat"];
 
-function pathEntries(environment, platform = process.platform) {
+function pathEntries(
+  environment,
+  platform = process.platform,
+  hostExecPath = process.execPath,
+) {
   const home = os.homedir();
   const configuredNode = environment.CODEX_ROUTER_NODE_BIN;
   const candidates = [
     ...(configuredNode && path.isAbsolute(configuredNode) ? [path.dirname(configuredNode)] : []),
     ...String(environment.PATH || "").split(path.delimiter),
-    ...(path.isAbsolute(process.execPath) ? [path.dirname(process.execPath)] : []),
+    ...(path.isAbsolute(hostExecPath) ? [path.dirname(hostExecPath)] : []),
     // GUI applications on macOS and Linux are commonly launched without the
     // login-shell PATH. Keep these explicit locations in the same search set
     // the Control Center uses when reporting an installed runtime.
@@ -69,7 +73,12 @@ function runnableExecutable(candidate, platform = process.platform) {
   }
 }
 
-function discoverExecutable(environment, executable, platform = process.platform) {
+function discoverExecutable(
+  environment,
+  executable,
+  platform = process.platform,
+  hostExecPath = process.execPath,
+) {
   const configured = executable === "node"
     ? runnableExecutable(environment.CODEX_ROUTER_NODE_BIN, platform)
     : undefined;
@@ -77,7 +86,7 @@ function discoverExecutable(environment, executable, platform = process.platform
   const names = platform === "win32" && !path.extname(executable)
     ? WINDOWS_EXECUTABLE_EXTENSIONS.map((extension) => `${executable}${extension}`)
     : [executable];
-  for (const directory of pathEntries(environment, platform)) {
+  for (const directory of pathEntries(environment, platform, hostExecPath)) {
     for (const name of names) {
       const found = runnableExecutable(path.join(directory, name), platform);
       if (found) return found;
@@ -95,9 +104,12 @@ function discoverExecutable(environment, executable, platform = process.platform
  */
 export function runtimeEnvironment(
   environment = process.env,
-  { platform = process.platform } = {},
+  {
+    platform = process.platform,
+    hostExecPath = process.execPath,
+  } = {},
 ) {
-  const node = discoverExecutable(environment, "node", platform);
+  const node = discoverExecutable(environment, "node", platform, hostExecPath);
   if (!node) {
     // Do not hand an invalid explicit path to the installer. It would look
     // deliberate in the generated service definition and fail on every boot.
@@ -105,7 +117,7 @@ export function runtimeEnvironment(
     delete cleaned.CODEX_ROUTER_NODE_BIN;
     return cleaned;
   }
-  const npm = discoverExecutable(environment, "npm", platform);
+  const npm = discoverExecutable(environment, "npm", platform, hostExecPath);
   const runtimeDirectories = [
     path.dirname(node),
     ...(npm ? [path.dirname(npm)] : []),
@@ -150,9 +162,12 @@ export function detachedControlRuntime(
     electron = Boolean(process.versions.electron),
   } = {},
 ) {
-  const childEnvironment = runtimeEnvironment(environment, { platform });
+  const childEnvironment = runtimeEnvironment(environment, {
+    platform,
+    hostExecPath: execPath,
+  });
   if (platform === "win32" && electron) {
-    const executable = discoverExecutable(childEnvironment, "node", platform);
+    const executable = discoverExecutable(childEnvironment, "node", platform, execPath);
     const packageDirectory = path.win32.dirname(execPath);
     if (
       !executable
