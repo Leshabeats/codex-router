@@ -74,6 +74,11 @@ test("Responses requests normalize legacy aliases without dropping fields", () =
     { type: "function_call_output", call_id: "call-b", output: "two" },
   ]);
   assert.deepEqual(input.messages[1].tool_calls[0].function, { name: "lookup", arguments: '{"a":1}' });
+  assert.throws(
+    () => normalizeOpenAIRequest({ model: "m", messages: [{ role: "assistant", tool_calls: {} }] }),
+    /tool_calls must be an array/,
+  );
+  assert.throws(() => normalizeOpenAIRequest({ model: "m", tools: {} }), /tools must be an array/);
 });
 
 test("Responses input stays lossless and invalid tool lifecycle fails closed", () => {
@@ -97,6 +102,30 @@ test("Responses input stays lossless and invalid tool lifecycle fails closed", (
     () => normalizeOpenAIRequest({ model: "m", input: [], max_tokens: 1, max_output_tokens: 2 }),
     /must not disagree/,
   );
+});
+
+test("Responses schema aliases keep their descriptive metadata", () => {
+  const output = normalizeOpenAIRequest({
+    model: "responses-model",
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: "answer",
+        description: "A short answer",
+        schema: { type: "object" },
+        strict: true,
+      },
+    },
+  });
+  assert.deepEqual(output.text, {
+    format: {
+      type: "json_schema",
+      name: "answer",
+      description: "A short answer",
+      schema: { type: "object" },
+      strict: true,
+    },
+  });
 });
 
 test("Responses stream keeps independent tool indices and usage across chunk boundaries", async () => {
@@ -132,6 +161,31 @@ test("Responses stream emits a terminal error instead of silently ending", async
     message: "The upstream Responses stream ended before a terminal event.",
     param: null,
   });
+});
+
+test("Responses stream rejects unknown, conflicting, and post-terminal tool indices", async () => {
+  const output = frames(await transformText(createResponsesStreamTransform(), [
+    "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-4\"}}\n\n",
+    "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"item-a\",\"type\":\"function_call\",\"call_id\":\"call-a\"}}\n\n",
+    "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"call_id\":\"unknown\",\"delta\":\"{}\"}\n\n",
+    "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-4\"}}\n\n",
+  ]));
+  assert.equal(output.at(-1).event, "error");
+  assert.equal(output.at(-1).data.code, "invalid_responses_stream");
+  assert.match(output.at(-1).data.message, /unknown item/);
+
+  const mismatch = frames(await transformText(createResponsesStreamTransform(), [
+    "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"item-a\",\"type\":\"function_call\",\"call_id\":\"call-a\"}}\n\n",
+    "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"call_id\":\"call-a\",\"output_index\":1,\"delta\":\"{}\"}\n\n",
+  ]));
+  assert.equal(mismatch.at(-1).data.code, "invalid_responses_stream");
+
+  const afterTerminal = frames(await transformText(createResponsesStreamTransform(), [
+    "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-5\"}}\n\n",
+    "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"late\"}\n\n",
+  ]));
+  assert.equal(afterTerminal.at(-1).data.code, "invalid_responses_stream");
+  assert.match(afterTerminal.at(-1).data.message, /after its terminal/);
 });
 
 test("Responses provider errors stay structured and do not gain a second terminal frame", async () => {

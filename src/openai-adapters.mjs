@@ -69,6 +69,9 @@ function chatMessageToResponses(message) {
     content: content === undefined || content === null ? [] : content,
     ...(typeof message.name === "string" && message.name ? { name: message.name } : {}),
   });
+  if (message.tool_calls !== undefined && !Array.isArray(message.tool_calls)) {
+    throw adapterError("message.tool_calls must be an array.");
+  }
   for (const call of message.tool_calls || []) {
     object(call, "tool call");
     const fn = object(call.function || {}, "tool call function");
@@ -115,6 +118,7 @@ function normalizeResponseFormat(payload) {
       format: {
         type: "json_schema",
         ...(schema.name !== undefined ? { name: schema.name } : {}),
+        ...(schema.description !== undefined ? { description: schema.description } : {}),
         ...(schema.schema !== undefined ? { schema: schema.schema } : {}),
         ...(schema.strict !== undefined ? { strict: schema.strict } : {}),
       },
@@ -144,14 +148,23 @@ function normalizeResponsesRequest(payload) {
       if (item.type === "message" && item.content !== undefined) {
         return { ...item, content: contentToResponses(item.content) };
       }
-      if (item.type === "function_call" && (!item.call_id || !item.name)) {
+      if (
+        item.type === "function_call" &&
+        (typeof item.call_id !== "string" || !item.call_id || typeof item.name !== "string" || !item.name)
+      ) {
         throw adapterError("A function_call input item requires call_id and name.");
       }
-      if (item.type === "function_call_output" && (!item.call_id || item.output === undefined)) {
+      if (
+        item.type === "function_call_output" &&
+        (typeof item.call_id !== "string" || !item.call_id || item.output === undefined)
+      ) {
         throw adapterError("A function_call_output input item requires call_id and output.");
       }
       return clone(item);
     });
+  }
+  if (next.tools !== undefined && !Array.isArray(next.tools)) {
+    throw adapterError("tools must be an array.");
   }
   if (Array.isArray(next.tools)) next.tools = next.tools.map(normalizeTool);
   if (next.tool_choice !== undefined) next.tool_choice = normalizeToolChoice(next.tool_choice);
@@ -230,6 +243,7 @@ function streamState() {
     itemIndexes: new Map(),
     sawEvent: false,
     terminal: false,
+    invalid: false,
   };
 }
 
@@ -244,43 +258,101 @@ function validOutputIndex(value) {
   return Number.isInteger(value) && value >= 0;
 }
 
+function invalidStream(state, message) {
+  if (state.invalid) return "";
+  state.invalid = true;
+  state.terminal = true;
+  return serializeFrame({ event: "error" }, {
+    type: "error",
+    code: "invalid_responses_stream",
+    message,
+    param: null,
+  });
+}
+
+function rememberStreamIndex(state, key, index) {
+  if (!key) return true;
+  const previous = state.itemIndexes.get(key);
+  if (previous !== undefined && previous !== index) return false;
+  state.itemIndexes.set(key, index);
+  return true;
+}
+
 function normalizeResponsesEvent(frame, state) {
   const data = frameData(frame);
   state.sawEvent = true;
+  if (state.invalid) return "";
+  if (state.terminal && data !== "[DONE]") {
+    return invalidStream(state, "The Responses stream emitted data after its terminal event.");
+  }
   if (frame.event === "error") state.terminal = true;
   if (data === "[DONE]") {
+    if (!state.terminal) {
+      return invalidStream(state, "The Responses stream ended without a terminal event.");
+    }
     state.terminal = true;
     return serializeFrame(frame, data);
   }
   if (!data || typeof data !== "object" || Array.isArray(data)) return serializeFrame(frame, data);
   if (typeof data.type === "string" && TERMINAL_EVENTS.has(data.type)) state.terminal = true;
   if (data.type === "response.created") {
-    state.responseId ||= data.response?.id || data.response_id;
+    const responseId = data.response?.id || data.response_id;
+    if (state.responseId && responseId && state.responseId !== responseId) {
+      return invalidStream(state, "The Responses stream changed response IDs.");
+    }
+    state.responseId ||= responseId;
   }
   if (data.type === "response.output_item.added") {
     const item = data.item && typeof data.item === "object" ? data.item : undefined;
-    let index = validOutputIndex(data.output_index) ? data.output_index : item?.output_index;
+    if (!item) return invalidStream(state, "A Responses output item event requires an item.");
+    if (Object.hasOwn(data, "output_index") && !validOutputIndex(data.output_index)) {
+      return invalidStream(state, "A Responses output item used an invalid output index.");
+    }
+    if (Object.hasOwn(item, "output_index") && !validOutputIndex(item.output_index)) {
+      return invalidStream(state, "A Responses output item used an invalid item index.");
+    }
+    if (validOutputIndex(data.output_index) && validOutputIndex(item.output_index) && data.output_index !== item.output_index) {
+      return invalidStream(state, "A Responses output item used conflicting output indices.");
+    }
+    let index = validOutputIndex(data.output_index) ? data.output_index : item.output_index;
     if (!validOutputIndex(index)) index = state.outputIndex;
-    state.outputIndex = Math.max(state.outputIndex, index + 1);
-    if (item?.id) state.itemIndexes.set(item.id, index);
-    if (item?.call_id) state.itemIndexes.set(item.call_id, index);
+    if (index !== state.outputIndex) {
+      return invalidStream(state, "A Responses output item used a non-sequential output index.");
+    }
+    if (item.type === "function_call" && !item.id && !item.call_id) {
+      return invalidStream(state, "A Responses function call item requires an id or call_id.");
+    }
+    if (!rememberStreamIndex(state, item.id, index) || !rememberStreamIndex(state, item.call_id, index)) {
+      return invalidStream(state, "A Responses output item reused an ID with a different index.");
+    }
+    state.outputIndex = index + 1;
     if (!validOutputIndex(data.output_index)) data.output_index = index;
   }
   if (data.type === "response.function_call_arguments.delta" || data.type === "response.function_call_arguments.done") {
     const key = data.call_id || data.item_id;
-    let index = validOutputIndex(data.output_index) ? data.output_index : state.itemIndexes.get(key);
-    if (!validOutputIndex(index) && key) {
-      index = state.outputIndex;
-      state.outputIndex += 1;
-      state.itemIndexes.set(key, index);
+    if (typeof key !== "string" || !key) {
+      return invalidStream(state, "A Responses function call arguments event requires call_id or item_id.");
     }
-    if (validOutputIndex(index) && !validOutputIndex(data.output_index)) data.output_index = index;
+    if (Object.hasOwn(data, "output_index") && !validOutputIndex(data.output_index)) {
+      return invalidStream(state, "A Responses function call arguments event used an invalid output index.");
+    }
+    const index = state.itemIndexes.get(key);
+    if (!validOutputIndex(index)) {
+      return invalidStream(state, "A Responses function call arguments event referenced an unknown item.");
+    }
+    if (validOutputIndex(data.output_index) && data.output_index !== index) {
+      return invalidStream(state, "A Responses function call arguments event used the wrong output index.");
+    }
+    if (!validOutputIndex(data.output_index)) data.output_index = index;
   }
   if (data.type === "response.output_text.delta" && !validOutputIndex(data.output_index) && state.outputIndex > 0) {
     data.output_index = state.outputIndex - 1;
   }
-  if (data.type === "response.completed" && data.response && typeof data.response === "object" && state.responseId && !data.response.id) {
-    data.response.id = state.responseId;
+  if (data.type === "response.completed" && data.response && typeof data.response === "object") {
+    if (state.responseId && data.response.id && data.response.id !== state.responseId) {
+      return invalidStream(state, "The Responses completion used a different response ID.");
+    }
+    if (state.responseId && !data.response.id) data.response.id = state.responseId;
   }
   return serializeFrame(frame, data);
 }
@@ -301,7 +373,10 @@ export function createResponsesStreamTransform() {
         while ((boundary = nextBoundary(buffer))) {
           const frame = buffer.slice(0, boundary.index);
           buffer = buffer.slice(boundary.index + boundary.length);
-          if (frame.trim()) this.push(normalizeResponsesEvent(parseFrame(frame), state));
+          if (frame.trim()) {
+            const normalized = normalizeResponsesEvent(parseFrame(frame), state);
+            if (normalized) this.push(normalized);
+          }
         }
         callback();
       } catch (error) {
@@ -311,8 +386,11 @@ export function createResponsesStreamTransform() {
     flush(callback) {
       try {
         buffer += decoder.decode();
-        if (buffer.trim()) this.push(normalizeResponsesEvent(parseFrame(buffer), state));
-        if (state.sawEvent && !state.terminal) {
+        if (buffer.trim()) {
+          const normalized = normalizeResponsesEvent(parseFrame(buffer), state);
+          if (normalized) this.push(normalized);
+        }
+        if (state.sawEvent && !state.terminal && !state.invalid) {
           this.push(serializeFrame({ event: "error" }, {
             type: "error",
             code: "upstream_stream_incomplete",
