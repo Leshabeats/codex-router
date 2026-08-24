@@ -35,6 +35,18 @@ export interface RouterModel {
   autoCompact?: number;
   inputModalities?: string[];
   isFree?: boolean;
+  /** False only for a checked-in research route that is not currently routable. */
+  available?: boolean;
+}
+
+export interface RouterKnownModel {
+  slug: string;
+  displayName: string;
+  provider: string;
+  available: boolean;
+  contextWindow?: number;
+  inputModalities?: string[];
+  isFree?: boolean;
 }
 
 export interface SubagentSettings {
@@ -247,6 +259,8 @@ export interface RouterCatalogSnapshot {
   configured: boolean;
   enabledProviders: string[];
   models: RouterModel[];
+  /** Safe checked-in inventory; never implies that a route is publishable. */
+  knownModels?: RouterKnownModel[];
   picker: { hidden: string[]; visible?: string[]; hasExplicitVisibility?: boolean; path?: string };
   subagents: SubagentSettings;
 }

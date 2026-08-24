@@ -1154,7 +1154,7 @@ test("the model directory combines provider setup with de-duplicated model-famil
   assert.match(models, /Available from loaded catalogs/);
   assert.match(models, /publishCatalogModels\(entry, result\.sourceId, \[result\.modelId\]\)/);
   assert.match(models, /modelRouteKind\(model\)/);
-  assert.match(models, /Search all providers/);
+  assert.match(models, /Search providers or known models/);
   assert.match(models, /Every supported provider stays visible/);
   assert.match(models, /catalogSources\.length > 1/);
   assert.match(models, /Select up to 200/);

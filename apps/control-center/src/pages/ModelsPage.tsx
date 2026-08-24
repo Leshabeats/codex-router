@@ -26,6 +26,7 @@ import type {
   ProviderUsageSnapshot,
   RouterCatalogSnapshot,
   RouterControlApi,
+  RouterKnownModel,
   RouterModel,
   RouterTarget,
 } from "../types";
@@ -53,6 +54,7 @@ interface ProviderDirectoryEntry {
   displayName: string;
   setup?: ProviderSetup;
   models: RouterModel[];
+  knownModels: RouterKnownModel[];
 }
 
 interface CatalogViewState {
@@ -132,6 +134,22 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
   );
   const subagentSettings = catalog?.subagents ?? target?.modelSettings?.subagents;
   const modelFamilies = useMemo(() => groupModelFamilies(models), [models]);
+  const researchModels = useMemo<RouterModel[]>(() => {
+    const activeSlugs = new Set(models.map((model) => model.slug));
+    return [
+      ...models,
+      ...(catalog?.knownModels ?? [])
+        .filter((model) => !activeSlugs.has(model.slug))
+        .map((model) => ({
+          ...model,
+          enabled: false,
+          visible: false,
+          available: false,
+          subagentCertification: "unknown" as const,
+        })),
+    ];
+  }, [catalog?.knownModels, models]);
+  const researchFamilies = useMemo(() => groupModelFamilies(researchModels), [researchModels]);
   const usageById = useMemo(
     () => new Map((usage?.providers ?? []).map((provider) => [provider.id, provider])),
     [usage?.providers],
@@ -139,7 +157,7 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
   const directory = useMemo<ProviderDirectoryEntry[]>(() => {
     const entries = new Map<string, ProviderDirectoryEntry>();
     for (const provider of setup?.providers ?? []) {
-      entries.set(provider.id, { id: provider.id, displayName: provider.displayName, setup: provider, models: [] });
+      entries.set(provider.id, { id: provider.id, displayName: provider.displayName, setup: provider, models: [], knownModels: [] });
     }
     for (const provider of target?.providers ?? []) {
       const current = entries.get(provider.id);
@@ -148,6 +166,7 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
         displayName: current?.displayName || provider.displayName,
         setup: current?.setup,
         models: current?.models ?? [],
+        knownModels: current?.knownModels ?? [],
       });
     }
     for (const model of models) {
@@ -157,6 +176,17 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
         displayName: current?.displayName || providerDisplayName(model.provider),
         setup: current?.setup,
         models: [...(current?.models ?? []), model],
+        knownModels: current?.knownModels ?? [],
+      });
+    }
+    for (const model of catalog?.knownModels ?? []) {
+      const current = entries.get(model.provider);
+      entries.set(model.provider, {
+        id: model.provider,
+        displayName: current?.displayName || providerDisplayName(model.provider),
+        setup: current?.setup,
+        models: current?.models ?? [],
+        knownModels: [...(current?.knownModels ?? []), model],
       });
     }
     return [...entries.values()].sort((left, right) => {
@@ -164,7 +194,7 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
       const rightConnected = providerConnected(right, enabledProviders);
       return Number(rightConnected) - Number(leftConnected) || left.displayName.localeCompare(right.displayName);
     });
-  }, [enabledProviders, models, setup?.providers, target?.providers]);
+  }, [catalog?.knownModels, enabledProviders, models, setup?.providers, target?.providers]);
   const providerStates = useMemo(() => new Map(directory.map((entry) => [
     entry.id,
     enabledProviders.has(entry.id) || entry.models.some((model) => model.native),
@@ -337,19 +367,27 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
         const maker = brandForModel(model).name;
         return `${model.displayName} ${model.slug} ${maker}`.toLowerCase().includes(needle);
       });
-      if (!providerMatch && !visibleModels.length) return [];
-      return [{ ...entry, visibleModels }];
+      const matchedKnownModels = needle
+        ? entry.knownModels.filter((model) =>
+          `${model.displayName} ${model.slug} ${providerDisplayName(model.provider)}`.toLowerCase().includes(needle))
+        : [];
+      if (!providerMatch && !visibleModels.length && !matchedKnownModels.length) return [];
+      return [{ ...entry, visibleModels, matchedKnownModels }];
     });
   }, [connectionFilter, directory, enabledProviders, providerSearch]);
   const filteredFamilies = useMemo(() => {
     const needle = modelSearch.trim().toLowerCase();
     if (!needle) return modelFamilies;
-    return modelFamilies.filter((family) =>
+    return researchFamilies.filter((family) =>
       `${family.displayName} ${family.routes.map((model: RouterModel) => `${model.displayName} ${model.slug} ${providerDisplayName(model.provider)}`).join(" ")}`
         .toLowerCase()
         .includes(needle),
     );
-  }, [modelFamilies, modelSearch]);
+  }, [modelFamilies, modelSearch, researchFamilies]);
+  const filteredRouteCount = useMemo(
+    () => filteredFamilies.reduce((total, family) => total + family.routes.length, 0),
+    [filteredFamilies],
+  );
   const loadedCatalogMatches = useMemo(
     () => searchLoadedCatalogModels(directory, catalogStates, modelSearch),
     [catalogStates, directory, modelSearch],
@@ -410,13 +448,13 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
             <div className="pm-family-heading pm-provider-heading">
               <div>
                 <strong>All providers</strong>
-                <span>Every supported provider stays visible. Connect one to browse its account-specific model catalog.</span>
+                <span>Every supported provider stays visible. Search checked-in routes before connecting; connect one to browse its live account-specific catalog.</span>
               </div>
               <span>{directory.length} providers · {connectedProviderCount} connected</span>
             </div>
             <div className="pm-provider-toolbar">
               <div className="pm-provider-toolbar-primary">
-                <SearchField value={providerSearch} onChange={setProviderSearch} placeholder="Search all providers" />
+                <SearchField value={providerSearch} onChange={setProviderSearch} placeholder="Search providers or known models" />
                 <span className="pm-results-count" aria-live="polite">{filteredDirectory.length} providers</span>
               </div>
               <div className="pm-provider-toolbar-actions">
@@ -494,6 +532,7 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
                               <Badge tone={configured ? "success" : "neutral"}>{configured ? "connected" : "not connected"}</Badge>
                               <Badge tone="neutral">{connectionMethod(entry)}</Badge>
                               <Badge tone="accent">{entry.models.length} active {entry.models.length === 1 ? "route" : "routes"}</Badge>
+                              {entry.matchedKnownModels.length ? <Badge tone="neutral">{entry.matchedKnownModels.length} known {entry.matchedKnownModels.length === 1 ? "match" : "matches"}</Badge> : null}
                             </div>
                           </div>
                           <small>{entry.id}</small>
@@ -594,7 +633,7 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
                   );
                 })}
               </div>
-            ) : <EmptyState icon={<SearchX size={20} />} title="No providers or models match" body="Clear a filter or connect another provider." />}
+            ) : <EmptyState icon={<SearchX size={20} />} title="No providers or known models match" body="Clear a filter or try another provider or model name." />}
         </section>
 
         <section className="panel-section pm-model-catalog pm-family-catalog" id="model-catalog-controls">
@@ -603,10 +642,10 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
               <strong>Model families</strong>
               <span>One model row. Expand it only when you need to choose a provider route.</span>
             </div>
-            <span>{filteredFamilies.length} models · {models.length} routes · {loadedCatalogMatches.length} catalog matches</span>
+            <span>{filteredFamilies.length} models · {filteredRouteCount} routes · {loadedCatalogMatches.length} catalog matches</span>
           </div>
           <div className="pm-family-toolbar">
-            <SearchField value={modelSearch} onChange={setModelSearch} placeholder="Search selected models or loaded catalogs" />
+            <SearchField value={modelSearch} onChange={setModelSearch} placeholder="Search active, known, or loaded catalog models" />
             <span className="pm-results-count" aria-live="polite">{filteredFamilies.length} families · {loadedCatalogMatches.length} catalog models</span>
             <Button variant="ghost" disabled={!api} onClick={() => api && void optimisticPicker.mutateMany(models.filter((model) => !nativeClientManaged(model)).map((model) => [model.slug, true] as const), "Show all router models", () => api.setPickerModels(true))}>Show all</Button>
             <Button variant="ghost" disabled={!api} onClick={() => api && void optimisticPicker.mutateMany(models.filter((model) => !nativeClientManaged(model)).map((model) => [model.slug, false] as const), "Hide all router models", () => api.setPickerModels(false))}>Hide all</Button>
@@ -628,6 +667,8 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
                 const expanded = expandedFamilyId === family.id;
                 const preferred = preferredFamilyRoute(family);
                 const maker = brandForModel(preferred);
+                const providerCount = new Set(family.routes.map((model: RouterModel) => model.provider)).size;
+                const makerLabel = providerCount > 1 ? `${providerCount} providers` : maker.name;
                 const visibleRoutes = family.routes.filter((model: RouterModel) =>
                   optimisticPicker.value(model.slug, model.visible),
                 ).length;
@@ -646,7 +687,7 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
                       <BrandLogo brand={maker} size="large" />
                       <div className="pm-family-main">
                         <strong>{family.displayName}</strong>
-                        <small>{maker.name}</small>
+                        <small>{makerLabel}</small>
                       </div>
                       <div className="pm-family-facts">
                         {family.routes.some((model: RouterModel) => model.isFree) ? <Badge tone="success">Free route</Badge> : null}
@@ -738,6 +779,25 @@ function ModelRouteRow({
   onSubagentChange: (checked: boolean) => void;
   onEffortChange: (effort: string) => void;
 }) {
+  if (model.available === false) {
+    return (
+      <article className="pm-model-row pm-route-row pm-route-row-unavailable" role="listitem" data-availability="known">
+        <div className="pm-model-identity">
+          <ProviderLogo providerId={model.provider} displayName={providerName} size="medium" />
+          <div><strong>{providerName}</strong><span>Checked-in route</span><small title={model.slug}>{model.slug}</small></div>
+        </div>
+        <div className="pm-model-meta">
+          {model.contextWindow ? <span>{formatContext(model.contextWindow)}</span> : null}
+          <span>{model.inputModalities?.includes("image") ? "Text + image" : "Text"}</span>
+          {model.isFree ? <Badge tone="success">Free</Badge> : null}
+          <Badge tone="neutral">Enable or connect provider</Badge>
+        </div>
+        <div className="pm-model-controls pm-model-unavailable-copy">
+          Enable and connect this provider before adding the route to installed clients.
+        </div>
+      </article>
+    );
+  }
   const certification = subagentCertification(model);
   const certified = certification === "v2";
   const knownV1 = certification === "v1";
