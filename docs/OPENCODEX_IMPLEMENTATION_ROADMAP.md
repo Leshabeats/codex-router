@@ -61,11 +61,11 @@ earlier state and record the reason in the notes column.
 | P10 | `feat: add capability-driven sidecar search` | Explicit web-search sidecar for models without native search | P02, P06 | complete and submitted (#409) |
 | P11 | `feat: extend verified sub-agent routing` | Opt-in unverified models, per-agent chains and safe fallback | P06, P09 | complete and submitted (#410) |
 | P12 | `feat: add missing provider presets` | Data-driven manifests for high-value missing OpenCodex providers | P04, P05, P06 | complete and submitted (#412) |
-| P13 | `feat: expose provider and pool controls in tray` | Native-style settings rows for provider/account/key/pool management | P02, P03, P04 | to implement |
+| P13 | `feat: expose provider and pool controls in tray` | Native-style settings rows for provider/account/key/pool management | P02, P03, P04 | implemented (pool controls still missing) |
 | P14 | `feat: expose combos and sidecars in tray` | Existing tray UI patterns for combos, search sidecar and sub-agent policy | P09, P10, P11 | to implement |
-| P15 | `feat: add provider and account dashboard API` | Authenticated control API parity for live management and diagnostics | P02-P11 | to implement |
+| P15 | `feat: add provider and account dashboard API` | Authenticated control API parity for live management and diagnostics | P02-P11 | implemented (snapshot wiring needs isolated PR) |
 | P16 | `feat: add client exports for supported integrations` | Versioned OpenCode/Pi/DSH/etc. exports without plaintext secrets | P04, P06, P15 | complete and submitted (#413) |
-| P17 | `perf: bound router cache and memory retention` | Explicit bounded buffers, retention policy and diagnostics | P02, P15 | to implement |
+| P17 | `perf: bound router cache and memory retention` | Explicit bounded buffers, retention policy and diagnostics | P02, P15 | implemented (hard request cap and eviction metrics pending) |
 | P18 | `test: add end-to-end parity and migration suite` | Full regression matrix, restart, rollback, tray and native GPT checks | P01-P17 | to implement |
 | P19 | `fix: raise managed subagent concurrency` | Keep router-managed Codex configuration aligned with the 100-thread user setting | P00 | implemented |
 
