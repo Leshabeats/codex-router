@@ -28,6 +28,7 @@ import {
   skipServiceManagerCall,
   assertServiceWriteIsolated,
 } from "./service-write-guard.mjs";
+import { windowsScheduledTaskState } from "./windows-task-state.mjs";
 
 // Only this platform's own module can reach this machine's Task Scheduler.
 // Cross-platform render tests execute this module on POSIX with executable
@@ -405,6 +406,23 @@ function taskState() {
   return undefined;
 }
 
+async function taskRunning(state) {
+  if (state === "running") return true;
+  // Task Scheduler can answer Ready while its detached launcher is still
+  // serving. Reuse the process-level probe that guards startup readiness, but
+  // keep an unavailable query inconclusive so a restricted shell cannot turn
+  // an idle task into a false running service.
+  const corroborated = await windowsScheduledTaskState({
+    taskName,
+    platform: effectivePlatform,
+    timeoutMs: TASK_STATE_TIMEOUT_MS,
+  });
+  // Neither signal is sufficient alone: COM instances can outlive their
+  // process, while the machine-wide launcher scan can also see a manually
+  // started router. Only their conjunction corroborates this task.
+  return corroborated?.instanceCount > 0 && corroborated?.launcherAlive === true;
+}
+
 if (
   !new Set([
     "install",
@@ -487,15 +505,18 @@ if (command === "render") {
 } else if (command === "status") {
   let installed = false;
   let state = "stopped";
+  let loaded = false;
   try {
     schtasks(["/Query", "/TN", taskName, "/FO", "LIST", "/V"]);
     installed = true;
     state = taskState() || "ready";
+    loaded = await taskRunning(state);
+    if (loaded) state = "running";
   } catch {
     // Missing task.
   }
   process.stdout.write(
-    `${JSON.stringify({ installed, loaded: state === "running", state })}\n`,
+    `${JSON.stringify({ installed, loaded, state })}\n`,
   );
 } else if (command === "stop") {
   // Stopping is idempotent, like uninstall and restart: a task that is missing

@@ -4,15 +4,12 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-// These assertions describe the checked-in registry, so the machine's own
-// curated models, stored keys, and observed quota headers must not leak in;
-// the imports are dynamic for that reason.
-const testStateDir = mkdtempSync(path.join(os.tmpdir(), "ox-alpha-state-"));
-process.env.MODEL_ROUTER_STATE_DIR = testStateDir;
-process.env.MODEL_ROUTER_USER_MODELS = path.join(
-  testStateDir,
-  "user-models.json",
-);
+// These assertions describe the checked-in registry and synthetic account
+// fixtures, so the machine's own models, credentials, and quota history must
+// not leak in; the imports are dynamic for that reason.
+const testRoot = mkdtempSync(path.join(os.tmpdir(), "ox-alpha-test-"));
+process.env.MODEL_ROUTER_USER_MODELS = path.join(testRoot, "user-models.json");
+process.env.MODEL_ROUTER_STATE_DIR = path.join(testRoot, "state");
 
 const { clampModelEfforts, codexEffortVocabulary } = await import("../src/catalog.mjs");
 const { MODEL_BY_SLUG, PROVIDERS } = await import("../src/model-registry.mjs");
@@ -272,8 +269,10 @@ test("Nous Portal degrades to its dashboard because it publishes no credits rout
 test("an unconfigured Venice or Nous account reports setup rather than an error", async () => {
   const savedVenice = process.env.VENICE_API_KEY;
   const savedNous = process.env.NOUS_API_KEY;
+  const savedDiscovery = process.env.CODEX_ROUTER_NO_DISCOVERY;
   delete process.env.VENICE_API_KEY;
   delete process.env.NOUS_API_KEY;
+  process.env.CODEX_ROUTER_NO_DISCOVERY = "1";
   try {
     const snapshot = await providerAccountUsageSnapshot({
       providerIds: ["venice", "nousresearch"],
@@ -288,5 +287,7 @@ test("an unconfigured Venice or Nous account reports setup rather than an error"
     else process.env.VENICE_API_KEY = savedVenice;
     if (savedNous === undefined) delete process.env.NOUS_API_KEY;
     else process.env.NOUS_API_KEY = savedNous;
+    if (savedDiscovery === undefined) delete process.env.CODEX_ROUTER_NO_DISCOVERY;
+    else process.env.CODEX_ROUTER_NO_DISCOVERY = savedDiscovery;
   }
 });
