@@ -160,6 +160,11 @@ test("the Windows packager can retain an exact rollback package for its caller",
   assert.match(script, /\[string\]\$BackupDirectory/);
   assert.match(script, /\[switch\]\$KeepPrevious/);
   assert.match(script, /KeepPrevious requires an explicit -BackupDirectory/);
+  assert.match(script, /Push-Location -LiteralPath \$App/);
+  assert.match(
+    script,
+    /Push-Location -LiteralPath \$App[\s\S]*electron-builder\.cmd[\s\S]*Pop-Location/,
+  );
   assert.match(script, /\.win-unpacked\.previous-/);
   assert.match(script, /Refusing to overwrite an existing Control Center backup/);
   assert.match(script, /if \(\$PreviousMoved -and -not \$KeepPrevious\)/);

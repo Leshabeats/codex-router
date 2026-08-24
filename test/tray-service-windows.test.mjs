@@ -192,6 +192,8 @@ test("graceful update drain is verified and lifecycle failure never authorizes a
   );
   assert.match(processIdentity, /candidate\.CreationDate/);
   assert.match(processIdentity, /process\.StartTime\.ToUniversalTime\(\)\.Ticks/);
+  assert.match(processIdentity, /\[Math\]::Abs\(\$process\.StartTime\.ToUniversalTime\(\)\.Ticks - \$cimTicks\)/);
+  assert.match(processIdentity, /\[TimeSpan\]::TicksPerMillisecond/);
   assert.ok(
     drain.indexOf("exactUserExecutableOwnsPid(executable, lifecycle.pid)")
       < drain.indexOf('spawnSync(executable, ["--quit-for-update"]'),
@@ -223,6 +225,7 @@ test("Windows legacy drain binds exact argv and process creation identity", () =
   assert.match(exact, /ProcessId = \$pidValue/);
   assert.match(exact, /fresh\.CreationDate[^\n]+Candidate\.CreationDate/);
   assert.match(exact, /process\.StartTime\.ToUniversalTime\(\)\.Ticks/);
+  assert.match(exact, /\[TimeSpan\]::TicksPerMillisecond/);
   assert.match(exact, /\$process\.Kill\(\)/);
   assert.match(exact, /if \(-not \$stopMatches\)[^\n]+exit 0/);
   assert.match(exact, /exact companion process query returned an invalid count/);
@@ -491,6 +494,15 @@ test("Windows replacement recovery journals the package and exact prior Schedule
   );
   assert.match(transaction, /FileOptions\]::WriteThrough/);
   assert.match(transaction, /Stream\.Flush\(\$true\)/);
+  assert.match(transaction, /function Replace-ControlCenterTransactionJournal/);
+  assert.match(transaction, /\[IO\.File\]::Replace\(\$Temporary, \$JournalPath, \$null\)/);
+  assert.match(transaction, /catch \[ArgumentException\]/);
+  assert.match(transaction, /\.replace-backup-/);
+  assert.match(
+    transaction,
+    /Move-Item -LiteralPath \$FallbackBackup -Destination \$JournalPath -ErrorAction Stop/,
+  );
+  assert.match(transaction, /Replace-ControlCenterTransactionJournal \$Temporary \$Transaction\.JournalPath/);
   assert.match(
     transaction,
     /if \(\[IO\.File\]::Exists\(\$Temporary\)\) \{\s+Assert-ControlCenterTransactionPath \$Temporary "temporary transaction journal" "File"\s+\[IO\.File\]::Delete\(\$Temporary\)/,
