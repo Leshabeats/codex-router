@@ -3,7 +3,11 @@ import { Readable, Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import test from "node:test";
 
-import { EmptyCompletionGuard } from "../src/empty-completion-guard.mjs";
+import {
+  EmptyCompletionGuard,
+  EmptyCompletionPreludeLimitError,
+  EmptyCompletionTerminalGuard,
+} from "../src/empty-completion-guard.mjs";
 
 async function runGuard(
   input,
@@ -41,6 +45,7 @@ async function runGuard(
     empty: guard.isEmpty(),
     suppressed: guard.suppressedPrologue(),
     live: guard.releasedForLiveness(),
+    preludeLimit: guard.preludeLimitKind(),
   };
 }
 
@@ -145,6 +150,85 @@ test("a reasoning-only turn is still empty but is relayed, not suppressed", asyn
   assert.equal(body, EMPTY_TURN);
 });
 
+test("terminal events stay hidden when a released reasoning turn is empty", async () => {
+  const guard = new EmptyCompletionGuard("text/event-stream");
+  const terminalGuard = new EmptyCompletionTerminalGuard(
+    guard,
+    "text/event-stream",
+  );
+  const chunks = [];
+  await pipeline(
+    Readable.from([Buffer.from(EMPTY_TURN)]),
+    guard,
+    terminalGuard,
+    new Writable({
+      write(chunk, _encoding, callback) {
+        chunks.push(Buffer.from(chunk));
+        callback();
+      },
+    }),
+  );
+  const body = Buffer.concat(chunks).toString("utf8");
+  assert.equal(guard.isEmpty(), true);
+  assert.match(body, /reasoning_text\.delta/);
+  assert.doesNotMatch(body, /response\.completed|response\.done/);
+});
+
+test("held terminal events have a byte bound", async () => {
+  const guard = new EmptyCompletionGuard("text/event-stream");
+  const terminalGuard = new EmptyCompletionTerminalGuard(
+    guard,
+    "text/event-stream",
+    { maxHeldTerminalBytes: 120 },
+  );
+  const repeatedDone = [
+    "event: response.reasoning_text.delta",
+    'data: {"type":"response.reasoning_text.delta","delta":"thinking"}',
+    "",
+    ...Array.from({ length: 8 }, () => [
+      "event: response.done",
+      'data: {"type":"response.done","response":{"id":"r1"}}',
+      "",
+    ]).flat(),
+    "",
+  ].join("\n");
+  await assert.rejects(
+    pipeline(
+      Readable.from([Buffer.from(repeatedDone)]),
+      guard,
+      terminalGuard,
+      new Writable({
+        write(_chunk, _encoding, callback) {
+          callback();
+        },
+      }),
+    ),
+    (error) =>
+      error instanceof EmptyCompletionPreludeLimitError && error.kind === "bytes",
+  );
+});
+
+test("terminal events pass through when the released turn has content", async () => {
+  const guard = new EmptyCompletionGuard("text/event-stream");
+  const terminalGuard = new EmptyCompletionTerminalGuard(
+    guard,
+    "text/event-stream",
+  );
+  const chunks = [];
+  await pipeline(
+    Readable.from([Buffer.from(CONTENT_TURN)]),
+    guard,
+    terminalGuard,
+    new Writable({
+      write(chunk, _encoding, callback) {
+        chunks.push(Buffer.from(chunk));
+        callback();
+      },
+    }),
+  );
+  assert.equal(Buffer.concat(chunks).toString("utf8"), CONTENT_TURN);
+});
+
 test("reasoning ends the hold before the terminal event arrives", async () => {
   // The point of the release is latency, so prove the bytes leave the guard
   // while the stream is still open rather than at flush.
@@ -176,6 +260,45 @@ test("a reasoning turn that then produces content is not empty", async () => {
   assert.equal(empty, false);
   assert.equal(live, true);
   assert.equal(body, input);
+});
+
+test("content clears the post-reasoning stall timer", async () => {
+  async function* delayedFinish() {
+    yield Buffer.from([
+      "event: response.reasoning_text.delta",
+      'data: {"type":"response.reasoning_text.delta","delta":"thinking"}',
+      "",
+      "event: response.output_text.delta",
+      'data: {"type":"response.output_text.delta","delta":"answer"}',
+      "",
+      "",
+    ].join("\n"));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    yield Buffer.from([
+      "event: response.completed",
+      'data: {"type":"response.completed","response":{"output":[]}}',
+      "",
+      "",
+    ].join("\n"));
+  }
+  const guard = new EmptyCompletionGuard("text/event-stream", {
+    maxPreludeMs: 100,
+    maxStreamStallMs: 5,
+  });
+  const chunks = [];
+  await pipeline(
+    Readable.from(delayedFinish()),
+    guard,
+    new Writable({
+      write(chunk, _encoding, callback) {
+        chunks.push(Buffer.from(chunk));
+        callback();
+      },
+    }),
+  );
+  assert.equal(guard.hasContent(), true);
+  assert.equal(guard.isEmpty(), false);
+  assert.match(Buffer.concat(chunks).toString("utf8"), /answer/);
 });
 
 test("a reasoning item announces liveness when no summary is streamed", async () => {
@@ -400,12 +523,6 @@ test("multiple data fields are joined per the SSE dispatch algorithm", async () 
   assert.equal(body, input);
 });
 
-test("the pre-content byte bound fails open to one coherent original attempt", async () => {
-  const { body, empty } = await runGuard(SILENT_TURN, { maxPreludeBytes: 1 });
-  assert.equal(empty, false);
-  assert.equal(body, SILENT_TURN);
-});
-
 test("the pre-content time bound also covers a headerless SSE attempt", async () => {
   const split = SILENT_TURN.indexOf("event: response.completed");
   async function* delayedTurn() {
@@ -413,7 +530,10 @@ test("the pre-content time bound also covers a headerless SSE attempt", async ()
     await new Promise((resolve) => setTimeout(resolve, 20));
     yield Buffer.from(SILENT_TURN.slice(split));
   }
-  const guard = new EmptyCompletionGuard("", { maxPreludeMs: 5 });
+  const guard = new EmptyCompletionGuard("", {
+    maxPreludeMs: 5,
+    maxStreamStallMs: 100,
+  });
   const chunks = [];
   await pipeline(
     Readable.from(delayedTurn()),
@@ -425,7 +545,9 @@ test("the pre-content time bound also covers a headerless SSE attempt", async ()
       },
     }),
   );
-  assert.equal(guard.isEmpty(), false);
+  assert.equal(guard.isEmpty(), true);
+  assert.equal(guard.suppressedPrologue(), false);
+  assert.equal(guard.preludeLimitKind(), "time");
   assert.equal(Buffer.concat(chunks).toString("utf8"), SILENT_TURN);
 });
 
@@ -458,32 +580,39 @@ test("non-SSE bodies pass through byte for byte and are never empty", async () =
   assert.equal(body, json);
 });
 
-test("a byte-budget release reports releasedForBudget", async () => {
+test("a byte limit fails before relaying any staged bytes", async () => {
   const guard = new EmptyCompletionGuard("text/event-stream", { maxPreludeBytes: 1 });
   const chunks = [];
-  await pipeline(
-    Readable.from([Buffer.from(SILENT_TURN)]),
-    guard,
-    new Writable({
-      write(chunk, _encoding, callback) {
-        chunks.push(Buffer.from(chunk));
-        callback();
-      },
-    }),
+  await assert.rejects(
+    pipeline(
+      Readable.from([Buffer.from(SILENT_TURN)]),
+      guard,
+      new Writable({
+        write(chunk, _encoding, callback) {
+          chunks.push(Buffer.from(chunk));
+          callback();
+        },
+      }),
+    ),
+    (error) =>
+      error instanceof EmptyCompletionPreludeLimitError && error.kind === "bytes",
   );
   assert.equal(guard.isEmpty(), false);
-  assert.equal(guard.releasedForBudget(), true);
-  assert.equal(Buffer.concat(chunks).toString("utf8"), SILENT_TURN);
+  assert.equal(guard.suppressedPrologue(), true);
+  assert.equal(Buffer.concat(chunks).length, 0);
 });
 
-test("a time-budget release reports releasedForBudget and never classifies empty", async () => {
+test("a time limit relays the staged stream but keeps its empty verdict", async () => {
   const split = SILENT_TURN.indexOf("event: response.completed");
   async function* delayedTurn() {
     yield Buffer.from(SILENT_TURN.slice(0, split));
     await new Promise((resolve) => setTimeout(resolve, 20));
     yield Buffer.from(SILENT_TURN.slice(split));
   }
-  const guard = new EmptyCompletionGuard("", { maxPreludeMs: 5 });
+  const guard = new EmptyCompletionGuard("", {
+    maxPreludeMs: 5,
+    maxStreamStallMs: 100,
+  });
   const chunks = [];
   await pipeline(
     Readable.from(delayedTurn()),
@@ -495,12 +624,73 @@ test("a time-budget release reports releasedForBudget and never classifies empty
       },
     }),
   );
-  assert.equal(guard.isEmpty(), false);
-  assert.equal(guard.releasedForBudget(), true);
+  assert.equal(guard.isEmpty(), true);
+  assert.equal(guard.suppressedPrologue(), false);
+  assert.equal(guard.preludeLimitKind(), "time");
   assert.equal(Buffer.concat(chunks).toString("utf8"), SILENT_TURN);
 });
 
-test("a content release never reports releasedForBudget", async () => {
+test("a headers-only stream fails the time bound before relaying anything", async () => {
+  async function* delayedBody() {
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    yield Buffer.from(CONTENT_TURN);
+  }
+  const guard = new EmptyCompletionGuard("text/event-stream", {
+    maxPreludeMs: 5,
+  });
+  const chunks = [];
+  await assert.rejects(
+    pipeline(
+      Readable.from(delayedBody()),
+      guard,
+      new Writable({
+        write(chunk, _encoding, callback) {
+          chunks.push(Buffer.from(chunk));
+          callback();
+        },
+      }),
+    ),
+    (error) =>
+      error instanceof EmptyCompletionPreludeLimitError && error.kind === "time",
+  );
+  assert.equal(guard.suppressedPrologue(), true);
+  assert.equal(Buffer.concat(chunks).length, 0);
+});
+
+test("post-release parsing is bounded for an unterminated event", async () => {
+  const reasoning = [
+    "event: response.reasoning_text.delta",
+    'data: {"type":"response.reasoning_text.delta","delta":"thinking"}',
+    "",
+    "",
+  ].join("\n");
+  const guard = new EmptyCompletionGuard("text/event-stream", {
+    maxPreludeBytes: 64,
+    maxPreludeMs: 1_000,
+  });
+  const chunks = [];
+  await assert.rejects(
+    pipeline(
+      Readable.from([
+        Buffer.from(reasoning),
+        Buffer.from(`event: response.in_progress\ndata: ${"x".repeat(128)}`),
+      ]),
+      guard,
+      new Writable({
+        write(chunk, _encoding, callback) {
+          chunks.push(Buffer.from(chunk));
+          callback();
+        },
+      }),
+    ),
+    (error) =>
+      error instanceof EmptyCompletionPreludeLimitError && error.kind === "bytes",
+  );
+  assert.equal(guard.suppressedPrologue(), false);
+  assert.match(Buffer.concat(chunks).toString("utf8"), /thinking/);
+});
+
+test("a content release is unaffected by the pre-content limits", async () => {
   const { empty } = await runGuard(CONTENT_TURN);
   assert.equal(empty, false);
   // content release goes through the same runGuard pipeline, so re-run with a
@@ -515,7 +705,6 @@ test("a content release never reports releasedForBudget", async () => {
       },
     }),
   );
-  assert.equal(guard.releasedForBudget(), false);
   assert.equal(guard.hasContent(), true);
 });
 
@@ -547,6 +736,5 @@ test("a terminal event whose data fails to parse is indeterminate, not empty", a
   // produced": the guard must not declare the turn empty and force a retry.
   assert.equal(guard.isEmpty(), false);
   assert.equal(guard.hasContent(), false);
-  assert.equal(guard.releasedForBudget(), false);
   assert.equal(Buffer.concat(chunks).toString("utf8"), input);
 });

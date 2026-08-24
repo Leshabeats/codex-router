@@ -110,11 +110,11 @@ test("OpenCode curation keeps each endpoint family on its documented protocol", 
   assert.equal(curatedModelBlockReason("opencode-go", "grok-4.5"), undefined);
   assert.match(
     curatedModelBlockReason("opencode-go", "future-responses-only-model"),
-    /no certified opencode-go protocol route yet.*Chat, Messages, or Responses route is verified/s,
+    /provider catalog lists future-responses-only-model.*has not verified whether the model uses Chat, Messages, or Responses.*router compatibility limitation.*future update/s,
   );
   assert.throws(
     () => curatedModelProviderId("opencode-go", "future-responses-only-model"),
-    /no certified opencode-go protocol route yet/,
+    /cannot be added safely/,
   );
   assert.equal(
     curatedModelProviderId("opencode-go", "existing-private-model", {
@@ -144,11 +144,17 @@ test("Command Code curation accepts only its exact certified Chat and Messages r
   }
   assert.match(
     curatedModelBlockReason("commandcode", "claude-future-messages-only"),
-    /no certified commandcode protocol route yet.*Chat or Messages route is verified/s,
+    /provider catalog lists claude-future-messages-only.*has not verified whether the model uses Chat or Messages.*router compatibility limitation.*future update/s,
   );
+  for (const model of ["gpt-5.3-codex", "gpt-5.4", "gpt-5.4-mini"]) {
+    assert.match(
+      curatedModelBlockReason("commandcode", model),
+      new RegExp(`provider catalog lists ${model}.*router compatibility limitation`, "s"),
+    );
+  }
   assert.throws(
     () => curatedModelProviderId("commandcode", "claude-future-messages-only"),
-    /no certified commandcode protocol route yet/,
+    /cannot be added safely/,
   );
   assert.equal(
     curatedModelProviderId("commandcode", "existing-private-model", {
@@ -188,7 +194,7 @@ test("scripted OpenCode curation refuses an uncertified discovered protocol rout
     assert.equal(result.status, 1);
     assert.match(
       result.stderr,
-      /future-responses-only-model has no certified opencode-go protocol route yet/,
+      /provider catalog lists future-responses-only-model.*cannot be added safely/s,
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -225,7 +231,7 @@ test("scripted Command Code curation refuses an uncertified discovered protocol 
     assert.equal(result.status, 1);
     assert.match(
       result.stderr,
-      /claude-future-messages-only has no certified commandcode protocol route yet/,
+      /provider catalog lists claude-future-messages-only.*cannot be added safely/s,
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });

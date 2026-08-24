@@ -439,6 +439,7 @@ export interface UsageEvent {
   progressOnlyRetried?: boolean;
   emptyCompletionUnrepairable?: boolean;
   emptyCompletionGuardReleased?: boolean;
+  emptyCompletionPreludeLimit?: "bytes" | "time";
 }
 
 export interface ActiveRequest {

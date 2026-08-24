@@ -812,11 +812,11 @@ function normalizeBody(buffer, contentType, route) {
     payload.reasoning_split = true;
   } else if (model.requestProfile === "ox-alpha") {
     // Ox Alpha always thinks, and every route validates reasoning_effort
-    // against the rungs its own catalog publishes -- an off-ladder value comes
+    // against the rungs the model accepts -- an off-ladder value comes
     // back as HTTP 400 "This model always engages in thinking and cannot be
-    // disabled" rather than being ignored. The rungs are not the same
-    // everywhere (low/high/max on OpenCode, OpenRouter, Command Code and Nous
-    // Portal; low/medium/high on Venice), and Codex can send any rung it
+    // disabled" rather than being ignored. Every route accepts low/high/max;
+    // Venice's generic catalog metadata is the documented exception because it
+    // advertises a `medium` rung the model rejects. Codex can send any rung it
     // knows: an installation older than 0.143 has no `max` in its enum at all,
     // so the catalog clamps this model's default down to `xhigh` and that is
     // what arrives here. Clamping onto the entry's own declared ladder is what

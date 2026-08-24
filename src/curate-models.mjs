@@ -375,7 +375,7 @@ async function main() {
   if (candidates.length === 0 && removeOption === undefined && modelsOption === undefined) {
     const blockedCandidates = Object.entries(discovery.blocked || {});
     if (blockedCandidates.length) {
-      process.stdout.write(`No newly advertised ${provider.displayName} models have a certified protocol route yet.\n`);
+      process.stdout.write(`No newly advertised ${provider.displayName} models are supported by this Codex Router version yet.\n`);
       for (const [id, reason] of blockedCandidates) process.stdout.write(`${id}: ${reason}\n`);
     } else {
       process.stdout.write(

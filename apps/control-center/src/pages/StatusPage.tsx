@@ -55,6 +55,7 @@ type UsageEventTelemetry = UsageEvent & {
   emptyCompletion?: boolean;
   emptyCompletionRetried?: boolean;
   emptyCompletionGuardReleased?: boolean;
+  emptyCompletionPreludeLimit?: "bytes" | "time";
 };
 
 type StatusModelUsage = ProviderModelUsage & {
@@ -759,6 +760,9 @@ function buildResetRows(
 
 function eventFlag(event: UsageEventTelemetry): string | null {
   if (event.streamAborted) return "truncated";
+  if (event.emptyCompletionPreludeLimit) {
+    return `guard ${event.emptyCompletionPreludeLimit} limit`;
+  }
   if (event.emptyCompletionRetried) return "retried empty";
   if (event.emptyCompletion) return "empty reply";
   if (event.emptyCompletionGuardReleased) return "guard released";

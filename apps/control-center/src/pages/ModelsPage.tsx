@@ -921,7 +921,7 @@ function LoadedCatalogSearchResults({
                   title={model.blockedReason}
                   onClick={() => onAdd(model)}
                 >
-                  {adding ? "Adding" : model.addable ? "Add" : model.blockedReason ? "Protocol pending" : "Unavailable"}
+                  {adding ? "Adding" : model.addable ? "Add" : model.blockedReason ? "Not yet supported" : "Unavailable"}
                 </Button>
               )}
             </article>
@@ -1027,7 +1027,7 @@ function ProviderCatalogManager({
                 </span>
                 {state.data?.free?.includes(modelId) || modelId === "big-pickle" || modelId.endsWith("-free") ? <Badge tone="success">Free</Badge> : null}
                 {context ? <small>{formatContext(context)}</small> : null}
-                {published ? <Badge tone="neutral">Selected</Badge> : blockedReason ? <Badge tone="neutral">Protocol pending</Badge> : null}
+                {published ? <Badge tone="neutral">Selected</Badge> : blockedReason ? <Badge tone="neutral">Not yet supported</Badge> : null}
               </label>
             );
           })}

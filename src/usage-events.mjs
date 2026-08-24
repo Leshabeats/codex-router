@@ -95,10 +95,11 @@ export function recordUsageEvent({
   // produced output text or a tool call, and the router suppressed the empty
   // completion instead of letting the client record a silent success.
   emptyCompletion,
-  // True when the empty completion above was retried once against the same
-  // request body. `status` describes the retry's own outcome; the token counts
-  // cover both attempts, because both were sent and both were billed. This
-  // marker is what says the reported spend belongs to two attempts at one turn.
+  // True when the guard retried once against the same request body, either
+  // after a proven empty completion or after a pre-content safety limit.
+  // `status` describes the retry's own outcome; the token counts cover both
+  // attempts, because both were sent and both were billed. This marker is what
+  // says the reported spend belongs to two attempts at one turn.
   emptyCompletionRetried,
   // True when the Grok OAuth forwarder retried a progress-only stop. New rows
   // keep the selected attempt in the ordinary token fields and the aggregate
@@ -118,6 +119,11 @@ export function recordUsageEvent({
   // release is the conservative path: the turn is relayed as-is and cannot be
   // proven empty, but it must not read as a guaranteed-healthy turn either.
   emptyCompletionGuardReleased,
+  // The byte or time safety limit ended the pre-content hold while no output
+  // had reached the client. Current routers retry that attempt once and fail
+  // explicitly if the retry also reaches the limit; historical routers used
+  // `emptyCompletionGuardReleased` for the old fail-open behavior above.
+  emptyCompletionPreludeLimit,
   // Present only when the router replaced an upstream `input_tokens: 0` with
   // its own estimate on the way to Codex (#95). The reported counts above stay
   // exactly as the provider sent them, so an estimated turn is never mistaken
@@ -171,6 +177,10 @@ export function recordUsageEvent({
       : {}),
     ...(emptyCompletionGuardReleased === true
       ? { emptyCompletionGuardReleased: true }
+      : {}),
+    ...(emptyCompletionPreludeLimit === "bytes" ||
+    emptyCompletionPreludeLimit === "time"
+      ? { emptyCompletionPreludeLimit }
       : {}),
     ...(safeRetryCount(retries) !== undefined ? { retries: safeRetryCount(retries) } : {}),
     ...(typeof failoverFrom === "string" && failoverFrom.trim()
@@ -463,6 +473,10 @@ export function recentUsageEvents({ sinceMs = 24 * 60 * 60 * 1000, limit = 1_000
           ...(event.progressOnlyRetried === true ? { progressOnlyRetried: true } : {}),
           ...(event.emptyCompletionGuardReleased === true
             ? { emptyCompletionGuardReleased: true }
+            : {}),
+          ...(event.emptyCompletionPreludeLimit === "bytes" ||
+          event.emptyCompletionPreludeLimit === "time"
+            ? { emptyCompletionPreludeLimit: event.emptyCompletionPreludeLimit }
             : {}),
           ...(retries !== undefined ? { retries } : {}),
           ...(inputTokens !== undefined ? { inputTokens } : {}),
