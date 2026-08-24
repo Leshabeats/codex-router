@@ -983,6 +983,11 @@ test("aggregate overview exposes the router-owned catalog separately from client
       ["opencode-free/ox-alpha"],
       "unavailable research routes must not enter the routable catalog",
     );
+    const activeOxAlpha = parsed.catalog.models.find(
+      (model) => model.slug === "opencode-free/ox-alpha",
+    );
+    assert.equal(activeOxAlpha.contextWindow, 1_048_576);
+    assert.deepEqual(activeOxAlpha.inputModalities, ["text", "image"]);
   } finally {
     rmSync(stateDir, { recursive: true, force: true });
   }

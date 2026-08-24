@@ -426,6 +426,8 @@ async function routerCatalogSnapshot() {
     subagentCertification: subagentCertification(model),
     visible: picker.hasExplicitVisibility ? visible.has(model.slug) : !hidden.has(model.slug),
     isFree: model.isFree === true,
+    ...(Number.isFinite(model.contextWindow) ? { contextWindow: model.contextWindow } : {}),
+    ...(Array.isArray(model.inputModalities) ? { inputModalities: model.inputModalities } : {}),
     ...reasoningLevelField(model.reasoningLevels),
   }));
   const availableSlugs = new Set(models.map((model) => model.slug));
