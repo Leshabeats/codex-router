@@ -4,12 +4,12 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-// These assertions describe the checked-in registry, so the machine's own
-// curated models must not leak in; the imports are dynamic for that reason.
-process.env.MODEL_ROUTER_USER_MODELS = path.join(
-  mkdtempSync(path.join(os.tmpdir(), "ox-alpha-test-")),
-  "user-models.json",
-);
+// These assertions describe the checked-in registry and synthetic account
+// fixtures, so the machine's own models, credentials, and quota history must
+// not leak in; the imports are dynamic for that reason.
+const testRoot = mkdtempSync(path.join(os.tmpdir(), "ox-alpha-test-"));
+process.env.MODEL_ROUTER_USER_MODELS = path.join(testRoot, "user-models.json");
+process.env.MODEL_ROUTER_STATE_DIR = path.join(testRoot, "state");
 
 const { clampModelEfforts, codexEffortVocabulary } = await import("../src/catalog.mjs");
 const { MODEL_BY_SLUG, PROVIDERS } = await import("../src/model-registry.mjs");
@@ -266,12 +266,19 @@ test("Nous Portal degrades to its dashboard because it publishes no credits rout
 });
 
 test("an unconfigured Venice or Nous account reports setup rather than an error", async () => {
-  const snapshot = await providerAccountUsageSnapshot({
-    providerIds: ["venice", "nousresearch"],
-    fetchImpl: async () => {
-      throw new Error("an unconfigured provider must not be queried");
-    },
-  });
-  assert.equal(snapshot.venice.status, "not-configured");
-  assert.equal(snapshot.nousresearch.status, "not-configured");
+  const savedDiscovery = process.env.CODEX_ROUTER_NO_DISCOVERY;
+  process.env.CODEX_ROUTER_NO_DISCOVERY = "1";
+  try {
+    const snapshot = await providerAccountUsageSnapshot({
+      providerIds: ["venice", "nousresearch"],
+      fetchImpl: async () => {
+        throw new Error("an unconfigured provider must not be queried");
+      },
+    });
+    assert.equal(snapshot.venice.status, "not-configured");
+    assert.equal(snapshot.nousresearch.status, "not-configured");
+  } finally {
+    if (savedDiscovery === undefined) delete process.env.CODEX_ROUTER_NO_DISCOVERY;
+    else process.env.CODEX_ROUTER_NO_DISCOVERY = savedDiscovery;
+  }
 });
