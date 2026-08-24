@@ -1,9 +1,9 @@
-import { createHash } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
 import { writePrivateJson } from "./file-security.mjs";
-import { PROVIDER_CATALOG_CACHE_PATH } from "./paths.mjs";
+import { INTERNAL_SECRET_PATH, PROVIDER_CATALOG_CACHE_PATH } from "./paths.mjs";
 import { withProviderCatalogLock } from "./provider-catalog-lock.mjs";
 
 // Asking a provider what it serves is a network round trip against a live
@@ -29,14 +29,27 @@ const MAX_PROVIDERS = 80;
 const MAX_MODELS = 4000;
 const PROVIDER_ID = /^[a-z0-9][a-z0-9._-]{0,80}$/i;
 const IDENTITY_FINGERPRINT = /^[a-f0-9]{64}$/;
+const PROCESS_IDENTITY_KEY = randomBytes(32);
+
+function providerCatalogIdentityKey() {
+  try {
+    const key = readFileSync(INTERNAL_SECRET_PATH, "utf8").trim();
+    if (key.length >= 32) return key;
+  } catch {
+    // Discovery can be exercised before installation has created the router's
+    // internal secret. A process-local key keeps that cache account-bound for
+    // this process without persisting a verifier that supports offline guesses.
+  }
+  return PROCESS_IDENTITY_KEY;
+}
 
 // The cache must answer only for the effective account that produced it. This
-// digest is a private verifier, never a credential: callers provide the small
-// stable identity tuple and only the one-way result is persisted in the 0600
-// cache document.
+// keyed digest is a private verifier, never a credential. The installation's
+// independent internal secret prevents somebody who obtains only the private
+// cache document from testing credential guesses against its fingerprint.
 export function providerCatalogIdentityFingerprint(parts) {
   const values = Array.isArray(parts) ? parts : [parts];
-  return createHash("sha256")
+  return createHmac("sha256", providerCatalogIdentityKey())
     .update(JSON.stringify(values.map((value) => value ?? null)))
     .digest("hex");
 }

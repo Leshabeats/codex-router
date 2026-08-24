@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash, createHmac } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -14,6 +15,8 @@ const stateRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-catalog-cache
 process.env.MODEL_ROUTER_STATE_DIR = stateRoot;
 process.env.CODEX_ROUTER_STATE_DIR = stateRoot;
 const cachePath = path.join(stateRoot, "provider-catalog-cache.json");
+const internalSecret = "provider-catalog-test-internal-secret-0000000000000000";
+writeFileSync(path.join(stateRoot, "internal-secret"), `${internalSecret}\n`, { mode: 0o600 });
 const {
   catalogEntryIsStale,
   forgetProviderCatalogCache,
@@ -26,6 +29,25 @@ const {
 const TEST_IDENTITY = providerCatalogIdentityFingerprint(["test-account"]);
 
 test.after(() => rmSync(stateRoot, { recursive: true, force: true }));
+
+test("catalog identity fingerprints require the installation's independent secret", () => {
+  const payload = JSON.stringify(["test-account"]);
+  const unkeyed = createHash("sha256").update(payload).digest("hex");
+  const keyed = createHmac("sha256", internalSecret).update(payload).digest("hex");
+  assert.equal(TEST_IDENTITY, keyed);
+  assert.notEqual(TEST_IDENTITY, unkeyed);
+  try {
+    writeFileSync(
+      path.join(stateRoot, "internal-secret"),
+      "rotated-provider-catalog-test-secret-1111111111111111\n",
+      { mode: 0o600 },
+    );
+    assert.notEqual(providerCatalogIdentityFingerprint(["test-account"]), TEST_IDENTITY);
+  } finally {
+    writeFileSync(path.join(stateRoot, "internal-secret"), `${internalSecret}\n`, { mode: 0o600 });
+  }
+  assert.equal(providerCatalogIdentityFingerprint(["test-account"]), TEST_IDENTITY);
+});
 
 test("a provider's published list survives for the next visit", async () => {
   assert.equal(readProviderCatalogCache("deepseek"), undefined);
@@ -287,6 +309,7 @@ test("a same-account stored list answers discovery without a network", async () 
     const credential = "offline-same-account-key";
     const baseUrl = "http://127.0.0.1:9";
     const { providerDiscoveryIdentityFingerprint } = await import("../src/model-discovery.mjs");
+    writeFileSync(path.join(offlineRoot, "internal-secret"), `${internalSecret}\n`, { mode: 0o600 });
     writeFileSync(path.join(offlineRoot, "deepseek-api-key.secret"), `${credential}\n`, { mode: 0o600 });
     writeFileSync(
       path.join(offlineRoot, "provider-catalog-cache.json"),
