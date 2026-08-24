@@ -36,9 +36,11 @@ import {
   finishResponse,
   formatErrorChain,
   HOP_BY_HOP_HEADERS,
+  MAX_BUFFERED_RESPONSE_BYTES,
   httpErrorStatus,
   installGracefulShutdown,
   pipeResponse,
+  readResponseBody,
   readRequestBody,
   writeEventStreamHead,
   writeJson,
@@ -221,16 +223,33 @@ const ERROR_STATUS_DURATION_MS = 8_000;
 const configuredDecodedBodyBytes = Number(
   process.env.MODEL_ROUTER_MAX_DECODED_BODY_BYTES ||
     process.env.CODEX_ROUTER_MAX_DECODED_BODY_BYTES ||
-    256 * 1024 * 1024,
+    64 * 1024 * 1024,
 );
 const MAX_DECODED_BODY_BYTES =
   Number.isFinite(configuredDecodedBodyBytes) && configuredDecodedBodyBytes > 0
     ? Math.floor(configuredDecodedBodyBytes)
-    : 256 * 1024 * 1024;
+    : 64 * 1024 * 1024;
+const configuredActiveRequests = Number(
+  process.env.MODEL_ROUTER_MAX_ACTIVE_REQUESTS ||
+    process.env.CODEX_ROUTER_MAX_ACTIVE_REQUESTS ||
+    64,
+);
+export const MAX_ACTIVE_REQUESTS =
+  Number.isFinite(configuredActiveRequests) && configuredActiveRequests > 0
+    ? Math.floor(configuredActiveRequests)
+    : 64;
 // No single Codex turn streams for this long. Anything still marked in-flight
 // past this point leaked (crashed client, half-closed socket) and would
 // otherwise inflate the tray activity count until the router restarts.
-const STALE_ACTIVITY_MS = 15 * 60_000;
+const configuredStaleActivityMs = Number(
+  process.env.MODEL_ROUTER_STALE_ACTIVITY_MS ||
+    process.env.CODEX_ROUTER_STALE_ACTIVITY_MS ||
+    15 * 60_000,
+);
+const STALE_ACTIVITY_MS =
+  Number.isFinite(configuredStaleActivityMs) && configuredStaleActivityMs > 0
+    ? Math.floor(configuredStaleActivityMs)
+    : 15 * 60_000;
 const NATIVE_IMAGE_PATHS = new Set([
   "/images/edits",
   "/images/generations",
@@ -239,11 +258,27 @@ const NATIVE_IMAGE_PATHS = new Set([
 ]);
 const NATIVE_SEARCH_PATHS = new Set(["/alpha/search", "/v1/alpha/search"]);
 const AGENT_PAYLOAD_RELAY_TOOL = "relay_external_agent_payload";
-const AGENT_PAYLOAD_CACHE_TTL_MS = 15 * 60 * 1_000;
+const configuredAgentPayloadCacheTtlMs = Number(
+  process.env.MODEL_ROUTER_AGENT_PAYLOAD_CACHE_TTL_MS ||
+    process.env.CODEX_ROUTER_AGENT_PAYLOAD_CACHE_TTL_MS ||
+    15 * 60 * 1_000,
+);
+const AGENT_PAYLOAD_CACHE_TTL_MS =
+  Number.isFinite(configuredAgentPayloadCacheTtlMs) && configuredAgentPayloadCacheTtlMs > 0
+    ? Math.floor(configuredAgentPayloadCacheTtlMs)
+    : 15 * 60 * 1_000;
 const AGENT_PAYLOAD_CACHE_MAX_BYTES = 8 * 1024 * 1024;
 const AGENT_PAYLOAD_CACHE_MAX_ENTRIES = 256;
 const agentPayloadCache = new Map();
+const agentPayloadCacheInFlight = new Map();
 let agentPayloadCacheBytes = 0;
+const agentPayloadCacheMetrics = {
+  hits: 0,
+  misses: 0,
+  expirations: 0,
+  evictions: 0,
+  coalesced: 0,
+};
 
 let requestSequence = 0;
 const activeRequests = new Map();
@@ -256,9 +291,9 @@ if (!INTERNAL_KEY) throw new Error("CODEX_ROUTER_INTERNAL_KEY is required.");
 assertCallerSecret(CALLER_KEY);
 
 function pruneStaleActivity(now = Date.now()) {
-  for (const [requestId, entry] of activeRequests) {
+  for (const entry of activeRequests.values()) {
     if (now - (entry?.startedAt ?? 0) > STALE_ACTIVITY_MS) {
-      activeRequests.delete(requestId);
+      entry.abortStale?.();
     }
   }
 }
@@ -287,15 +322,58 @@ function activityPayload() {
   };
 }
 
-function beginRequestActivity() {
+function retentionPayload() {
+  purgeExpiredAgentPayloads();
+  return {
+    activeRequests: activeRequests.size,
+    maxActiveRequests: MAX_ACTIVE_REQUESTS,
+    maxDecodedBodyBytes: MAX_DECODED_BODY_BYTES,
+    maxBufferedResponseBytes: MAX_BUFFERED_RESPONSE_BYTES,
+    agentPayloadCache: {
+      entries: agentPayloadCache.size,
+      bytes: agentPayloadCacheBytes,
+      maxEntries: AGENT_PAYLOAD_CACHE_MAX_ENTRIES,
+      maxBytes: AGENT_PAYLOAD_CACHE_MAX_BYTES,
+      ttlMs: AGENT_PAYLOAD_CACHE_TTL_MS,
+      inFlight: agentPayloadCacheInFlight.size,
+      ...agentPayloadCacheMetrics,
+    },
+  };
+}
+
+function beginRequestActivity({ request, response, controller } = {}) {
   const requestId = ++requestSequence;
   const startedAt = Date.now();
-  activeRequests.set(requestId, { startedAt });
   let finished = false;
+  let stale = false;
+  let staleTimer;
+  const finish = (status) => {
+    if (finished) return;
+    finished = true;
+    if (staleTimer) clearTimeout(staleTimer);
+    activeRequests.delete(requestId);
+    if (status >= 400) errorStatusUntil = Date.now() + ERROR_STATUS_DURATION_MS;
+  };
+  const abortStale = () => {
+    if (finished || stale) return;
+    stale = true;
+    const error = new Error("Router request exceeded its stale activity limit.");
+    error.code = "ERR_ROUTER_STALE_REQUEST";
+    error.status = 504;
+    controller?.abort(error);
+    request?.resume?.();
+    // Release admission only after aborting the operation that was retaining
+    // the request. The handler's catch path settles the response and usage.
+    finish(504);
+  };
+  staleTimer = setTimeout(abortStale, STALE_ACTIVITY_MS + 1);
+  staleTimer.unref?.();
+  activeRequests.set(requestId, { startedAt, abortStale });
   return {
     setRoute({ provider, model, sessionName, ...metadata } = {}) {
-      if (!provider) return;
+      if (!provider || finished) return;
       const entry = {
+        ...(activeRequests.get(requestId) || {}),
         id: String(requestId),
         provider,
         ...(model ? { model } : {}),
@@ -308,12 +386,8 @@ function beginRequestActivity() {
       if (model) lastUsedModel = model;
       if (sessionName) lastUsedSessionName = sessionName;
     },
-    finish(status) {
-      if (finished) return;
-      finished = true;
-      activeRequests.delete(requestId);
-      if (status >= 400) errorStatusUntil = Date.now() + ERROR_STATUS_DURATION_MS;
-    },
+    finish,
+    wasStale: () => stale,
   };
 }
 
@@ -681,6 +755,14 @@ function responseWithBody(upstream, body) {
   });
 }
 
+async function boundedResponseText(upstream, maxBytes = MAX_BUFFERED_RESPONSE_BYTES) {
+  try {
+    return (await readResponseBody(upstream, { maxBytes })).toString("utf8");
+  } catch {
+    return "";
+  }
+}
+
 // Rejected retries are still upstream requests and may be billed. Drain only
 // a complete bounded body through the ordinary usage observer; an oversized,
 // stalled, or failed body has unknowable usage and is canceled without
@@ -902,6 +984,7 @@ async function healthPayload() {
     router: "ready",
     degraded,
     activity: activityPayload(),
+    retention: retentionPayload(),
     oauth,
     api,
     grokOauth,
@@ -1086,24 +1169,43 @@ function agentPayloadCacheKey(encrypted) {
   return createHash("sha256").update(encrypted).digest("base64url");
 }
 
+function eraseAgentPayload(key, { expired = false, evicted = false } = {}) {
+  const entry = agentPayloadCache.get(key);
+  if (!entry) return;
+  const bytes = entry.bytes || 0;
+  entry.plaintext = "";
+  entry.bytes = 0;
+  agentPayloadCache.delete(key);
+  agentPayloadCacheBytes = Math.max(0, agentPayloadCacheBytes - bytes);
+  if (expired) agentPayloadCacheMetrics.expirations += 1;
+  if (evicted) agentPayloadCacheMetrics.evictions += 1;
+}
+
+function purgeExpiredAgentPayloads(now = Date.now()) {
+  for (const [key, entry] of agentPayloadCache) {
+    if (entry.expiresAt <= now) eraseAgentPayload(key, { expired: true });
+  }
+}
+
 function cachedAgentPayload(encrypted) {
   const key = agentPayloadCacheKey(encrypted);
+  purgeExpiredAgentPayloads();
   const entry = agentPayloadCache.get(key);
-  if (!entry) return undefined;
-  if (entry.expiresAt <= Date.now()) {
-    agentPayloadCache.delete(key);
-    agentPayloadCacheBytes -= entry.bytes;
+  if (!entry) {
+    agentPayloadCacheMetrics.misses += 1;
     return undefined;
   }
   agentPayloadCache.delete(key);
   agentPayloadCache.set(key, entry);
+  agentPayloadCacheMetrics.hits += 1;
   return entry.plaintext;
 }
 
 function rememberAgentPayload(encrypted, plaintext) {
+  purgeExpiredAgentPayloads();
   const key = agentPayloadCacheKey(encrypted);
   const existing = agentPayloadCache.get(key);
-  if (existing) agentPayloadCacheBytes -= existing.bytes;
+  if (existing) eraseAgentPayload(key);
   const bytes = Buffer.byteLength(plaintext, "utf8");
   agentPayloadCache.set(key, {
     plaintext,
@@ -1116,15 +1218,17 @@ function rememberAgentPayload(encrypted, plaintext) {
     agentPayloadCacheBytes > AGENT_PAYLOAD_CACHE_MAX_BYTES
   ) {
     const oldestKey = agentPayloadCache.keys().next().value;
-    const oldest = agentPayloadCache.get(oldestKey);
-    agentPayloadCache.delete(oldestKey);
-    agentPayloadCacheBytes -= oldest?.bytes || 0;
+    eraseAgentPayload(oldestKey, { evicted: true });
   }
 }
 
-async function relayEncryptedAgentPayload(request, item, encrypted, signal) {
-  const cached = cachedAgentPayload(encrypted);
-  if (cached !== undefined) return cached;
+const agentPayloadCachePurgeTimer = setInterval(
+  () => purgeExpiredAgentPayloads(),
+  Math.min(AGENT_PAYLOAD_CACHE_TTL_MS, 60_000),
+);
+agentPayloadCachePurgeTimer.unref?.();
+
+async function relayEncryptedAgentPayloadOnce(request, item, encrypted, signal) {
   const body = {
     model: nativeAgentRelayModel(),
     stream: true,
@@ -1156,7 +1260,7 @@ async function relayEncryptedAgentPayload(request, item, encrypted, signal) {
     body: JSON.stringify(body),
     signal,
   });
-  const bytes = Buffer.from(await upstream.arrayBuffer());
+  const bytes = await readResponseBody(upstream, { maxBytes: 4 * 1024 * 1024 });
   if (!upstream.ok) {
     const error = new Error(
       `Native collaboration payload relay failed with HTTP ${upstream.status}.`,
@@ -1188,6 +1292,26 @@ async function relayEncryptedAgentPayload(request, item, encrypted, signal) {
   }
   rememberAgentPayload(encrypted, plaintext);
   return plaintext;
+}
+
+async function relayEncryptedAgentPayload(request, item, encrypted, signal) {
+  const cached = cachedAgentPayload(encrypted);
+  if (cached !== undefined) return cached;
+  const key = agentPayloadCacheKey(encrypted);
+  const pending = agentPayloadCacheInFlight.get(key);
+  if (pending) {
+    agentPayloadCacheMetrics.coalesced += 1;
+    return pending;
+  }
+  const operation = relayEncryptedAgentPayloadOnce(request, item, encrypted, signal);
+  agentPayloadCacheInFlight.set(key, operation);
+  try {
+    return await operation;
+  } finally {
+    if (agentPayloadCacheInFlight.get(key) === operation) {
+      agentPayloadCacheInFlight.delete(key);
+    }
+  }
 }
 
 async function normalizeRoutedAgentInput(request, input, signal) {
@@ -1909,7 +2033,22 @@ async function summarize(request, payload, route, signal) {
   for (let index = 0; index < attempts.length; index += 1) {
     const attemptRoute = attempts[index];
     const sent = await summarizeWith(request, payload, attemptRoute, aged, prepared, signal);
-    const bytes = Buffer.from(await sent.upstream.arrayBuffer());
+    let bytes;
+    try {
+      bytes = await readResponseBody(sent.upstream, {
+        maxBytes: 32 * 1024 * 1024,
+      });
+    } catch (error) {
+      if (error?.code === "ERR_UPSTREAM_RESPONSE_TOO_LARGE") {
+        return {
+          ok: false,
+          status: 502,
+          payload: { error: { message: "Compact response is too large." } },
+          toolResultAging: aged.stats,
+        };
+      }
+      throw error;
+    }
     if (bytes.length > 32 * 1024 * 1024) {
       return {
         ok: false,
@@ -2584,7 +2723,7 @@ async function attemptModelFailover({
     // model's own problem and not evidence about the operator's chosen one.
     const hopVerdict = classifyRoutedFailure({
       status: upstream.status,
-      bodyText: await upstream.text().catch(() => ""),
+      bodyText: await boundedResponseText(upstream),
       retryAfterSeconds: Number(upstream.headers.get("retry-after")),
     });
     if (hopVerdict.swap) recordProviderCooldown(model.provider, hopVerdict);
@@ -2612,7 +2751,8 @@ function writeIdleNoProviderError(response) {
 
 async function handleResponses(request, response, requestUrl) {
   const startedAt = Date.now();
-  const activity = beginRequestActivity();
+  const controller = new AbortController();
+  const activity = beginRequestActivity({ request, response, controller });
   let clientGone = false;
   let requestedModel = "";
   let route;
@@ -2644,7 +2784,6 @@ async function handleResponses(request, response, requestUrl) {
   let finalStatus;
   let activityStatus;
   let usageRecorded = false;
-  const controller = new AbortController();
   bindClientAbort(request, response, () => {
     clientGone = true;
     controller.abort();
@@ -2654,6 +2793,7 @@ async function handleResponses(request, response, requestUrl) {
     const encoded = await readRequestBody(request);
     const body = decodeBody(encoded, request.headers["content-encoding"]);
     const payload = await parseBodyAsync(body);
+    controller.signal.throwIfAborted();
     requestedModel = typeof payload.model === "string" ? payload.model : "";
     let registeredRoute =
       MODEL_BY_SLUG.get(requestedModel) ??
@@ -2912,7 +3052,7 @@ async function handleResponses(request, response, requestUrl) {
     // once. Nothing is relayed either way, so reading it is free.
     let failedBodyText;
     if (route && !upstream.ok) {
-      failedBodyText = await upstream.text().catch(() => "");
+      failedBodyText = await boundedResponseText(upstream);
       const verdict = classifyRoutedFailure({
         status: upstream.status,
         bodyText: failedBodyText,
@@ -2979,7 +3119,7 @@ async function handleResponses(request, response, requestUrl) {
           status: upstream.status,
           // Already drained above so the failover classifier could read it; a
           // second `.text()` on the same response yields "".
-          bodyText: failedBodyText ?? (await upstream.text().catch(() => "")),
+          bodyText: failedBodyText ?? "",
           modelName: route.displayName || route.slug,
           providerName:
             provider?.transport === "ollama"
@@ -3398,6 +3538,34 @@ async function handleResponses(request, response, requestUrl) {
     }
   } catch (error) {
     upstreamLatencyMs ??= Date.now() - startedAt;
+    if (activity.wasStale()) {
+      finalStatus = 504;
+      activityStatus = 504;
+      if (!usageRecorded) {
+        recordUsageEvent({
+          model: route?.slug || requestedModel,
+          provider: route ? canonicalProviderId(route.provider) : "openai",
+          status: 504,
+          durationMs: Date.now() - startedAt,
+          responseStartMs: upstreamLatencyMs,
+          staleRequest: true,
+        });
+        usageRecorded = true;
+      }
+      if (!response.headersSent) {
+        writeJson(response, 504, {
+          error: {
+            type: "router_stale_request",
+            message: "The router canceled a request that exceeded its retention limit.",
+          },
+        });
+      } else {
+        endStreamedResponse(response, {
+          message: "The router canceled a request that exceeded its retention limit.",
+        });
+      }
+      return;
+    }
     if (retryEmptyCompletionGuard?.hasContent()) emptyCompletion = false;
     if (usageTransform) {
       usage = mergeTokenUsage(
@@ -3518,10 +3686,10 @@ async function handleResponses(request, response, requestUrl) {
 
 async function handleNativeRequest(request, response, requestUrl, defaultModel) {
   const startedAt = Date.now();
-  const activity = beginRequestActivity();
+  const controller = new AbortController();
+  const activity = beginRequestActivity({ request, response, controller });
   let clientGone = false;
   let requestedModel = defaultModel;
-  const controller = new AbortController();
   bindClientAbort(request, response, () => {
     clientGone = true;
     controller.abort();
@@ -3547,6 +3715,7 @@ async function handleNativeRequest(request, response, requestUrl, defaultModel) 
     const encoded = await readRequestBody(request);
     const body = decodeBody(encoded, request.headers["content-encoding"]);
     const payload = await parseBodyAsync(body);
+    controller.signal.throwIfAborted();
     requestedModel =
       typeof payload.model === "string" ? payload.model : defaultModel;
     activity.setRoute({
@@ -3604,6 +3773,31 @@ async function handleNativeRequest(request, response, requestUrl, defaultModel) 
       );
     }
   } catch (error) {
+    if (activity.wasStale()) {
+      const status = 504;
+      if (!response.headersSent) {
+        writeJson(response, status, {
+          error: {
+            type: "router_stale_request",
+            message: "The router canceled a request that exceeded its retention limit.",
+          },
+        });
+      } else {
+        endStreamedResponse(response, {
+          message: "The router canceled a request that exceeded its retention limit.",
+        });
+      }
+      recordUsageEvent({
+        model: requestedModel,
+        provider: "openai",
+        status,
+        durationMs: Date.now() - startedAt,
+        ...(response.headersSent ? { streamAborted: true } : {}),
+        staleRequest: true,
+      });
+      activity.finish(status);
+      return;
+    }
     // A failure with no usage event is invisible to the diagnostic that
     // separates "the upstream failed" from "the request died inside the
     // router" — the distinction #171 turned on. Meter this path the way the

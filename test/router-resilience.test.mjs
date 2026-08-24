@@ -230,6 +230,165 @@ test("a gateway that dies mid-stream ends the routed body and logs the cause", a
   }
 });
 
+test("stale activity aborts the operation before releasing its accounting slot", async () => {
+  let upstreamAborted = false;
+  const gateway = await mockServer(async (request, response) => {
+    if (request.method === "GET" && request.url === "/health") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    request.once("aborted", () => {
+      upstreamAborted = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    if (!response.writableEnded) {
+      response.writeHead(200, {
+        "Content-Type": "application/json",
+        Connection: "close",
+      });
+      response.end(JSON.stringify({ id: "late", object: "response", output: [] }));
+    }
+  });
+  const routerPort = await openPort();
+  const router = run({
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_STALE_ACTIVITY_MS: "80",
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_API_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_GROK_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_GATEWAY_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+  });
+  try {
+    await waitFor(`http://127.0.0.1:${routerPort}/health`, router);
+    const response = await fetch(`${callerBaseUrl(routerPort, CALLER_KEY)}/responses`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer codex-caller-auth",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ model: "deepseek/deepseek-v4-pro", input: "stale" }),
+    });
+    const responseBody = await response.json();
+    assert.equal(response.status, 504, JSON.stringify(responseBody));
+    assert.equal(responseBody.error.type, "router_stale_request");
+    const health = await fetch(`${callerBaseUrl(routerPort, CALLER_KEY)}/health`).then((r) => r.json());
+    assert.equal(health.retention.activeRequests, 0);
+    assert.equal(health.activity.state, "error");
+    const events = await waitForUsageEvents(router.stateDir, 1, router);
+    assert.equal(events[0].status, 504);
+    assert.equal(events[0].staleRequest, true);
+    const abortDeadline = Date.now() + 1_000;
+    while (!upstreamAborted && Date.now() < abortDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(upstreamAborted, true);
+  } finally {
+    await stopChild(router);
+    gateway.server.closeAllConnections?.();
+    gateway.server.closeIdleConnections?.();
+    gateway.server.close(() => {});
+  }
+});
+
+test("same encrypted payload shares one relay and expiry removes the retained plaintext", async () => {
+  let nativeRequests = 0;
+  const native = await mockServer(async (_request, response) => {
+    nativeRequests += 1;
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const argumentsText = JSON.stringify({ payload: "coalesced payload" });
+    const added = {
+      type: "response.output_item.added",
+      item: {
+        type: "function_call",
+        id: "fc_relay",
+        name: "relay_external_agent_payload",
+        arguments: "",
+      },
+    };
+    const done = {
+      type: "response.function_call_arguments.done",
+      item_id: "fc_relay",
+      arguments: argumentsText,
+    };
+    const body = [added, done]
+      .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+      .join("") + "data: [DONE]\n\n";
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    response.end(body);
+  });
+  const gateway = await mockServer(async (request, response) => {
+    if (request.method === "GET" && request.url === "/health") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ id: "r-coalesced", output: [] }));
+  });
+  const routerPort = await openPort();
+  const router = run({
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_AGENT_PAYLOAD_CACHE_TTL_MS: "50",
+    CODEX_NATIVE_BASE_URL: `http://127.0.0.1:${native.port}/backend-api/codex`,
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_API_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_GROK_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_GATEWAY_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+  });
+  const body = {
+    model: "deepseek/deepseek-v4-pro",
+    stream: false,
+    input: [
+      {
+        type: "agent_message",
+        content: [
+          {
+            type: "input_text",
+            text: "Message Type: NEW_TASK\nTask name: /root/critic\nSender: /root\nPayload:\n",
+          },
+          { type: "encrypted_content", encrypted_content: "gAAAAA-coalesced=" },
+        ],
+      },
+    ],
+  };
+  const headers = {
+    Authorization: "Bearer CHATGPT_SESSION_TOKEN",
+    "Content-Type": "application/json",
+  };
+  try {
+    await waitFor(`http://127.0.0.1:${routerPort}/health`, router);
+    const [first, second] = await Promise.all([
+      fetch(`${callerBaseUrl(routerPort, CALLER_KEY)}/responses`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+      }),
+      fetch(`${callerBaseUrl(routerPort, CALLER_KEY)}/responses`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+      }),
+    ]);
+    assert.equal(first.status, 200, await first.text());
+    assert.equal(second.status, 200, await second.text());
+    assert.equal(nativeRequests, 1);
+    const retained = await fetch(`${callerBaseUrl(routerPort, CALLER_KEY)}/health`).then((r) => r.json());
+    assert.equal(retained.retention.agentPayloadCache.entries, 1);
+    assert.ok(retained.retention.agentPayloadCache.coalesced >= 1);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const expired = await fetch(`${callerBaseUrl(routerPort, CALLER_KEY)}/health`).then((r) => r.json());
+    assert.equal(expired.retention.agentPayloadCache.entries, 0);
+    assert.equal(expired.retention.agentPayloadCache.bytes, 0);
+    assert.ok(expired.retention.agentPayloadCache.expirations >= 1);
+  } finally {
+    await stopChild(router);
+    await Promise.all([closeServer(native.server), closeServer(gateway.server)]);
+  }
+});
+
 // A client that cancels mid-stream is not an upstream failure: the router
 // meters the turn as 0 rather than the committed 200 or a fabricated 5xx.
 test("a client cancel mid-stream meters 0 and never claims an upstream failure", async () => {
