@@ -30,12 +30,15 @@ export function normalizeSupportedEndpoints(value, { field = "supportedEndpoints
 
 export function protocolEndpoint(adapter) {
   if (adapter === "openai-responses" || adapter === "responses") return "/responses";
-  if (adapter === "openai-completions" || adapter === "completions") return "/completions";
-  return "/chat/completions";
-}
-
-export function adapterForEndpoint(route, adapter) {
-  return route === "/completions" ? "openai-completions" : adapter;
+  if (
+    adapter === undefined ||
+    adapter === "openai" ||
+    adapter === "openai-chat" ||
+    adapter === "chat"
+  ) {
+    return "/chat/completions";
+  }
+  return undefined;
 }
 
 /**

@@ -113,6 +113,19 @@ test("private endpoints and secret transport headers require explicit handling",
   );
 });
 
+test("generic providers reject adapters whose endpoint is not exposed", () => {
+  assert.throws(
+    () => addGenericProvider({
+      id: "legacy-completions",
+      displayName: "Legacy Completions",
+      baseUrl: "https://provider.example.test/v1",
+      adapter: "openai-completions",
+      credentialRef: "cred_legacy-completions",
+    }),
+    /adapter must be one of: openai-chat, openai-responses/,
+  );
+});
+
 test("generic provider test checks private resolution and never prints headers", async () => {
   const calls = [];
   const result = await testGenericProvider("loopback-explicit", {

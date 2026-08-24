@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  adapterForEndpoint,
   endpointCapabilityError,
   normalizeSupportedEndpoints,
   protocolEndpoint,
@@ -11,9 +10,9 @@ import {
 
 test("endpoint declarations are closed, deduplicated and protocol-aware", () => {
   assert.deepEqual(normalizeSupportedEndpoints(["/embeddings", "/embeddings"]), ["/embeddings"]);
-  assert.equal(protocolEndpoint("openai-completions"), "/completions");
   assert.equal(protocolEndpoint("openai-responses"), "/responses");
-  assert.equal(adapterForEndpoint("/completions", "openai-chat"), "openai-completions");
+  assert.equal(protocolEndpoint("openai-chat"), "/chat/completions");
+  assert.equal(protocolEndpoint("openai-completions"), undefined);
   assert.throws(() => normalizeSupportedEndpoints(["/completions"]), /unsupported endpoint/);
 });
 
@@ -32,6 +31,10 @@ test("models need an explicit declaration for non-native endpoints", () => {
       adapter: "openai-chat",
       model: { supportedEndpoints: ["/chat/completions", "/responses"] },
     }),
+    false,
+  );
+  assert.equal(
+    supportsOpenAIEndpoint("/chat/completions", { adapter: "openai-completions" }),
     false,
   );
   const error = endpointCapabilityError("/embeddings", { displayName: "Text model" });

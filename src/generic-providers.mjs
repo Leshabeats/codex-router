@@ -18,7 +18,6 @@ export const GENERIC_PROVIDER_SCHEMA_VERSION = 1;
 export const GENERIC_PROVIDER_ADAPTERS = Object.freeze([
   "openai-chat",
   "openai-responses",
-  "openai-completions",
 ]);
 
 // These names are either hop-by-hop transport headers or common secret
@@ -369,8 +368,8 @@ function optionValues(args, name) {
 
 function cliUsage() {
   throw new Error(
-    "Usage: providers generic list [--json] | add ID --name NAME --base-url URL " +
-      "[--adapter openai-chat|openai-responses|openai-completions] [--header Name=Value] " +
+      "Usage: providers generic list [--json] | add ID --name NAME --base-url URL " +
+      "[--adapter openai-chat|openai-responses] [--header Name=Value] " +
       "[--credential-ref cred_ID] [--description TEXT] [--allow-private] | edit ID [options] | show ID [--json] | " +
       "enable ID | disable ID | remove ID | test ID [--json]",
   );
