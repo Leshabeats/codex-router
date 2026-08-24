@@ -211,16 +211,27 @@ export function resolveProviderCredential(providerOrId, options = {}) {
     }
   }
   for (const candidate of credentialPaths(provider)) {
-    if (!existsSync(candidate)) continue;
-    const value = readFileSync(candidate, "utf8").trim();
-    if (value) {
-      const credential = resolvedCredential(
-        provider,
-        value,
-        `protected file (${candidate})`,
-        true,
-      );
-      if (credential) return credential;
+    let stat;
+    try {
+      stat = lstatSync(candidate);
+    } catch (error) {
+      if (error?.code === "ENOENT") continue;
+      continue;
+    }
+    if (stat.isSymbolicLink() || !stat.isFile()) continue;
+    try {
+      const value = readFileSync(candidate, "utf8").trim();
+      if (value) {
+        const credential = resolvedCredential(
+          provider,
+          value,
+          `protected file (${candidate})`,
+          true,
+        );
+        if (credential) return credential;
+      }
+    } catch {
+      // An unreadable or non-text file is not a usable credential source.
     }
   }
   const keychain = keyFromKeychain(provider);

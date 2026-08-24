@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   symlinkSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -35,6 +37,7 @@ const {
 } = await import("../src/provider-credential-store.mjs");
 const {
   credentialPaths,
+  resolveProviderCredential,
   resolveProviderCredentialReference,
   writeProviderCredential,
 } = await import("../src/provider-credentials.mjs");
@@ -192,6 +195,54 @@ test("migration rejects unknown legacy fields and confined paths", () => {
     () => addCredentialReference({ providerId: "deepseek", kind: "api_key", secretRef: ref() }, link),
     /symbolic link/,
   );
+});
+
+test("credential writes and resolution do not traverse symlinked paths", () => {
+  const outside = path.join(root, "outside-credential-state");
+  const linkedDirectory = path.join(root, "state", "linked-directory");
+  mkdirSync(outside, { recursive: true });
+  symlinkSync(outside, linkedDirectory, "dir");
+  assert.throws(
+    () => writeProviderCredentialStore(
+      { credentials: [] },
+      path.join(linkedDirectory, "store.json"),
+    ),
+    /symbolic link/,
+  );
+
+  const providerPath = writeProviderCredential("deepseek", "TEST_SYMLINK_RESOLUTION_SECRET");
+  const external = path.join(root, "outside-resolution-secret.txt");
+  writeFileSync(external, "TEST_SYMLINK_RESOLUTION_SECRET\n", { mode: 0o600 });
+  unlinkSync(providerPath);
+  symlinkSync(external, providerPath);
+  assert.equal(resolveProviderCredential("deepseek"), undefined);
+});
+
+test("failed migration restores the exact original bytes", () => {
+  const filePath = path.join(root, "state", "transactional-legacy.json");
+  const migrationDirectory = path.join(root, "state", "transactional-migration");
+  const legacyBytes = Buffer.from(JSON.stringify({
+    version: 1,
+    credentials: [{
+      id: "cred_transactional_123456",
+      providerId: "deepseek",
+      kind: "api_key",
+      secretRef: { type: "provider-file" },
+      state: "active",
+    }],
+  }) + "\n", "utf8");
+  writeFileSync(filePath, legacyBytes, { mode: 0o600 });
+  const latestPath = path.join(migrationDirectory, "latest.json");
+  mkdirSync(migrationDirectory, { recursive: true, mode: 0o700 });
+  const outside = path.join(root, "latest-target.json");
+  writeFileSync(outside, "do not touch\n", { mode: 0o600 });
+  symlinkSync(outside, latestPath);
+  assert.throws(
+    () => migrateProviderCredentialStore(filePath, { migrationDirectory }),
+    /symbolic link/,
+  );
+  assert.deepEqual(readFileSync(filePath), legacyBytes);
+  assert.equal(readFileSync(outside, "utf8"), "do not touch\n");
 });
 
 test("credential references are target- and provider-bound at resolution time", () => {

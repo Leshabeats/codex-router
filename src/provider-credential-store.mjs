@@ -167,6 +167,17 @@ function atomicPrivateBytes(filePath, bytes, { directoryMode = 0o700 } = {}) {
   return target;
 }
 
+function restoreMigrationTarget(target, before, after) {
+  const current = readRegularBytes(target, "credential store");
+  const afterDigest = sha256(after);
+  if (current === undefined || sha256(current) !== afterDigest) return;
+  if (before === undefined) {
+    unlinkSync(target);
+  } else {
+    atomicPrivateBytes(target, before);
+  }
+}
+
 function serializedStore(store) {
   return Buffer.from(`${JSON.stringify(store, null, 2)}\n`, "utf8");
 }
@@ -624,21 +635,30 @@ export function migrateProviderCredentialStore(
       };
       const after = serializedStore(store);
       const manifestPath = migrationManifestPath(directory);
-      atomicPrivateBytes(previousPath, existing);
-      atomicPrivateBytes(manifestPath, Buffer.from(JSON.stringify({
-        schemaVersion: PROVIDER_CREDENTIAL_SCHEMA_VERSION,
-        createdAt: now(),
-        targetPath: target,
-        previousExists: true,
-        previousPath,
-        previousSha256: sha256(existing),
-        afterSha256: sha256(after),
-      }, null, 2) + "\n"));
-      atomicPrivateBytes(target, after);
-      atomicPrivateBytes(path.join(migrations, "latest.json"), Buffer.from(JSON.stringify({
-        schemaVersion: PROVIDER_CREDENTIAL_SCHEMA_VERSION,
-        manifestPath,
-      }, null, 2) + "\n"));
+      try {
+        atomicPrivateBytes(previousPath, existing);
+        atomicPrivateBytes(manifestPath, Buffer.from(JSON.stringify({
+          schemaVersion: PROVIDER_CREDENTIAL_SCHEMA_VERSION,
+          createdAt: now(),
+          targetPath: target,
+          previousExists: true,
+          previousPath,
+          previousSha256: sha256(existing),
+          afterSha256: sha256(after),
+        }, null, 2) + "\n"));
+        atomicPrivateBytes(target, after);
+        atomicPrivateBytes(path.join(migrations, "latest.json"), Buffer.from(JSON.stringify({
+          schemaVersion: PROVIDER_CREDENTIAL_SCHEMA_VERSION,
+          manifestPath,
+        }, null, 2) + "\n"));
+      } catch (error) {
+        try {
+          restoreMigrationTarget(target, existing, after);
+        } catch (rollbackError) {
+          error.rollbackError = rollbackError;
+        }
+        throw error;
+      }
       return { migrated: true, store, legacy: true, manifestPath };
     }
   }
@@ -659,12 +679,21 @@ export function migrateProviderCredentialStore(
     afterSha256: sha256(after),
   };
   const manifestPath = migrationManifestPath(directory);
-  atomicPrivateBytes(manifestPath, Buffer.from(`${JSON.stringify(snapshot, null, 2)}\n`));
-  atomicPrivateBytes(target, after);
-  atomicPrivateBytes(path.join(migrations, "latest.json"), Buffer.from(`${JSON.stringify({
-    schemaVersion: PROVIDER_CREDENTIAL_SCHEMA_VERSION,
-    manifestPath,
-  }, null, 2)}\n`));
+  try {
+    atomicPrivateBytes(manifestPath, Buffer.from(`${JSON.stringify(snapshot, null, 2)}\n`));
+    atomicPrivateBytes(target, after);
+    atomicPrivateBytes(path.join(migrations, "latest.json"), Buffer.from(`${JSON.stringify({
+      schemaVersion: PROVIDER_CREDENTIAL_SCHEMA_VERSION,
+      manifestPath,
+    }, null, 2)}\n`));
+  } catch (error) {
+    try {
+      restoreMigrationTarget(target, undefined, after);
+    } catch (rollbackError) {
+      error.rollbackError = rollbackError;
+    }
+    throw error;
+  }
   return { migrated: true, store, manifestPath };
 }
 

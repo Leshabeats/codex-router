@@ -2,6 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   statSync,
@@ -70,6 +71,16 @@ function fileMetadata(target) {
   };
 }
 
+function privateText(target) {
+  try {
+    const metadata = lstatSync(target);
+    if (metadata.isSymbolicLink() || !metadata.isFile()) return undefined;
+    return readFileSync(target, "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
 function redactLogs(contents) {
   return redactCredentialText(redactCallerUrl(contents));
 }
@@ -95,8 +106,7 @@ function knownLocalSecrets() {
     }
   }
   for (const target of files) {
-    if (!existsSync(target)) continue;
-    const value = readFileSync(target, "utf8").trim();
+    const value = privateText(target)?.trim();
     if (value) values.add(value);
   }
   // Not a provider credential and not stored in the state directory, but a
@@ -105,9 +115,10 @@ function knownLocalSecrets() {
   const clientSecret = process.env.ANTIGRAVITY_CLIENT_SECRET?.trim();
   if (clientSecret) values.add(clientSecret);
   const oauthPath = antigravityTokenPath();
-  if (existsSync(oauthPath)) {
+  const oauthContents = privateText(oauthPath);
+  if (oauthContents !== undefined) {
     try {
-      const token = JSON.parse(readFileSync(oauthPath, "utf8"));
+      const token = JSON.parse(oauthContents);
       for (const field of ["access_token", "refresh_token"]) {
         const value = token?.[field];
         if (typeof value === "string" && value.trim()) values.add(value.trim());
