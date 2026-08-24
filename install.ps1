@@ -316,11 +316,20 @@ try {
     $VenvHomeOk = (& node src/install-plan.mjs venv-home-ok 2>$null | Select-Object -Last 1) -eq "ok"
     $VenvRuntimeOk = $false
     if (Test-Path $Python) {
-      & $Python -I -c "import encodings, sys" 2>$null | Out-Null
-      $VenvRuntimeOk = $LASTEXITCODE -eq 0
+      try {
+        & $Python -I -c "import encodings, sys" 2>$null | Out-Null
+        $VenvRuntimeOk = $LASTEXITCODE -eq 0
+      } catch {
+        $VenvRuntimeOk = $false
+      }
     }
     if (-not (Test-Path $Python)) {
-      & uv venv --python 3.12 .venv
+      if (Test-Path ".venv") {
+        Write-Host "The virtual environment's Python launcher is missing; recreating the venv."
+        & uv venv --clear --python 3.12 .venv
+      } else {
+        & uv venv --python 3.12 .venv
+      }
       if ($LASTEXITCODE -ne 0) { throw "uv could not create the Python environment." }
     } elseif (-not $VenvHomeOk -or -not $VenvRuntimeOk) {
       # A venv whose interpreter home was cleared (macOS wipes /private/tmp,
@@ -345,8 +354,12 @@ try {
     $VenvHomeOk = (& node src/install-plan.mjs venv-home-ok 2>$null | Select-Object -Last 1) -eq "ok"
     $VenvRuntimeOk = $false
     if (Test-Path $Python) {
-      & $Python -I -c "import encodings, sys" 2>$null | Out-Null
-      $VenvRuntimeOk = $LASTEXITCODE -eq 0
+      try {
+        & $Python -I -c "import encodings, sys" 2>$null | Out-Null
+        $VenvRuntimeOk = $LASTEXITCODE -eq 0
+      } catch {
+        $VenvRuntimeOk = $false
+      }
     }
     $RecreateVenv = -not $VenvHomeOk -or -not $VenvRuntimeOk
     if (Get-Command "py" -ErrorAction SilentlyContinue) {

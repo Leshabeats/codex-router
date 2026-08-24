@@ -159,29 +159,38 @@ case "$(install_step node-deps)" in
     ;;
 esac
 
+ensure_uv_venv() {
+  if [ ! -x .venv/bin/python ]; then
+    if [ -e .venv ]; then
+      echo "The virtual environment's Python launcher is missing; recreating the venv."
+      uv venv --clear --python 3.12 .venv
+    else
+      uv venv --python 3.12 .venv
+    fi
+  elif ! .venv/bin/python -I -c 'import encodings, sys' >/dev/null 2>&1; then
+    # A venv can have a present launcher whose interpreter cannot start
+    # (for example after its temporary Python home was removed). Reusing it
+    # lets uv install packages into a runtime that will never boot.
+    echo "The virtual environment's Python cannot run; recreating the venv."
+    uv venv --clear --python 3.12 .venv
+  elif ! node src/install-plan.mjs venv-home-ok >/dev/null 2>&1; then
+    # A venv whose interpreter home was cleared (macOS wipes /private/tmp,
+    # and installers that recorded a temporary Python as the venv home end
+    # up with a dangling interpreter) must be recreated, not pip-installed
+    # into: the launcher may still exist while pyvenv.cfg points at a
+    # vanished home.
+    echo "The virtual environment's interpreter home is missing; recreating the venv."
+    uv venv --clear --python 3.12 .venv
+  fi
+}
+
 case "$(install_step python-deps)" in
   managed) echo "Homebrew manages LiteLLM; skipping Python dependency installation." ;;
   skip) echo "LiteLLM already matches the pinned versions; skipping the Python install." ;;
   *)
     packaged_dependency_refusal "LiteLLM"
     if command -v uv >/dev/null 2>&1; then
-      if [ ! -x .venv/bin/python ]; then
-        uv venv --python 3.12 .venv
-      elif ! .venv/bin/python -I -c 'import encodings, sys' >/dev/null 2>&1; then
-        # A venv can have a present launcher whose interpreter cannot start
-        # (for example after its temporary Python home was removed). Reusing it
-        # lets uv install packages into a runtime that will never boot.
-        echo "The virtual environment's Python cannot run; recreating the venv."
-        uv venv --clear --python 3.12 .venv
-      elif ! node src/install-plan.mjs venv-home-ok >/dev/null 2>&1; then
-        # A venv whose interpreter home was cleared (macOS wipes /private/tmp,
-        # and installers that recorded a temporary Python as the venv home end
-        # up with a dangling interpreter) must be recreated, not pip-installed
-        # into: the launcher may still exist while pyvenv.cfg points at a
-        # vanished home.
-        echo "The virtual environment's interpreter home is missing; recreating the venv."
-        uv venv --clear --python 3.12 .venv
-      fi
+      ensure_uv_venv
       # requirements/python.txt is the hash-verified transitive closure of the
       # pins in src/install-plan.mjs. Hash checking makes every wheel and sdist
       # in that tree verify against the lock before it is executed; without it

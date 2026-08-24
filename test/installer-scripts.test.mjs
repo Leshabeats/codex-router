@@ -114,6 +114,15 @@ function runPosixHelper(call, args, options = {}) {
   return result.stdout;
 }
 
+function posixVenvHelper() {
+  const source = readScript("bin", "install");
+  const start = source.indexOf("ensure_uv_venv() {");
+  assert.notEqual(start, -1, "bin/install must define ensure_uv_venv");
+  const end = source.indexOf("\n}\n", start);
+  assert.notEqual(end, -1, "ensure_uv_venv must be a complete function");
+  return source.slice(start, end + 3);
+}
+
 test("install.sh is valid POSIX shell", { skip: !POSIX_SHELL_AVAILABLE }, () => {
   const result = spawnSync("sh", ["-n", path.join(root, "install.sh")], {
     encoding: "utf8",
@@ -314,6 +323,35 @@ test("broken virtual environments use the venv tools' exact-target clear mode", 
   assert.match(windows, /\$Python -I -c "import encodings, sys"/);
   assert.match(windows, /-not \$VenvHomeOk -or -not \$VenvRuntimeOk/);
 });
+
+test(
+  "a present venv with no Python launcher is cleared before uv recreates it",
+  { skip: !POSIX_SHELL_AVAILABLE },
+  () => {
+    const fixture = mkdtempSync(path.join(os.tmpdir(), "codex-router-missing-python-"));
+    const bin = path.join(fixture, "bin");
+    const calls = path.join(fixture, "uv-calls");
+    try {
+      mkdirSync(path.join(fixture, ".venv"), { recursive: true });
+      mkdirSync(bin, { recursive: true });
+      writeFileSync(
+        path.join(bin, "uv"),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >>${JSON.stringify(calls)}\n`,
+        { mode: 0o755 },
+      );
+      const result = spawnSync("sh", ["-s"], {
+        cwd: fixture,
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH || ""}` },
+        input: `${posixVenvHelper()}\nensure_uv_venv\n`,
+      });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(readFileSync(calls, "utf8"), "venv --clear --python 3.12 .venv\n");
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+    }
+  },
+);
 
 test("the kept-update message names the way back", () => {
   // Keeping the update on exit 2 is the right default, but a user who wanted
