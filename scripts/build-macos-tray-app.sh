@@ -9,7 +9,7 @@ control_center_dir="$repo_dir/apps/control-center"
 # at whichever one installed last; ~/Applications is also a LaunchServices
 # location, so the app resolves by name and can be found and quit normally.
 # src/tray-install.mjs trayBundleDir() holds the same path for the Node side.
-bundle_dir=${1:-"$HOME/Applications/Model Router.app"}
+bundle_dir=${1:-"$HOME/Applications/Codex Router.app"}
 configuration=${MODEL_ROUTER_TRAY_CONFIGURATION:-release}
 app_version=$(node -e '
   const fs = require("node:fs");
@@ -96,7 +96,7 @@ fi
 # The icon is committed as a built .icns, not rasterized here: scripts/build-app-icon.sh
 # needs sips and iconutil, and a tray build must not start depending on them.
 # Without this file the bundle falls back to the generic macOS app icon, which
-# is what made Model Router unfindable in Finder, Launchpad, and Spotlight.
+# is what made Codex Router unfindable in Finder, Launchpad, and Spotlight.
 if [ -f "$tray_dir/Resources/AppIcon.icns" ]; then
   cp "$tray_dir/Resources/AppIcon.icns" "$bundle_dir/Contents/Resources/AppIcon.icns"
 else

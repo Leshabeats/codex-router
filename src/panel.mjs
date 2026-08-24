@@ -22,7 +22,7 @@ if (help) {
   process.stdout.write(
     `Usage: panel.mjs [--print]
 
-Opens the Model Router companion in your default browser.
+Opens the Codex Router companion in your default browser.
 
   --print   Write the address instead of opening it. It contains this
             machine's router capability: treat it like a password, and do

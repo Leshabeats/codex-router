@@ -13,21 +13,36 @@ esac
 
 case $(uname -s) in
   Darwin)
-    bundle_dir="$HOME/Applications/Model Router.app"
+    bundle_dir="$HOME/Applications/Codex Router.app"
+    legacy_user_bundle="$HOME/Applications/Model Router.app"
     bundle_parent="$HOME/Applications"
     mkdir -p "$bundle_parent"
     transaction_dir="$bundle_parent/.model-router-tray-transaction"
     staging_dir="$transaction_dir/staged"
-    staged_bundle="$staging_dir/Model Router.app"
+    staged_bundle="$staging_dir/Codex Router.app"
     previous_bundle="$transaction_dir/previous"
     failed_bundle="$transaction_dir/failed"
     phase_file="$transaction_dir/phase"
     next_phase_file="$transaction_dir/phase.next"
     had_previous_file="$transaction_dir/had-previous"
+    target_name_file="$transaction_dir/target-name"
     embedded_app="$bundle_dir/Contents/Resources/Control Center.app"
     embedded_binary="$embedded_app/Contents/MacOS/Codex Router"
     transaction_committed=0
     reopen_control_center=0
+    legacy_user_bundle_present=0
+    legacy_user_bundle_is_managed() {
+      candidate=$1
+      [ -d "$candidate" ] && [ ! -L "$candidate" ] || return 1
+      node "$repo_dir/src/macos-tray-transaction.mjs" validate-bundle "$candidate" \
+        >/dev/null 2>&1 || return 1
+      candidate_identifier=$(
+        /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" \
+          "$candidate/Contents/Info.plist" 2>/dev/null
+      ) || return 1
+      [ "$candidate_identifier" = "io.github.codex-router.tray" ] || return 1
+      /usr/bin/codesign --verify --deep --strict "$candidate" >/dev/null 2>&1
+    }
     tray_app_count() {
       /usr/bin/osascript -l JavaScript -e '
         ObjC.import("AppKit");
@@ -79,11 +94,13 @@ case $(uname -s) in
         CODEX_ROUTER_EMBEDDED_CONTROL_CENTER=1 "$@"
     }
     stop_uncommitted_tray() {
+      recovery_bundle=$1
+      recovery_embedded_binary="$recovery_bundle/Contents/Resources/Control Center.app/Contents/MacOS/Codex Router"
       # The renderer probe is launched directly, outside launchd. Ask that exact
       # embedded child to quit as well as booting out the outer Swift host; the
       # latter cannot be assumed to own a child whose renderer failed mid-boot.
-      if [ -n "${embedded_binary:-}" ] && [ -x "$embedded_binary" ]; then
-        run_embedded_control_center "$embedded_binary" --quit-for-update \
+      if [ -x "$recovery_embedded_binary" ]; then
+        run_embedded_control_center "$recovery_embedded_binary" --quit-for-update \
           >/dev/null 2>&1 || true
       fi
       node "$repo_dir/src/tray-service.mjs" stop >/dev/null 2>&1 || return 1
@@ -92,8 +109,8 @@ case $(uname -s) in
         running_count=$(router_app_count) || return 1
         case "$running_count" in *[!0-9]*|'') return 1 ;; esac
         [ "$running_count" -eq 0 ] && return 0
-        if [ -n "${embedded_binary:-}" ] && [ -x "$embedded_binary" ]; then
-          run_embedded_control_center "$embedded_binary" --quit-for-update \
+        if [ -x "$recovery_embedded_binary" ]; then
+          run_embedded_control_center "$recovery_embedded_binary" --quit-for-update \
             >/dev/null 2>&1 || true
         fi
         stop_wait=$((stop_wait + 1))
@@ -102,13 +119,14 @@ case $(uname -s) in
       done
     }
     schedule_macos_supervision_restore() {
+      recovery_bundle=$1
       # The app may still be draining a provider/model mutation when this
       # installer is interrupted. A forceful launchctl restart here would kill
       # that work, while doing nothing leaves SuccessfulExit=false loaded but
       # stopped after the eventual clean exit. This anonymous helper outlives
       # the failed installer, waits for both real GUI bundles to disappear, and
       # only then asks launchd to resume its previously installed job.
-      /usr/bin/nohup /bin/sh -s -- "$repo_dir" "$transaction_dir" "$bundle_dir" >/dev/null 2>&1 <<'RESTORE_MACOS_SUPERVISION' &
+      /usr/bin/nohup /bin/sh -s -- "$repo_dir" "$transaction_dir" "$recovery_bundle" >/dev/null 2>&1 <<'RESTORE_MACOS_SUPERVISION' &
 trap '' HUP
 repo_dir=$1
 transaction_dir=$2
@@ -149,9 +167,18 @@ RESTORE_MACOS_SUPERVISION
     }
     recover_macos_transaction() {
       [ -e "$transaction_dir" ] || return 0
+      recovery_bundle_dir=$bundle_dir
+      recovery_service_action=install
+      # Journals written before the visible app rename have no target marker.
+      # Finish those against Model Router.app and its existing launchd plist;
+      # every new journal identifies the Codex Router.app target explicitly.
+      if [ ! -e "$target_name_file" ]; then
+        recovery_bundle_dir=$legacy_user_bundle
+        recovery_service_action=restart
+      fi
       if ! recovery_fields=$(node "$repo_dir/src/macos-tray-transaction.mjs" \
-        plan "$transaction_dir" "$bundle_dir"); then
-        printf 'codex-router: refusing ambiguous macOS Model Router recovery data at %s.\n' "$transaction_dir" >&2
+        plan "$transaction_dir" "$recovery_bundle_dir"); then
+        printf 'codex-router: refusing ambiguous macOS Codex Router recovery data at %s.\n' "$transaction_dir" >&2
         return 1
       fi
       # The validator emits exactly two fixed enum fields and rejects every
@@ -187,7 +214,7 @@ RESTORE_MACOS_SUPERVISION
           if running_count=$(router_app_count); then
             case "$running_count" in *[!0-9]*|'') return 1 ;; esac
             if [ "$running_count" -gt 0 ]; then
-              schedule_macos_supervision_restore
+              schedule_macos_supervision_restore "$recovery_bundle_dir"
               printf 'codex-router: launchd supervision will resume after the running app finishes its active operation.\n' >&2
               return 1
             fi
@@ -196,42 +223,42 @@ RESTORE_MACOS_SUPERVISION
           fi
           ;;
         restore-previous)
-          [ ! -e "$bundle_dir" ] || return 1
+          [ ! -e "$recovery_bundle_dir" ] || return 1
           # Journal both sides of the move. If launchd installation fails (or
           # this shell dies) after the old bundle becomes live, the next run
           # recognizes `restoring-previous`/`previous-restored` and retries
           # supervision instead of demanding a backup that was already moved.
           write_macos_phase restoring-previous || return 1
-          mv "$previous_bundle" "$bundle_dir" || return 1
+          mv "$previous_bundle" "$recovery_bundle_dir" || return 1
           write_macos_phase previous-restored || return 1
           restore_supervision=1
           ;;
         replace-live-with-previous)
-          if ! stop_uncommitted_tray; then
-            printf 'codex-router: the uncommitted Model Router could not be stopped; recovery files were preserved.\n' >&2
+          if ! stop_uncommitted_tray "$recovery_bundle_dir"; then
+            printf 'codex-router: the uncommitted Codex Router could not be stopped; recovery files were preserved.\n' >&2
             return 1
           fi
           [ ! -e "$failed_bundle" ] || return 1
-          mv "$bundle_dir" "$failed_bundle" || return 1
-          mv "$previous_bundle" "$bundle_dir" || return 1
+          mv "$recovery_bundle_dir" "$failed_bundle" || return 1
+          mv "$previous_bundle" "$recovery_bundle_dir" || return 1
           restore_supervision=1
           ;;
         finish-restored)
           restore_supervision=1
           ;;
         remove-live)
-          if ! stop_uncommitted_tray; then
+          if ! stop_uncommitted_tray "$recovery_bundle_dir"; then
             printf 'codex-router: the uncommitted first-install bundle could not be stopped; recovery files were preserved.\n' >&2
             return 1
           fi
           [ ! -e "$failed_bundle" ] || return 1
-          mv "$bundle_dir" "$failed_bundle" || return 1
+          mv "$recovery_bundle_dir" "$failed_bundle" || return 1
           ;;
         *) return 1 ;;
       esac
 
       if [ "$restore_supervision" -eq 1 ]; then
-        if ! node "$repo_dir/src/tray-service.mjs" install >/dev/null 2>&1; then
+        if ! node "$repo_dir/src/tray-service.mjs" "$recovery_service_action" >/dev/null 2>&1; then
           printf 'codex-router: launchd supervision could not be restored automatically; recovery files were preserved.\n' >&2
           return 1
         fi
@@ -244,24 +271,39 @@ RESTORE_MACOS_SUPERVISION
       trap - EXIT HUP INT TERM
       if [ "$transaction_committed" -eq 0 ] && [ -e "$transaction_dir" ]; then
         recover_macos_transaction \
-          || printf 'codex-router: macOS Model Router recovery remains at %s.\n' "$transaction_dir" >&2
+          || printf 'codex-router: macOS Codex Router recovery remains at %s.\n' "$transaction_dir" >&2
       fi
       exit "$cleanup_status"
     }
 
     if [ -L "$bundle_dir" ] || { [ -e "$bundle_dir" ] && [ ! -d "$bundle_dir" ]; }; then
-      printf 'codex-router: refusing a non-directory Model Router target at %s.\n' "$bundle_dir" >&2
+      printf 'codex-router: refusing a non-directory Codex Router target at %s.\n' "$bundle_dir" >&2
       exit 1
     fi
     recover_macos_transaction
     if [ -e "$transaction_dir" ]; then
-      printf 'codex-router: refusing to overwrite a stale macOS Model Router transaction.\n' >&2
+      printf 'codex-router: refusing to overwrite a stale macOS Codex Router transaction.\n' >&2
+      exit 1
+    fi
+    if [ -e "$legacy_user_bundle" ]; then
+      if ! legacy_user_bundle_is_managed "$legacy_user_bundle"; then
+        printf 'codex-router: refusing to remove an unrecognized legacy app at %s.\n' "$legacy_user_bundle" >&2
+        exit 1
+      fi
+      legacy_user_bundle_present=1
+    fi
+    if [ -d "$bundle_dir" ] && [ "$legacy_user_bundle_present" -eq 1 ]; then
+      printf 'codex-router: both Codex Router.app and the legacy Model Router.app exist; refusing an ambiguous replacement.\n' >&2
       exit 1
     fi
     mkdir -m 700 "$transaction_dir"
     mkdir -m 700 "$staging_dir"
+    (umask 077; printf '%s\n' codex-router >"$target_name_file")
+    chmod 600 "$target_name_file"
     had_previous=0
-    if [ -d "$bundle_dir" ]; then had_previous=1; fi
+    if [ -d "$bundle_dir" ] || [ "$legacy_user_bundle_present" -eq 1 ]; then
+      had_previous=1
+    fi
     (umask 077; printf '%s\n' "$had_previous" >"$had_previous_file")
     chmod 600 "$had_previous_file"
     write_macos_phase staging
@@ -403,7 +445,7 @@ RESTORE_MACOS_SUPERVISION
     fi
     write_macos_phase draining
     if ! terminate_router_apps; then
-      printf 'codex-router: the running Model Router apps could not be asked to quit; the app was not replaced.\n' >&2
+      printf 'codex-router: the running Codex Router apps could not be asked to quit; the app was not replaced.\n' >&2
       exit 1
     fi
     # A pre-unification standalone app used the same Control Center bundle id
@@ -421,14 +463,14 @@ RESTORE_MACOS_SUPERVISION
     wait_count=0
     while :; do
       if ! running_count=$(router_app_count); then
-        printf 'codex-router: the running Model Router apps could not be inspected; the app was not replaced.\n' >&2
+        printf 'codex-router: the running Codex Router apps could not be inspected; the app was not replaced.\n' >&2
         exit 1
       fi
       case "$running_count" in *[!0-9]*|'') exit 1 ;; esac
       [ "$running_count" -eq 0 ] && break
       wait_count=$((wait_count + 1))
       if [ "$wait_count" -ge 720 ]; then
-        printf 'codex-router: the running Model Router did not finish its active operation; the app was not replaced.\n' >&2
+        printf 'codex-router: the running Codex Router did not finish its active operation; the app was not replaced.\n' >&2
         exit 1
       fi
       # A clean AppKit exit does not satisfy launchd's SuccessfulExit=false
@@ -444,7 +486,7 @@ RESTORE_MACOS_SUPERVISION
     # the application's terminate-later guarantee on a long provider mutation.
     write_macos_phase supervision-stopping
     if ! node "$repo_dir/src/tray-service.mjs" stop >/dev/null; then
-      printf 'codex-router: launchd would not release the current Model Router; the app was not replaced.\n' >&2
+      printf 'codex-router: launchd would not release the current Codex Router; the app was not replaced.\n' >&2
       exit 1
     fi
     write_macos_phase supervision-stopped
@@ -452,6 +494,8 @@ RESTORE_MACOS_SUPERVISION
     write_macos_phase previous-moving
     if [ -d "$bundle_dir" ]; then
       mv "$bundle_dir" "$previous_bundle"
+    elif [ "$legacy_user_bundle_present" -eq 1 ]; then
+      mv "$legacy_user_bundle" "$previous_bundle"
     fi
     write_macos_phase previous-moved
     write_macos_phase replacement-moving
@@ -473,7 +517,7 @@ RESTORE_MACOS_SUPERVISION
       trap 'exit 129' HUP
       trap 'exit 130' INT
       trap 'exit 143' TERM
-      printf 'codex-router: launchd would not accept the rebuilt Model Router; the previous app will be restored.\n' >&2
+      printf 'codex-router: launchd would not accept the rebuilt Codex Router; the previous app will be restored.\n' >&2
       exit 1
     fi
     trap 'exit 129' HUP
@@ -509,7 +553,7 @@ RESTORE_MACOS_SUPERVISION
       sleep 0.25
     done
     if [ "$replacement_ready" -ne 1 ]; then
-      printf 'codex-router: the rebuilt Model Router did not start as the exact live native host (count: %s, live matches: %s); the previous app will be restored.\n' "$readiness_count" "$readiness_matches" >&2
+      printf 'codex-router: the rebuilt Codex Router did not start as the exact live native host (count: %s, live matches: %s); the previous app will be restored.\n' "$readiness_count" "$readiness_matches" >&2
       exit 1
     fi
     write_macos_phase replacement-ready
@@ -522,7 +566,7 @@ RESTORE_MACOS_SUPERVISION
     embedded_app="$bundle_dir/Contents/Resources/Control Center.app"
     embedded_binary="$embedded_app/Contents/MacOS/Codex Router"
     if [ ! -x "$embedded_binary" ]; then
-      printf 'codex-router: the rebuilt Model Router has no executable embedded Control Center; the previous app will be restored.\n' >&2
+      printf 'codex-router: the rebuilt Codex Router has no executable embedded Control Center; the previous app will be restored.\n' >&2
       exit 1
     fi
     run_embedded_control_center "$embedded_binary" --tray-only \

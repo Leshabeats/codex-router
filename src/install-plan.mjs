@@ -277,8 +277,10 @@ const TRAY_PLATFORMS = {
     // Keeping it inside Contents would invalidate the completed bundle seal.
     stamp: (root, home) => path.join(home, ".codex", "codex-router", "tray-build.json"),
     // Companions built before the per-user move live inside the checkout.
-    legacy: (root) =>
+    legacy: (root, home) => [
       path.join(root, "dist", "Model Router.app", "Contents", "MacOS", "ModelRouterTray"),
+      path.join(home, "Applications", "Model Router.app"),
+    ],
   },
   linux: {
     sources: controlCenterSources,
@@ -426,7 +428,7 @@ export function trayRebuildPlan({
     ) return "rebuild";
     // A companion at a superseded location still counts as installed, so the
     // update migrates it rather than reading as "absent" and abandoning it.
-    const legacy = definition.legacy?.(root);
+    const legacy = definition.legacy?.(root, home);
     const candidates = Array.isArray(legacy) ? legacy : legacy ? [legacy] : [];
     return candidates.some((candidate) => existsSync(candidate)) ? "rebuild" : "absent";
   }

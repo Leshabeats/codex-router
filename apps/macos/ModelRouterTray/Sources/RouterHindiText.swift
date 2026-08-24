@@ -32,7 +32,7 @@ enum RouterHindiText {
     "Status": "स्थिति",
     "Settings": "सेटिंग्स",
     "Control Center": "नियंत्रण केंद्र",
-    "Model Router": "मॉडल राउटर",
+    "Codex Router": "Codex Router",
     "Updated": "अपडेट हो गया",
     "None": "कोई नहीं",
     "none": "कोई नहीं",

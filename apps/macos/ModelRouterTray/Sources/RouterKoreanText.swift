@@ -32,7 +32,7 @@ enum RouterKoreanText {
     "Status": "상태",
     "Settings": "설정",
     "Control Center": "제어 센터",
-    "Model Router": "모델 라우터",
+    "Codex Router": "Codex Router",
     "Updated": "업데이트됨",
     "None": "없음",
     "none": "없음",

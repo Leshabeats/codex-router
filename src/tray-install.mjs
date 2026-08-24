@@ -179,5 +179,5 @@ export function trayBundleDir(platform, home) {
   // Always a macOS path, so use POSIX joins — path.join would emit backslashes
   // when this code runs on a Windows host (e.g. CI), producing a wrong bundle
   // path and breaking the test cross-platform.
-  return path.posix.join(home, "Applications", "Model Router.app");
+  return path.posix.join(home, "Applications", "Codex Router.app");
 }

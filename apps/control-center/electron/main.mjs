@@ -43,15 +43,16 @@ const lifecycleFile = lifecycleStatePath();
 // builds own their native Electron Tray directly.
 function embeddedInNativeHost() {
   if (process.platform !== "darwin" || !process.resourcesPath) return false;
-  const marker = [
-    "Model Router.app",
-    "Contents",
-    "Resources",
-    "Control Center.app",
-    "Contents",
-    "Resources",
-  ].join(path.sep);
-  return path.resolve(process.resourcesPath).endsWith(marker);
+  const resourcePath = path.resolve(process.resourcesPath);
+  return ["Codex Router.app", "Model Router.app"].some((outerBundle) =>
+    resourcePath.endsWith([
+      outerBundle,
+      "Contents",
+      "Resources",
+      "Control Center.app",
+      "Contents",
+      "Resources",
+    ].join(path.sep)));
 }
 
 const nativeTrayOwnedByHost = process.platform === "darwin"
@@ -222,11 +223,11 @@ function createTray() {
   if (image.isEmpty()) throw new Error(`The tray icon could not be loaded from ${appIconPath()}.`);
   const createdTray = new Tray(image);
   try {
-    createdTray.setToolTip("Model Router");
+    createdTray.setToolTip("Codex Router");
     createdTray.setContextMenu(Menu.buildFromTemplate([
       { label: "Open Control Center", click: showWindow },
       { type: "separator" },
-      { label: "Quit Model Router", click: () => app.quit() },
+      { label: "Quit Codex Router", click: () => app.quit() },
     ]));
     createdTray.on("click", showWindow);
   } catch (error) {

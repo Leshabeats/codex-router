@@ -1,6 +1,6 @@
 # macOS native tray and Control Center
 
-`Model Router.app` is one installed macOS app with two coordinated surfaces.
+`Codex Router.app` is one installed macOS app with two coordinated surfaces.
 Its Swift host owns the native menu-bar item and optional Dynamic-Island-style
 overlay; its embedded Electron app supplies the full Control Center window.
 The top-center island follows the provider handling the latest request, reveals
@@ -14,7 +14,7 @@ existing router configuration.
 
 ## Opening it like an app
 
-`./bin/model-router-tray` installs **Model Router.app** into `~/Applications`,
+`./bin/model-router-tray` installs **Codex Router.app** into `~/Applications`,
 where Finder, Spotlight, and Launchpad can all find it by name and icon. The
 icon is built from `apps/macos/ModelRouterTray/Resources/AppIcon.svg`; edit the
 SVG and run `scripts/build-app-icon.sh` to regenerate the committed
@@ -22,7 +22,7 @@ SVG and run `scripts/build-app-icon.sh` to regenerate the committed
 `.icns` is committed rather than rasterized during a normal tray build.
 
 The Swift host stays `LSUIElement`, so it does not add a second Dock icon. A
-person opening `Model Router.app` gets the embedded Control Center as a normal
+person opening `Codex Router.app` gets the embedded Control Center as a normal
 window and also reveals the native tray surfaces for 20 seconds if **With
 Codex** would otherwise hide them. Closing the Control Center window leaves the
 native host running; reopen the app or choose **Control Center** from the
@@ -68,7 +68,7 @@ was needed for. The watcher therefore also scans the process table (via
 The native host itself stays resident as a lightweight watcher; quitting on app
 exit would leave nothing around to notice the next launch. Combined with
 launchd supervision, this makes the tray automatic: it waits invisibly after a
-reboot and shows up exactly while Codex is open. Opening `Model Router.app`
+reboot and shows up exactly while Codex is open. Opening `Codex Router.app`
 temporarily reveals the native surfaces and opens the Control Center even while
 Codex is closed, so the setting remains reachable. In **With Codex** mode the
 router endpoint starts as soon as Codex or ChatGPT appears and stops only after
@@ -201,7 +201,7 @@ Run it from a stable checkout on macOS:
 ```
 
 The command builds and verifies a staging bundle, atomically installs it as
-`~/Applications/Model Router.app`, and registers the native host with launchd.
+`~/Applications/Codex Router.app`, and registers the native host with launchd.
 The installed bundle records the checkout path used at build time, so rebuild
 it after moving the repository.
 

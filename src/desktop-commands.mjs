@@ -188,7 +188,7 @@ export function runControl(
 ) {
   return new Promise((resolve, reject) => {
     if (!root) {
-      reject(new Error("Model Router was not found. Set MODEL_ROUTER_SOURCE_ROOT."));
+      reject(new Error("Codex Router was not found. Set MODEL_ROUTER_SOURCE_ROOT."));
       return;
     }
     const child = execFile(
@@ -219,7 +219,7 @@ export function parseJson(output) {
   try {
     return JSON.parse(output);
   } catch {
-    throw new Error("Model Router returned an unreadable response.");
+    throw new Error("Codex Router returned an unreadable response.");
   }
 }
 

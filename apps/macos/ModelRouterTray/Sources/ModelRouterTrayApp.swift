@@ -432,7 +432,7 @@ enum ControlCenterLauncher {
   static func open() {
     guard let application = bundledApplicationURL else {
       RouterStore.shared.reportControlCenterLaunchFailure(
-        "The embedded Control Center is missing. Rebuild Model Router."
+        "The embedded Control Center is missing. Rebuild Codex Router."
       )
       return
     }
@@ -467,7 +467,7 @@ enum ControlCenterLauncher {
       try await Task.sleep(for: .milliseconds(100))
     }
     throw RouterError(
-      "A superseded Codex Router Control Center is still running. Quit it, then reopen Model Router."
+      "A superseded Codex Router Control Center is still running. Quit it, then reopen Codex Router."
     )
   }
 
@@ -1053,7 +1053,7 @@ final class RouterStore: ObservableObject {
     surfacesVisible = next
   }
 
-  // Opening Model Router from Finder, Spotlight, Launchpad, or the Dock has to
+  // Opening Codex Router from Finder, Spotlight, Launchpad, or the Dock has to
   // produce a menu bar item and a live router even in follow mode with Codex
   // closed. Without this the app looked broken on exactly the launch that
   // motivates having an icon at all: double-click, nothing appears, because
@@ -3241,7 +3241,7 @@ final class RouterStore: ObservableObject {
       }
       guard task.terminationStatus == 0 else {
         let detail = String(data: stderr, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        throw RouterError(detail?.isEmpty == false ? detail! : "Model Router control command failed.")
+        throw RouterError(detail?.isEmpty == false ? detail! : "Codex Router control command failed.")
       }
       return stdout
     }.value
@@ -3257,7 +3257,7 @@ final class RouterStore: ObservableObject {
     timeout: TimeInterval
   ) async throws -> Data {
     guard ["model-discovery.mjs", "curate-models.mjs"].contains(script) else {
-      throw RouterError("Unsupported Model Router script.")
+      throw RouterError("Unsupported Codex Router script.")
     }
     let root = try sourceRoot()
     if script == "curate-models.mjs" {
@@ -3312,7 +3312,7 @@ final class RouterStore: ObservableObject {
       }
       guard task.terminationStatus == 0 else {
         let detail = String(data: stderr, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        throw RouterError(detail?.isEmpty == false ? detail! : "Model Router command failed.")
+        throw RouterError(detail?.isEmpty == false ? detail! : "Codex Router command failed.")
       }
       return stdout
     }.value
@@ -3353,7 +3353,7 @@ final class RouterStore: ObservableObject {
       if let root = try? validatedSourceRoot(candidate) { return root }
     }
     throw RouterError(
-      "Cannot find the installed Model Router checkout. Install the router or rebuild this app from its checkout."
+      "Cannot find the installed Codex Router checkout. Install the router or rebuild this app from its checkout."
     )
   }
 
@@ -3371,7 +3371,7 @@ final class RouterStore: ObservableObject {
       expectedProtocol: expectedProtocol
     ) else {
       throw RouterError(
-        "This Model Router app does not match the installed router control protocol. "
+        "This Codex Router app does not match the installed router control protocol. "
           + "Install or update the router and desktop app from the same build, then reopen the app."
       )
     }
@@ -3392,7 +3392,7 @@ final class RouterStore: ObservableObject {
         trustedOwnerAndMode(attributes),
         !executable || FileManager.default.isExecutableFile(atPath: url.path)
       else {
-        throw RouterError("The Model Router checkout is missing or has unsafe ownership or permissions.")
+        throw RouterError("The Codex Router checkout is missing or has unsafe ownership or permissions.")
       }
     }
     return resolvedRoot
@@ -4972,7 +4972,7 @@ private struct TrayView: View {
   private var header: some View {
     HStack(alignment: .center, spacing: 12) {
       VStack(alignment: .leading, spacing: 3) {
-        Text(routerLocalized("Model Router"))
+        Text(routerLocalized("Codex Router"))
           .font(.system(size: 15, weight: .semibold))
         Text(accountLabel)
           .font(.system(size: 10, weight: .regular))
@@ -6382,7 +6382,7 @@ private struct TrayView: View {
           .disabled(unsupported || busy || store.localDownload?.isRunning == true || store.localModelOperation != nil)
           .help(unsupported
             ? (mlx?.host?.reason ?? "This MLX model requires an Apple silicon Mac.")
-            : "Installs official local prerequisites when missing, downloads the curated 4-bit model, and publishes it through Model Router.")
+            : "Installs official local prerequisites when missing, downloads the curated 4-bit model, and publishes it through Codex Router.")
         }
       }
       .padding(8)

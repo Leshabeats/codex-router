@@ -1626,7 +1626,7 @@ On macOS, build and install the unified app with:
 ./bin/model-router-tray
 ```
 
-`Model Router.app` contains the Swift-native menu-bar host and the embedded
+`Codex Router.app` contains the Swift-native menu-bar host and the embedded
 Electron Control Center window. Opening the app shows the Control Center;
 closing that window leaves the native tray running so it can be reopened. A
 per-user launchd agent starts the host at login and restarts abnormal exits.
@@ -1650,7 +1650,7 @@ available whether or not the overlay is on.
 
 ## Unified desktop app
 
-`Model Router.app` on macOS combines the Swift-native menu-bar host with an
+`Codex Router.app` on macOS combines the Swift-native menu-bar host with an
 embedded Electron Control Center. launchd supervises the host, and opening the
 app or choosing **Control Center** shows the embedded window. Windows and Linux
 package that same Control Center as one Electron process with the native OS

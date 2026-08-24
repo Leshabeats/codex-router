@@ -293,12 +293,12 @@ jobs:
       - name: Build native tray with embedded Control Center
         env:
           MODEL_ROUTER_TRAY_UNIVERSAL: "1"
-        run: scripts/build-macos-tray-app.sh "$RUNNER_TEMP/Model Router.app"
+        run: scripts/build-macos-tray-app.sh "$RUNNER_TEMP/Codex Router.app"
       - name: Verify universal binaries, version, and complete bundle seal
         shell: bash
         run: |
           set -euo pipefail
-          app="$RUNNER_TEMP/Model Router.app"
+          app="$RUNNER_TEMP/Codex Router.app"
           expected_control_version=$(node -p 'require("./apps/control-center/package.json").version')
           expected_short_version=${expected_control_version%%-*}
           actual_short_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")
@@ -317,7 +317,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          app="$RUNNER_TEMP/Model Router.app"
+          app="$RUNNER_TEMP/Codex Router.app"
           outer="$app/Contents/MacOS/ModelRouterTray"
           embedded="$app/Contents/Resources/Control Center.app/Contents/MacOS/Codex Router"
           log="$RUNNER_TEMP/model-router-macos-smoke.log"
@@ -454,7 +454,7 @@ jobs:
           fi
           trap - EXIT
       - name: Package the one visible application
-        run: ditto -c -k --keepParent "$RUNNER_TEMP/Model Router.app" "$RUNNER_TEMP/model-router-macos.zip"
+        run: ditto -c -k --keepParent "$RUNNER_TEMP/Codex Router.app" "$RUNNER_TEMP/model-router-macos.zip"
       - uses: actions/upload-artifact@v7
         with:
           name: model-router-macOS-${{ github.sha }}

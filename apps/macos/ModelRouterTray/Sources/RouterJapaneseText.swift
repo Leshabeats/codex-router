@@ -32,7 +32,7 @@ enum RouterJapaneseText {
     "Status": "状態",
     "Settings": "設定",
     "Control Center": "コントロールセンター",
-    "Model Router": "モデルルーター",
+    "Codex Router": "Codex Router",
     "Updated": "更新済み",
     "None": "なし",
     "none": "なし",
