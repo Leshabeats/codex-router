@@ -4,6 +4,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -20,6 +21,7 @@ for (const name of ["DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY
 
 const {
   addCredentialReference,
+  createCredentialReference,
   migrateProviderCredentialStore,
   PROVIDER_CREDENTIAL_SCHEMA_VERSION,
   readProviderCredentialStore,
@@ -31,10 +33,19 @@ const {
   sanitizedCredentialStore,
   writeProviderCredentialStore,
 } = await import("../src/provider-credential-store.mjs");
-const { writeProviderCredential } = await import("../src/provider-credentials.mjs");
+const {
+  credentialPaths,
+  resolveProviderCredentialReference,
+  writeProviderCredential,
+} = await import("../src/provider-credentials.mjs");
+const { PROVIDERS } = await import("../src/model-registry.mjs");
 const { privateFileIsProtected } = await import("../src/file-security.mjs");
 
 test.after(() => rmSync(root, { recursive: true, force: true }));
+
+function ref(providerId = "deepseek") {
+  return { type: "provider-file", providerId, target: "codex" };
+}
 
 test("credential references contain no secret and use protected metadata storage", () => {
   const filePath = path.join(root, "state", "references.json");
@@ -42,7 +53,7 @@ test("credential references contain no secret and use protected metadata storage
     {
       providerId: "deepseek",
       kind: "api_key",
-      secretRef: { type: "provider-file" },
+      secretRef: ref(),
       label: "Primary DeepSeek",
       account: { alias: "main", plan: "api" },
     },
@@ -50,6 +61,7 @@ test("credential references contain no secret and use protected metadata storage
   );
   assert.match(entry.id, /^cred_[A-Za-z0-9_-]{16,64}$/);
   assert.equal(entry.secretRef.providerId, "deepseek");
+  assert.equal(entry.secretRef.target, "codex");
   assert.equal("value" in entry, false);
   assert.equal(privateFileIsProtected(filePath), true);
   if (process.platform !== "win32") assert.equal(statSync(filePath).mode & 0o777, 0o600);
@@ -60,39 +72,59 @@ test("credential references contain no secret and use protected metadata storage
   assert.deepEqual(readProviderCredentialStore(filePath).credentials, []);
 });
 
-test("raw secret fields are rejected instead of being copied into the store", () => {
-  const filePath = path.join(root, "state", "reject.json");
+test("credential metadata parsing fails closed for unknown or secret-bearing fields", () => {
   assert.throws(
-    () => addCredentialReference({
+    () => createCredentialReference({
       providerId: "deepseek",
       kind: "api_key",
-      secretRef: { type: "provider-file" },
+      secretRef: ref(),
       apiKey: "TEST_DO_NOT_STORE",
-    }, filePath),
+    }),
     /secret field apiKey/,
   );
-  assert.equal(existsSync(filePath), false);
+  assert.throws(
+    () => createCredentialReference({
+      providerId: "deepseek",
+      kind: "api_key",
+      secretRef: { ...ref(), name: "NOT_ALLOWED" },
+    }),
+    /provider-file secretRef cannot include service or name/,
+  );
+  assert.throws(
+    () => createCredentialReference({
+      providerId: "deepseek",
+      kind: "api_key",
+      secretRef: { type: "environment", providerId: "deepseek", target: "codex", name: "UNRELATED_SECRET" },
+    }),
+    /not configured for this provider/,
+  );
+  assert.throws(
+    () => writeProviderCredentialStore({ credentials: [], accessToken: "TEST_STORE_SECRET" }, path.join(root, "state", "unsafe.json")),
+    /secret field accessToken/,
+  );
 });
 
 test("redaction covers headers, URLs, errors, nested objects, and known secrets", () => {
   const text = [
     "Authorization: Bearer TEST_BEARER_TOKEN",
+    "X-Api-Key: TEST_HEADER_KEY",
     "https://user:password@example.test/v1?api_key=QUERY_SECRET",
     "{\"access_token\":\"JSON_SECRET\",\"message\":\"TEST_KNOWN_SECRET\"}",
     "sk-test_secret_value",
   ].join(" ");
   const redacted = redactCredentialText(text, ["TEST_KNOWN_SECRET"]);
-  assert.doesNotMatch(redacted, /TEST_BEARER_TOKEN|password|QUERY_SECRET|JSON_SECRET|TEST_KNOWN_SECRET|sk-test_secret_value/);
+  assert.doesNotMatch(redacted, /TEST_BEARER_TOKEN|TEST_HEADER_KEY|password|QUERY_SECRET|JSON_SECRET|TEST_KNOWN_SECRET|sk-test_secret_value/);
   const object = redactCredentialObject({
-    headers: { Authorization: "Bearer TEST_HEADER_SECRET" },
+    headers: { Authorization: "Bearer TEST_HEADER_SECRET", "X-Api-Key": "TEST_API_SECRET" },
     nested: { refreshToken: "TEST_REFRESH_SECRET", message: "TEST_KNOWN_SECRET" },
   }, ["TEST_KNOWN_SECRET"]);
   assert.equal(object.headers.Authorization, "[REDACTED]");
+  assert.equal(object.headers["X-Api-Key"], "[REDACTED]");
   assert.equal(object.nested.refreshToken, "[REDACTED]");
   assert.equal(object.nested.message, "[REDACTED]");
 });
 
-test("migration discovers existing protected provider files without copying secrets", () => {
+test("migration discovers configured provider files without copying secret bytes", () => {
   const filePath = path.join(root, "state", "migrated.json");
   const migrationDirectory = path.join(root, "state", "migration-test");
   const providerPath = writeProviderCredential("deepseek", "TEST_MIGRATION_SECRET");
@@ -105,15 +137,15 @@ test("migration discovers existing protected provider files without copying secr
   const second = migrateProviderCredentialStore(filePath, { migrationDirectory });
   assert.equal(second.migrated, false, "the second run must be idempotent");
 
-  rollbackProviderCredentialStore(first.manifestPath, { migrationDirectory });
+  rollbackProviderCredentialStore(first.manifestPath, { migrationDirectory, targetPath: filePath });
   assert.equal(existsSync(filePath), false);
   assert.equal(readFileSync(providerPath, "utf8"), "TEST_MIGRATION_SECRET\n");
 });
 
-test("legacy metadata migration creates a protected rollback snapshot", () => {
+test("legacy migration preserves exact bytes and rejects changed targets", () => {
   const filePath = path.join(root, "state", "legacy.json");
   const migrationDirectory = path.join(root, "state", "legacy-migration-test");
-  const legacy = {
+  const legacyBytes = Buffer.from(JSON.stringify({
     version: 1,
     credentials: [{
       id: "cred_legacy_reference_123456",
@@ -122,22 +154,70 @@ test("legacy metadata migration creates a protected rollback snapshot", () => {
       secretRef: { type: "provider-file" },
       state: "active",
     }],
-    // Unknown legacy fields are deliberately discarded from the rollback
-    // snapshot; they are not part of the supported metadata contract.
-    opaque: "TEST_LEGACY_SECRET",
-  };
-  writeFileSync(filePath, `${JSON.stringify(legacy)}\n`, { mode: 0o600 });
+  }) + "\n", "utf8");
+  writeFileSync(filePath, legacyBytes, { mode: 0o600 });
   const migration = migrateProviderCredentialStore(filePath, { migrationDirectory });
   assert.equal(migration.legacy, true);
-  assert.equal(JSON.parse(readFileSync(filePath, "utf8")).schemaVersion, 1);
-  assert.equal(privateFileIsProtected(path.join(migrationDirectory, "latest.json")), true);
-  const snapshot = readFileSync(path.join(path.dirname(migration.manifestPath), "provider-credentials.before-migration.json"), "utf8");
-  assert.doesNotMatch(snapshot, /TEST_LEGACY_SECRET/);
-  rollbackProviderCredentialStore(undefined, { migrationDirectory });
-  const rolledBack = JSON.parse(readFileSync(filePath, "utf8"));
-  assert.equal(rolledBack.version, 1);
-  assert.equal(rolledBack.credentials.length, 1);
-  assert.equal(rolledBack.credentials[0].id, legacy.credentials[0].id);
-  assert.equal(rolledBack.credentials[0].secretRef.providerId, "openrouter");
-  assert.equal("opaque" in rolledBack, false);
+  assert.equal(JSON.parse(readFileSync(filePath, "utf8")).schemaVersion, PROVIDER_CREDENTIAL_SCHEMA_VERSION);
+  const snapshotPath = path.join(path.dirname(migration.manifestPath), "provider-credentials.before-migration.json");
+  assert.deepEqual(readFileSync(snapshotPath), legacyBytes);
+  writeFileSync(filePath, Buffer.from("changed\n"));
+  assert.throws(
+    () => rollbackProviderCredentialStore(migration.manifestPath, { migrationDirectory, targetPath: filePath }),
+    /changed after migration/,
+  );
+  assert.equal(readFileSync(filePath, "utf8"), "changed\n");
+  writeFileSync(filePath, Buffer.from(JSON.stringify({
+    schemaVersion: PROVIDER_CREDENTIAL_SCHEMA_VERSION,
+    credentials: migration.store.credentials,
+  }, null, 2) + "\n"));
+  rollbackProviderCredentialStore(undefined, { migrationDirectory, targetPath: filePath });
+  assert.deepEqual(readFileSync(filePath), legacyBytes);
+});
+
+test("migration rejects unknown legacy fields and confined paths", () => {
+  const filePath = path.join(root, "state", "bad-legacy.json");
+  writeFileSync(filePath, `${JSON.stringify({ version: 1, credentials: [], opaque: "TEST_SECRET" })}\n`, { mode: 0o600 });
+  assert.throws(
+    () => migrateProviderCredentialStore(filePath, { migrationDirectory: path.join(root, "state", "bad-migration") }),
+    /unsupported field opaque/,
+  );
+  assert.throws(
+    () => migrateProviderCredentialStore(path.join(root, "outside", "store.json")),
+    /inside the router state directory/,
+  );
+  const link = path.join(root, "state", "linked.json");
+  symlinkSync(path.join(root, "state", "target.json"), link);
+  assert.throws(
+    () => addCredentialReference({ providerId: "deepseek", kind: "api_key", secretRef: ref() }, link),
+    /symbolic link/,
+  );
+});
+
+test("credential references are target- and provider-bound at resolution time", () => {
+  const providerPath = writeProviderCredential("deepseek", "TEST_BOUND_SECRET");
+  const configured = resolveProviderCredentialReference("deepseek", ref());
+  assert.equal(configured?.value, "TEST_BOUND_SECRET");
+  assert.equal(resolveProviderCredentialReference("deepseek", { ...ref(), target: "gemini" }), undefined);
+  assert.equal(resolveProviderCredentialReference("openrouter", ref("deepseek")), undefined);
+  assert.equal(resolveProviderCredentialReference("deepseek", { ...ref(), path: "/tmp/outside" }), undefined);
+  assert.equal(resolveProviderCredentialReference("deepseek", {
+    type: "environment",
+    providerId: "deepseek",
+    target: "codex",
+    name: "UNRELATED_SECRET",
+  }), undefined);
+  assert.equal(resolveProviderCredentialReference("deepseek", {
+    type: "keychain",
+    providerId: "deepseek",
+    target: "codex",
+    service: "arbitrary-service",
+  }), undefined);
+
+  const external = path.join(root, "outside-secret.txt");
+  writeFileSync(external, "TEST_SYMLINK_SECRET\n", { mode: 0o600 });
+  rmSync(providerPath);
+  symlinkSync(external, providerPath);
+  assert.equal(resolveProviderCredentialReference("deepseek", ref()), undefined);
+  assert.deepEqual(credentialPaths(PROVIDERS.get("deepseek")).filter((candidate) => candidate === providerPath), [providerPath]);
 });

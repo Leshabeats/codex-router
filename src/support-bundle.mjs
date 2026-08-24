@@ -31,6 +31,7 @@ import {
   credentialStatus,
 } from "./provider-credentials.mjs";
 import { providerSelectionStatus } from "./provider-selection.mjs";
+import { redactCredentialText } from "./provider-credential-store.mjs";
 
 function runJson(script, args = []) {
   const result = spawnSync(
@@ -70,11 +71,7 @@ function fileMetadata(target) {
 }
 
 function redactLogs(contents) {
-  return redactCallerUrl(contents)
-    .replace(/(authorization\s*[:=]\s*bearer\s+)[^\s"']+/gi, "$1[REDACTED]")
-    .replace(/("(?:api[_-]?key|access[_-]?token|refresh[_-]?token)"\s*:\s*")[^"]+/gi, "$1[REDACTED]")
-    .replace(/((?:api[_-]?key|access[_-]?token|refresh[_-]?token)\s*[=:]\s*["']?)[^\s"',}]+/gi, "$1[REDACTED]")
-    .replace(/\bsk-[A-Za-z0-9_-]{12,}\b/g, "[REDACTED_KEY]");
+  return redactCredentialText(redactCallerUrl(contents));
 }
 
 function logTail() {
@@ -142,11 +139,7 @@ function sharableInstallManifest() {
 }
 
 function redactBundle(contents) {
-  let redacted = redactCallerUrl(contents);
-  for (const secret of knownLocalSecrets()) {
-    redacted = redacted.replaceAll(secret, "[REDACTED]");
-  }
-  return redacted;
+  return redactCredentialText(redactCallerUrl(contents), knownLocalSecrets());
 }
 
 function outputOption() {

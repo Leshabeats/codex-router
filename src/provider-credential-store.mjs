@@ -1,18 +1,25 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   unlinkSync,
+  writeFileSync,
 } from "node:fs";
 import path from "node:path";
 
 import { credentialPaths } from "./provider-credentials.mjs";
-import { writePrivateFile, writePrivateJson } from "./file-security.mjs";
+import { protectPrivateFile } from "./file-security.mjs";
 import { PROVIDERS } from "./model-registry.mjs";
 import {
+  CODEX_HOME,
   PROVIDER_CREDENTIAL_MIGRATIONS_DIR,
   PROVIDER_CREDENTIAL_STORE_PATH,
+  STATE_DIR,
+  TARGET,
 } from "./paths.mjs";
 
 /**
@@ -21,24 +28,151 @@ import {
  * OAuth secret. `secretRef` names an existing protected provider store and is
  * resolved by the provider-specific credential code when a request is made.
  */
-export const PROVIDER_CREDENTIAL_SCHEMA_VERSION = 1;
+export const PROVIDER_CREDENTIAL_SCHEMA_VERSION = 2;
 export const PROVIDER_CREDENTIAL_KINDS = Object.freeze(["account", "api_key"]);
 export const SECRET_REFERENCE_TYPES = Object.freeze([
   "provider-file",
   "keychain",
-  "oauth-session",
   "environment",
 ]);
 
-const SENSITIVE_KEY = /(?:authorization|api[-_]?key|access[-_]?token|refresh[-_]?token|secret|password|cookie|credential|private[-_]?key|signed[-_]?url)/i;
-const PROVIDER_ID = /^[a-z0-9][a-z0-9-]*$/i;
+const SENSITIVE_KEY = /(?:authorization|api[-_]?key|access[-_]?token|refresh[-_]?token|token|secret|password|cookie|credential|private[-_]?key|signed[-_]?url)/i;
 const CREDENTIAL_ID = /^cred_[A-Za-z0-9_-]{16,64}$/;
 const LABEL_LIMIT = 160;
+const STORE_KEYS = new Set(["schemaVersion", "credentials"]);
+const LEGACY_STORE_KEYS = new Set(["version", "credentials"]);
+const CREDENTIAL_KEYS = new Set([
+  "id",
+  "providerId",
+  "kind",
+  "secretRef",
+  "state",
+  "createdAt",
+  "updatedAt",
+  "label",
+  "account",
+]);
+const ACCOUNT_KEYS = new Set(["alias", "plan"]);
+const SECRET_REF_KEYS = new Set(["type", "providerId", "target", "service", "name"]);
 
 function sensitiveKey(key) {
-  // `secretRef` is a safe descriptor, not a secret-bearing field. Every
-  // other key matching the broad pattern is rejected/redacted.
-  return key !== "secretRef" && SENSITIVE_KEY.test(key);
+  // `secretRef` is a safe descriptor, not a secret-bearing field.
+  return !["secretRef", "credentials"].includes(key) && SENSITIVE_KEY.test(key);
+}
+
+function plainObject(value, field) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${field} must be an object.`);
+  }
+  return value;
+}
+
+function assertAllowedKeys(value, allowed, field) {
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) throw new Error(`${field} contains unsupported field ${key}.`);
+  }
+}
+
+function isWithin(base, target) {
+  const relative = path.relative(base, target);
+  return relative === "" || (
+    relative !== ".." &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative)
+  );
+}
+
+function assertNoSymlinkComponents(target, field, boundary) {
+  const absolute = path.resolve(target);
+  const base = boundary ? path.resolve(boundary) : undefined;
+  const root = path.parse(absolute).root;
+  const components = absolute.slice(root.length).split(path.sep).filter(Boolean);
+  let current = root;
+  for (const component of components) {
+    current = path.join(current, component);
+    try {
+      const atOrBelowBoundary = !base || isWithin(base, current);
+      if (atOrBelowBoundary && lstatSync(current).isSymbolicLink()) {
+        throw new Error(`${field} cannot contain a symbolic link.`);
+      }
+    } catch (error) {
+      if (error?.code === "ENOENT") break;
+      throw error;
+    }
+  }
+}
+
+function managedStatePath(value, field, { allowDirectory = false } = {}) {
+  if (typeof value !== "string" || !path.isAbsolute(value)) {
+    throw new Error(`${field} must be an absolute path.`);
+  }
+  const target = path.resolve(value);
+  const base = path.resolve(STATE_DIR);
+  if (!isWithin(base, target) || (!allowDirectory && target === base)) {
+    throw new Error(`${field} must stay inside the router state directory.`);
+  }
+  assertNoSymlinkComponents(target, field, base);
+  return target;
+}
+
+function managedSourcePath(value, field) {
+  if (typeof value !== "string" || !path.isAbsolute(value)) {
+    throw new Error(`${field} must be an absolute path.`);
+  }
+  const target = path.resolve(value);
+  const bases = [path.resolve(CODEX_HOME), path.resolve(STATE_DIR)];
+  const base = bases.find((candidate) => isWithin(candidate, target));
+  if (!base || target === base) {
+    throw new Error(`${field} must stay inside a managed credential directory.`);
+  }
+  assertNoSymlinkComponents(target, field, base);
+  return target;
+}
+
+function readRegularBytes(filePath, field) {
+  const target = path.resolve(filePath);
+  let stat;
+  try {
+    stat = lstatSync(target);
+  } catch (error) {
+    if (error?.code === "ENOENT") return undefined;
+    throw error;
+  }
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    throw new Error(`${field} must be a regular file.`);
+  }
+  return readFileSync(target);
+}
+
+function atomicPrivateBytes(filePath, bytes, { directoryMode = 0o700 } = {}) {
+  const target = managedStatePath(filePath, "target path");
+  const directory = path.dirname(target);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  chmodSync(directory, directoryMode);
+  const temporary = path.join(
+    directory,
+    `.${path.basename(target)}.tmp-${process.pid}-${randomBytes(8).toString("hex")}`,
+  );
+  try {
+    writeFileSync(temporary, bytes, { mode: 0o600 });
+    protectPrivateFile(temporary);
+    renameSync(temporary, target);
+    protectPrivateFile(target);
+  } catch (error) {
+    try { unlinkSync(temporary); } catch (cleanupError) {
+      if (cleanupError?.code !== "ENOENT") error.cleanupError = cleanupError;
+    }
+    throw error;
+  }
+  return target;
+}
+
+function serializedStore(store) {
+  return Buffer.from(`${JSON.stringify(store, null, 2)}\n`, "utf8");
+}
+
+function sha256(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
 }
 
 function now() {
@@ -62,8 +196,11 @@ function normalizeText(value, field, { max = LABEL_LIMIT, required = false } = {
 
 function validateProviderId(value) {
   const providerId = normalizeText(value, "providerId", { max: 100, required: true });
-  if (!PROVIDER_ID.test(providerId)) throw new Error(`Invalid providerId: ${providerId}`);
-  return providerId;
+  const provider = PROVIDERS.get(providerId);
+  if (!provider || provider.kind !== "openai-compatible" || !provider.credential) {
+    throw new Error(`Invalid providerId: ${providerId}`);
+  }
+  return provider.variantOf || provider.id;
 }
 
 function validateCredentialId(value) {
@@ -97,11 +234,10 @@ function assertNoSecretFields(value, context = "credential metadata") {
   }
 }
 
-function normalizeSecretRef(value, providerId) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("secretRef must be an object reference; raw secrets are not accepted.");
-  }
+function normalizeSecretRef(value, providerId, { legacy = false } = {}) {
+  plainObject(value, "secretRef");
   assertNoSecretFields(value, "secretRef");
+  assertAllowedKeys(value, SECRET_REF_KEYS, "secretRef");
   const type = normalizeText(value.type, "secretRef.type", { max: 40, required: true });
   if (!SECRET_REFERENCE_TYPES.includes(type)) {
     throw new Error(`Unsupported secretRef type: ${type}`);
@@ -109,23 +245,47 @@ function normalizeSecretRef(value, providerId) {
   const referenceProviderId = value.providerId === undefined
     ? providerId
     : validateProviderId(value.providerId);
-  const normalized = { type, providerId: referenceProviderId };
+  if (referenceProviderId !== providerId) {
+    throw new Error("secretRef.providerId must match providerId.");
+  }
+  const target = value.target === undefined && legacy ? TARGET : normalizeText(
+    value.target,
+    "secretRef.target",
+    { max: 20, required: true },
+  );
+  if (target !== TARGET) throw new Error("secretRef.target does not match this router target.");
+  const normalized = { type, providerId: referenceProviderId, target };
+  const provider = PROVIDERS.get(referenceProviderId);
+  if (!provider?.credential) throw new Error(`Provider ${referenceProviderId} has no credential policy.`);
   if (type === "keychain") {
     const service = normalizeText(value.service, "secretRef.service", { max: 200, required: true });
+    if (!provider.credential.keychainServices?.includes(service)) {
+      throw new Error("secretRef.service is not configured for this provider.");
+    }
     normalized.service = service;
   } else if (type === "environment") {
     const name = normalizeText(value.name, "secretRef.name", { max: 100, required: true });
-    if (!/^[A-Z][A-Z0-9_]*$/.test(name)) throw new Error("secretRef.name must be an environment variable name.");
+    if (!provider.credential.environment?.includes(name)) {
+      throw new Error("secretRef.name is not configured for this provider.");
+    }
     normalized.name = name;
+  }
+  if (type === "provider-file" && (value.service !== undefined || value.name !== undefined)) {
+    throw new Error("provider-file secretRef cannot include service or name.");
+  }
+  if (type === "keychain" && value.name !== undefined) {
+    throw new Error("keychain secretRef cannot include name.");
+  }
+  if (type === "environment" && value.service !== undefined) {
+    throw new Error("environment secretRef cannot include service.");
   }
   return normalized;
 }
 
 function normalizeCredential(raw, { legacy = false } = {}) {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    throw new Error("Each credential must be an object.");
-  }
+  plainObject(raw, "credential");
   assertNoSecretFields(raw, "credential metadata");
+  assertAllowedKeys(raw, CREDENTIAL_KEYS, "credential");
   const providerId = validateProviderId(raw.providerId);
   const kind = normalizeText(raw.kind || (legacy ? "api_key" : undefined), "credential kind", {
     max: 20,
@@ -135,7 +295,7 @@ function normalizeCredential(raw, { legacy = false } = {}) {
     throw new Error(`Unsupported credential kind: ${kind}`);
   }
   const id = validateCredentialId(raw.id);
-  const secretRef = normalizeSecretRef(raw.secretRef, providerId);
+  const secretRef = normalizeSecretRef(raw.secretRef, providerId, { legacy });
   const state = normalizeText(raw.state || "active", "credential state", { max: 20, required: true });
   if (!["active", "paused", "revoked"].includes(state)) {
     throw new Error(`Unsupported credential state: ${state}`);
@@ -155,7 +315,9 @@ function normalizeCredential(raw, { legacy = false } = {}) {
   if (label) result.label = label;
   // Account metadata is intentionally narrow. Do not persist arbitrary
   // provider responses or email/token-shaped fields in this store.
-  if (raw.account && typeof raw.account === "object" && !Array.isArray(raw.account)) {
+  if (raw.account !== undefined) {
+    plainObject(raw.account, "account");
+    assertAllowedKeys(raw.account, ACCOUNT_KEYS, "account");
     const account = {};
     const alias = normalizeText(raw.account.alias, "account.alias");
     const plan = normalizeText(raw.account.plan, "account.plan", { max: 80 });
@@ -167,10 +329,14 @@ function normalizeCredential(raw, { legacy = false } = {}) {
 }
 
 function normalizeStore(raw, { legacy = false } = {}) {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    throw new Error("Credential store must be an object.");
+  plainObject(raw, "Credential store");
+  assertNoSecretFields(raw, "Credential store");
+  assertAllowedKeys(raw, legacy ? LEGACY_STORE_KEYS : STORE_KEYS, "Credential store");
+  if (!Array.isArray(raw.credentials)) throw new Error("Credential store credentials must be an array.");
+  if (!legacy && raw.schemaVersion !== PROVIDER_CREDENTIAL_SCHEMA_VERSION) {
+    throw new Error("Unsupported provider credential store schema.");
   }
-  const entries = Array.isArray(raw.credentials) ? raw.credentials : [];
+  const entries = raw.credentials;
   const seen = new Set();
   const credentials = entries.map((entry) => {
     const normalized = normalizeCredential(entry, { legacy });
@@ -182,23 +348,38 @@ function normalizeStore(raw, { legacy = false } = {}) {
 }
 
 function parseStore(contents, { allowLegacy = false } = {}) {
-  const parsed = JSON.parse(contents);
+  if (typeof contents !== "string" && !Buffer.isBuffer(contents)) {
+    throw new Error("Credential store contents must be bytes.");
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(Buffer.from(contents).toString("utf8"));
+  } catch {
+    throw new Error("Credential store is not valid JSON.");
+  }
   if (parsed?.schemaVersion === PROVIDER_CREDENTIAL_SCHEMA_VERSION) {
     return normalizeStore(parsed);
   }
-  // The migration accepts the older `{ version: 1, credentials: [...] }`
-  // shape used by early local experiments, but the normal reader never writes
-  // it back unless an explicit migration is requested.
-  if (allowLegacy && parsed?.version === 1 && Array.isArray(parsed.credentials)) {
-    return normalizeStore(parsed, { legacy: true });
+  if (
+    allowLegacy &&
+    ((parsed?.version === 1) || (parsed?.schemaVersion === 1)) &&
+    Array.isArray(parsed.credentials)
+  ) {
+    assertAllowedKeys(
+      parsed,
+      parsed.version === 1 ? LEGACY_STORE_KEYS : new Set(["schemaVersion", "credentials"]),
+      "Credential store",
+    );
+    return normalizeStore({ version: 1, credentials: parsed.credentials }, { legacy: true });
   }
   throw new Error("Unsupported provider credential store schema.");
 }
 
 export function readProviderCredentialStore(filePath = PROVIDER_CREDENTIAL_STORE_PATH) {
-  if (!existsSync(filePath)) return emptyStore();
+  const target = managedStatePath(filePath, "credential store path");
+  if (!existsSync(target)) return emptyStore();
   try {
-    return parseStore(readFileSync(filePath, "utf8"));
+    return parseStore(readRegularBytes(target, "credential store"));
   } catch {
     // A malformed store must not become a source of credentials. Returning an
     // empty, safe state lets health/catalog paths continue while migration and
@@ -208,16 +389,27 @@ export function readProviderCredentialStore(filePath = PROVIDER_CREDENTIAL_STORE
 }
 
 export function writeProviderCredentialStore(store, filePath = PROVIDER_CREDENTIAL_STORE_PATH) {
+  const target = managedStatePath(filePath, "credential store path");
+  plainObject(store, "Credential store");
+  assertNoSecretFields(store, "Credential store");
+  assertAllowedKeys(store, STORE_KEYS, "Credential store");
+  if (store.schemaVersion !== undefined && store.schemaVersion !== PROVIDER_CREDENTIAL_SCHEMA_VERSION) {
+    throw new Error("Unsupported provider credential store schema.");
+  }
   const normalized = normalizeStore({
     schemaVersion: PROVIDER_CREDENTIAL_SCHEMA_VERSION,
     credentials: store?.credentials,
   });
-  writePrivateJson(filePath, normalized, { directoryMode: 0o700 });
+  atomicPrivateBytes(target, serializedStore(normalized));
   return normalized;
 }
 
 export function createCredentialReference(input = {}) {
   assertNoSecretFields(input, "credential metadata");
+  plainObject(input, "credential metadata");
+  assertAllowedKeys(input, new Set([
+    "providerId", "kind", "secretRef", "label", "account", "id", "state", "createdAt", "updatedAt",
+  ]), "credential metadata");
   const {
     providerId,
     kind,
@@ -234,7 +426,9 @@ export function createCredentialReference(input = {}) {
     id: id || generatedCredentialId(normalizedProviderId, kind),
     providerId: normalizedProviderId,
     kind,
-    secretRef,
+    secretRef: secretRef && typeof secretRef === "object"
+      ? { ...secretRef, target: secretRef.target ?? TARGET }
+      : secretRef,
     label,
     account,
     state,
@@ -245,27 +439,30 @@ export function createCredentialReference(input = {}) {
 }
 
 export function addCredentialReference(input, filePath = PROVIDER_CREDENTIAL_STORE_PATH) {
-  const store = readProviderCredentialStoreStrict(filePath);
+  const target = managedStatePath(filePath, "credential store path");
+  const store = readProviderCredentialStoreStrict(target);
   const credential = createCredentialReference(input);
   if (store.credentials.some((entry) => entry.id === credential.id)) {
     throw new Error(`Credential id already exists: ${credential.id}`);
   }
   store.credentials.push(credential);
-  return writeProviderCredentialStore(store, filePath).credentials.at(-1);
+  return writeProviderCredentialStore(store, target).credentials.at(-1);
 }
 
 export function removeCredentialReference(id, filePath = PROVIDER_CREDENTIAL_STORE_PATH) {
   const credentialId = validateCredentialId(id);
-  const store = readProviderCredentialStoreStrict(filePath);
+  const target = managedStatePath(filePath, "credential store path");
+  const store = readProviderCredentialStoreStrict(target);
   const next = store.credentials.filter((entry) => entry.id !== credentialId);
   if (next.length === store.credentials.length) return false;
-  writeProviderCredentialStore({ credentials: next }, filePath);
+  writeProviderCredentialStore({ credentials: next }, target);
   return true;
 }
 
 function readProviderCredentialStoreStrict(filePath) {
-  if (!existsSync(filePath)) return emptyStore();
-  return parseStore(readFileSync(filePath, "utf8"));
+  const target = managedStatePath(filePath, "credential store path");
+  if (!existsSync(target)) return emptyStore();
+  return parseStore(readRegularBytes(target, "credential store"));
 }
 
 export function sanitizeCredentialStatus(entry) {
@@ -277,7 +474,11 @@ export function sanitizeCredentialStatus(entry) {
     state: credential.state,
     label: credential.label || null,
     account: credential.account ? { ...credential.account } : null,
-    secretRef: { type: credential.secretRef.type, providerId: credential.secretRef.providerId },
+    secretRef: {
+      type: credential.secretRef.type,
+      providerId: credential.secretRef.providerId,
+      target: credential.secretRef.target,
+    },
     createdAt: credential.createdAt,
     updatedAt: credential.updatedAt,
   };
@@ -295,8 +496,9 @@ function redactString(value) {
   let result = String(value ?? "");
   result = result
     .replace(/(authorization\s*[:=]\s*bearer\s+)[^\s"'&,}]+/gi, "$1[REDACTED]")
-    .replace(/([?&](?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|key)=)[^&#\s]+/gi, "$1[REDACTED]")
-    .replace(/((?:["']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token)["']?)\s*[:=]\s*["']?)[^\s"',}]+/gi, "$1[REDACTED]")
+    .replace(/((?:x[-_]?api[-_]?key|api[_-]?key|access[-_]?token|refresh[-_]?token|token|key)\s*[:=]\s*(?:bearer\s+)?)[^\s"'&,}]+/gi, "$1[REDACTED]")
+    .replace(/([?&](?:x[-_]?api[-_]?key|api[_-]?key|access[-_]?token|refresh[-_]?token|token|key)=)[^&#\s]+/gi, "$1[REDACTED]")
+    .replace(/((?:["']?(?:x[-_]?api[-_]?key|api[_-]?key|access[-_]?token|refresh[-_]?token|token|secret)["']?)\s*[:=]\s*["']?)([^\s"',}]+)/gi, "$1[REDACTED]")
     .replace(/(https?:\/\/)[^\s/@:]+:[^\s/@]+@/gi, "$1[REDACTED]@[REDACTED]")
     .replace(/\b(?:sk|ghp|gho|github_pat)-[A-Za-z0-9_-]{8,}\b/g, "[REDACTED_KEY]");
   return result;
@@ -325,15 +527,47 @@ export function redactCredentialObject(value, knownSecrets = []) {
 }
 
 function migrationTimestamp() {
-  return `${new Date().toISOString().replaceAll(":", "-").replaceAll(".", "-")}-${process.pid}`;
+  return `${new Date().toISOString().replaceAll(":", "-").replaceAll(".", "-")}-${process.pid}-${randomBytes(6).toString("hex")}`;
 }
 
 function migrationManifestPath(directory) {
   return path.join(directory, "migration.json");
 }
 
-function readMigrationManifest(manifestPath) {
-  return JSON.parse(readFileSync(manifestPath, "utf8"));
+function readMigrationManifest(manifestPath, migrationDirectory, expectedTarget) {
+  const selected = managedStatePath(manifestPath, "migration manifest path");
+  const directory = managedStatePath(migrationDirectory, "migration directory", { allowDirectory: true });
+  if (!isWithin(directory, selected) || path.basename(selected) !== "migration.json") {
+    throw new Error("Migration manifest must stay inside the migration directory.");
+  }
+  const parsed = JSON.parse(readRegularBytes(selected, "migration manifest").toString("utf8"));
+  plainObject(parsed, "migration manifest");
+  assertAllowedKeys(parsed, new Set([
+    "schemaVersion", "createdAt", "targetPath", "previousExists", "previousPath", "previousSha256", "afterSha256",
+  ]), "migration manifest");
+  if (parsed.schemaVersion !== PROVIDER_CREDENTIAL_SCHEMA_VERSION || typeof parsed.targetPath !== "string") {
+    throw new Error("Unsupported provider credential migration snapshot.");
+  }
+  const target = managedStatePath(parsed.targetPath, "migration target path");
+  if (target !== expectedTarget) throw new Error("Migration target does not match the requested store.");
+  if (typeof parsed.afterSha256 !== "string" || !/^[a-f0-9]{64}$/.test(parsed.afterSha256)) {
+    throw new Error("Migration snapshot has no valid post-migration digest.");
+  }
+  if (typeof parsed.previousExists !== "boolean") throw new Error("Migration snapshot has invalid previous state.");
+  if (parsed.previousExists) {
+    const previous = managedStatePath(parsed.previousPath, "migration rollback path");
+    if (path.dirname(previous) !== path.dirname(selected) || path.basename(previous) !== "provider-credentials.before-migration.json") {
+      throw new Error("Migration rollback path is outside its snapshot directory.");
+    }
+    if (typeof parsed.previousSha256 !== "string" || !/^[a-f0-9]{64}$/.test(parsed.previousSha256)) {
+      throw new Error("Migration snapshot has no valid previous digest.");
+    }
+    parsed.previousPath = previous;
+  } else if (parsed.previousPath !== null || parsed.previousSha256 !== null) {
+    throw new Error("Migration snapshot has an unexpected previous path.");
+  }
+  parsed.targetPath = target;
+  return parsed;
 }
 
 function existingProviderFileReferences() {
@@ -344,7 +578,14 @@ function existingProviderFileReferences() {
     const providerId = provider.variantOf || provider.id;
     const referenceKey = `${providerId}:api_key`;
     if (seen.has(referenceKey)) continue;
-    const file = credentialPaths(provider).find((candidate) => existsSync(candidate));
+    const file = credentialPaths(provider).map((candidate) => {
+      try {
+        const managed = managedSourcePath(candidate, "provider credential path");
+        return readRegularBytes(managed, "provider credential") === undefined ? undefined : managed;
+      } catch {
+        return undefined;
+      }
+    }).find(Boolean);
     if (!file) continue;
     seen.add(referenceKey);
     entries.push({
@@ -352,7 +593,7 @@ function existingProviderFileReferences() {
       providerId,
       kind: "api_key",
       label: provider.credential.label,
-      secretRef: { type: "provider-file", providerId },
+      secretRef: { type: "provider-file", providerId, target: TARGET },
       state: "active",
       createdAt: now(),
       updatedAt: now(),
@@ -365,86 +606,106 @@ export function migrateProviderCredentialStore(
   filePath = PROVIDER_CREDENTIAL_STORE_PATH,
   { migrationDirectory = PROVIDER_CREDENTIAL_MIGRATIONS_DIR } = {},
 ) {
-  if (existsSync(filePath)) {
-    const contents = readFileSync(filePath, "utf8");
+  const target = managedStatePath(filePath, "credential store path");
+  const migrations = managedStatePath(migrationDirectory, "migration directory", { allowDirectory: true });
+  const existing = readRegularBytes(target, "credential store");
+  if (existing !== undefined) {
     try {
-      const current = parseStore(contents);
+      const current = parseStore(existing);
       return { migrated: false, store: current };
     } catch {
-      // Continue only when this is the explicitly supported legacy shape. A
-      // foreign or malformed file is never silently overwritten.
-      const legacy = parseStore(contents, { allowLegacy: true });
-      const directory = path.join(migrationDirectory, migrationTimestamp());
+      const legacy = parseStore(existing, { allowLegacy: true });
+      const directory = path.join(migrations, migrationTimestamp());
       mkdirSync(directory, { recursive: true, mode: 0o700 });
       const previousPath = path.join(directory, "provider-credentials.before-migration.json");
-      // Keep rollback useful without copying unknown fields from the legacy
-      // document. `parseStore` already reduced it to the supported metadata
-      // shape; snapshot that normalized shape instead of preserving arbitrary
-      // values that may contain a secret under an unrecognised key.
-      writePrivateJson(previousPath, { version: 1, credentials: legacy.credentials });
+      const store = {
+        schemaVersion: PROVIDER_CREDENTIAL_SCHEMA_VERSION,
+        credentials: legacy.credentials,
+      };
+      const after = serializedStore(store);
       const manifestPath = migrationManifestPath(directory);
-      writePrivateJson(
+      atomicPrivateBytes(previousPath, existing);
+      atomicPrivateBytes(manifestPath, Buffer.from(JSON.stringify({
+        schemaVersion: PROVIDER_CREDENTIAL_SCHEMA_VERSION,
+        createdAt: now(),
+        targetPath: target,
+        previousExists: true,
+        previousPath,
+        previousSha256: sha256(existing),
+        afterSha256: sha256(after),
+      }, null, 2) + "\n"));
+      atomicPrivateBytes(target, after);
+      atomicPrivateBytes(path.join(migrations, "latest.json"), Buffer.from(JSON.stringify({
+        schemaVersion: PROVIDER_CREDENTIAL_SCHEMA_VERSION,
         manifestPath,
-        {
-          schemaVersion: PROVIDER_CREDENTIAL_SCHEMA_VERSION,
-          createdAt: now(),
-          targetPath: filePath,
-          previousExists: true,
-          previousPath,
-        },
-        { directoryMode: 0o700 },
-      );
-      const store = writeProviderCredentialStore(legacy, filePath);
-      writePrivateJson(
-        path.join(migrationDirectory, "latest.json"),
-        { schemaVersion: 1, manifestPath },
-        { directoryMode: 0o700 },
-      );
+      }, null, 2) + "\n"));
       return { migrated: true, store, legacy: true, manifestPath };
     }
   }
 
   const entries = existingProviderFileReferences();
   const store = { schemaVersion: PROVIDER_CREDENTIAL_SCHEMA_VERSION, credentials: entries };
-  mkdirSync(migrationDirectory, { recursive: true, mode: 0o700 });
-  const directory = path.join(migrationDirectory, migrationTimestamp());
+  const after = serializedStore(store);
+  mkdirSync(migrations, { recursive: true, mode: 0o700 });
+  const directory = path.join(migrations, migrationTimestamp());
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const snapshot = {
     schemaVersion: PROVIDER_CREDENTIAL_SCHEMA_VERSION,
     createdAt: now(),
-    targetPath: filePath,
+    targetPath: target,
     previousExists: false,
     previousPath: null,
+    previousSha256: null,
+    afterSha256: sha256(after),
   };
   const manifestPath = migrationManifestPath(directory);
-  writePrivateJson(manifestPath, snapshot, { directoryMode: 0o700 });
-  writeProviderCredentialStore(store, filePath);
-  writePrivateJson(path.join(migrationDirectory, "latest.json"), { schemaVersion: 1, manifestPath }, { directoryMode: 0o700 });
+  atomicPrivateBytes(manifestPath, Buffer.from(`${JSON.stringify(snapshot, null, 2)}\n`));
+  atomicPrivateBytes(target, after);
+  atomicPrivateBytes(path.join(migrations, "latest.json"), Buffer.from(`${JSON.stringify({
+    schemaVersion: PROVIDER_CREDENTIAL_SCHEMA_VERSION,
+    manifestPath,
+  }, null, 2)}\n`));
   return { migrated: true, store, manifestPath };
 }
 
 export function rollbackProviderCredentialStore(
   manifestPath,
-  { migrationDirectory = PROVIDER_CREDENTIAL_MIGRATIONS_DIR } = {},
+  {
+    migrationDirectory = PROVIDER_CREDENTIAL_MIGRATIONS_DIR,
+    targetPath = PROVIDER_CREDENTIAL_STORE_PATH,
+  } = {},
 ) {
-  let selected = manifestPath;
+  const migrations = managedStatePath(migrationDirectory, "migration directory", { allowDirectory: true });
+  const target = managedStatePath(targetPath, "credential store path");
+  let selected = manifestPath ? managedStatePath(manifestPath, "migration manifest path") : undefined;
   if (!selected) {
-    const latestPath = path.join(migrationDirectory, "latest.json");
-    if (!existsSync(latestPath)) throw new Error("No provider credential migration snapshot is available.");
-    selected = JSON.parse(readFileSync(latestPath, "utf8")).manifestPath;
+    const latestPath = path.join(migrations, "latest.json");
+    const latest = readRegularBytes(latestPath, "latest migration pointer");
+    if (!latest) throw new Error("No provider credential migration snapshot is available.");
+    const parsed = JSON.parse(latest.toString("utf8"));
+    plainObject(parsed, "latest migration pointer");
+    assertAllowedKeys(parsed, new Set(["schemaVersion", "manifestPath"]), "latest migration pointer");
+    if (parsed.schemaVersion !== PROVIDER_CREDENTIAL_SCHEMA_VERSION || typeof parsed.manifestPath !== "string") {
+      throw new Error("Unsupported latest migration pointer.");
+    }
+    selected = managedStatePath(parsed.manifestPath, "migration manifest path");
   }
   if (!selected || !existsSync(selected)) throw new Error("Provider credential migration snapshot is missing.");
-  const manifest = readMigrationManifest(selected);
-  if (manifest.schemaVersion !== PROVIDER_CREDENTIAL_SCHEMA_VERSION || typeof manifest.targetPath !== "string") {
-    throw new Error("Unsupported provider credential migration snapshot.");
+  const manifest = readMigrationManifest(selected, migrations, target);
+  const current = readRegularBytes(target, "credential store");
+  if (current !== undefined && sha256(current) !== manifest.afterSha256) {
+    throw new Error("Refusing rollback because the credential store changed after migration.");
   }
   if (manifest.previousExists) {
-    if (!manifest.previousPath || !existsSync(manifest.previousPath)) {
+    const previous = readRegularBytes(manifest.previousPath, "migration rollback snapshot");
+    if (!previous || sha256(previous) !== manifest.previousSha256) {
       throw new Error("Provider credential rollback snapshot is missing.");
     }
-    writePrivateFile(manifest.targetPath, readFileSync(manifest.previousPath, "utf8"));
-  } else if (existsSync(manifest.targetPath)) {
-    unlinkSync(manifest.targetPath);
+    atomicPrivateBytes(target, previous);
+  } else if (current !== undefined) {
+    const stat = lstatSync(target);
+    if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("Credential store is not a regular file.");
+    unlinkSync(target);
   }
-  return { rolledBack: true, targetPath: manifest.targetPath };
+  return { rolledBack: true, targetPath: target };
 }

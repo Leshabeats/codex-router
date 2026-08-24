@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   renameSync,
@@ -136,6 +137,38 @@ function resolvedCredential(provider, value, source, persistent) {
   return { value, source, persistent };
 }
 
+function canonicalProviderId(provider) {
+  return provider.variantOf || provider.id;
+}
+
+function configuredProviderFileCredential(provider) {
+  for (const candidate of credentialPaths(provider)) {
+    let stat;
+    try {
+      stat = lstatSync(candidate);
+    } catch (error) {
+      if (error?.code === "ENOENT") continue;
+      continue;
+    }
+    if (stat.isSymbolicLink() || !stat.isFile()) continue;
+    try {
+      const value = readFileSync(candidate, "utf8").trim();
+      if (value) {
+        const credential = resolvedCredential(
+          provider,
+          value,
+          "protected file",
+          true,
+        );
+        if (credential) return credential;
+      }
+    } catch {
+      // A file that cannot be read is not a usable credential source.
+    }
+  }
+  return undefined;
+}
+
 export function resolveProviderCredential(providerOrId, options = {}) {
   const provider =
     typeof providerOrId === "string" ? PROVIDERS.get(providerOrId) : providerOrId;
@@ -200,9 +233,9 @@ export function resolveProviderCredential(providerOrId, options = {}) {
 
 /**
  * Resolve one metadata-only credential reference without changing the
- * provider's existing single-credential path. The reference is an opaque
- * pointer to a provider-owned file, Keychain item, or environment variable;
- * this helper never accepts a raw secret or an arbitrary filesystem path.
+ * provider's existing single-credential path. References are bound to this
+ * target and to source names declared by the provider registry; raw secrets,
+ * arbitrary paths, services, and environment variables are rejected.
  */
 export function resolveProviderCredentialReference(providerOrId, secretRef) {
   const provider =
@@ -211,25 +244,31 @@ export function resolveProviderCredentialReference(providerOrId, secretRef) {
   if (!secretRef || typeof secretRef !== "object" || Array.isArray(secretRef)) {
     return undefined;
   }
-  if (secretRef.providerId && secretRef.providerId !== provider.id && secretRef.providerId !== provider.variantOf) {
+  const referenceKeys = new Set(["type", "providerId", "target", "service", "name"]);
+  if (Object.keys(secretRef).some((key) => !referenceKeys.has(key))) return undefined;
+  if (secretRef.target !== TARGET) return undefined;
+  if (secretRef.providerId !== canonicalProviderId(provider)) {
     return undefined;
   }
   if (discoveryDisabled()) return undefined;
   const type = typeof secretRef.type === "string" ? secretRef.type.trim() : "";
   if (type === "provider-file") {
-    return resolveProviderCredential(provider, { persistent: true });
+    if (secretRef.service !== undefined || secretRef.name !== undefined) return undefined;
+    return configuredProviderFileCredential(provider);
   }
   if (type === "environment") {
+    if (secretRef.service !== undefined) return undefined;
     const name = typeof secretRef.name === "string" ? secretRef.name.trim() : "";
-    if (!/^[A-Z][A-Z0-9_]*$/.test(name)) return undefined;
+    if (!provider.credential?.environment?.includes(name)) return undefined;
     const value = process.env[name]?.trim();
     if (!value) return undefined;
     return resolvedCredential(provider, value, `environment (${name})`, false);
   }
   if (type === "keychain") {
+    if (secretRef.name !== undefined) return undefined;
     if (process.platform !== "darwin") return undefined;
     const service = typeof secretRef.service === "string" ? secretRef.service.trim() : "";
-    if (!service || service.length > 200) return undefined;
+    if (!provider.credential?.keychainServices?.includes(service)) return undefined;
     const found = keychainSecret(service, Date.now());
     return found
       ? resolvedCredential(provider, found.value, `macOS Keychain (${service})`, true)
