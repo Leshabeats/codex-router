@@ -59,7 +59,6 @@
 
 .pm-model-catalog {
   padding: 0;
-  overflow: hidden;
 }
 
 .pm-model-toolbar {
@@ -638,14 +637,94 @@
   justify-self: start;
 }
 
-/* Sized to its column so the row stays one line. The full-width control the
-   app uses elsewhere pushed the effort menu past the table's right edge. */
-.pm-route-effort {
+/* The effort control, sized to its column so the row stays one line. */
+.pm-effort-menu-wrap {
+  position: relative;
   width: 100%;
-  min-width: 0;
+}
+
+.pm-effort-trigger {
+  display: flex;
+  width: 100%;
   min-height: 26px;
-  padding: 2px 20px 2px 7px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 5px;
+  padding: 3px 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface-0);
+  color: var(--ink-subtle);
+  cursor: pointer;
+  font: inherit;
   font-size: 9px;
+  white-space: nowrap;
+}
+
+.pm-effort-trigger:hover:not(:disabled),
+.pm-effort-trigger[aria-expanded="true"] {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--line-strong));
+  color: var(--ink-strong);
+}
+
+.pm-effort-trigger:disabled {
+  color: var(--ink-faint);
+  cursor: default;
+}
+
+.pm-effort-trigger > svg {
+  flex: 0 0 auto;
+  color: var(--ink-faint);
+  transition: transform 130ms ease;
+}
+
+.pm-effort-trigger > svg.is-open {
+  transform: rotate(180deg);
+}
+
+/* Anchored to the control it belongs to, unlike a native select's menu, which
+   macOS shifts left by the width of its checkmark gutter. */
+.pm-effort-menu {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 4px);
+  right: 0;
+  display: grid;
+  min-width: 100%;
+  gap: 2px;
+  padding: 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--raised);
+  box-shadow: 0 12px 28px var(--shadow);
+}
+
+.pm-effort-menu button {
+  display: flex;
+  min-height: 26px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 3px 7px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ink-subtle);
+  cursor: pointer;
+  font: inherit;
+  font-size: 9.5px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.pm-effort-menu button:hover,
+.pm-effort-menu button.is-selected {
+  background: var(--surface-2);
+  color: var(--ink-strong);
+}
+
+.pm-effort-menu button.is-selected svg {
+  color: var(--accent);
 }
 
 .providers-models-page :is(input, select):focus-visible,
@@ -1069,7 +1148,7 @@
     padding-left: 14px;
   }
 
-.pm-route-effort {
+.pm-effort-menu-wrap {
     max-width: 128px;
   }
 

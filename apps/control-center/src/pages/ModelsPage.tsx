@@ -1255,6 +1255,10 @@ function SubagentToggle({
   );
 }
 
+// A native <select> draws its menu shifted left to make room for the macOS
+// checkmark gutter, which reads as misalignment inside a table. This page
+// already has its own menu pattern for the filter and the connections chips;
+// using it here keeps the popup anchored to the control it belongs to.
 function SubagentEffort({
   model,
   providerName,
@@ -1270,23 +1274,67 @@ function SubagentEffort({
   apiAvailable: boolean;
   onEffortChange: (effort: string) => void;
 }) {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
   const effortOptions = model.reasoningLevels ?? [];
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (!wrapRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointer);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
   // Nothing to choose on a route that is off, or one with a single-level
   // ladder. An empty cell reads better than a menu nobody can use.
   if (!selectedInSettings || effortOptions.length < 2) {
     return <span className="pm-route-none">—</span>;
   }
+  const choices = ["default", ...effortOptions];
   return (
-    <select
-      className="pm-route-effort"
-      aria-label={`${model.displayName} ${providerName} subagent thinking effort`}
-      value={subagentEffort}
-      disabled={!apiAvailable}
-      onChange={(event) => onEffortChange(event.target.value)}
-    >
-      <option value="default">Default</option>
-      {effortOptions.map((effort) => <option key={effort} value={effort}>{effortLabel(effort)}</option>)}
-    </select>
+    <div className="pm-effort-menu-wrap" ref={wrapRef}>
+      <button
+        type="button"
+        className="pm-effort-trigger"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={`${model.displayName} ${providerName} subagent thinking effort`}
+        disabled={!apiAvailable}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span>{effortLabel(subagentEffort)}</span>
+        <ChevronDown aria-hidden size={12} strokeWidth={1.8} className={open ? "is-open" : ""} />
+      </button>
+      {open ? (
+        <div className="pm-effort-menu" role="menu">
+          {choices.map((effort) => (
+            <button
+              key={effort}
+              type="button"
+              role="menuitemradio"
+              aria-checked={subagentEffort === effort}
+              className={subagentEffort === effort ? "is-selected" : ""}
+              onClick={() => {
+                setOpen(false);
+                if (effort !== subagentEffort) onEffortChange(effort);
+              }}
+            >
+              <span>{effortLabel(effort)}</span>
+              {subagentEffort === effort ? <Check aria-hidden size={13} strokeWidth={1.9} /> : null}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
   );
 }
 

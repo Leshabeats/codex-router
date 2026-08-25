@@ -1151,7 +1151,11 @@ test("the model directory combines provider setup with de-duplicated model-famil
   assert.match(models, /function SubagentEffort\(/);
   assert.match(models, /<span>Thinking<\/span>/);
   assert.match(providerModelsCss, /grid-template-columns: minmax\(0, 1fr\) 78px 92px 70px 74px 104px/);
-  assert.match(providerModelsCss, /\.pm-route-effort \{/);
+  // The effort control uses this page's own menu: a native select's popup is
+  // shifted by the macOS checkmark gutter, which reads as misaligned in a table.
+  assert.match(providerModelsCss, /\.pm-effort-menu \{/);
+  assert.match(models, /className="pm-effort-trigger"/);
+  assert.doesNotMatch(models, /<select[\s\S]{0,200}subagent thinking effort/);
   assert.match(models, /<dt>Model id<\/dt>/);
   assert.match(providerModelsCss, /\.pm-model-details\s*\{/);
 
