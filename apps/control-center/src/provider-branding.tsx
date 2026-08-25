@@ -15,7 +15,7 @@ import githubCopilotLogo from "./assets/providers/github-copilot.svg";
 import googleLogo from "./assets/providers/google.svg";
 import groqLogo from "./assets/providers/groq.svg";
 import huggingFaceLogo from "./assets/providers/huggingface.svg";
-import kimiLogo from "./assets/providers/kimi.svg";
+import kimiLogo from "./assets/providers/kimi.png";
 import kiloLogo from "./assets/providers/kilo.svg";
 import lmStudioLogo from "./assets/providers/lmstudio.svg";
 import metaLogo from "./assets/providers/meta.svg";
@@ -57,7 +57,7 @@ interface BrandableModel {
 
 const BRANDS: Record<string, ProviderBrand> = {
   antigravity: { key: "antigravity", name: "Antigravity", shortName: "AG", color: "#4285f4", logo: antigravityLogo, logoMode: "artwork" },
-  anthropic: { key: "anthropic", name: "Anthropic", shortName: "A", color: "#c66f4e", logo: anthropicLogo },
+  anthropic: { key: "anthropic", name: "Anthropic", shortName: "A", color: "#d97757", logo: anthropicLogo, logoMode: "artwork" },
   cerebras: { key: "cerebras", name: "Cerebras", shortName: "C", color: "#f15a24", logo: cerebrasLogo, logoMode: "artwork" },
   chutes: { key: "chutes", name: "Chutes", shortName: "CH", color: "#42a875", logo: chutesLogo },
   cline: { key: "cline", name: "Cline", shortName: "CL", color: "#5b6df2", logo: clineLogo, logoMode: "artwork" },
@@ -71,11 +71,11 @@ const BRANDS: Record<string, ProviderBrand> = {
   stealth: { key: "stealth", name: "Stealth preview", shortName: "SP", color: "#3f4550", logo: stealthLogo, logoMode: "artwork" },
   fireworks: { key: "fireworks", name: "Fireworks AI", shortName: "FW", color: "#6720ff", logo: fireworksLogo },
   github: { key: "github", name: "GitHub", shortName: "GH", color: "#59636e", logo: githubCopilotLogo },
-  gemini: { key: "gemini", name: "Gemini", shortName: "GM", color: "#8e75b2", logo: geminiLogo },
+  gemini: { key: "gemini", name: "Gemini", shortName: "GM", color: "#5684d1", logo: geminiLogo, logoMode: "artwork" },
   google: { key: "google", name: "Google", shortName: "G", color: "#4285f4", logo: googleLogo },
   groq: { key: "groq", name: "Groq", shortName: "GQ", color: "#f43e01", logo: groqLogo, logoMode: "artwork" },
   huggingface: { key: "huggingface", name: "Hugging Face", shortName: "HF", color: "#d89b00", logo: huggingFaceLogo },
-  kimi: { key: "kimi", name: "Kimi", shortName: "K", color: "#2f6bff", logo: kimiLogo },
+  kimi: { key: "kimi", name: "Kimi", shortName: "K", color: "#2f6bff", logo: kimiLogo, logoMode: "artwork" },
   kilo: { key: "kilo", name: "Kilo", shortName: "KL", color: "#cfca00", logo: kiloLogo, logoMode: "artwork" },
   lmstudio: { key: "lmstudio", name: "LM Studio", shortName: "LM", color: "#654cdb", logo: lmStudioLogo, logoMode: "artwork" },
   meta: { key: "meta", name: "Meta", shortName: "M", color: "#0467df", logo: metaLogo },

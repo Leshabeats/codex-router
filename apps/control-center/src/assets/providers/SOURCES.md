@@ -7,10 +7,10 @@ hotlinked at runtime. Research was refreshed on 2026-08-21.
 | Local asset | Used for | Official brand or product page | Asset source |
 | --- | --- | --- | --- |
 | `openai.png` | OpenAI and GPT models | https://openai.com/brand/ | https://www.google.com/s2/favicons?domain=openai.com&sz=128, reused from the attributed tray asset |
-| `anthropic.png` | Anthropic and Claude models | https://www.anthropic.com/ | https://cdn.prod.website-files.com/67ce28cfec624e2b733f8a52/681d52619fec35886a7f1a70_favicon.png |
+| `anthropic.png` | Anthropic and Claude models | https://www.anthropic.com/ | https://claude.ai/apple-touch-icon.png (official Claude icon, resized to 256px; replaced a monochrome favicon that lost the brand colour) |
 | `xai.png` | xAI and Grok | https://x.ai/ | https://x.ai/icon.png |
 | `deepseek.png` | DeepSeek | https://www.deepseek.com/ | https://www.deepseek.com/favicon.ico |
-| `kimi.svg` | Kimi and Moonshot | https://www.kimi.com/ | https://cdn.simpleicons.org/kimi (current KIMI mark; replaced an older favicon capture) |
+| `kimi.png` | Kimi and Moonshot | https://www.kimi.com/ | Official Kimi app icon, App Store artwork for Beijing Moonshot Technology's Kimi app, resized to 256px |
 | `commandcode.svg` | Command Code | https://commandcode.ai/brand | https://raw.githubusercontent.com/CommandCodeAI/command-code/refs/heads/main/.github/commandcode/symbols/symbol.svg |
 | `github-copilot.svg` | GitHub Copilot | https://github.com/features/copilot | https://github.com/primer/octicons/blob/main/icons/copilot-24.svg |
 | `chutes.svg` | Chutes | https://chutes.ai/ | Official site header mark, reused from the attributed tray asset |
@@ -32,7 +32,7 @@ hotlinked at runtime. Research was refreshed on 2026-08-21.
 | `stepfun.svg` | StepFun models | https://www.stepfun.com/ | https://www.stepfun.com/step_favicon.svg |
 | `tencent.svg` | Tencent Hy3 models | https://www.tencent.com/tencent-hunyuan-officially-releases-hy3-advancing-agent-capabilities-and-deeper-product-integration/ | https://www.tencent.com/wp-content/themes/tencent-web/assets/favicon/safari-pinned-tab.svg (official site vector mask, locally colored with Tencent's `#0052d9` mask-icon color) |
 | `google.svg` | Google, and Gemma models | https://about.google/brand-resource-center/ | https://cdn.simpleicons.org/google |
-| `gemini.svg` | Gemini models | https://gemini.google/ | https://cdn.simpleicons.org/googlegemini |
+| `gemini.svg` | Gemini models | https://gemini.google/ | https://www.gstatic.com/lamda/images/gemini_sparkle_v002_d4735304ff6292a690345.svg (official sparkle, with its own purple-to-cyan gradient) |
 | `antigravity.png` | Google Antigravity | https://antigravity.google/ | https://antigravity.google/assets/image/brand/antigravity-icon__full-color.png (official press asset) |
 | `meta.svg` | Meta and Llama models | https://about.meta.com/brand/resources/meta/company-brand/ | https://cdn.simpleicons.org/meta |
 | `minimax.svg` | MiniMax | https://www.minimax.io/about | https://cdn.simpleicons.org/minimax |
