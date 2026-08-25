@@ -1278,6 +1278,24 @@ async function handleSubagents(action, value, flag, rest = []) {
       routerVersion: VERSION,
       ...(result.ok ? {} : { reason: firstFailure(result.checks)?.detail }),
     });
+    // A pass is evidence worth more than this machine. Filing it as a v2_agent
+    // application is what lets a review promote the route for every installer,
+    // so nobody -- including this operator on their next machine -- pays to
+    // measure it again.
+    let application;
+    if (result.ok) {
+      const { recordApplicationEvidence } = await import("./subagent-certify.mjs");
+      try {
+        application = recordApplicationEvidence(value, {
+          checks: result.checks,
+          routerVersion: VERSION,
+          at: new Date().toISOString(),
+        });
+      } catch {
+        // A read-only or relocated checkout must not turn a genuine pass into
+        // a failure; the machine-local record already stands on its own.
+      }
+    }
     // Republish so a promotion reaches the merged catalog and the agents
     // directory in the same command the switch is waiting on.
     refreshModelSettingsCatalog();
@@ -1286,6 +1304,7 @@ async function handleSubagents(action, value, flag, rest = []) {
       `${JSON.stringify({
         slug: value,
         certified: result.ok,
+        ...(application ? { application } : {}),
         ...(failure ? { failed: failure.check, failedLabel: failure.label, reason: failure.detail } : {}),
       })}\n`,
     );

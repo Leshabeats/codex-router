@@ -23,6 +23,7 @@ function verifiedRecord(slug, overrides = {}) {
     slug,
     routerVersion: ROUTER_VERSION,
     verifiedAt: "2026-08-25T00:00:00.000Z",
+    epoch: 1,
     checks: passingChecks(),
     ...overrides,
   };
@@ -99,10 +100,15 @@ test("a record cannot promote a route it was not produced for", () => {
   assert.equal(applied[0].multiAgentVersion, "v1");
 });
 
-test("a verification does not survive a router upgrade", () => {
+test("a verification survives a router upgrade but not an epoch change", () => {
+  // What the checks measure is the provider route, which a router patch bump
+  // does not change. Expiring every upgrade would charge the operator again to
+  // re-learn the same answer.
   const proof = verifiedRecord("a/b", { routerVersion: "0.4.0-beta.3" });
-  assert.equal(verifiedForRoute(proof, "a/b", { routerVersion: ROUTER_VERSION }), false);
-  assert.equal(verifiedForRoute(proof, "a/b", { routerVersion: "0.4.0-beta.3" }), true);
+  assert.equal(verifiedForRoute(proof, "a/b", { routerVersion: ROUTER_VERSION }), true);
+  // Invalidation stays possible, but only as a deliberate, reviewable act.
+  const stale = verifiedRecord("a/b", { epoch: 0 });
+  assert.equal(verifiedForRoute(stale, "a/b", { routerVersion: ROUTER_VERSION }), false);
 });
 
 test("hidden and switched-off routes are never promoted", () => {

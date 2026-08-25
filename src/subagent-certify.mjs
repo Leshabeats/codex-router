@@ -11,13 +11,16 @@
 // provider's quota.
 import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { routedAgentDefinition } from "./codex-agent-catalog.mjs";
 import { spawnableCommand } from "./codex-binary.mjs";
 import { VERIFICATION_CHECKS } from "./subagent-proofs.mjs";
+
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 export const CHECK_LABELS = Object.freeze({
   streaming: "streamed reply",
@@ -299,6 +302,57 @@ async function runDelegationChecks({
     ? pass(200)
     : fail("the child did not answer a second turn in the same thread");
   return { results, agentName: definition.agentName };
+}
+
+// A pass is worth more than one machine. The same five outcomes are what a
+// v2_agent application carries, so record them there too: once that artifact
+// is reviewed and its registry entry lands, every installer gets the route as
+// v2 and nobody -- including this operator on their next machine -- pays to
+// measure it again.
+//
+// Only outcomes, HTTP statuses, and timestamps are written. Prompts, response
+// bodies, decrypted payloads, and anything credential-shaped stay out, which
+// is both the README's rule and what CI refuses.
+export function applicationPath(slug, root = REPO_ROOT) {
+  const [provider, ...rest] = String(slug || "").split("/");
+  const model = rest.join("/");
+  if (!provider || !model) return undefined;
+  const safe = /^[a-z0-9][a-z0-9._-]*$/i;
+  if (!safe.test(provider) || !safe.test(model)) return undefined;
+  return path.join(root, "v2_agent", provider, model);
+}
+
+export function recordApplicationEvidence(slug, { checks, routerVersion, at, root = REPO_ROOT }) {
+  const directory = applicationPath(slug, root);
+  if (!directory) return undefined;
+  const target = path.join(directory, "proof.json");
+  // An existing draft already carries the upstream model id and the official
+  // sources a reviewer checked. Never overwrite those with a guess.
+  let existing;
+  if (existsSync(target)) {
+    try {
+      existing = JSON.parse(readFileSync(target, "utf8"));
+    } catch {
+      existing = undefined;
+    }
+  }
+  const [provider, ...rest] = String(slug).split("/");
+  const next = {
+    version: 1,
+    provider: existing?.provider || provider,
+    model: existing?.model || rest.join("/"),
+    slug: String(slug),
+    // Only the pull request that also moves the registry entry may accept an
+    // application, so a local pass never promotes itself past review.
+    status: existing?.status === "accepted" ? "accepted" : "draft",
+    officialSources: Array.isArray(existing?.officialSources) ? existing.officialSources : [],
+    testedAt: at,
+    routerVersion: String(routerVersion || ""),
+    checks,
+  };
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(target, `${JSON.stringify(next, undefined, 2)}\n`, "utf8");
+  return target;
 }
 
 // One route, all five checks, stopping at the first failure so a route that

@@ -54,6 +54,12 @@ export const VERIFICATION_CHECKS = Object.freeze([
   "sameThreadFollowUp",
 ]);
 
+// Raise this only when a change makes previously gathered evidence untrue -- a
+// different relay format, a different check set. Every existing record then
+// stops promoting and has to be measured again, so invalidation is a
+// deliberate act rather than a side effect of shipping a release.
+export const PROOF_EPOCH = 1;
+
 // A file that exists but cannot be parsed promotes nothing: somebody's
 // evidence was here and we can no longer read it, so the conservative v1
 // default applies until the operator re-verifies.
@@ -165,11 +171,15 @@ export function verifiedForRoute(proof, slug, { routerVersion } = {}) {
   for (const name of VERIFICATION_CHECKS) {
     if (checks[name]?.outcome !== "pass") return false;
   }
-  // A verification describes one build's relay behaviour. Carrying it across a
-  // router upgrade would advertise v2 on evidence nobody gathered for it.
-  if (routerVersion && String(proof.routerVersion || "") !== String(routerVersion)) {
-    return false;
-  }
+  // `routerVersion` is provenance, not a gate. What the five checks measure is
+  // the provider route's behaviour through the relay, and a router patch bump
+  // does not change the provider. Expiring on every upgrade would silently
+  // demote every verified route and charge the operator again to re-learn the
+  // same answer -- which is the opposite of why the record exists. A change
+  // that genuinely invalidates old evidence should raise PROOF_EPOCH instead,
+  // so the invalidation is deliberate and reviewable.
+  if (Number(proof.epoch || 0) !== PROOF_EPOCH) return false;
+  void routerVersion;
   return true;
 }
 
@@ -216,6 +226,7 @@ export function recordVerification(
   return updateProof(slug, {
     slug: String(slug),
     status: complete ? "verified" : "failed",
+    epoch: PROOF_EPOCH,
     checks: { ...(checks || {}) },
     routerVersion: routerVersion ? String(routerVersion) : undefined,
     verifiedAt: complete ? at : undefined,
