@@ -1071,11 +1071,25 @@ function main() {
     // switched off as a subagent needs its definition gone as well. Without
     // this, switching it off changes multi_agent_version and nothing else, and
     // the model still answers when it is spawned by name.
-    routedAgents = syncRoutedCodexAgents(
-      routedCatalog || loginFree
-        ? subagentEligibleModels(routedModels, multiAgentSettings)
-        : [],
-    );
+    const eligibleAgents = routedCatalog || loginFree
+      ? subagentEligibleModels(routedModels, multiAgentSettings)
+      : [];
+    routedAgents = syncRoutedCodexAgents(eligibleAgents);
+    // Removing every definition is how an operator's subagents disappear, and
+    // it is the only code path that does it. Say so on the way out: a publish
+    // that read the routed catalog as inactive has just emptied a directory
+    // the next publish will refill, and until this line the only trace was a
+    // doctor FAIL some time later with nothing to attribute it to.
+    if (!routedCatalog && !loginFree && routedAgents.removed.length) {
+      process.stderr.write(
+        `${JSON.stringify({
+          warning: "routed_agents_cleared",
+          removed: routedAgents.removed.length,
+          reason: "the routed catalog read as inactive",
+          config: CONFIG_PATH,
+        })}\n`,
+      );
+    }
   } catch (error) {
     const restoreErrors = [];
     for (const [target, snapshot] of [...snapshots].reverse()) {
