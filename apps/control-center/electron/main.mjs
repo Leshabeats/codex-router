@@ -105,19 +105,18 @@ function createWindow() {
     show: false,
     title: "Codex Router",
     icon: appIconPath(),
-    // Keep the platform-managed traffic lights while the renderer supplies
-    // the draggable toolbar surface. The renderer never recreates
-    // close/minimize/maximize buttons with HTML/CSS.
-    frame: process.platform !== "darwin",
-    // Codex keeps the native macOS traffic lights while letting its toolbar
-    // occupy the titlebar row. Other platforms retain their normal framed
-    // window chrome.
+    // macOS keeps native traffic lights. Windows/Linux are frameless with
+    // no overlay so the renderer can place left-side lights like macOS.
+    frame: false,
     ...(process.platform === "darwin"
       ? {
           titleBarStyle: "hiddenInset",
           trafficLightPosition: { x: 16, y: 16 },
         }
-      : {}),
+      : {
+          titleBarStyle: "hidden",
+          autoHideMenuBar: true,
+        }),
     backgroundColor: "#ffffff",
     webPreferences: {
       preload: path.join(HERE, "preload.cjs"),
@@ -277,6 +276,9 @@ if (primaryInstance && !quitForUpdateInvocation) {
   // lock. The ready bit is raised only after the full Electron boundary is set.
   publishLifecycleState();
   app.whenReady().then(() => {
+    if (process.platform !== "darwin") {
+      Menu.setApplicationMenu(null);
+    }
     if (process.platform === "darwin") {
       if (nativeTrayOwnedByHost) app.dock?.hide();
       else app.dock?.setIcon(appIconPath());

@@ -85,7 +85,7 @@ function initialView(): ViewId {
 
 export default function App() {
   const api = window.routerControl;
-  const nativeTitlebar = api?.platform === "darwin";
+  const nativeTitlebar = Boolean(api);
   const [view, setView] = useState<ViewId>(initialView);
   const [modelFocusRequest, setModelFocusRequest] = useState<ModelViewFocusRequest>();
   const modelFocusSequence = useRef(0);
@@ -352,9 +352,16 @@ export default function App() {
   })();
 
   return (
-    <div className={classNames("app-shell", nativeTitlebar && "native-titlebar", !sidebarOpen && "sidebar-collapsed")}>
+    <div className={classNames("app-shell", nativeTitlebar && "native-titlebar", api && `native-titlebar-${api.platform}`, !sidebarOpen && "sidebar-collapsed")}>
       <aside className="app-sidebar" aria-label="Codex Router sidebar" inert={sidebarSearchOpen ? true : undefined}>
         <header className="sidebar-window-row">
+          {api && api.platform !== "darwin" && sidebarOpen ? (
+            <div className="traffic-lights">
+              <button type="button" className="traffic-light traffic-light-close" aria-label="Close window" onClick={() => void api.closeWindow()} />
+              <button type="button" className="traffic-light traffic-light-minimize" aria-label="Minimize window" onClick={() => void api.minimizeWindow()} />
+              <button type="button" className="traffic-light traffic-light-maximize" aria-label="Maximize or restore window" onClick={() => void api.toggleMaximizeWindow()} />
+            </div>
+          ) : null}
           <button className="sidebar-toggle" type="button" aria-label="Collapse sidebar" onClick={() => setSidebarOpen(false)}><PanelLeftClose aria-hidden size={15} strokeWidth={1.7} /></button>
           <button className="sidebar-toggle" type="button" aria-label="Go back" disabled={historyIndex === 0} onClick={() => moveHistory(-1)}><ArrowLeft aria-hidden size={15} strokeWidth={1.7} /></button>
           <button className="sidebar-toggle" type="button" aria-label="Go forward" disabled={historyIndex >= viewHistory.length - 1} onClick={() => moveHistory(1)}><ArrowRight aria-hidden size={15} strokeWidth={1.7} /></button>
@@ -386,6 +393,13 @@ export default function App() {
 
       <main className="app-main" inert={sidebarSearchOpen ? true : undefined}>
         <div className="titlebar">
+          {api && api.platform !== "darwin" && !sidebarOpen ? (
+            <div className="traffic-lights">
+              <button type="button" className="traffic-light traffic-light-close" aria-label="Close window" onClick={() => void api.closeWindow()} />
+              <button type="button" className="traffic-light traffic-light-minimize" aria-label="Minimize window" onClick={() => void api.minimizeWindow()} />
+              <button type="button" className="traffic-light traffic-light-maximize" aria-label="Maximize or restore window" onClick={() => void api.toggleMaximizeWindow()} />
+            </div>
+          ) : null}
           {!sidebarOpen ? <button className="titlebar-toggle" type="button" aria-label="Expand sidebar" onClick={() => setSidebarOpen(true)}><PanelLeftOpen aria-hidden size={15} strokeWidth={1.7} /></button> : null}
           <div className="title-tabs"><strong>{activeMeta.label}</strong><span>Overview</span></div>
           <div className="titlebar-spacer" />

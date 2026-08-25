@@ -77,9 +77,11 @@ The main window keeps the operating system's native window controls. On macOS,
 the frameless window uses a hidden-inset title bar so native traffic lights sit
 over the content while the sidebar controls and page toolbar share the same top
 row as Codex; the renderer marks that row draggable without recreating the
-controls. Other platforms retain their standard native frame. Close, minimize,
-maximize, keyboard shortcuts, accessibility behavior, and platform-specific
-placement remain native. The Hermes artwork is used consistently for the
+controls. Windows and Linux hide the system title bar the same way so the
+toolbar occupies that row, and the renderer draws macOS-style traffic lights
+on the left. The File/Edit/View application menu is removed on Windows and
+Linux. macOS keeps native traffic lights. Close, minimize, maximize, keyboard
+shortcuts, and accessibility behavior still work. The Hermes artwork is used consistently for the
 Electron window, standalone Dock entry, application bundle, and installer; the
 unified macOS host keeps its separate outer-bundle icon.
 

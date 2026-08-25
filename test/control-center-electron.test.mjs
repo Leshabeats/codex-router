@@ -699,9 +699,12 @@ test("electron boundary does not enable node integration or shell argv", async (
   assert.match(main, /contextIsolation:\s*true/);
   assert.match(main, /nodeIntegration:\s*false/);
   assert.match(main, /sandbox:\s*true/);
-  assert.match(main, /frame:\s*process\.platform\s*!==\s*"darwin"/);
+  assert.match(main, /frame:\s*false/);
   assert.match(main, /titleBarStyle:\s*"hiddenInset"/);
   assert.match(main, /trafficLightPosition:\s*\{\s*x:\s*16,\s*y:\s*16\s*\}/);
+  assert.match(main, /titleBarStyle:\s*"hidden"/);
+  assert.doesNotMatch(main, /titleBarOverlay/);
+  assert.match(main, /setApplicationMenu\(null\)/);
   assert.match(main, /icon:\s*appIconPath\(\)/);
   assert.match(main, /app\.dock\?\.setIcon\(appIconPath\(\)\)/);
   assert.match(main, /setWindowOpenHandler\(\(\) => \(\{ action: "deny" \}\)\)/);
@@ -754,17 +757,17 @@ test("electron boundary does not enable node integration or shell argv", async (
   assert.match(compatibilityMain, /import "\.\/electron\/main\.mjs"/);
   assert.doesNotMatch(compatibilityMain, /BrowserWindow|ipcMain|registerIpcHandlers/);
   const renderer = await readFile(new URL("../apps/control-center/src/App.tsx", import.meta.url), "utf8");
-  assert.doesNotMatch(renderer, /WindowControls|traffic-lights|window-control/);
+  assert.match(renderer, /traffic-lights/);
   assert.match(renderer, /native-titlebar/);
   const styles = await readFile(new URL("../apps/control-center/src/styles.css", import.meta.url), "utf8");
-  assert.doesNotMatch(styles, /traffic-lights|window-control|window-close|window-minimize|window-maximize/);
+  assert.match(styles, /\.traffic-lights/);
   assert.match(styles, /native-titlebar/);
-  assert.match(styles, /native-titlebar\.sidebar-collapsed \.titlebar[\s\S]*padding-left:\s*88px/);
+  assert.match(styles, /native-titlebar-darwin\.sidebar-collapsed \.titlebar[\s\S]*padding-left:\s*88px/);
   assert.doesNotMatch(renderer, /drag-region|no-drag/);
   assert.match(styles, /-webkit-app-region:\s*drag/);
   assert.match(styles, /-webkit-app-region:\s*no-drag/);
   for (const label of ["Close window", "Minimize window", "Maximize or restore window"]) {
-    assert.doesNotMatch(renderer, new RegExp(`aria-label=\\"${label}\\"`));
+    assert.match(renderer, new RegExp(`aria-label=\\"${label}\\"`));
   }
   const runner = await readFile(new URL("../apps/control-center/electron/command-runner.mjs", import.meta.url), "utf8");
   assert.match(runner, /shell:\s*false/);
