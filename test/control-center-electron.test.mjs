@@ -760,7 +760,7 @@ test("electron boundary does not enable node integration or shell argv", async (
   assert.match(renderer, /traffic-lights/);
   assert.match(renderer, /native-titlebar/);
   const styles = await readFile(new URL("../apps/control-center/src/styles.css", import.meta.url), "utf8");
-  assert.match(styles, /\\.traffic-lights/);
+  assert.match(styles, /\.traffic-lights/);
   assert.match(styles, /native-titlebar/);
   assert.match(styles, /native-titlebar-darwin\.sidebar-collapsed \.titlebar[\s\S]*padding-left:\s*88px/);
   assert.doesNotMatch(renderer, /drag-region|no-drag/);
