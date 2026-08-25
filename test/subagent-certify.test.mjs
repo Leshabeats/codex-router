@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   CHECK_LABELS,
@@ -100,4 +103,22 @@ test("event parsing survives interleaved non-JSON output", () => {
   assert.equal(events[0].type, "turn.started");
   assert.equal(typeof events[1], "string");
   assert.equal(events[2].type, "turn.completed");
+});
+
+test("the checks call the endpoint the router actually serves", async () => {
+  // A 404 from `chat/completions` was reported to the operator as "this model
+  // cannot run subagents". The caller endpoint speaks Responses and takes the
+  // caller key as a bearer; both are part of the check, not incidental.
+  const source = readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "subagent-certify.mjs"),
+    "utf8",
+  );
+  assert.match(source, /\$\{baseUrl\}\/responses/);
+  // Only the comment explaining the original bug may still name that path.
+  assert.doesNotMatch(source, /fetch\([^)]*chat\/completions/);
+  assert.doesNotMatch(source, /`\$\{baseUrl\}\/chat\/completions`/);
+  assert.match(source, /authorization: `Bearer \$\{secret\}`/);
+  // Responses puts the forced call in `output`, not in a chat `message`.
+  assert.match(source, /\(payload\?\.output \|\| \[\]\)\.find\(\(item\) => item\?\.type === "function_call"\)/);
+  assert.match(source, /tool_choice: \{ type: "function", name: "codex_router_probe" \}/);
 });

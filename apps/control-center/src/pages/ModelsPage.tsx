@@ -1324,8 +1324,10 @@ function SubagentControl({
             label={`Check whether ${model.displayName} through ${providerName} can run subagents`}
             onChange={(checked) => { if (checked) onCertify(); }}
           />
+          {/* A refusal outranks the spinner: the run is over, and leaving
+              "Checking…" on screen beside the reason reads as still working. */}
           <span className={problem ? "pm-route-problem" : undefined}>
-            {checking ? "Checking…" : problem ? "No" : "Off"}
+            {problem ? "No" : checking ? "Checking…" : "Off"}
           </span>
         </div>
       </div>

@@ -142,19 +142,26 @@ function execArgs({ model, prompt, agentsHome, extra = [] }) {
 // than through Codex: a forced tool call with asserted arguments is the point
 // of the check, and driving that through an agent turn would test the agent's
 // judgement instead of the route's tool handling.
-async function runHttpChecks({ slug, baseUrl, timeoutMs }) {
+async function runHttpChecks({ slug, baseUrl, secret, timeoutMs }) {
   const results = {};
-  const body = {
-    model: slug,
-    stream: true,
-    max_tokens: 64,
-    messages: [{ role: "user", content: "Reply with the single word: ready" }],
+  // The caller endpoint speaks the Responses API and takes the caller key as a
+  // bearer. `chat/completions` is not served here at all, so calling it
+  // reported a 404 as though the route had failed the check.
+  const url = `${baseUrl}/responses`;
+  const headers = {
+    "content-type": "application/json",
+    ...(secret ? { authorization: `Bearer ${secret}` } : {}),
   };
   try {
-    const response = await fetch(`${baseUrl}/chat/completions`, {
+    const response = await fetch(url, {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
+      headers,
+      body: JSON.stringify({
+        model: slug,
+        input: "Reply with the single word: ready",
+        stream: true,
+        max_output_tokens: 64,
+      }),
       signal: AbortSignal.timeout(timeoutMs),
     });
     const text = await response.text();
@@ -166,42 +173,41 @@ async function runHttpChecks({ slug, baseUrl, timeoutMs }) {
   }
   if (results.streaming.outcome !== "pass") return results;
 
-  const tool = {
-    type: "function",
-    function: {
-      name: "codex_router_probe",
-      description: "Return the supplied token.",
-      parameters: {
-        type: "object",
-        properties: { token: { type: "string" } },
-        required: ["token"],
-        additionalProperties: false,
-      },
-    },
-  };
   try {
-    const response = await fetch(`${baseUrl}/chat/completions`, {
+    const response = await fetch(url, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers,
       body: JSON.stringify({
         model: slug,
-        max_tokens: 128,
-        tools: [tool],
-        tool_choice: { type: "function", function: { name: "codex_router_probe" } },
-        messages: [{ role: "user", content: 'Call codex_router_probe with token "ok".' }],
+        input: 'Call codex_router_probe with token "ok".',
+        max_output_tokens: 128,
+        tools: [
+          {
+            type: "function",
+            name: "codex_router_probe",
+            description: "Return the supplied token.",
+            parameters: {
+              type: "object",
+              properties: { token: { type: "string" } },
+              required: ["token"],
+              additionalProperties: false,
+            },
+          },
+        ],
+        tool_choice: { type: "function", name: "codex_router_probe" },
       }),
       signal: AbortSignal.timeout(timeoutMs),
     });
     const payload = await response.json().catch(() => undefined);
-    const call = payload?.choices?.[0]?.message?.tool_calls?.[0];
+    const call = (payload?.output || []).find((item) => item?.type === "function_call");
     const argumentsValid = (() => {
       try {
-        return typeof JSON.parse(call?.function?.arguments ?? "").token === "string";
+        return typeof JSON.parse(call?.arguments ?? "").token === "string";
       } catch {
         return false;
       }
     })();
-    results.toolCall = response.ok && call?.function?.name === "codex_router_probe" && argumentsValid
+    results.toolCall = response.ok && call?.name === "codex_router_probe" && argumentsValid
       ? pass(response.status)
       : fail(
         call
@@ -301,6 +307,7 @@ export async function verifySubagentRoute(
   slug,
   {
     baseUrl,
+    secret,
     codexBin,
     parentModel = "gpt-5.6-sol",
     catalogPath,
@@ -310,7 +317,7 @@ export async function verifySubagentRoute(
 ) {
   const checks = pending();
   const started = Date.now();
-  const http = await runHttpChecks({ slug, baseUrl, timeoutMs });
+  const http = await runHttpChecks({ slug, baseUrl, secret, timeoutMs });
   Object.assign(checks, http);
   if (checks.streaming.outcome !== "pass" || checks.toolCall.outcome !== "pass") {
     return { slug, checks, ok: false, routerVersion, durationMs: Date.now() - started };

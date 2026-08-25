@@ -1269,6 +1269,7 @@ async function handleSubagents(action, value, flag, rest = []) {
     const secret = assertCallerSecret(readFileSync(CALLER_SECRET_PATH, "utf8").trim());
     const result = await verifySubagentRoute(value, {
       baseUrl: callerBaseUrl(PORTS.router, secret),
+      secret,
       codexBin: findCodexBinary(),
       routerVersion: VERSION,
     });
