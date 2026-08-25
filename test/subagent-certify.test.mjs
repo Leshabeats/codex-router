@@ -121,7 +121,10 @@ test("the checks call the endpoint the router actually serves", async () => {
   assert.match(source, /authorization: `Bearer \$\{secret\}`/);
   // Responses puts the forced call in `output`, not in a chat `message`.
   assert.match(source, /\(payload\?\.output \|\| \[\]\)\.find\(\(item\) => item\?\.type === "function_call"\)/);
-  assert.match(source, /tool_choice: \{ type: "function", name: "codex_router_probe" \}/);
+  // Forced first, because that is the strongest evidence; the fallback to an
+  // offered call is covered by its own test below.
+  assert.match(source, /toolProbe\(\{ type: "function", name: "codex_router_probe" \}\)/);
+  assert.match(source, /tool_choice: choice/);
 });
 
 test("independent routes fan out, but recording and publishing do not", () => {

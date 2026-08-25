@@ -65,32 +65,36 @@ test("Control Center keeps legacy local proofs as candidates, not active v2 rout
   assert.match(source, /disabled=\{!apiAvailable\}/);
 });
 
-test("macOS subagent settings show native and unverified enabled models", () => {
+test("the macOS tray lists only routes that can host a subagent", () => {
   const source = readFileSync(
     path.join(root, "apps", "macos", "ModelRouterTray", "Sources", "ModelRouterTrayApp.swift"),
     "utf8",
   );
+  // The tray and the Control Center describe the same models, so they must not
+  // use two vocabularies. A route that cannot host a child is not a row with a
+  // disabled switch and an explanation; it is not in this list at all.
   assert.match(source, /private var subagentModels: \[RouterModel\]/);
+  assert.match(source, /\.filter \{ \$0\.enabled && isCertifiedV2\(\$0\) \}/);
   assert.match(source, /ForEach\(providerGroups\(subagentModels\)\)/);
-  const subagentList = source.slice(
-    source.indexOf("private var subagentModels"),
-    source.indexOf("private var enabledModels"),
-  );
-  assert.doesNotMatch(subagentList, /provider != "openai"/);
+
+  // Capability still comes only from the registry's certification.
   assert.match(source, /let subagentCertification: String\?/);
-  assert.match(source, /if model\.multiAgentVersion == "v1" \{ return "v1" \}/);
+  assert.match(source, /private func isCertifiedV2\(_ model: RouterModel\) -> Bool/);
   const activeCapability = source.slice(
     source.indexOf("private func isSubagent(_ model: RouterModel)"),
     source.indexOf("private func subagentToggleOn(_ model: RouterModel)"),
   );
-  assert.match(source, /private func isCertifiedV2\(_ model: RouterModel\) -> Bool/);
   assert.match(activeCapability, /isCertifiedV2\(model\)/);
-  assert.doesNotMatch(activeCapability, /selectedSubagentSet/);
-  assert.match(source, /private func subagentToggleOn\(_ model: RouterModel\)/);
-  assert.match(source, /selectedSubagentSet\.contains\(model\.slug\)/);
-  assert.doesNotMatch(source, /let authoritative = checking \|\| selectedSubagentSet/);
-  assert.match(source, /return isKnownV1\(model\) \|\| isCertificationCandidate\(model\)/);
-  assert.match(source, /\["candidate", "experimental", "proven"\]\.contains\(status\)/);
+
+  // No local-proof vocabulary survives on this surface either.
+  assert.doesNotMatch(source, /isKnownV1|isCertificationCandidate|selectedSubagentSet/);
+  assert.doesNotMatch(source, /"candidate", "experimental", "proven"/);
+  assert.doesNotMatch(source, /Proven v2|Certification candidate|v1 only/);
+  assert.doesNotMatch(source, /subagents\.proofs/);
+
+  // Every row's switch means one thing, so it needs no state to decode.
+  assert.match(source, /private func subagentToggleOn\(_ model: RouterModel\) -> Bool \{\s*isSubagent\(model\)\s*\}/);
+  assert.match(source, /private func subagentToggleDisabled\(_ model: RouterModel\) -> Bool \{\s*!isPickerVisible\(model\)\s*\}/);
   assert.match(source, /get: \{ subagentToggleOn\(model\) \}/);
   assert.match(source, /disabled: subagentToggleDisabled\(model\)/);
   assert.match(source, /title: model\.displayName/);
