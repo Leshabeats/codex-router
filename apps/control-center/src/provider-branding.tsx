@@ -28,6 +28,7 @@ import openRouterLogo from "./assets/providers/openrouter.png";
 import poolsideLogo from "./assets/providers/poolside.svg";
 import qwenLogo from "./assets/providers/qwen.svg";
 import siliconFlowLogo from "./assets/providers/siliconflow.png";
+import stealthLogo from "./assets/providers/stealth.svg";
 import stepFunLogo from "./assets/providers/stepfun.svg";
 import tencentLogo from "./assets/providers/tencent.svg";
 import togetherLogo from "./assets/providers/together.png";
@@ -61,6 +62,10 @@ const BRANDS: Record<string, ProviderBrand> = {
   cognition: { key: "cognition", name: "Devin", shortName: "DV", color: "#0d98d4", logo: cognitionLogo, logoMode: "artwork" },
   deepseek: { key: "deepseek", name: "DeepSeek", shortName: "DS", color: "#4d6bfe", logo: deepSeekLogo },
   deepreinforce: { key: "deepreinforce", name: "Ornith", shortName: "OR", color: "#8f816b", logo: deepReinforceLogo, logoMode: "artwork" },
+  // Codenamed preview models ship without a maker's mark of their own. They
+  // fell through to their provider's logo, so the same model wore six
+  // different faces depending on which account served it.
+  stealth: { key: "stealth", name: "Stealth preview", shortName: "SP", color: "#3f4550", logo: stealthLogo, logoMode: "artwork" },
   fireworks: { key: "fireworks", name: "Fireworks AI", shortName: "FW", color: "#6720ff", logo: fireworksLogo },
   github: { key: "github", name: "GitHub", shortName: "GH", color: "#59636e", logo: githubCopilotLogo },
   google: { key: "google", name: "Google", shortName: "G", color: "#4285f4", logo: googleLogo },
@@ -166,6 +171,10 @@ export function brandForModel(model: BrandableModel): ProviderBrand {
   if (/\b(?:mistral|mixtral|codestral)\b/.test(identity)) return BRANDS.mistral;
   if (/\bnemotron\b/.test(identity)) return BRANDS.nvidia;
   if (/\bornith(?:-|\b)/.test(identity)) return BRANDS.deepreinforce;
+  // Anonymous preview models, matched last so a maker's own mark always wins.
+  if (/\b(?:ox alpha|ox-alpha|fugu|inkling)\b/.test(identity) || /x-preview/.test(identity)) {
+    return BRANDS.stealth;
+  }
   return brandForProvider(model.provider);
 }
 
