@@ -152,6 +152,11 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
   // slowest thing this page starts; without a placeholder the models simply are
   // not there for the length of it and the click reads as having done nothing.
   const [pendingModels, setPendingModels] = useState<PendingCatalogModels>({});
+  // Routes with a check in flight, and the one-line reason for the ones that
+  // came back unable. Both are per-route so a slow provider never freezes the
+  // rest of the list.
+  const [certifying, setCertifying] = useState<Record<string, boolean>>({});
+  const [certifyProblems, setCertifyProblems] = useState<Record<string, string>>({});
 
   // External model identity and picker visibility come from the router-owned
   // catalog. Native entries remain a Codex-only adapter concern and are merged
@@ -474,6 +479,39 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
     );
   };
 
+  // The switch is the whole interaction: it runs the checks, and the router
+  // promotes the route only if every one of them passed. A refusal comes back
+  // as one sentence rather than a state the reader has to decode.
+  const certifyRoute = async (model: RouterModel) => {
+    if (!api || certifying[model.slug]) return;
+    setCertifying((current) => ({ ...current, [model.slug]: true }));
+    setCertifyProblems((current) => {
+      const next = { ...current };
+      delete next[model.slug];
+      return next;
+    });
+    try {
+      await runAction(`Check ${model.displayName} for subagents`, async () => {
+        const outcome = await api.certifySubagentModel(model.slug);
+        if (!outcome?.certified) {
+          setCertifyProblems((current) => ({
+            ...current,
+            [model.slug]: outcome?.reason || outcome?.failedLabel
+              ? `Cannot run subagents — ${outcome.reason || outcome.failedLabel}`
+              : "This route cannot run subagents.",
+          }));
+        }
+      });
+    } finally {
+      setCertifying((current) => {
+        const next = { ...current };
+        delete next[model.slug];
+        return next;
+      });
+      onRefresh();
+    }
+  };
+
   const renderRow = ({ family, usable, inPicker, on }: (typeof rows)[number]) => (
     <ModelFamilyRow
       key={family.id}
@@ -491,6 +529,9 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
       onFamilyPicker={(visible) => void updateFamilyPicker(family, usable, inPicker, visible)}
       onRoutePicker={(model, visible) => void updatePicker(model.slug, visible)}
       onSubagent={(model, enabled) => void updateSubagent(model.slug, enabled)}
+      onCertify={(model) => void certifyRoute(model)}
+      certifying={(model) => Boolean(certifying[model.slug])}
+      certifyProblem={(model) => certifyProblems[model.slug]}
       onEffort={(model, effort) => void updateSubagentEffort(model.slug, effort)}
       onConnect={(providerId) => {
         const entry = directoryById.get(providerId);
@@ -919,6 +960,9 @@ function ModelFamilyRow({
   onFamilyPicker,
   onRoutePicker,
   onSubagent,
+  onCertify,
+  certifying,
+  certifyProblem,
   onEffort,
   onConnect,
 }: {
@@ -936,6 +980,9 @@ function ModelFamilyRow({
   onFamilyPicker: (visible: boolean) => void;
   onRoutePicker: (model: RouterModel, visible: boolean) => void;
   onSubagent: (model: RouterModel, enabled: boolean) => void;
+  onCertify: (model: RouterModel) => void;
+  certifying: (model: RouterModel) => boolean;
+  certifyProblem: (model: RouterModel) => string | undefined;
   onEffort: (model: RouterModel, effort: string) => void;
   onConnect: (providerId: string) => void;
 }) {
@@ -1023,7 +1070,10 @@ function ModelFamilyRow({
                   subagentEffort={effortValue(model)}
                   apiAvailable={apiAvailable}
                   onPickerChange={(checked) => onRoutePicker(model, checked)}
+                  checking={certifying(model)}
+                  problem={certifyProblem(model)}
                   onSubagentChange={(checked) => onSubagent(model, checked)}
+                  onCertify={() => onCertify(model)}
                   onEffortChange={(effort) => onEffort(model, effort)}
                   onConnect={() => onConnect(model.provider)}
                 />
@@ -1040,7 +1090,10 @@ function ModelFamilyRow({
             selectedInSettings={subagentValue(family.routes[0])}
             subagentEffort={effortValue(family.routes[0])}
             apiAvailable={apiAvailable}
+            checking={certifying(family.routes[0])}
+            problem={certifyProblem(family.routes[0])}
             onSubagentChange={(checked) => onSubagent(family.routes[0], checked)}
+            onCertify={() => onCertify(family.routes[0])}
             onEffortChange={(effort) => onEffort(family.routes[0], effort)}
           />
         )}
@@ -1055,7 +1108,10 @@ function ModelDetails({
   selectedInSettings,
   subagentEffort,
   apiAvailable,
+  checking,
+  problem,
   onSubagentChange,
+  onCertify,
   onEffortChange,
 }: {
   model: RouterModel;
@@ -1063,7 +1119,10 @@ function ModelDetails({
   selectedInSettings: boolean;
   subagentEffort: string;
   apiAvailable: boolean;
+  checking?: boolean;
+  problem?: string;
   onSubagentChange: (checked: boolean) => void;
+  onCertify: () => void;
   onEffortChange: (effort: string) => void;
 }) {
   return (
@@ -1086,7 +1145,10 @@ function ModelDetails({
               selectedInSettings={selectedInSettings}
               subagentEffort={subagentEffort}
               apiAvailable={apiAvailable}
+              checking={checking}
+              problem={problem}
               onSubagentChange={onSubagentChange}
+              onCertify={onCertify}
               onEffortChange={onEffortChange}
             />
           </dd>
@@ -1101,23 +1163,33 @@ function ModelDetails({
   );
 }
 
-// Only the model registry can make a route a subagent: `multiAgentVersion:
-// "v2"` is the sole promotion authority, and applySubagentProofs() discards
-// local probe results by design. A control that cannot change that outcome has
-// no business in front of someone choosing a model, so a route either offers
-// the switch or says nothing at all.
+// What the switch in the Subagents column means for one route. A route is
+// either already able to run subagents, settled as unable, or a candidate the
+// switch can check on the spot. Nothing here asks the reader to know what
+// "v2", "certified", or "relay" mean.
 function subagentControl(model: RouterModel, selectedInSettings: boolean) {
-  if (subagentCertification(model) !== "v2") {
+  const certification = subagentCertification(model);
+  if (certification === "v2") {
     return {
-      available: false as const,
+      kind: "ready" as const,
+      checked: selectedInSettings,
+      hint: "Codex can spawn subagents on this route.",
+    };
+  }
+  // A registry v1 is a route that was already reviewed and found unable to
+  // host the native role. Offering to check it again would spend the reader's
+  // quota to re-learn a settled answer.
+  if (certification === "v1") {
+    return {
+      kind: "unsupported" as const,
       checked: false,
-      hint: "This route cannot host subagents. Only models certified in the router's registry can.",
+      hint: "This route cannot host subagents.",
     };
   }
   return {
-    available: true as const,
-    checked: selectedInSettings,
-    hint: "Codex can spawn subagents on this route.",
+    kind: "certifiable" as const,
+    checked: false,
+    hint: "Switch on to check whether this route can run subagents. It makes a few live requests.",
   };
 }
 
@@ -1128,8 +1200,11 @@ function ModelRouteRow({
   selectedInSettings,
   subagentEffort,
   apiAvailable,
+  checking,
+  problem,
   onPickerChange,
   onSubagentChange,
+  onCertify,
   onEffortChange,
   onConnect,
 }: {
@@ -1140,7 +1215,10 @@ function ModelRouteRow({
   subagentEffort: string;
   apiAvailable: boolean;
   onPickerChange: (checked: boolean) => void;
+  checking?: boolean;
+  problem?: string;
   onSubagentChange: (checked: boolean) => void;
+  onCertify: () => void;
   onEffortChange: (effort: string) => void;
   onConnect: () => void;
 }) {
@@ -1174,7 +1252,7 @@ function ModelRouteRow({
 
   const subagent = subagentControl(model, selectedInSettings);
   return (
-    <article className="pm-route-row" role="listitem" data-subagent={subagent.available && subagent.checked ? "enabled" : "disabled"}>
+    <article className="pm-route-row" role="listitem" data-subagent={subagent.kind === "ready" && subagent.checked ? "enabled" : "disabled"}>
       {identity}
       <span className="pm-route-cell">{context}</span>
       <span className="pm-route-cell">{input}</span>
@@ -1193,7 +1271,10 @@ function ModelRouteRow({
           selectedInSettings={selectedInSettings}
           subagentEffort={subagentEffort}
           apiAvailable={apiAvailable}
+          checking={checking}
+          problem={problem}
           onSubagentChange={onSubagentChange}
+          onCertify={onCertify}
           onEffortChange={onEffortChange}
         />
       </span>
@@ -1209,7 +1290,10 @@ function SubagentControl({
   selectedInSettings,
   subagentEffort,
   apiAvailable,
+  checking,
+  problem,
   onSubagentChange,
+  onCertify,
   onEffortChange,
 }: {
   model: RouterModel;
@@ -1217,12 +1301,35 @@ function SubagentControl({
   selectedInSettings: boolean;
   subagentEffort: string;
   apiAvailable: boolean;
+  checking?: boolean;
+  problem?: string;
   onSubagentChange: (checked: boolean) => void;
+  onCertify: () => void;
   onEffortChange: (effort: string) => void;
 }) {
   const subagent = subagentControl(model, selectedInSettings);
-  if (!subagent.available) {
+  if (subagent.kind === "unsupported") {
     return <span className="pm-route-none" title={subagent.hint}>—</span>;
+  }
+  // A candidate gets the same switch as a working route. Flipping it on is the
+  // whole interaction: the check runs, and the switch either stays on or comes
+  // back with the one sentence that matters.
+  if (subagent.kind === "certifiable") {
+    return (
+      <div className="pm-subagent-controls" title={problem || subagent.hint}>
+        <div className="pm-model-control">
+          <Toggle
+            checked={Boolean(checking)}
+            disabled={!apiAvailable || checking}
+            label={`Check whether ${model.displayName} through ${providerName} can run subagents`}
+            onChange={(checked) => { if (checked) onCertify(); }}
+          />
+          <span className={problem ? "pm-route-problem" : undefined}>
+            {checking ? "Checking…" : problem ? "No" : "Off"}
+          </span>
+        </div>
+      </div>
+    );
   }
   const effortOptions = model.reasoningLevels ?? [];
   return (

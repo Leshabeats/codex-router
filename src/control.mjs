@@ -1239,6 +1239,56 @@ async function handleSubagents(action, value, flag, rest = []) {
     refreshModelSettingsCatalog();
     process.stdout.write(`${JSON.stringify({ verified })}\n`);
     return;
+  } else if (action === "certify") {
+    // The whole five-check run for one route, in the foreground. This is what
+    // the Models page switch calls: unlike `verify` above, whose two-request
+    // probe is diagnostic, a complete pass here promotes the route on this
+    // machine. It spends real quota on the route's own provider and on the
+    // native parent that delegates to it.
+    if (!value) throw new Error("Usage: control subagents certify <model-slug>");
+    if (!(await knownModelSlug(value))) throw new Error(`Unknown model slug: ${value}`);
+    const [{ verifySubagentRoute, firstFailure }, { recordVerification, recordVerificationStarted }] =
+      await Promise.all([
+        import("./subagent-certify.mjs"),
+        import("./subagent-proofs.mjs"),
+      ]);
+    recordVerificationStarted(value);
+    const [{ assertCallerSecret, callerBaseUrl }, { CALLER_SECRET_PATH, PORTS }, { findCodexBinary }, { VERSION }] =
+      await Promise.all([
+        import("./caller-auth.mjs"),
+        import("./paths.mjs"),
+        import("./codex-binary.mjs"),
+        import("./version.mjs"),
+      ]);
+    const { existsSync, readFileSync } = await import("node:fs");
+    if (!existsSync(CALLER_SECRET_PATH)) {
+      throw new Error(
+        "The local router caller key is missing; run ./bin/doctor --fix (.\\codex-router.ps1 doctor --fix on Windows).",
+      );
+    }
+    const secret = assertCallerSecret(readFileSync(CALLER_SECRET_PATH, "utf8").trim());
+    const result = await verifySubagentRoute(value, {
+      baseUrl: callerBaseUrl(PORTS.router, secret),
+      codexBin: findCodexBinary(),
+      routerVersion: VERSION,
+    });
+    recordVerification(value, {
+      checks: result.checks,
+      routerVersion: VERSION,
+      ...(result.ok ? {} : { reason: firstFailure(result.checks)?.detail }),
+    });
+    // Republish so a promotion reaches the merged catalog and the agents
+    // directory in the same command the switch is waiting on.
+    refreshModelSettingsCatalog();
+    const failure = result.ok ? undefined : firstFailure(result.checks);
+    process.stdout.write(
+      `${JSON.stringify({
+        slug: value,
+        certified: result.ok,
+        ...(failure ? { failed: failure.check, failedLabel: failure.label, reason: failure.detail } : {}),
+      })}\n`,
+    );
+    return;
   } else if (action === "set") {
     if (!["on", "off"].includes(flag)) {
       throw new Error("Usage: control subagents set <model-slug> <on|off>");
@@ -1309,7 +1359,7 @@ async function handleSubagents(action, value, flag, rest = []) {
     throw new Error(
       "Usage: control subagents status|select-all|unselect-all|mode <all|selected|proven>|" +
         "set <model-slug> <on|off>|effort <model-slug> <level|default>|" +
-        "provider <provider-id> <on|off>|verify [model-slug ...]|" +
+        "provider <provider-id> <on|off>|verify [model-slug ...]|certify <model-slug>|" +
         "policy status|provider <provider-id> <on|off>|model <model-slug> <on|off>|family <name> <on|off>",
     );
   }

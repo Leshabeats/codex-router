@@ -44,17 +44,23 @@ test("Control Center keeps legacy local proofs as candidates, not active v2 rout
     source.indexOf("function ModelRouteRow("),
   );
   assert.ok(control, "subagentControl is the single source of subagent wording");
-  assert.match(control, /if \(subagentCertification\(model\) !== "v2"\)[\s\S]{0,220}available: false as const/);
-  assert.match(control, /available: true as const[\s\S]{0,120}checked: selectedInSettings/);
+  assert.match(control, /if \(certification === "v2"\)[\s\S]{0,140}kind: "ready" as const/);
+  assert.match(control, /kind: "ready" as const[\s\S]{0,120}checked: selectedInSettings/);
+  // Only an unknown route is a candidate. v2 is already able; v1 was reviewed
+  // and refused, and re-checking it would spend quota on a settled answer.
+  assert.match(control, /if \(certification === "v1"\)[\s\S]{0,200}kind: "unsupported" as const/);
+  assert.match(control, /kind: "certifiable" as const/);
 
   // No local-proof vocabulary survives anywhere on the page: no probe request,
   // no candidate state, and no wording that reads as one test away from working.
   assert.doesNotMatch(source, /proofs/);
-  assert.doesNotMatch(source, /candidate|experimental|proven/);
+  // The legacy statuses must not be handled as data. Prose may still use the
+  // word "candidate" for a route the switch can check.
+  assert.doesNotMatch(source, /"candidate"|"experimental"|"proven"/);
   assert.doesNotMatch(source, /Test subagents|Untested|Awaiting certification|Test failed|Checking compatibility/);
 
   // An uncertified route renders an inert marker, never a Toggle.
-  assert.match(source, /if \(!subagent\.available\) \{[\s\S]{0,200}className="pm-route-none"/);
+  assert.match(source, /if \(subagent\.kind === "unsupported"\) \{[\s\S]{0,200}className="pm-route-none"/);
   assert.match(source, /disabled=\{!apiAvailable\}/);
 });
 

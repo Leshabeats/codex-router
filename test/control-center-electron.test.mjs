@@ -1171,12 +1171,22 @@ test("the model directory combines provider setup with de-duplicated model-famil
   // page offers the switch or says nothing -- never a test that cannot change
   // the outcome.
   assert.match(models, /function subagentControl\(/);
-  assert.match(models, /if \(subagentCertification\(model\) !== "v2"\)/);
-  assert.match(models, /available: false as const/);
-  assert.match(models, /available: true as const/);
+  assert.match(models, /kind: "ready" as const/);
+  assert.match(models, /kind: "unsupported" as const/);
+  assert.match(models, /kind: "certifiable" as const/);
+  // A registry v1 was already reviewed and refused, so the switch must not
+  // offer to spend quota re-learning that.
+  assert.match(models, /if \(certification === "v1"\)[\s\S]{0,200}kind: "unsupported"/);
   assert.match(models, /className="pm-route-none"/);
   assert.doesNotMatch(models, /"Test v2"|>v1 only<|Test subagents|Untested|Awaiting certification|Certification candidate/);
   assert.doesNotMatch(models, /proof\?\.status/);
+
+  // Flipping the switch is the whole interaction: it runs the checks and the
+  // router promotes only on a complete pass. A refusal is one sentence.
+  assert.match(models, /certifySubagentModel\(model\.slug\)/);
+  assert.match(models, /if \(!outcome\?\.certified\)/);
+  assert.match(models, /Cannot run subagents/);
+  assert.match(models, /\{checking \? "Checking…"/);
   assert.match(models, /subagent thinking effort/);
   assert.match(models, /<option value="default">Model default<\/option>/);
   assert.match(providerModelsCss, /\.pm-model-row\[data-subagent="enabled"\]/);

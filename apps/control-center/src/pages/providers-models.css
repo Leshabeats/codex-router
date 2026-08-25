@@ -626,6 +626,10 @@
   row-gap: 4px;
 }
 
+.pm-route-problem {
+  color: var(--danger);
+}
+
 .pm-route-none {
   color: var(--ink-faint);
   font-size: 9.5px;
