@@ -342,7 +342,7 @@ The full lifecycle works in this state:
 ./bin/model-router codex status
 ./bin/model-router codex doctor    # exits 0; idle state reports as warnings
 ./bin/model-router codex stop
-./bin/model-router codex start     # foreground; the service restarts it otherwise
+./bin/model-router codex start     # starts the background service again
 ./bin/model-router codex uninstall
 ```
 
