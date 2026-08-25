@@ -738,14 +738,20 @@ so the unit of evidence is always the slug, never the model name.
    Codex collaboration: tool calls work, encrypted subagent payload relay works
    without disclosure, a marker-return spawn succeeds, and a same-thread
    follow-up succeeds. Otherwise omit it and retain conservative v1 behavior.
-   A route also reaches v2 on one machine through a completed local
-   verification — all five of those checks passing in one run, recorded in
-   `multi-agent-proofs.json`. That is a second promotion authority, not a
-   replacement: a partial run, a mismatched slug, or the legacy diagnostic
-   statuses still promote nothing, and only the pull request that moves the
-   registry entry may accept the matching `v2_agent/` application. Read
+   The registry is not the only way a route reaches v2. The operator's own
+   selection promotes it — `subagents mode selected` plus `subagents set <slug>
+   on`, or `mode all` — and so does a completed local verification of all five
+   checks recorded in `multi-agent-proofs.json`. Selection is the ordinary path
+   and the one the Control Center switch uses; the registry exists so nobody
+   has to select a proven route by hand. None of this loosens the gate: an
+   explicit `off` beats every mode, a hidden model is never promoted, a partial
+   verification or a mismatched slug promotes nothing, the legacy diagnostic
+   statuses promote nothing, and only the pull request that moves the registry
+   entry may accept a `v2_agent/` application. Read
    `docs/SUBAGENT-CERTIFICATION.md` in full before changing
-   `src/subagent-*.mjs`, `v2_agent/`, or the Subagents column.
+   `src/subagent-*.mjs`, `src/multi-agent-state.mjs`, `v2_agent/`, or the
+   Subagents column — it records which questions have already been answered at
+   the cost of provider quota.
 5. Remember that Codex advertises only a small priority-ordered subset of native
    spawn-model overrides. Adjust priority intentionally and keep the desired
    Kimi/Grok/GPT choices in that visible subset; do not crowd them out

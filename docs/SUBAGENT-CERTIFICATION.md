@@ -43,16 +43,31 @@ them as evidence of native collaboration** — a route can stream and call tools
 perfectly and still fail the relay. That confusion is the whole reason the
 promotion gate exists.
 
-## Two ways a route becomes v2
+## Three ways a route becomes v2
 
-1. **The registry.** `multiAgentVersion: "v2"` checked in, alongside an accepted
-   `v2_agent/` application. This ships to every installer.
-2. **A completed local verification.** All five checks passing in one run on
+1. **The operator selects it.** This is the ordinary path and the one almost
+   everyone uses. `subagents mode selected` plus `subagents set <slug> on`
+   promotes that route, writes its agent definition, and Codex can spawn it by
+   name. `mode all` does the same for every non-hidden route. See
+   `.claude/skills/codex-subagents/SKILL.md`; `applyMultiAgentSettings` is where
+   it happens.
+2. **The registry.** `multiAgentVersion: "v2"` checked in, alongside an accepted
+   `v2_agent/` application. This ships to every installer, so nobody has to
+   select it.
+3. **A completed local verification.** All five checks passing in one run on
    this machine, recorded in `~/.codex/codex-router/multi-agent-proofs.json`.
 
-There is no third way. In particular, the legacy diagnostic statuses in that
-proofs file — `candidate`, `experimental`, `proven` — promote nothing, and never
-have.
+An explicit `off` beats all three, and a hidden model is never promoted.
+
+What is **not** a fourth way: the legacy diagnostic statuses in the proofs file
+— `candidate`, `experimental`, `proven` — promote nothing, and never have.
+
+> **This regressed once.** `applyMultiAgentSettings` only ever demoted: it read
+> `disabled` and `hidden` and nothing else, so modes 1 and its `all` sibling
+> were inert and every selection an operator had made was silently discarded.
+> An install with twenty routes enabled had four spawnable and one agent
+> definition on disk. If you are changing that function, the modes are the
+> feature, not a formality — and `subagent-report.mjs` is how you check.
 
 ## A ChatGPT account cannot certify a routed model
 
@@ -84,22 +99,65 @@ than `"chatgpt"`. The wording of the refusal implies an API key would be
 accepted, but that has not been verified, and it bills separately from a
 ChatGPT plan. Verify before promising anyone this works.
 
-## Running it
+## What has already been verified, and what has not
 
-From the Control Center: expand a model, flip the switch in the **Subagents**
-column. It reads `Checking…`, then either stays on or comes back with one
-sentence. That is the whole user-facing surface — no check names, no
-"certification", no protocol versions.
+Do not re-run these. They cost quota and the answers are recorded here.
 
-From the CLI:
+| Question | Answer | Evidence |
+|---|---|---|
+| Does the caller endpoint serve `chat/completions`? | **No.** It answers Responses at `<callerBase>/responses` and takes the caller key as a bearer. | A 404 was once reported to the operator as "this model cannot run subagents". |
+| Can a route stream through the router? | **Yes** for every route tried. | `deepseek/deepseek-v4-flash-vision-exp` returned HTTP 200 with a real SSE stream. |
+| Does a forced `tool_choice` work everywhere? | **No.** A reasoning route can reject the forcing mode itself — *"Thinking mode does not support this tool_choice"* — while calling the tool correctly when simply offered it. | `opencode-go/deepseek-v4-flash-vision-exp`: forced → 400, `auto` → 200 with `{"token": "ok"}`. Codex does not force tool_choice in ordinary use. |
+| Can checks 3-5 complete under a ChatGPT account? | **No.** See the section above. | Codex states it in the parent's own message. |
+| Does marking the candidate v2 in a private catalog help? | **Partly.** It clears an earlier "not supported with the current ChatGPT account" error and gets as far as the refusal above. It does not get past it. | Already implemented in the runner. |
+| Is signed routing a way around that? | **No.** Its provider block is `requires_openai_auth = true` — the same account. | `managedSignedProviderBlock` in `config-manager.mjs`. |
+| Do Ox Alpha, Fugu Ultra or Inkling have a registry certification? | **No.** The registry has seven v2 routes and none of them is one of these. | They reach v2 through operator selection instead. |
+
+Statuses that answer about the account or the moment — 401, 402, 403, 408, 429,
+5xx, aborts and timeouts — are recorded as **deferred**, never as a refusal, and
+a deferred run clears its record so the switch stays retryable. Only a reply the
+provider actually sent can refuse a route.
+
+## Turning a route on
+
+From the Control Center: expand a model and flip the switch in the **Subagents**
+column. That selects the route, the router republishes it as v2, and its agent
+definition is written — one click from off to spawnable. The same thing from the
+CLI:
 
 ```bash
-bin/model-router codex subagents certify <provider>/<model>
+bin/model-router codex subagents set <provider>/<model> on
+node src/catalog.mjs                 # publish; the Control Center does this for you
 ```
 
-Both spend real quota: two HTTP turns against the route, then a Codex parent
-turn plus child turns, twice. The run stops at the first failure, so a route
-that cannot stream never pays for a delegation.
+Then **fully quit and reopen Codex**. It reads the catalog at startup and caches
+it; skipping this is the most common reason a change looks like it did nothing.
+
+Neither costs quota. Selection is a statement of intent, not a capability claim
+— `mode all` is documented as advertising every route "regardless of whether it
+works" — so verify a route before relying on it:
+
+```bash
+node --input-type=module -e '
+import { checkAgentCapability } from "./src/agent-check.mjs";
+console.log(JSON.stringify(checkAgentCapability(process.argv[1]), null, 2));
+' "opencode-go/glm-5.2"
+```
+
+## Gathering evidence for the registry
+
+Separately from turning a route on, the five-check run produces the artifact a
+`v2_agent` application needs:
+
+```bash
+bin/model-router codex subagents certify <provider>/<model> [<provider>/<model> ...]
+```
+
+**This spends real quota**: two HTTP turns per route, then a Codex parent turn
+plus child turns, twice. Routes are checked in parallel; the recording and the
+republish happen once, after them. A run stops at its first failure, so a route
+that cannot stream never pays for a delegation. On a complete pass it writes
+`v2_agent/<provider>/<model>/proof.json` and promotes the route locally.
 
 ## Don't measure the same route twice
 
