@@ -191,3 +191,20 @@ test("the delegation run is configured to reach the router at all", () => {
   assert.match(control, /codexHome: CODEX_HOME/);
   assert.match(control, /catalogPath: MERGED_CATALOG_PATH/);
 });
+
+test("a run that got no answer is not a refusal either", () => {
+  // A client-side timeout recorded "Cannot run subagents" against Command Code
+  // -- for a model that answers tool calls fine on three other providers. Only
+  // a reply the provider actually sent can refuse a route.
+  const source = readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "subagent-certify.mjs"),
+    "utf8",
+  );
+  assert.doesNotMatch(source, /results\.streaming = fail\(error/);
+  assert.doesNotMatch(source, /results\.toolCall = fail\(error/);
+  assert.match(source, /results\.streaming = deferred\(undefined, error/);
+  assert.match(source, /results\.toolCall = deferred\(undefined, error/);
+  // A parent killed at the ceiling ran out of time; it did not refuse.
+  assert.match(source, /first\.timedOut\s*\?\s*deferred\(/);
+  assert.equal(runDeferred({ streaming: { outcome: "deferred" } }), true);
+});

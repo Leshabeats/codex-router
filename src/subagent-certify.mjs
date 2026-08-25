@@ -217,7 +217,10 @@ async function runHttpChecks({ slug, baseUrl, secret, timeoutMs }) {
       ? pass(response.status)
       : httpOutcome(response.status, `streamed turn returned HTTP ${response.status}`);
   } catch (error) {
-    results.streaming = fail(error?.message || "streamed turn failed");
+    // A request that never got an answer -- an abort, a timeout, a socket the
+    // router closed while restarting -- proved nothing about the route. Only a
+    // reply the provider actually sent can refuse one.
+    results.streaming = deferred(undefined, error?.message || "the streamed turn got no answer");
   }
   if (results.streaming.outcome !== "pass") return results;
 
@@ -264,7 +267,7 @@ async function runHttpChecks({ slug, baseUrl, secret, timeoutMs }) {
           : `no tool call in the reply (HTTP ${response.status})`,
       );
   } catch (error) {
-    results.toolCall = fail(error?.message || "forced tool call failed");
+    results.toolCall = deferred(undefined, error?.message || "the forced tool call got no answer");
   }
   return results;
 }
@@ -318,7 +321,11 @@ async function runDelegationChecks({
     });
     results.encryptedRelay = firstDelegation.childStarted
       ? pass(200)
-      : fail(first.timedOut ? "the parent did not delegate before the timeout" : "no child ran on this route");
+      // A parent killed at the ceiling never finished asking. That is the run
+      // running out of time, not the route refusing to host a child.
+      : first.timedOut
+        ? deferred(undefined, "the parent did not finish delegating before the timeout")
+        : fail("no child ran on this route");
     if (!firstDelegation.childStarted) return { results, agentName: definition.agentName };
 
     results.markerReturn = firstDelegation.markerReturned
