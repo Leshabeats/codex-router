@@ -2,6 +2,54 @@
 
 ## Unreleased
 
+- **Subagent selection is honoured again.** `applyMultiAgentSettings` only ever
+  demoted: it read `disabled` and `hidden` and nothing else, so the three modes
+  documented in `.claude/skills/codex-subagents/SKILL.md` — `proven`,
+  `selected`, `all` — were inert and every selection an operator had made was
+  silently discarded. An install running `mode: selected` with twenty routes
+  enabled had four spawnable and one agent definition on disk, while
+  `subagents status` cheerfully reported the twenty. The modes work as
+  documented again: an explicit `off` still beats every mode, a hidden model is
+  never promoted, and only an explicit choice promotes — a machine-local probe
+  still promotes nothing on its own. **On upgrade this changes what Codex is
+  offered**: an install sitting on `mode: all`, or on `selected` with a stale
+  `enabled` list, will advertise those routes as subagents again, which is what
+  the setting always said it would do. `mode all` remains "every non-hidden
+  model, regardless of whether it works" — verify a route with the agent check
+  before relying on it (PR #439).
+
+- **Running the test suite no longer clears the operator's subagent
+  definitions.** Four tests in `test/control.test.mjs` pointed
+  `MODEL_ROUTER_STATE_DIR` at a temporary directory but left `CODEX_HOME`
+  alone. `subagents set` republishes the catalog, and the agent definitions it
+  writes are keyed off `CODEX_HOME`, so every `npm test` emptied
+  `~/.codex/agents` on the machine running it — seventeen definitions before,
+  none after, restored by the next publish, with a doctor `FAIL` as the only
+  trace. The publish that clears them also says so now, rather than emptying
+  the directory in silence (PR #439).
+
+- **A provider reachable only through the proxy no longer reads as a broken
+  one.** The Control Center is launched by the desktop session, so it inherits
+  `HTTP_PROXY` from the login environment but nothing telling Node it may use
+  it — the address and the permission to use it are separate answers. A
+  discovery child then dialled the provider directly and its connect timeout
+  was reported as the provider failing, which is how a reachable Venice catalog
+  came back as `fetch failed`. Children spawned by the app now read the opt-in
+  the install manifest recorded, and only for the install that recorded it;
+  only the opt-in is restored, never an address (PR #439).
+
+- **The Models page is one list.** Two sections both changed what ended up in
+  the picker, six words described three concepts, and a row jumped to a
+  different group the moment its switch was flipped. Provider accounts collapse
+  into a connections strip, one **Add models** dialog searches every connected
+  catalog, and row order no longer depends on the switches. The Subagents
+  column stopped offering a compatibility test that could not enable anything —
+  turning the switch on now selects the route and the router publishes it, one
+  click from off to spawnable. `docs/SUBAGENT-CERTIFICATION.md` records what
+  the five-check certification can and cannot establish, including that checks
+  3-5 cannot complete while Codex is signed in with a ChatGPT account, so the
+  next reader does not spend provider quota re-learning it (PR #439).
+
 - **Windows startup now fails fast when the scheduled task is dead instead of
   polling health for its whole budget.** Task Scheduler can keep a stale
   instance entry (or a Running state) after the launcher tree behind it has
