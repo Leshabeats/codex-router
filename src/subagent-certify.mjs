@@ -104,6 +104,23 @@ export function readDelegation(events, { agentName, marker }) {
   return { childStarted, markerReturned };
 }
 
+// Codex refuses to spawn a non-OpenAI child while the parent is signed in with
+// a ChatGPT account, and says so in the parent's own message. That is a
+// property of the harness and the account, not of the route -- branding the
+// route "cannot run subagents" for it is the same wrong verdict as a 429.
+const ACCOUNT_REFUSES_ROUTE =
+  /not supported when using Codex with a ChatGPT account|isn.t supported with the current ChatGPT account/i;
+
+export function accountRefusal(events) {
+  for (const event of Array.isArray(events) ? events : []) {
+    const text = typeof event === "string" ? event : JSON.stringify(event ?? "");
+    if (ACCOUNT_REFUSES_ROUTE.test(text)) {
+      return "Codex will not spawn this route as a subagent while signed in with a ChatGPT account.";
+    }
+  }
+  return undefined;
+}
+
 export function parseEventLines(stdout) {
   return String(stdout || "")
     .split("\n")
@@ -224,14 +241,20 @@ async function runHttpChecks({ slug, baseUrl, secret, timeoutMs }) {
   }
   if (results.streaming.outcome !== "pass") return results;
 
-  try {
+  // Forced first, because a forced call is the strongest evidence and what the
+  // application asks for. But a reasoning route can reject the forcing mode
+  // itself -- "Thinking mode does not support this tool_choice" -- while
+  // calling the tool perfectly well when simply offered it. Codex does not
+  // force tool_choice in ordinary use, so refusing the route over the forcing
+  // mode would fail it for something it is never asked to do.
+  const toolProbe = async (choice) => {
     const response = await fetch(url, {
       method: "POST",
       headers,
       body: JSON.stringify({
         model: slug,
-        input: 'Call codex_router_probe with token "ok".',
-        max_output_tokens: 128,
+        input: 'Call codex_router_probe with token "ok". Use the tool; do not answer in prose.',
+        max_output_tokens: 512,
         tools: [
           {
             type: "function",
@@ -245,27 +268,46 @@ async function runHttpChecks({ slug, baseUrl, secret, timeoutMs }) {
             },
           },
         ],
-        tool_choice: { type: "function", name: "codex_router_probe" },
+        tool_choice: choice,
       }),
       signal: AbortSignal.timeout(timeoutMs),
     });
     const payload = await response.json().catch(() => undefined);
     const call = (payload?.output || []).find((item) => item?.type === "function_call");
-    const argumentsValid = (() => {
-      try {
-        return typeof JSON.parse(call?.arguments ?? "").token === "string";
-      } catch {
-        return false;
+    let argumentsValid = false;
+    try {
+      argumentsValid = typeof JSON.parse(call?.arguments ?? "").token === "string";
+    } catch {
+      argumentsValid = false;
+    }
+    return {
+      status: response.status,
+      ok: response.ok && call?.name === "codex_router_probe" && argumentsValid,
+      sawCall: Boolean(call),
+      detail: String(payload?.error?.message || "").slice(0, 300),
+    };
+  };
+
+  try {
+    const forced = await toolProbe({ type: "function", name: "codex_router_probe" });
+    if (forced.ok) {
+      results.toolCall = pass(forced.status);
+    } else if (STATUS_ABOUT_THE_ACCOUNT.has(forced.status)) {
+      results.toolCall = deferred(forced.status, forced.detail || `forced tool call returned HTTP ${forced.status}`);
+    } else {
+      const offered = await toolProbe("auto");
+      if (offered.ok) {
+        results.toolCall = { ...pass(offered.status), mode: "auto" };
+      } else if (STATUS_ABOUT_THE_ACCOUNT.has(offered.status)) {
+        results.toolCall = deferred(offered.status, offered.detail || `tool call returned HTTP ${offered.status}`);
+      } else {
+        results.toolCall = fail(
+          offered.sawCall
+            ? "the tool call did not return valid JSON arguments"
+            : offered.detail || `no tool call in the reply (HTTP ${offered.status})`,
+        );
       }
-    })();
-    results.toolCall = response.ok && call?.name === "codex_router_probe" && argumentsValid
-      ? pass(response.status)
-      : httpOutcome(
-        response.status,
-        call
-          ? "the forced call did not return valid JSON arguments"
-          : `no tool call in the reply (HTTP ${response.status})`,
-      );
+    }
   } catch (error) {
     results.toolCall = deferred(undefined, error?.message || "the forced tool call got no answer");
   }
@@ -301,7 +343,32 @@ async function runDelegationChecks({
     writeFileSync(agentFile, definition.contents, { encoding: "utf8", mode: 0o600 });
   }
 
-  const config = routerConfigArgs({ baseUrl, catalogPath });
+  // Codex only offers a subagent for a route its catalog marks v2, which is
+  // the very thing this run exists to establish. Give the run a private copy
+  // of the catalog with just this candidate marked, so the delegation can be
+  // attempted without the real catalog ever claiming anything.
+  let runCatalog = catalogPath;
+  if (catalogPath && existsSync(catalogPath)) {
+    try {
+      const data = JSON.parse(readFileSync(catalogPath, "utf8"));
+      const entries = Array.isArray(data) ? data : data?.models || [];
+      let marked = 0;
+      for (const entry of entries) {
+        if (String(entry?.slug || entry?.id || "") === String(slug)) {
+          entry.multi_agent_version = "v2";
+          marked += 1;
+        }
+      }
+      if (marked) {
+        runCatalog = path.join(workDir, "candidate-catalog.json");
+        writeFileSync(runCatalog, JSON.stringify(data), { encoding: "utf8", mode: 0o600 });
+      }
+    } catch {
+      // An unreadable catalog leaves the run on the published one; the
+      // delegation will simply report that no child ran.
+    }
+  }
+  const config = routerConfigArgs({ baseUrl, catalogPath: runCatalog });
   try {
     const marker = newMarker();
     const first = await runCodex(
@@ -315,17 +382,21 @@ async function runDelegationChecks({
       }),
       { codexBin, codexHome, timeoutMs, cwd: workDir },
     );
-    const firstDelegation = readDelegation(parseEventLines(first.stdout), {
+    const firstEvents = parseEventLines(first.stdout);
+    const firstDelegation = readDelegation(firstEvents, {
       agentName: definition.agentName,
       marker,
     });
+    const refusal = accountRefusal(firstEvents);
     results.encryptedRelay = firstDelegation.childStarted
       ? pass(200)
-      // A parent killed at the ceiling never finished asking. That is the run
-      // running out of time, not the route refusing to host a child.
-      : first.timedOut
-        ? deferred(undefined, "the parent did not finish delegating before the timeout")
-        : fail("no child ran on this route");
+      : refusal
+        ? deferred(undefined, refusal)
+        // A parent killed at the ceiling never finished asking. That is the run
+        // running out of time, not the route refusing to host a child.
+        : first.timedOut
+          ? deferred(undefined, "the parent did not finish delegating before the timeout")
+          : fail("no child ran on this route");
     if (!firstDelegation.childStarted) return { results, agentName: definition.agentName };
 
     results.markerReturn = firstDelegation.markerReturned
