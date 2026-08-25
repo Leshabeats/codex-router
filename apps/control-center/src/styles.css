@@ -155,9 +155,9 @@ button {
   padding: 6px 8px 2px 13px;
 }
 
-/* Electron's macOS hidden-inset titlebar leaves the native traffic lights in
-   the content surface. Reserve that same leading space for the sidebar
-   controls so the renderer and OS chrome share one toolbar row, like Codex. */
+/* Hidden titlebar chrome leaves native window buttons in the content
+   surface. Reserve that same leading/trailing space so the renderer and OS
+   chrome share one toolbar row, like Codex. */
 .native-titlebar .sidebar-window-row,
 .native-titlebar .titlebar {
   min-height: 44px;
@@ -169,7 +169,6 @@ button {
 .native-titlebar .sidebar-window-row {
   padding-top: 9px;
   padding-bottom: 7px;
-  padding-left: 88px;
   border-bottom: 0;
   background: var(--surface-1);
 }
@@ -179,9 +178,50 @@ button {
   background: var(--surface-0);
 }
 
-.native-titlebar.sidebar-collapsed .titlebar {
+/* macOS hiddenInset traffic lights sit over the sidebar, or the titlebar
+   when the sidebar is collapsed. */
+.native-titlebar-darwin .sidebar-window-row {
   padding-left: 88px;
 }
+
+.native-titlebar-darwin.sidebar-collapsed .titlebar {
+  padding-left: 88px;
+}
+
+/* Windows/Linux draw macOS-style traffic lights on the left. */
+.native-titlebar-win32 .sidebar-window-row,
+.native-titlebar-linux .sidebar-window-row {
+  padding-left: 16px;
+}
+
+.native-titlebar-win32.sidebar-collapsed .titlebar,
+.native-titlebar-linux.sidebar-collapsed .titlebar {
+  padding-left: 16px;
+}
+
+.traffic-lights {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: 10px;
+  -webkit-app-region: no-drag;
+}
+
+.traffic-light {
+  width: 12px;
+  height: 12px;
+  border: 0;
+  padding: 0;
+  border-radius: 50%;
+  background: #d0d0d0;
+}
+
+.traffic-light-close { background: #ff5f57; }
+.traffic-light-minimize { background: #febc2e; }
+.traffic-light-maximize { background: #28c840; }
+
+.traffic-light:hover { filter: brightness(0.92); }
+.traffic-light:active { filter: brightness(0.82); }
 
 .sidebar-collapsed .titlebar-toggle {
   position: relative;
