@@ -64,9 +64,15 @@ const STATUS_LABELS: Record<StatusFilter, string> = {
   blocked: "Needs a provider",
 };
 
+const ALL_PROVIDERS_LABEL = "All providers";
+
 /** Below this, a list is short enough to read whole; filters and bulk switches
  *  would be more chrome than the list they act on. */
 const CROWDED_LIST = 8;
+
+/** Picking between two or three providers is slower through a menu than by
+ *  reading the provider each row already names. */
+const CROWDED_PROVIDERS = 3;
 
 interface ModelsPageProps {
   target?: RouterTarget;
@@ -138,6 +144,9 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [filterMenuOpen, setFilterMenuOpen] = useState(false);
   const filterMenuRef = useRef<HTMLDivElement | null>(null);
+  const [providerFilter, setProviderFilter] = useState("all");
+  const [providerFilterMenuOpen, setProviderFilterMenuOpen] = useState(false);
+  const providerFilterMenuRef = useRef<HTMLDivElement | null>(null);
   const [bulkMenuOpen, setBulkMenuOpen] = useState(false);
   const bulkMenuRef = useRef<HTMLDivElement | null>(null);
   // The connect menu lives in the connections strip but is also the first-run
@@ -248,6 +257,19 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
     () => new Map(directory.map((entry) => [entry.id, entry.displayName])),
     [directory],
   );
+  // Ordered by the directory, so the menu lists providers in the same order as
+  // the connections strip: connected first, then alphabetical.
+  const filterProviders = useMemo(() => {
+    const routed = new Set(families.flatMap((family) => family.routes.map((model) => model.provider)));
+    return directory.filter((entry) => routed.has(entry.id));
+  }, [directory, families]);
+  const providerCrowded = filterProviders.length > CROWDED_PROVIDERS;
+  // A filter whose chip is not on screen -- because the provider left the list,
+  // or because there are too few providers left to warrant the chip -- would go
+  // on narrowing the list with nothing there to undo it.
+  const activeProviderFilter = providerCrowded && filterProviders.some((entry) => entry.id === providerFilter)
+    ? providerFilter
+    : "all";
   const pickerStates = useMemo(() => new Map(models.map((model) => [model.slug, model.visible])), [models]);
   const subagentStates = useMemo(() => new Map(models.map((model) => [
     model.slug,
@@ -263,14 +285,16 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
   const optimisticSubagentEfforts = useOptimisticValues(subagentEffortStates, runAction);
 
   useEffect(() => {
-    if (!filterMenuOpen && !bulkMenuOpen) return;
+    if (!filterMenuOpen && !providerFilterMenuOpen && !bulkMenuOpen) return;
     const closeOnOutsidePointer = (event: PointerEvent) => {
       if (!filterMenuRef.current?.contains(event.target as Node)) setFilterMenuOpen(false);
+      if (!providerFilterMenuRef.current?.contains(event.target as Node)) setProviderFilterMenuOpen(false);
       if (!bulkMenuRef.current?.contains(event.target as Node)) setBulkMenuOpen(false);
     };
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       setFilterMenuOpen(false);
+      setProviderFilterMenuOpen(false);
       setBulkMenuOpen(false);
     };
     document.addEventListener("pointerdown", closeOnOutsidePointer);
@@ -279,7 +303,7 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
       document.removeEventListener("pointerdown", closeOnOutsidePointer);
       document.removeEventListener("keydown", closeOnEscape);
     };
-  }, [bulkMenuOpen, filterMenuOpen]);
+  }, [bulkMenuOpen, filterMenuOpen, providerFilterMenuOpen]);
 
   const updateCatalogState = (sourceId: string, update: (current: CatalogViewState) => CatalogViewState) => {
     setCatalogStates((current) => ({
@@ -407,12 +431,15 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
 
   const filteredFamilies = useMemo(() => {
     const needle = modelSearch.trim().toLowerCase();
-    if (!needle) return families;
-    return families.filter((family) =>
-      `${family.displayName} ${family.routes.map((model) => `${model.displayName} ${model.slug} ${providerDisplayName(model.provider)}`).join(" ")}`
+    if (!needle && activeProviderFilter === "all") return families;
+    return families.filter((family) => {
+      if (activeProviderFilter !== "all" && !family.routes.some((model) => model.provider === activeProviderFilter)) return false;
+      if (!needle) return true;
+      return `${family.displayName} ${family.routes.map((model) => `${model.displayName} ${model.slug} ${providerDisplayName(model.provider)}`).join(" ")}`
         .toLowerCase()
-        .includes(needle));
-  }, [families, modelSearch]);
+        .includes(needle);
+    });
+  }, [activeProviderFilter, families, modelSearch]);
 
   // Row order never depends on a switch. Sorting by on/off would throw the row
   // you just clicked to the other end of the list, at the exact moment you are
@@ -552,7 +579,7 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
                 catalogue while a filter is narrowing the view made the filter
                 look broken. */}
             <span className="pm-results-count" aria-live="polite">
-              {modelSearch || statusFilter !== "all"
+              {modelSearch || statusFilter !== "all" || activeProviderFilter !== "all"
                 ? `${visibleRows.length} of ${families.length} models`
                 : `${families.length} models`}
             </span>
@@ -588,6 +615,45 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
                       >
                         <span>{STATUS_LABELS[value]}</span>
                         {statusFilter === value ? <Check aria-hidden size={14} strokeWidth={1.9} /> : null}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+            {/* Which account serves a model matters most where several of them
+                serve overlapping catalogues; below that the list already names
+                the provider on every row. */}
+            {providerCrowded ? (
+              <div className="pm-filter-menu-wrap" ref={providerFilterMenuRef}>
+                <button
+                  type="button"
+                  className="pm-filter-trigger"
+                  aria-haspopup="menu"
+                  aria-expanded={providerFilterMenuOpen}
+                  onClick={() => setProviderFilterMenuOpen((open) => !open)}
+                >
+                  <Filter aria-hidden size={14} strokeWidth={1.7} />
+                  <span>Provider</span>
+                  <strong>{activeProviderFilter === "all" ? ALL_PROVIDERS_LABEL : providerNames.get(activeProviderFilter) || activeProviderFilter}</strong>
+                  <ChevronDown aria-hidden size={14} strokeWidth={1.7} className={providerFilterMenuOpen ? "is-open" : ""} />
+                </button>
+                {providerFilterMenuOpen ? (
+                  <div className="pm-filter-menu pm-provider-filter-menu" role="menu" aria-label="Filter models by provider">
+                    {[{ id: "all", displayName: ALL_PROVIDERS_LABEL }, ...filterProviders].map((entry) => (
+                      <button
+                        key={entry.id}
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked={activeProviderFilter === entry.id}
+                        className={activeProviderFilter === entry.id ? "is-selected" : ""}
+                        onClick={() => {
+                          setProviderFilter(entry.id);
+                          setProviderFilterMenuOpen(false);
+                        }}
+                      >
+                        <span>{entry.displayName}</span>
+                        {activeProviderFilter === entry.id ? <Check aria-hidden size={14} strokeWidth={1.9} /> : null}
                       </button>
                     ))}
                   </div>
@@ -665,7 +731,9 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
             <EmptyState
               icon={<SearchX size={20} />}
               title="No models match"
-              body={modelSearch ? "Clear the search, or add models from a connected provider." : "Add models from a connected provider to fill this list."}
+              body={modelSearch || statusFilter !== "all" || activeProviderFilter !== "all"
+                ? "Clear the search or the filters, or add models from a connected provider."
+                : "Add models from a connected provider to fill this list."}
             />
           )}
         </section>

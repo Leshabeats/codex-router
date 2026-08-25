@@ -153,6 +153,13 @@
   color: var(--accent);
 }
 
+/* One entry per connected account, so this menu grows with the setup while the
+   status one never exceeds four rows. */
+.pm-provider-filter-menu {
+  max-height: 296px;
+  overflow-y: auto;
+}
+
 .pm-model-toolbar .search-field {
   min-width: min(310px, 35%);
 }

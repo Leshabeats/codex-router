@@ -103,6 +103,10 @@ const PROVIDER_BRANDS: Record<string, string> = {
   clinepass: "cline",
   commandcode: "commandcode",
   "commandcode-messages": "commandcode",
+  // A user-defined endpoint has no brand of its own to show, and a monogram
+  // built from the word "custom" says nothing. It shares the mark used for
+  // models whose maker is deliberately not disclosed.
+  custom: "stealth",
   "devin-cli": "cognition",
   deepseek: "deepseek",
   fireworks: "fireworks",

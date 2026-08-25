@@ -1138,6 +1138,20 @@ test("the model directory combines provider setup with de-duplicated model-famil
   assert.match(models, /\{crowded \? \(/);
   assert.match(models, /aria-label="More model actions"/);
 
+  // The provider chip follows the same judgement, counted in providers rather
+  // than rows, and composes with the search and status filters instead of
+  // replacing them.
+  assert.match(models, /const CROWDED_PROVIDERS = 3/);
+  assert.match(models, /const providerCrowded = filterProviders\.length > CROWDED_PROVIDERS/);
+  assert.match(models, /\{providerCrowded \? \([\s\S]{0,400}className="pm-filter-trigger"/);
+  assert.match(models, /aria-label="Filter models by provider"/);
+  assert.match(models, /role="menuitemradio"\s*aria-checked=\{activeProviderFilter === entry\.id\}/);
+  assert.match(models, /activeProviderFilter !== "all" && !family\.routes\.some\(\(model\) => model\.provider === activeProviderFilter\)/);
+  assert.match(models, /modelSearch \|\| statusFilter !== "all" \|\| activeProviderFilter !== "all"[\s\S]{0,120}visibleRows\.length/);
+  // A chip that is no longer rendered must not keep the list narrowed.
+  assert.match(models, /const activeProviderFilter = providerCrowded && filterProviders\.some/);
+  assert.match(providerModelsCss, /\.pm-provider-filter-menu\s*\{/);
+
   // Nothing to connect means nothing to browse, so the page asks for that
   // first instead of showing an empty list behind a disabled button.
   assert.match(models, /title="Connect a provider to get started"/);
