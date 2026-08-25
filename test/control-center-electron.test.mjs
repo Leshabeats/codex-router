@@ -1145,7 +1145,13 @@ test("the model directory combines provider setup with de-duplicated model-famil
   // A single-route model already showed its identity in the row above, so the
   // panel carries only what the summary left out.
   assert.match(models, /function ModelDetails\(/);
-  assert.match(models, /function SubagentControl\(/);
+  // Two cells, so a route stays one row: stacking the switch and the effort
+  // menu doubled every row's height and repeated "Thinking" down the list.
+  assert.match(models, /function SubagentToggle\(/);
+  assert.match(models, /function SubagentEffort\(/);
+  assert.match(models, /<span>Thinking<\/span>/);
+  assert.match(providerModelsCss, /grid-template-columns: minmax\(0, 1fr\) 78px 92px 70px 74px 104px/);
+  assert.match(providerModelsCss, /\.pm-route-effort \{/);
   assert.match(models, /<dt>Model id<\/dt>/);
   assert.match(providerModelsCss, /\.pm-model-details\s*\{/);
 
@@ -1173,7 +1179,9 @@ test("the model directory combines provider setup with de-duplicated model-famil
   assert.match(models, /function subagentControl\(/);
   // One switch, one meaning, for every route: use this as a subagent or do
   // not. No certification state to decode in front of a model choice.
-  assert.doesNotMatch(models, /kind: "certifiable"|kind: "unsupported"|className="pm-route-none"/);
+  // The certification states are gone; the muted dash survives as the empty
+  // Thinking cell, which is a different thing entirely.
+  assert.doesNotMatch(models, /kind: "certifiable"|kind: "unsupported"/);
   assert.doesNotMatch(models, /"Test v2"|>v1 only<|Test subagents|Untested|Awaiting certification|Certification candidate/);
   assert.doesNotMatch(models, /proof\?\.status/);
 

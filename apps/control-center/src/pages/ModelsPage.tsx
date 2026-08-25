@@ -1019,6 +1019,7 @@ function ModelFamilyRow({
                 <span>Input</span>
                 <span>In picker</span>
                 <span>Subagents</span>
+                <span>Thinking</span>
               </div>
               {family.routes.map((model) => (
                 <ModelRouteRow
@@ -1087,15 +1088,23 @@ function ModelDetails({
         <div>
           <dt>Subagents</dt>
           <dd>
-            <SubagentControl
-              model={model}
-              providerName={providerName}
-              selectedInSettings={selectedInSettings}
-              subagentEffort={subagentEffort}
-              apiAvailable={apiAvailable}
-              onSubagentChange={onSubagentChange}
-              onEffortChange={onEffortChange}
-            />
+            <div className="pm-subagent-controls">
+              <SubagentToggle
+                model={model}
+                providerName={providerName}
+                selectedInSettings={selectedInSettings}
+                apiAvailable={apiAvailable}
+                onSubagentChange={onSubagentChange}
+              />
+              <SubagentEffort
+                model={model}
+                providerName={providerName}
+                selectedInSettings={selectedInSettings}
+                subagentEffort={subagentEffort}
+                apiAvailable={apiAvailable}
+                onEffortChange={onEffortChange}
+              />
+            </div>
           </dd>
         </div>
       ) : (
@@ -1192,13 +1201,21 @@ function ModelRouteRow({
         />
       </span>
       <span className="pm-route-cell pm-route-control">
-        <SubagentControl
+        <SubagentToggle
+          model={model}
+          providerName={providerName}
+          selectedInSettings={selectedInSettings}
+          apiAvailable={apiAvailable}
+          onSubagentChange={onSubagentChange}
+        />
+      </span>
+      <span className="pm-route-cell pm-route-control">
+        <SubagentEffort
           model={model}
           providerName={providerName}
           selectedInSettings={selectedInSettings}
           subagentEffort={subagentEffort}
           apiAvailable={apiAvailable}
-          onSubagentChange={onSubagentChange}
           onEffortChange={onEffortChange}
         />
       </span>
@@ -1208,13 +1225,42 @@ function ModelRouteRow({
 
 // The route row and the single-route details panel must say the same thing
 // about subagents, so they share the control rather than the wording.
-function SubagentControl({
+// Two cells, so the table keeps one row per route. Stacking the switch and the
+// effort menu made every row two lines tall and repeated the word "Thinking"
+// down the whole list -- the same noise the column headers removed.
+function SubagentToggle({
+  model,
+  providerName,
+  selectedInSettings,
+  apiAvailable,
+  onSubagentChange,
+}: {
+  model: RouterModel;
+  providerName: string;
+  selectedInSettings: boolean;
+  apiAvailable: boolean;
+  onSubagentChange: (checked: boolean) => void;
+}) {
+  const subagent = subagentControl(model, selectedInSettings);
+  return (
+    <div className="pm-model-control" title={subagent.hint}>
+      <Toggle
+        checked={subagent.checked}
+        disabled={!apiAvailable}
+        label={`Use ${model.displayName} through ${providerName} as a subagent`}
+        onChange={onSubagentChange}
+      />
+      <span>{subagent.checked ? "On" : "Off"}</span>
+    </div>
+  );
+}
+
+function SubagentEffort({
   model,
   providerName,
   selectedInSettings,
   subagentEffort,
   apiAvailable,
-  onSubagentChange,
   onEffortChange,
 }: {
   model: RouterModel;
@@ -1222,37 +1268,25 @@ function SubagentControl({
   selectedInSettings: boolean;
   subagentEffort: string;
   apiAvailable: boolean;
-  onSubagentChange: (checked: boolean) => void;
   onEffortChange: (effort: string) => void;
 }) {
-  const subagent = subagentControl(model, selectedInSettings);
   const effortOptions = model.reasoningLevels ?? [];
+  // Nothing to choose on a route that is off, or one with a single-level
+  // ladder. An empty cell reads better than a menu nobody can use.
+  if (!selectedInSettings || effortOptions.length < 2) {
+    return <span className="pm-route-none">—</span>;
+  }
   return (
-    <div className="pm-subagent-controls" title={subagent.hint}>
-      <div className="pm-model-control">
-        <Toggle
-          checked={subagent.checked}
-          disabled={!apiAvailable}
-          label={`Use ${model.displayName} through ${providerName} as a subagent`}
-          onChange={onSubagentChange}
-        />
-        <span>{subagent.checked ? "On" : "Off"}</span>
-      </div>
-      {subagent.checked && effortOptions.length ? (
-        <label className="pm-model-effort">
-          <span>Thinking</span>
-          <select
-            aria-label={`${model.displayName} ${providerName} subagent thinking effort`}
-            value={subagentEffort}
-            disabled={!apiAvailable}
-            onChange={(event) => onEffortChange(event.target.value)}
-          >
-            <option value="default">Model default</option>
-            {effortOptions.map((effort) => <option key={effort} value={effort}>{effortLabel(effort)}</option>)}
-          </select>
-        </label>
-      ) : null}
-    </div>
+    <select
+      className="pm-route-effort"
+      aria-label={`${model.displayName} ${providerName} subagent thinking effort`}
+      value={subagentEffort}
+      disabled={!apiAvailable}
+      onChange={(event) => onEffortChange(event.target.value)}
+    >
+      <option value="default">Default</option>
+      {effortOptions.map((effort) => <option key={effort} value={effort}>{effortLabel(effort)}</option>)}
+    </select>
   );
 }
 
