@@ -5,6 +5,17 @@ import Testing
 
 @Suite("Menu bar settings", .serialized)
 struct MenuBarSettingsTests {
+  @Test("activity dot keeps an explicit state color")
+  func activityDotUsesNonTemplateImage() {
+    let image = MenuBarActivityDotImage.make(state: .generating, size: 6)
+    let color = RouterActivityState.generating.menuBarColor.usingColorSpace(.genericRGB)
+    #expect(image.isTemplate == false)
+    #expect(image.size == NSSize(width: 6, height: 6))
+    #expect(abs((color?.redComponent ?? 0) - 0.68) < 0.001)
+    #expect(abs((color?.greenComponent ?? 0) - 0.40) < 0.001)
+    #expect(abs((color?.blueComponent ?? 0) - 0.03) < 0.001)
+  }
+
   @Test("a missing key keeps the shipped activity-dot look")
   func missingKeysKeepShippedLook() {
     let settings = RouterStore.resolveMenuBarSettings(

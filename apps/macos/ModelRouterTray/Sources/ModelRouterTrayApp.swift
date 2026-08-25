@@ -324,6 +324,15 @@ enum RouterActivityState: String, Decodable {
     }
   }
 
+  var menuBarColor: NSColor {
+    switch self {
+    case .idle: return .white
+    case .generating: return NSColor(calibratedRed: 0.68, green: 0.40, blue: 0.03, alpha: 1)
+    case .starting: return NSColor(calibratedRed: 0.12, green: 0.40, blue: 0.76, alpha: 1)
+    case .error: return NSColor(calibratedRed: 0.72, green: 0.16, blue: 0.12, alpha: 1)
+    }
+  }
+
   var label: String {
     switch self {
     case .idle: return routerLocalized("Idle")
@@ -331,6 +340,18 @@ enum RouterActivityState: String, Decodable {
     case .starting: return routerLocalized("Starting")
     case .error: return routerLocalized("Error")
     }
+  }
+}
+
+enum MenuBarActivityDotImage {
+  static func make(state: RouterActivityState, size: CGFloat) -> NSImage {
+    let image = NSImage(size: NSSize(width: size, height: size))
+    image.isTemplate = false
+    image.lockFocus()
+    state.menuBarColor.setFill()
+    NSBezierPath(ovalIn: NSRect(x: 1, y: 1, width: max(1, size - 2), height: max(1, size - 2))).fill()
+    image.unlockFocus()
+    return image
   }
 }
 
@@ -4633,8 +4654,9 @@ private struct MenuBarIconView: View {
     case .provider:
       ProviderIcon(providerID: providerID, size: size, showsHelp: false)
     case .indicator:
-      Circle()
-        .fill(store.activityState.tint)
+      Image(nsImage: MenuBarActivityDotImage.make(state: store.activityState, size: 6))
+        .resizable()
+        .interpolation(.high)
         .frame(width: 6, height: 6)
     case .preset:
       Image(systemName: store.menuBarPresetIcon)
@@ -4678,8 +4700,9 @@ private struct StatusItemLabel: View {
           iconStyle: store.menuBarIconStyle,
           isIdle: store.activityState == .idle
         ) {
-          Circle()
-            .fill(store.activityState.tint)
+          Image(nsImage: MenuBarActivityDotImage.make(state: store.activityState, size: 5))
+            .resizable()
+            .interpolation(.high)
             .frame(width: 5, height: 5)
         }
       }
@@ -4697,8 +4720,9 @@ private struct StatusItemLabel: View {
     } else {
       HStack(spacing: 5) {
         if store.menuBarIconStyle == .indicator {
-          Circle()
-            .fill(store.activityState.tint)
+          Image(nsImage: MenuBarActivityDotImage.make(state: store.activityState, size: 6))
+            .resizable()
+            .interpolation(.high)
             .frame(width: 6, height: 6)
             .scaleEffect(pulsing ? 2.1 : 1)
             .opacity(pulsing ? 0.55 : 1)
