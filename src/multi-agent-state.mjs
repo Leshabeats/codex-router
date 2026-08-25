@@ -7,6 +7,7 @@ import path from "node:path";
 import { writePrivateJson } from "./file-security.mjs";
 import { STATE_DIR } from "./paths.mjs";
 import { applySubagentProofs, subagentProofSnapshot } from "./subagent-proofs.mjs";
+import { VERSION } from "./version.mjs";
 
 export const MULTI_AGENT_STATE_PATH =
   process.env.MODEL_ROUTER_MULTI_AGENT_STATE ||
@@ -202,19 +203,24 @@ export function applyMultiAgentSettings(models, settings, hidden = new Set()) {
   });
 }
 
-// Resolve the effective registry v2 claims once so catalog publication,
-// managed agent definitions, and doctor checks cannot disagree. Local proofs
-// are deliberately diagnostic only.
+// Resolve the effective v2 claims once so catalog publication, managed agent
+// definitions, and doctor checks cannot disagree. Two things can make a route
+// v2: a checked-in registry entry, or a completed local verification of that
+// exact route. The diagnostic proof statuses still promote nothing.
+//
+// `routerVersion` defaults here rather than at each call site: a verification
+// describes one build's relay behaviour, and a caller that forgot to pass it
+// would silently carry that evidence across an upgrade.
 export function applyMultiAgentCapabilities(
   models,
   settings,
-  { hidden = new Set(), proofs = subagentProofSnapshot() } = {},
+  { hidden = new Set(), proofs = subagentProofSnapshot(), routerVersion = VERSION } = {},
 ) {
   const configured = settings || readMultiAgentSettings();
   return applySubagentProofs(
     applyMultiAgentSettings(models, configured, hidden),
     proofs,
-    { hidden, disabled: configured.disabled },
+    { hidden, disabled: configured.disabled, routerVersion },
   );
 }
 

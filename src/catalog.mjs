@@ -945,10 +945,11 @@ function main() {
   const pickerState = modelPickerSnapshot();
   const visibleModels = new Set(pickerState.visible);
   const multiAgentSettings = readMultiAgentSettings();
-  // Settings can disable a certified route, but machine-local proof records
-  // are diagnostic only: neither a compatibility probe nor an observed child
-  // turn may manufacture a v2 claim. That capability belongs to the exact
-  // checked-in registry route and its reviewed v2_agent application.
+  // Settings can disable a certified route. A v2 claim itself comes from one
+  // of exactly two places: the checked-in registry route, or a completed local
+  // verification of that same route -- all five v2_agent checks passing in one
+  // run on this build. The older diagnostic records stay diagnostic: neither a
+  // compatibility probe nor an observed child turn may manufacture the claim.
   const allMultiAgentModels = applyMultiAgentCapabilities(
     selectedModels,
     multiAgentSettings,
