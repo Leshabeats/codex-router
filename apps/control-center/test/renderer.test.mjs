@@ -325,7 +325,8 @@ test("the production renderer exposes model discovery and picker actions", { tim
     const deepseekRow = page.locator(".pm-family-row").filter({ hasText: "DeepSeek Chat" });
     assert.equal((await deepseekRow.locator(".pm-family-state").innerText()).trim(), "On");
     await deepseekRow.locator('.pm-family-action input[type="checkbox"]').click();
-    await deepseekRow.getByText("Off", { exact: true }).waitFor();
+    // Scope to the row's own state, not any "Off" inside its expanded panel.
+    await deepseekRow.locator(".pm-family-state").filter({ hasText: "Off" }).waitFor();
     assert.deepEqual(await modelNames(), orderBefore);
 
     // Bulk switches live behind the overflow menu, off the main toolbar.
