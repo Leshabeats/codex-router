@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 
 // Point the proofs file and the user-model overlay at empty temp state before
 // the modules read their paths, the same isolation the registry tests use.
 const stateDir = mkdtempSync(path.join(os.tmpdir(), "subagent-proofs-test-"));
 process.env.MODEL_ROUTER_SUBAGENT_PROOFS = path.join(stateDir, "multi-agent-proofs.json");
 process.env.MODEL_ROUTER_USER_MODELS = path.join(stateDir, "user-models.json");
+after(() => rmSync(stateDir, { recursive: true, force: true }));
 
 const {
   applySubagentProofs,
@@ -115,6 +116,7 @@ test("local proof records never promote or demote repository claims", () => {
     { slug: "vendor/checking" },
     { slug: "vendor/hidden" },
     { slug: "vendor/disabled" },
+    { slug: "vendor/reviewed-v1", multiAgentVersion: "v1" },
     { slug: "vendor/registry", multiAgentVersion: "v2" },
   ];
   const proofs = {
@@ -136,6 +138,7 @@ test("local proof records never promote or demote repository claims", () => {
   assert.equal(bySlug.get("vendor/checking"), undefined);
   assert.equal(bySlug.get("vendor/hidden"), undefined);
   assert.equal(bySlug.get("vendor/disabled"), undefined);
+  assert.equal(bySlug.get("vendor/reviewed-v1"), "v1");
   assert.equal(bySlug.get("vendor/registry"), "v2");
   // No proofs at all is a pass-through, not a rewrite.
   assert.equal(applySubagentProofs(models, {}), models);

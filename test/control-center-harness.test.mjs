@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   getContextSessionsSnapshot,
@@ -107,7 +108,10 @@ test("service stop and restart are rejected at the IPC boundary", async () => {
   const handlers = new Map();
   const priorRoot = process.env.CODEX_ROUTER_SOURCE_ROOT;
   try {
-    process.env.CODEX_ROUTER_SOURCE_ROOT = path.resolve(new URL("..", import.meta.url).pathname);
+    process.env.CODEX_ROUTER_SOURCE_ROOT = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      "..",
+    );
     registerIpcHandlers({
       ipcMain: { handle: (name, handler) => handlers.set(name, handler) },
       BrowserWindow: { getAllWindows: () => [] },
