@@ -497,7 +497,12 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
             const entry = outcome?.results?.find((item) => item.slug === slug);
             if (entry?.certified) continue;
             const detail = entry?.reason || entry?.failedLabel;
-            failures[slug] = detail ? `Cannot run subagents — ${detail}` : "This route cannot run subagents.";
+            // A deferred run learned nothing about the route -- a rate limit,
+            // an outage, or a harness that would not start the child. Saying
+            // "cannot run subagents" there states a verdict nobody reached.
+            failures[slug] = entry?.deferred
+              ? detail ? `Couldn't check — ${detail}` : "Couldn't check this route just now."
+              : detail ? `Cannot run subagents — ${detail}` : "This route cannot run subagents.";
           }
           if (Object.keys(failures).length) {
             setCertifyProblems((current) => ({ ...current, ...failures }));

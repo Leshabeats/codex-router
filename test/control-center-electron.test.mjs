@@ -1185,6 +1185,8 @@ test("the model directory combines provider setup with de-duplicated model-famil
   // router promotes only on a complete pass. A refusal is one sentence.
   assert.match(models, /const runCertifyBatch = async/);
   assert.match(models, /if \(entry\?\.certified\) continue;/);
+  // A run that never reached a verdict must not be reported as one.
+  assert.match(models, /entry\?\.deferred[\s\S]{0,140}Couldn't check/);
   assert.match(models, /Cannot run subagents/);
   // A refusal outranks the spinner once the run is over.
   assert.match(models, /\{problem \? "No" : checking \? "Checking…" : "Off"\}/);
