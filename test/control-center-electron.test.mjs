@@ -1562,3 +1562,25 @@ for (const mode of ["timeout", "overflow"]) {
     }
   });
 }
+
+test("router children inherit the proxy opt-in this install recorded", async () => {
+  const runner = await readFile(
+    new URL("../apps/control-center/electron/command-runner.mjs", import.meta.url),
+    "utf8",
+  );
+  // The app is launched by the desktop session, so it inherits a proxy address
+  // but nothing saying Node may use it. Without the recorded opt-in a router
+  // child dials a proxied host directly and the connect timeout is reported as
+  // the provider failing -- a reachable Venice catalog came back as "fetch
+  // failed" that way.
+  assert.match(runner, /recordedInstall\.proxyOptIn === "1"/);
+  assert.match(runner, /childEnvironment\.NODE_USE_ENV_PROXY === undefined/);
+  assert.match(runner, /childEnvironment\.NODE_USE_ENV_PROXY = "1"/);
+  assert.match(runner, /recordedProxy\.NODE_USE_ENV_PROXY === "1"/);
+  // Only the opt-in is restored. Supplying an address the environment does not
+  // name is inheritedProxyEnvironment's decision to defer, and AGENTS.md says
+  // not to widen that trigger.
+  assert.doesNotMatch(runner, /childEnvironment\.HTTPS?_PROXY = /);
+  // It applies only to the install that recorded it.
+  assert.match(runner, /recordedInstall\?\.sourceRoot === sourceRoot\s*&&\s*recordedInstall\.proxyOptIn/);
+});

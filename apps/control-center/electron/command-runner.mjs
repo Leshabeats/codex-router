@@ -268,7 +268,17 @@ function recordedInstallManifest() {
       : typeof rawPackageManager === "string" && /^[a-z0-9][a-z0-9._-]{0,80}$/i.test(rawPackageManager)
         ? rawPackageManager
         : undefined;
-    return { sourceRoot, packageManager };
+    // Only the proxy opt-in is read back, never the addresses: restoring an
+    // address the environment does not name is `inheritedProxyEnvironment`'s
+    // decision to defer, and AGENTS.md says not to widen that trigger here.
+    const recordedProxy = manifest.current?.proxyEnvironment;
+    const proxyOptIn = recordedProxy
+      && typeof recordedProxy === "object"
+      && !Array.isArray(recordedProxy)
+      && recordedProxy.NODE_USE_ENV_PROXY === "1"
+      ? "1"
+      : undefined;
+    return { sourceRoot, packageManager, proxyOptIn };
   } catch {
     return undefined;
   }
@@ -485,6 +495,24 @@ function runEntrypoint(entry, args = [], {
     ...environmentOverrides,
   };
   const recordedInstall = recordedInstallManifest();
+  // The address and the permission to use it are separate answers, and this
+  // app is launched by the desktop session rather than by the service: it
+  // inherits HTTP_PROXY from the login environment but nothing that says Node
+  // may use it. A router child then dials a proxied host directly and reports
+  // the connect timeout as the provider failing -- which is how a reachable
+  // Venice catalog came back as "fetch failed". The service definition already
+  // resolves this the same way; see serviceProxyEnvironment().
+  if (
+    recordedInstall?.sourceRoot === sourceRoot
+    && recordedInstall.proxyOptIn === "1"
+    && childEnvironment.NODE_USE_ENV_PROXY === undefined
+    && (
+      childEnvironment.HTTP_PROXY ?? childEnvironment.http_proxy
+      ?? childEnvironment.HTTPS_PROXY ?? childEnvironment.https_proxy
+    )
+  ) {
+    childEnvironment.NODE_USE_ENV_PROXY = "1";
+  }
   if (recordedInstall?.sourceRoot === sourceRoot && recordedInstall.packageManager !== undefined) {
     if (recordedInstall.packageManager === null) delete childEnvironment.CODEX_ROUTER_PACKAGE_MANAGER;
     else childEnvironment.CODEX_ROUTER_PACKAGE_MANAGER = recordedInstall.packageManager;
