@@ -1003,9 +1003,19 @@ function ModelFamilyRow({
         {multiRoute ? (
           <>
             <div className="pm-family-route-note">
-              The same model reaches you through more than one account. Each route has its own credential, quota, and pricing — keep the one you want in the picker.
+              The same model reaches you through more than one account. Each one has its own credential, quota, and pricing.
             </div>
-            <div className="pm-model-list" role="list" aria-label={`${family.displayName} routes`}>
+            {/* Labelling every row cost 12 words for 4 switches, and every row
+                sized its own columns so nothing lined up down the list. One
+                header, one shared grid. */}
+            <div className="pm-route-table" role="list" aria-label={`${family.displayName} routes`}>
+              <div className="pm-route-head" aria-hidden="true">
+                <span>Account</span>
+                <span>Context</span>
+                <span>Input</span>
+                <span>In picker</span>
+                <span>Subagents</span>
+              </div>
               {family.routes.map((model) => (
                 <ModelRouteRow
                   key={model.slug}
@@ -1019,6 +1029,7 @@ function ModelFamilyRow({
                   onPickerChange={(checked) => onRoutePicker(model, checked)}
                   onSubagentChange={(checked) => onSubagent(model, checked)}
                   onEffortChange={(effort) => onEffort(model, effort)}
+                  onConnect={() => onConnect(model.provider)}
                 />
               ))}
             </div>
@@ -1173,6 +1184,7 @@ function ModelRouteRow({
   onPickerChange,
   onSubagentChange,
   onEffortChange,
+  onConnect,
 }: {
   model: RouterModel;
   providerName: string;
@@ -1184,48 +1196,51 @@ function ModelRouteRow({
   onPickerChange: (checked: boolean) => void;
   onSubagentChange: (checked: boolean) => void;
   onEffortChange: (effort: string) => void;
+  onConnect: () => void;
 }) {
+  const identity = (
+    <div className="pm-route-identity">
+      <ProviderLogo providerId={model.provider} displayName={providerName} size="medium" />
+      <div>
+        <strong>{providerName}</strong>
+        {model.isFree ? <span className="pm-route-free">Free</span> : null}
+        <small title={model.slug}>{model.slug}</small>
+      </div>
+    </div>
+  );
+  const context = model.contextWindow ? formatContext(model.contextWindow) : "—";
+  const input = model.inputModalities?.includes("image") ? "Text + image" : "Text";
+
   if (!routeUsable(model)) {
     return (
-      <article className="pm-model-row pm-route-row pm-route-row-unavailable" role="listitem" data-availability="known">
-        <div className="pm-model-identity">
-          <ProviderLogo providerId={model.provider} displayName={providerName} size="medium" />
-          <div><strong>{providerName}</strong><span>Known route</span><small title={model.slug}>{model.slug}</small></div>
-        </div>
-        <div className="pm-model-meta">
-          {model.contextWindow ? <span>{formatContext(model.contextWindow)}</span> : null}
-          <span>{model.inputModalities?.includes("image") ? "Text + image" : "Text"}</span>
-          {model.isFree ? <Badge tone="success">Free</Badge> : null}
-        </div>
-        <div className="pm-model-controls pm-model-unavailable-copy">
-          Connect {providerName} to use this route.
-        </div>
+      <article className="pm-route-row" role="listitem" data-availability="known">
+        {identity}
+        <span className="pm-route-cell">{context}</span>
+        <span className="pm-route-cell">{input}</span>
+        {/* The same slot the switches occupy, so the right edge answers one
+            question all the way down: what can I do with this route. */}
+        <span className="pm-route-cell pm-route-connect">
+          <Button variant="secondary" disabled={!apiAvailable} onClick={onConnect}>Connect {providerName}</Button>
+        </span>
       </article>
     );
   }
+
   const subagent = subagentControl(model, subagentSettings, selectedInSettings);
   return (
-    <article className="pm-model-row pm-route-row" role="listitem" data-subagent={subagent.kind === "subagent" && subagent.checked ? "enabled" : "disabled"}>
-      <div className="pm-model-identity">
-        <ProviderLogo providerId={model.provider} displayName={providerName} size="medium" />
-        <div><strong>{providerName}</strong><span>{modelRouteKind(model)}</span><small title={model.slug}>{model.slug}</small></div>
-      </div>
-      <div className="pm-model-meta">
-        <span>{formatContext(model.contextWindow)}</span>
-        <span>{model.inputModalities?.includes("image") ? "Text + image" : "Text"}</span>
-        {model.isFree ? <Badge tone="success">Free</Badge> : null}
-        <Badge tone={subagent.badge.tone}>{subagent.badge.text}</Badge>
-      </div>
-      <div className="pm-model-controls">
-        <div className="pm-model-control">
-          <span>In picker</span>
-          <Toggle
-            checked={pickerVisible}
-            disabled={!apiAvailable || nativeClientManaged(model)}
-            label={nativeClientManaged(model) ? `${model.displayName} is managed by Codex` : `Show ${model.displayName} through ${providerName} in the picker`}
-            onChange={onPickerChange}
-          />
-        </div>
+    <article className="pm-route-row" role="listitem" data-subagent={subagent.kind === "subagent" && subagent.checked ? "enabled" : "disabled"}>
+      {identity}
+      <span className="pm-route-cell">{context}</span>
+      <span className="pm-route-cell">{input}</span>
+      <span className="pm-route-cell pm-route-control">
+        <Toggle
+          checked={pickerVisible}
+          disabled={!apiAvailable || nativeClientManaged(model)}
+          label={nativeClientManaged(model) ? `${model.displayName} is managed by Codex` : `Show ${model.displayName} through ${providerName} in the picker`}
+          onChange={onPickerChange}
+        />
+      </span>
+      <span className="pm-route-cell pm-route-control">
         <SubagentControl
           model={model}
           providerName={providerName}
@@ -1236,7 +1251,7 @@ function ModelRouteRow({
           onSubagentChange={onSubagentChange}
           onEffortChange={onEffortChange}
         />
-      </div>
+      </span>
     </article>
   );
 }
@@ -1269,14 +1284,16 @@ function SubagentControl({
       {subagent.kind === "unsupported" ? (
         <span className="pm-model-control-note">{subagent.badge.text}</span>
       ) : (
+        // The column header already says "Subagents"; the row says what state
+        // it is in, never the same word twice in one line.
         <div className="pm-model-control">
-          <span>{subagent.label}</span>
           <Toggle
             checked={subagent.checked}
             disabled={!apiAvailable || subagent.disabled}
             label={`${subagent.label}: ${model.displayName} through ${providerName}`}
             onChange={onSubagentChange}
           />
+          <span>{subagent.kind === "test" ? subagent.badge.text : subagent.checked ? "On" : "Off"}</span>
         </div>
       )}
       {subagent.showEffort && effortOptions.length ? (

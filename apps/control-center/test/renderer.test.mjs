@@ -282,7 +282,11 @@ test("the production renderer exposes model discovery and picker actions", { tim
     await oxFamily.locator(".pm-family-open").click();
     assert.equal(await oxFamily.locator(".pm-route-row").count(), 6);
     assert.equal(await oxFamily.locator('.pm-route-row[data-availability="known"]').count(), 4);
-    assert.equal(await oxFamily.getByText(/Connect .* to use this route\./).count(), 4);
+    // Every row ends in the same slot: a switch you can use, or the button
+    // that would make it usable.
+    assert.equal(await oxFamily.getByRole("button", { name: /^Connect / }).count(), 4);
+    const columns = await oxFamily.locator(".pm-route-head > span").allTextContents();
+    assert.deepEqual(columns, ["Account", "Context", "Input", "In picker", "Subagents"]);
     await modelSearch.fill("");
 
     // Adding reads every connected provider's catalog at once. Only a provider

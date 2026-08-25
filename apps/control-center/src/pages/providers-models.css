@@ -533,20 +533,102 @@
   border-radius: 0;
 }
 
-.pm-route-row {
-  padding-left: 66px;
+/* Header and rows share one column definition in fixed units, so every cell
+   lines up down the whole list. Per-row `auto` columns are what made each row
+   size itself and the list read as ragged. */
+
+.pm-route-table {
   background: var(--surface-0);
 }
 
-.pm-route-row-unavailable {
-  background: color-mix(in srgb, var(--surface-1) 70%, var(--surface-0));
+.pm-route-head,
+.pm-route-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 84px 96px 74px 148px;
+  align-items: center;
+  column-gap: 14px;
+  padding: 0 14px 0 64px;
 }
 
-.pm-model-unavailable-copy {
-  max-width: 260px;
+.pm-route-head {
+  padding-top: 9px;
+  padding-bottom: 6px;
   color: var(--ink-faint);
+  font-size: 8px;
+  font-weight: 650;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.pm-route-row {
+  min-height: 50px;
+  border-top: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+}
+
+.pm-route-row[data-availability="known"] {
+  background: color-mix(in srgb, var(--surface-1) 55%, var(--surface-0));
+}
+
+.pm-route-identity {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 0;
+}
+
+.pm-route-identity > div {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: baseline;
+  column-gap: 7px;
+}
+
+.pm-route-identity strong {
+  grid-column: 1;
+  overflow: hidden;
+  color: var(--ink-strong);
+  font-size: 11px;
+  font-weight: 580;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pm-route-free {
+  grid-column: 2;
+  color: var(--success);
   font-size: 8.5px;
-  line-height: 1.45;
+  font-weight: 600;
+}
+
+.pm-route-identity small {
+  grid-column: 1 / -1;
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--ink-faint);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pm-route-cell {
+  color: var(--ink-subtle);
+  font-size: 9.5px;
+  white-space: nowrap;
+}
+
+.pm-route-control .pm-subagent-controls,
+.pm-route-control .pm-model-control {
+  gap: 8px;
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+
+.pm-route-connect {
+  grid-column: 4 / -1;
+  justify-self: start;
 }
 
 .providers-models-page :is(input, select):focus-visible,
@@ -965,8 +1047,28 @@
 
 .pm-family-route-note,
   .pm-model-details,
+  .pm-route-head,
   .pm-route-row {
     padding-left: 14px;
+  }
+
+.pm-route-head {
+    display: none;
+  }
+
+.pm-route-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    row-gap: 6px;
+    padding-top: 8px;
+    padding-bottom: 8px;
+  }
+
+.pm-route-row > .pm-route-cell:not(.pm-route-connect) {
+    grid-column: auto;
+  }
+
+.pm-route-connect {
+    grid-column: 2;
   }
 
 .pm-model-row {

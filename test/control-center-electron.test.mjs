@@ -1179,6 +1179,13 @@ test("the model directory combines provider setup with de-duplicated model-famil
   assert.match(models, /<strong>\{providerName\}<\/strong>/);
   assert.match(models, /groupModelFamilies\(allModels\)/);
   assert.match(models, /The same model reaches you through more than one account\./);
+  // One header for the whole list instead of a label on every row, and one
+  // shared column definition so the rows cannot size themselves apart.
+  assert.match(models, /className="pm-route-head"/);
+  assert.match(models, /<span>In picker<\/span>[\s\S]{0,60}<span>Subagents<\/span>/);
+  assert.match(providerModelsCss, /\.pm-route-head,\n\.pm-route-row \{[^}]*grid-template-columns: minmax\(0, 1fr\) 84px/s);
+  // A status must not be printed twice in the same row.
+  assert.doesNotMatch(models, /<Badge tone=\{subagent\.badge\.tone\}>/);
   assert.match(models, /discoverProviderModels/);
   assert.match(models, /addProviderModels/);
   assert.match(models, /className="pm-filter-trigger"/);
