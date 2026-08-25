@@ -1167,11 +1167,16 @@ test("the model directory combines provider setup with de-duplicated model-famil
   assert.match(providerModelsCss, /\.pm-pending-control/);
   assert.match(models, /setSubagentModel/);
   assert.match(models, /setSubagentEffort/);
-  // One vocabulary for subagent support instead of a v1/v2/test/untested mix.
+  // The registry is the only thing that can make a route a subagent, so the
+  // page offers the switch or says nothing -- never a test that cannot change
+  // the outcome.
   assert.match(models, /function subagentControl\(/);
-  assert.match(models, /text: "Runs subagents"/);
-  assert.match(models, /label: "Test subagents"/);
-  assert.doesNotMatch(models, /"Test v2"|>v1 only</);
+  assert.match(models, /if \(subagentCertification\(model\) !== "v2"\)/);
+  assert.match(models, /available: false as const/);
+  assert.match(models, /available: true as const/);
+  assert.match(models, /className="pm-route-none"/);
+  assert.doesNotMatch(models, /"Test v2"|>v1 only<|Test subagents|Untested|Awaiting certification|Certification candidate/);
+  assert.doesNotMatch(models, /proof\?\.status/);
   assert.match(models, /subagent thinking effort/);
   assert.match(models, /<option value="default">Model default<\/option>/);
   assert.match(providerModelsCss, /\.pm-model-row\[data-subagent="enabled"\]/);
@@ -1186,6 +1191,9 @@ test("the model directory combines provider setup with de-duplicated model-famil
   assert.match(providerModelsCss, /\.pm-route-head,\n\.pm-route-row \{[^}]*grid-template-columns: minmax\(0, 1fr\) 84px/s);
   // A status must not be printed twice in the same row.
   assert.doesNotMatch(models, /<Badge tone=\{subagent\.badge\.tone\}>/);
+  // Nothing downstream needs the proof records any more, so the settings stop
+  // being threaded through every row component to reach them.
+  assert.doesNotMatch(models, /subagentSettings=\{subagentSettings\}/);
   assert.match(models, /discoverProviderModels/);
   assert.match(models, /addProviderModels/);
   assert.match(models, /className="pm-filter-trigger"/);

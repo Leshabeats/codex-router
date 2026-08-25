@@ -485,7 +485,6 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
       onToggleExpanded={() => setExpandedFamilyId(expandedFamilyId === family.id ? null : family.id)}
       apiAvailable={Boolean(api)}
       providerNames={providerNames}
-      subagentSettings={subagentSettings}
       pickerValue={(model) => optimisticPicker.value(model.slug, model.visible)}
       subagentValue={(model) => optimisticSubagents.value(model.slug, Boolean(subagentEnabled(target, model.slug, subagentSettings)))}
       effortValue={(model) => optimisticSubagentEfforts.value(model.slug, subagentSettings?.efforts?.[model.slug] ?? "default")}
@@ -914,7 +913,6 @@ function ModelFamilyRow({
   onToggleExpanded,
   apiAvailable,
   providerNames,
-  subagentSettings,
   pickerValue,
   subagentValue,
   effortValue,
@@ -932,7 +930,6 @@ function ModelFamilyRow({
   onToggleExpanded: () => void;
   apiAvailable: boolean;
   providerNames: Map<string, string>;
-  subagentSettings?: NonNullable<RouterTarget["modelSettings"]>["subagents"];
   pickerValue: (model: RouterModel) => boolean;
   subagentValue: (model: RouterModel) => boolean;
   effortValue: (model: RouterModel) => string;
@@ -1021,7 +1018,6 @@ function ModelFamilyRow({
                   key={model.slug}
                   model={model}
                   providerName={providerNames.get(model.provider) || providerDisplayName(model.provider)}
-                  subagentSettings={subagentSettings}
                   pickerVisible={pickerValue(model)}
                   selectedInSettings={subagentValue(model)}
                   subagentEffort={effortValue(model)}
@@ -1041,7 +1037,6 @@ function ModelFamilyRow({
           <ModelDetails
             model={family.routes[0]}
             providerName={providerNames.get(family.routes[0].provider) || providerDisplayName(family.routes[0].provider)}
-            subagentSettings={subagentSettings}
             selectedInSettings={subagentValue(family.routes[0])}
             subagentEffort={effortValue(family.routes[0])}
             apiAvailable={apiAvailable}
@@ -1057,7 +1052,6 @@ function ModelFamilyRow({
 function ModelDetails({
   model,
   providerName,
-  subagentSettings,
   selectedInSettings,
   subagentEffort,
   apiAvailable,
@@ -1066,7 +1060,6 @@ function ModelDetails({
 }: {
   model: RouterModel;
   providerName: string;
-  subagentSettings?: NonNullable<RouterTarget["modelSettings"]>["subagents"];
   selectedInSettings: boolean;
   subagentEffort: string;
   apiAvailable: boolean;
@@ -1090,7 +1083,6 @@ function ModelDetails({
             <SubagentControl
               model={model}
               providerName={providerName}
-              subagentSettings={subagentSettings}
               selectedInSettings={selectedInSettings}
               subagentEffort={subagentEffort}
               apiAvailable={apiAvailable}
@@ -1109,74 +1101,29 @@ function ModelDetails({
   );
 }
 
-// One vocabulary for subagent support. A route either runs subagents, cannot,
-// or has never been tested — the protocol version behind that is a detail the
-// tooltip carries, not four different words on four different controls.
-function subagentControl(model: RouterModel, subagentSettings: NonNullable<RouterTarget["modelSettings"]>["subagents"] | undefined, selectedInSettings: boolean) {
-  const certification = subagentCertification(model);
-  const proof = subagentSettings?.proofs?.[model.slug];
-  if (certification === "v2") {
+// Only the model registry can make a route a subagent: `multiAgentVersion:
+// "v2"` is the sole promotion authority, and applySubagentProofs() discards
+// local probe results by design. A control that cannot change that outcome has
+// no business in front of someone choosing a model, so a route either offers
+// the switch or says nothing at all.
+function subagentControl(model: RouterModel, selectedInSettings: boolean) {
+  if (subagentCertification(model) !== "v2") {
     return {
-      kind: "subagent" as const,
-      label: "Subagents",
-      hint: "This route is certified to run subagents.",
-      badge: { tone: "accent" as const, text: "Runs subagents" },
-      checked: selectedInSettings,
-      disabled: false,
-      showEffort: true,
-    };
-  }
-  if (certification === "v1") {
-    return {
-      kind: "unsupported" as const,
-      label: "Subagents",
-      hint: "This route speaks the older v1 protocol and cannot host subagents.",
-      badge: { tone: "neutral" as const, text: "No subagents" },
+      available: false as const,
       checked: false,
-      disabled: true,
-      showEffort: false,
+      hint: "This route cannot host subagents. Only models certified in the router's registry can.",
     };
   }
-  if (proof?.status === "checking") {
-    return {
-      kind: "test" as const,
-      label: "Test subagents",
-      hint: "Running a one-time low-cost compatibility test. This does not enable subagents by itself.",
-      badge: { tone: "neutral" as const, text: "Testing" },
-      checked: selectedInSettings,
-      disabled: false,
-      showEffort: false,
-    };
-  }
-  if (["candidate", "experimental", "proven"].includes(proof?.status ?? "")) {
-    return {
-      kind: "unsupported" as const,
-      label: "Subagents",
-      hint: "This route passed a local test but is still waiting on a reviewed certification.",
-      badge: { tone: "neutral" as const, text: "Awaiting certification" },
-      checked: false,
-      disabled: true,
-      showEffort: false,
-    };
-  }
-  const failed = proof?.status === "failed";
   return {
-    kind: "test" as const,
-    label: "Test subagents",
-    hint: failed
-      ? proof?.reason || "The last compatibility test failed."
-      : "Run a one-time low-cost test to see whether this route can host subagents.",
-    badge: failed ? { tone: "danger" as const, text: "Test failed" } : { tone: "neutral" as const, text: "Untested" },
+    available: true as const,
     checked: selectedInSettings,
-    disabled: false,
-    showEffort: false,
+    hint: "Codex can spawn subagents on this route.",
   };
 }
 
 function ModelRouteRow({
   model,
   providerName,
-  subagentSettings,
   pickerVisible,
   selectedInSettings,
   subagentEffort,
@@ -1188,7 +1135,6 @@ function ModelRouteRow({
 }: {
   model: RouterModel;
   providerName: string;
-  subagentSettings?: NonNullable<RouterTarget["modelSettings"]>["subagents"];
   pickerVisible: boolean;
   selectedInSettings: boolean;
   subagentEffort: string;
@@ -1226,9 +1172,9 @@ function ModelRouteRow({
     );
   }
 
-  const subagent = subagentControl(model, subagentSettings, selectedInSettings);
+  const subagent = subagentControl(model, selectedInSettings);
   return (
-    <article className="pm-route-row" role="listitem" data-subagent={subagent.kind === "subagent" && subagent.checked ? "enabled" : "disabled"}>
+    <article className="pm-route-row" role="listitem" data-subagent={subagent.available && subagent.checked ? "enabled" : "disabled"}>
       {identity}
       <span className="pm-route-cell">{context}</span>
       <span className="pm-route-cell">{input}</span>
@@ -1244,7 +1190,6 @@ function ModelRouteRow({
         <SubagentControl
           model={model}
           providerName={providerName}
-          subagentSettings={subagentSettings}
           selectedInSettings={selectedInSettings}
           subagentEffort={subagentEffort}
           apiAvailable={apiAvailable}
@@ -1261,7 +1206,6 @@ function ModelRouteRow({
 function SubagentControl({
   model,
   providerName,
-  subagentSettings,
   selectedInSettings,
   subagentEffort,
   apiAvailable,
@@ -1270,33 +1214,29 @@ function SubagentControl({
 }: {
   model: RouterModel;
   providerName: string;
-  subagentSettings?: NonNullable<RouterTarget["modelSettings"]>["subagents"];
   selectedInSettings: boolean;
   subagentEffort: string;
   apiAvailable: boolean;
   onSubagentChange: (checked: boolean) => void;
   onEffortChange: (effort: string) => void;
 }) {
-  const subagent = subagentControl(model, subagentSettings, selectedInSettings);
+  const subagent = subagentControl(model, selectedInSettings);
+  if (!subagent.available) {
+    return <span className="pm-route-none" title={subagent.hint}>—</span>;
+  }
   const effortOptions = model.reasoningLevels ?? [];
   return (
     <div className="pm-subagent-controls" title={subagent.hint}>
-      {subagent.kind === "unsupported" ? (
-        <span className="pm-model-control-note">{subagent.badge.text}</span>
-      ) : (
-        // The column header already says "Subagents"; the row says what state
-        // it is in, never the same word twice in one line.
-        <div className="pm-model-control">
-          <Toggle
-            checked={subagent.checked}
-            disabled={!apiAvailable || subagent.disabled}
-            label={`${subagent.label}: ${model.displayName} through ${providerName}`}
-            onChange={onSubagentChange}
-          />
-          <span>{subagent.kind === "test" ? subagent.badge.text : subagent.checked ? "On" : "Off"}</span>
-        </div>
-      )}
-      {subagent.showEffort && effortOptions.length ? (
+      <div className="pm-model-control">
+        <Toggle
+          checked={subagent.checked}
+          disabled={!apiAvailable}
+          label={`Use ${model.displayName} through ${providerName} as a subagent`}
+          onChange={onSubagentChange}
+        />
+        <span>{subagent.checked ? "On" : "Off"}</span>
+      </div>
+      {effortOptions.length ? (
         <label className="pm-model-effort">
           <span>Thinking</span>
           <select

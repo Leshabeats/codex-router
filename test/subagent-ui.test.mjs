@@ -35,49 +35,27 @@ test("Control Center keeps legacy local proofs as candidates, not active v2 rout
   assert.match(source, /model\.multiAgentVersion === "v1" \? "v1" : "unknown"/);
   assert.match(source, /settings\.mode === "selected" && settings\.enabled\.includes\(slug\)/);
 
-  // The four states share one control and one vocabulary. What must not blur is
-  // which of them can actually host a subagent: only a certified v2 route.
+  // The registry is the sole promotion authority and applySubagentProofs()
+  // discards local probe results, so the page must not offer a control that
+  // implies otherwise. A route certified v2 gets the switch; every other route
+  // gets nothing to click at all.
   const control = source.slice(
     source.indexOf("function subagentControl("),
     source.indexOf("function ModelRouteRow("),
   );
   assert.ok(control, "subagentControl is the single source of subagent wording");
-  const certified = control.slice(
-    control.indexOf('if (certification === "v2")'),
-    control.indexOf('if (certification === "v1")'),
-  );
-  assert.match(certified, /kind: "subagent" as const/);
-  assert.match(certified, /checked: selectedInSettings/);
-  assert.match(certified, /showEffort: true/);
-  // Thinking effort belongs to a route that really runs subagents, so exactly
-  // one branch may offer it.
-  assert.equal(control.match(/showEffort: true/g)?.length, 1);
+  assert.match(control, /if \(subagentCertification\(model\) !== "v2"\)[\s\S]{0,220}available: false as const/);
+  assert.match(control, /available: true as const[\s\S]{0,120}checked: selectedInSettings/);
 
-  const knownV1 = control.slice(
-    control.indexOf('if (certification === "v1")'),
-    control.indexOf('if (proof?.status === "checking")'),
-  );
-  assert.match(knownV1, /kind: "unsupported" as const/);
-  assert.match(knownV1, /checked: false/);
-  assert.match(knownV1, /disabled: true/);
+  // No local-proof vocabulary survives anywhere on the page: no probe request,
+  // no candidate state, and no wording that reads as one test away from working.
+  assert.doesNotMatch(source, /proofs/);
+  assert.doesNotMatch(source, /candidate|experimental|proven/);
+  assert.doesNotMatch(source, /Test subagents|Untested|Awaiting certification|Test failed|Checking compatibility/);
 
-  // A local proof is diagnostic only. It stays a candidate: never checked,
-  // never toggleable, and never presented as a working subagent route.
-  assert.match(control, /\["candidate", "experimental", "proven"\]\.includes\(proof\?\.status \?\? ""\)/);
-  const candidate = control.slice(
-    control.indexOf('["candidate", "experimental", "proven"].includes(proof?.status ?? "")'),
-    control.indexOf("const failed = proof?.status === \"failed\""),
-  );
-  assert.match(candidate, /kind: "unsupported" as const/);
-  assert.match(candidate, /checked: false/);
-  assert.match(candidate, /disabled: true/);
-  assert.doesNotMatch(candidate, /kind: "subagent"/);
-
-  // An unsupported route offers no switch at all, so there is nothing to click
-  // that could imply the route is one test away from working.
-  assert.match(source, /subagent\.kind === "unsupported" \? \(/);
-  assert.match(source, /className="pm-model-control-note"/);
-  assert.match(source, /disabled=\{!apiAvailable \|\| subagent\.disabled\}/);
+  // An uncertified route renders an inert marker, never a Toggle.
+  assert.match(source, /if \(!subagent\.available\) \{[\s\S]{0,200}className="pm-route-none"/);
+  assert.match(source, /disabled=\{!apiAvailable\}/);
 });
 
 test("macOS subagent settings show native and unverified enabled models", () => {
