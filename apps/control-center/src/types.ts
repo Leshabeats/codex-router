@@ -296,6 +296,26 @@ export interface ProviderCatalog {
   blocked: Record<string, string>;
   unavailable: string[];
   contextLengths?: Record<string, number>;
+  metadata?: Record<string, {
+    contextWindow?: number;
+    maxOutputTokens?: number;
+    inputModalities?: string[];
+    outputModalities?: string[];
+    supportsTools?: boolean;
+    supportsToolChoice?: boolean;
+    reasoning?: {
+      supported?: boolean;
+      configurable?: boolean;
+      supportedEfforts?: string[];
+      defaultEffort?: string;
+      mandatory?: boolean;
+      defaultEnabled?: boolean;
+      advertisedSupportedEfforts?: string[];
+      advertisedDefaultEffort?: string;
+      effectiveMetadataSource?: string;
+    };
+    metadataSource?: string;
+  }>;
   free?: string[];
   /** True when the list came from the stored copy rather than a live request. */
   cached?: boolean;

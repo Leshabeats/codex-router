@@ -6,6 +6,7 @@ import {
   providerCatalogIdentityFingerprint,
   withProviderCatalogCacheTransaction,
 } from "./model-catalog-cache.mjs";
+import { modelCatalogMetadata } from "./model-catalog-metadata.mjs";
 import {
   anonymousModelAllowed,
   MODELS,
@@ -281,11 +282,13 @@ export async function discoverProviderModels(
   let discovered;
   let free;
   let contextLengths;
+  let metadata;
   let fetchedAt;
   if (cached) {
     discovered = cached.discovered;
     free = cached.free || [];
     contextLengths = cached.contextLengths || {};
+    metadata = cached.metadata || {};
     fetchedAt = cached.fetchedAt;
   } else {
     identity ||= usingFixture ? undefined : await providerDiscoveryIdentity(provider);
@@ -293,6 +296,11 @@ export async function discoverProviderModels(
     discovered = modelIds(payload, provider);
     free = freeModelIds(payload, provider);
     contextLengths = modelContextLengths(payload, provider);
+    const discoveredIds = new Set(discovered);
+    metadata = Object.fromEntries(
+      Object.entries(modelCatalogMetadata(payload, provider))
+        .filter(([id]) => discoveredIds.has(id)),
+    );
     fetchedAt = new Date().toISOString();
     if (storeAnswer) {
       await withProviderCatalogCacheTransaction(async (catalog) => {
@@ -304,6 +312,7 @@ export async function discoverProviderModels(
           discovered,
           free,
           contextLengths,
+          metadata,
           fetchedAt,
           identityFingerprint: providerDiscoveryIdentityFingerprint(identity),
         });
@@ -342,6 +351,10 @@ export async function discoverProviderModels(
     // Sizing the provider published for itself. Curation stores it rather than
     // guessing a window for a model whose catalog entry already names one.
     contextLengths,
+    // Normalized provider-declared capabilities and documented supplements.
+    // Missing fields stay missing: discovery is an evidence record, not a
+    // reason to invent curation defaults or enable a route automatically.
+    ...(Object.keys(metadata || {}).length ? { metadata } : {}),
     // Whether this list came from the provider just now or from the last time
     // it was asked. The surfaces that show it say which, so a stale list is
     // never mistaken for a live one.

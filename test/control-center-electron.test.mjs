@@ -83,6 +83,15 @@ test("global model search includes candidates that exist only in loaded discover
         addable: ["discovery-only-model"],
         blocked: {},
         contextLengths: { "discovery-only-model": 131_072 },
+        metadata: {
+          "discovery-only-model": {
+            contextWindow: 262_144,
+            maxOutputTokens: 32_000,
+            inputModalities: ["text", "image"],
+            supportsTools: true,
+            reasoning: { supportedEfforts: ["low", "high"] },
+          },
+        },
       },
     },
   };
@@ -94,7 +103,11 @@ test("global model search includes candidates that exist only in loaded discover
   assert.equal(match.sourceId, "opencode-zen");
   assert.equal(match.addable, true);
   assert.equal(match.registered, false);
-  assert.equal(match.contextWindow, 131_072);
+  assert.equal(match.contextWindow, 262_144);
+  assert.equal(match.maxOutputTokens, 32_000);
+  assert.deepEqual(match.inputModalities, ["text", "image"]);
+  assert.deepEqual(match.reasoningEfforts, ["low", "high"]);
+  assert.equal(match.supportsTools, true);
   assert.equal(searchLoadedCatalogModels(directory, states, "opencode zen").length, 1);
 });
 
