@@ -252,78 +252,86 @@ test("the production renderer exposes model discovery and picker actions", { tim
     await page.goto(url, { waitUntil: "domcontentloaded" });
     await page.getByRole("navigation", { name: "Control center sections" }).waitFor();
     await page.getByRole("button", { name: "Models", exact: true }).click();
-    const providerSearch = page.locator('input[placeholder="Search providers or known models"]');
-    await providerSearch.waitFor();
 
-    await providerSearch.fill("Ox Alpha");
-    const oxProviderRows = page.locator(".pm-provider-row");
-    await oxProviderRows.filter({ hasText: "Command Code" }).waitFor();
-    assert.equal(await oxProviderRows.count(), 6);
+    // The connections strip carries every account: connected providers as
+    // chips, the rest behind one menu.
+    const connections = page.locator(".pm-connections");
+    await connections.waitFor();
+    assert.match(await connections.innerText(), /3 of 8 connected/);
     assert.deepEqual(
-      (await oxProviderRows.locator(".pm-provider-title-line > strong").allTextContents()).sort(),
-      ["Command Code", "Nous Research", "OpenCode Free", "OpenRouter", "Venice", "opencode Go/Zen"].sort(),
+      (await connections.locator(".pm-chip:not(.pm-chip-add)").allTextContents()).map((text) => text.trim()).sort(),
+      ["DeepSeek", "OpenCode Free", "opencode Go/Zen"].sort(),
     );
-    assert.equal(await oxProviderRows.filter({ hasText: "not connected" }).count(), 4);
-    assert.equal(await oxProviderRows.filter({ hasText: "1 known match" }).count(), 6);
+    await connections.getByRole("button", { name: "Connect provider", exact: true }).click();
+    const connectMenu = page.locator(".pm-connect-menu");
+    await connectMenu.waitFor();
+    // An anonymous endpoint is not connected until it is explicitly enabled,
+    // so it belongs with the providers still waiting for a connection.
+    assert.match(await connectMenu.innerText(), /Kilo Free/);
+    assert.equal(await connectMenu.getByRole("menuitem").count(), 5);
+    await page.keyboard.press("Escape");
 
-    const knownModelSearch = page.locator('input[placeholder="Search active, known, or loaded catalog models"]');
-    await knownModelSearch.fill("Ox Alpha");
+    // A route that is only known to the registry still has to be findable, and
+    // has to say which connection it is waiting for.
+    const modelSearch = page.locator('input[placeholder="Search models"]');
+    await modelSearch.fill("Ox Alpha");
     const oxFamily = page.locator(".pm-family-row").filter({ hasText: "Ox Alpha" });
     await oxFamily.waitFor();
     assert.match(await oxFamily.innerText(), /6 providers/);
     assert.match(await oxFamily.innerText(), /6 routes/i);
-    await oxFamily.locator(".pm-family-summary").click();
+    await oxFamily.locator(".pm-family-open").click();
     assert.equal(await oxFamily.locator(".pm-route-row").count(), 6);
     assert.equal(await oxFamily.locator('.pm-route-row[data-availability="known"]').count(), 4);
-    assert.equal(await oxFamily.getByText("Enable or connect provider", { exact: true }).count(), 4);
+    // Every row ends in the same slot: a switch you can use, or the button
+    // that would make it usable.
+    assert.equal(await oxFamily.getByRole("button", { name: /^Connect / }).count(), 4);
+    const columns = await oxFamily.locator(".pm-route-head > span").allTextContents();
+    assert.deepEqual(columns, ["Account", "Context", "Input", "In picker", "Subagents", "Thinking"]);
+    await modelSearch.fill("");
 
-    await providerSearch.fill("");
-    await knownModelSearch.fill("");
-
-    const anonymousRow = page.locator(".pm-provider-row").filter({ hasText: "Kilo Free" });
-    await anonymousRow.waitFor();
-    assert.equal(await anonymousRow.getAttribute("data-connection"), "setup");
-    assert.match(await anonymousRow.innerText(), /not connected/i);
-
-    await page.getByRole("button", { name: "Load connected catalogs", exact: true }).click();
-    await page.waitForFunction(() => [...document.querySelectorAll("button")]
-      .some((button) => button.textContent?.trim() === "Load connected catalogs"));
+    // Adding reads every connected provider's catalog at once. Only a provider
+    // that is both connected and publishes a catalog is asked.
+    await page.getByRole("button", { name: "Add models", exact: true }).click();
+    const addDialog = page.locator(".pm-add-models");
+    await addDialog.waitFor();
+    await page.waitForFunction(() => window.routerControlTest.calls()
+      .some((call) => call.name === "discoverProviderModels"));
     const bulkCatalogProviders = await page.evaluate(() => window.routerControlTest.calls()
       .filter((call) => call.name === "discoverProviderModels")
       .map((call) => call.args[0]));
     assert.deepEqual(bulkCatalogProviders, ["deepseek"]);
 
-    const deepseekProvider = page.locator(".pm-provider-row").filter({ hasText: "DeepSeek" });
-    await deepseekProvider.locator(".pm-provider-summary").click();
-    const providerBlockedRow = deepseekProvider
-      .locator(".pm-live-catalog-row")
-      .filter({ hasText: "blocked-preview" });
-    await providerBlockedRow.waitFor();
-    assert.equal(await providerBlockedRow.getAttribute("data-blocked"), "true");
-    assert.equal(
-      await providerBlockedRow.getByText("Not yet supported", { exact: true }).count(),
-      1,
-    );
-
-    const search = page.locator('input[placeholder="Search active, known, or loaded catalog models"]');
-    await search.fill("catalog-addable");
-    const addableRow = page.locator(".pm-catalog-search-row").filter({ hasText: "catalog-addable" });
-    await addableRow.waitFor();
-    await addableRow.getByRole("button", { name: "Add", exact: true }).click();
-    await page.waitForFunction(() => window.routerControlTest.calls()
-      .some((call) => call.name === "addProviderModels"));
-
-    await search.fill("blocked-preview");
-    const blockedRow = page.locator(".pm-catalog-search-row").filter({ hasText: "blocked-preview" });
+    const blockedRow = addDialog.locator(".pm-add-models-row").filter({ hasText: "blocked-preview" });
     await blockedRow.waitFor();
-    const blockedButton = blockedRow.getByRole("button", { name: "Not yet supported", exact: true });
-    assert.equal(await blockedButton.isDisabled(), true);
+    assert.equal(await blockedRow.getAttribute("data-blocked"), "true");
+    assert.equal(await blockedRow.locator("input[type=checkbox]").isDisabled(), true);
+    assert.equal(await blockedRow.getByText("Not yet supported", { exact: true }).count(), 1);
     assert.equal(
       await blockedRow.locator(".pm-catalog-block-reason").innerText(),
       "No certified protocol route is available.",
     );
 
-    await page.getByRole("button", { name: "Show all", exact: true }).click();
+    const addableRow = addDialog.locator(".pm-add-models-row").filter({ hasText: "catalog-addable" });
+    await addableRow.locator("input[type=checkbox]").check();
+    await addDialog.getByRole("button", { name: "Add 1 model", exact: true }).click();
+    await page.waitForFunction(() => window.routerControlTest.calls()
+      .some((call) => call.name === "addProviderModels"));
+
+    // Flipping a model must never move it. Sorting by the switch would throw
+    // the row across the list at the moment the reader looks for confirmation.
+    const modelNames = () => page.locator(".pm-family-main > strong").allTextContents();
+    const orderBefore = await modelNames();
+    assert.deepEqual(orderBefore, ["DeepSeek Chat", "Ox Alpha"]);
+    const deepseekRow = page.locator(".pm-family-row").filter({ hasText: "DeepSeek Chat" });
+    assert.equal((await deepseekRow.locator(".pm-family-state").innerText()).trim(), "On");
+    await deepseekRow.locator('.pm-family-action input[type="checkbox"]').click();
+    // Scope to the row's own state, not any "Off" inside its expanded panel.
+    await deepseekRow.locator(".pm-family-state").filter({ hasText: "Off" }).waitFor();
+    assert.deepEqual(await modelNames(), orderBefore);
+
+    // Bulk switches live behind the overflow menu, off the main toolbar.
+    await page.getByRole("button", { name: "More model actions", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Turn all on", exact: true }).click();
     await page.waitForFunction(() => window.routerControlTest.calls()
       .some((call) => call.name === "setPickerModels" && call.args[0] === true));
 

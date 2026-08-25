@@ -1,5 +1,6 @@
 import type { CSSProperties } from "react";
 
+import antigravityLogo from "./assets/providers/antigravity.png";
 import anthropicLogo from "./assets/providers/anthropic.png";
 import cerebrasLogo from "./assets/providers/cerebras.png";
 import chutesLogo from "./assets/providers/chutes.svg";
@@ -9,6 +10,7 @@ import cognitionLogo from "./assets/providers/cognition.svg";
 import deepSeekLogo from "./assets/providers/deepseek.png";
 import deepReinforceLogo from "./assets/providers/deepreinforce.svg";
 import fireworksLogo from "./assets/providers/fireworks.svg";
+import geminiLogo from "./assets/providers/gemini.svg";
 import githubCopilotLogo from "./assets/providers/github-copilot.svg";
 import googleLogo from "./assets/providers/google.svg";
 import groqLogo from "./assets/providers/groq.svg";
@@ -28,6 +30,7 @@ import openRouterLogo from "./assets/providers/openrouter.png";
 import poolsideLogo from "./assets/providers/poolside.svg";
 import qwenLogo from "./assets/providers/qwen.svg";
 import siliconFlowLogo from "./assets/providers/siliconflow.png";
+import stealthLogo from "./assets/providers/stealth.svg";
 import stepFunLogo from "./assets/providers/stepfun.svg";
 import tencentLogo from "./assets/providers/tencent.svg";
 import togetherLogo from "./assets/providers/together.png";
@@ -53,7 +56,8 @@ interface BrandableModel {
 }
 
 const BRANDS: Record<string, ProviderBrand> = {
-  anthropic: { key: "anthropic", name: "Anthropic", shortName: "A", color: "#c66f4e", logo: anthropicLogo },
+  antigravity: { key: "antigravity", name: "Antigravity", shortName: "AG", color: "#4285f4", logo: antigravityLogo, logoMode: "artwork" },
+  anthropic: { key: "anthropic", name: "Anthropic", shortName: "A", color: "#d97757", logo: anthropicLogo, logoMode: "artwork" },
   cerebras: { key: "cerebras", name: "Cerebras", shortName: "C", color: "#f15a24", logo: cerebrasLogo, logoMode: "artwork" },
   chutes: { key: "chutes", name: "Chutes", shortName: "CH", color: "#42a875", logo: chutesLogo },
   cline: { key: "cline", name: "Cline", shortName: "CL", color: "#5b6df2", logo: clineLogo, logoMode: "artwork" },
@@ -61,12 +65,17 @@ const BRANDS: Record<string, ProviderBrand> = {
   cognition: { key: "cognition", name: "Devin", shortName: "DV", color: "#0d98d4", logo: cognitionLogo, logoMode: "artwork" },
   deepseek: { key: "deepseek", name: "DeepSeek", shortName: "DS", color: "#4d6bfe", logo: deepSeekLogo },
   deepreinforce: { key: "deepreinforce", name: "Ornith", shortName: "OR", color: "#8f816b", logo: deepReinforceLogo, logoMode: "artwork" },
+  // Codenamed preview models ship without a maker's mark of their own. They
+  // fell through to their provider's logo, so the same model wore six
+  // different faces depending on which account served it.
+  stealth: { key: "stealth", name: "Stealth preview", shortName: "SP", color: "#3f4550", logo: stealthLogo, logoMode: "artwork" },
   fireworks: { key: "fireworks", name: "Fireworks AI", shortName: "FW", color: "#6720ff", logo: fireworksLogo },
   github: { key: "github", name: "GitHub", shortName: "GH", color: "#59636e", logo: githubCopilotLogo },
+  gemini: { key: "gemini", name: "Gemini", shortName: "GM", color: "#5684d1", logo: geminiLogo, logoMode: "artwork" },
   google: { key: "google", name: "Google", shortName: "G", color: "#4285f4", logo: googleLogo },
   groq: { key: "groq", name: "Groq", shortName: "GQ", color: "#f43e01", logo: groqLogo, logoMode: "artwork" },
   huggingface: { key: "huggingface", name: "Hugging Face", shortName: "HF", color: "#d89b00", logo: huggingFaceLogo },
-  kimi: { key: "kimi", name: "Kimi", shortName: "K", color: "#2f6bff", logo: kimiLogo },
+  kimi: { key: "kimi", name: "Kimi", shortName: "K", color: "#2f6bff", logo: kimiLogo, logoMode: "artwork" },
   kilo: { key: "kilo", name: "Kilo", shortName: "KL", color: "#cfca00", logo: kiloLogo, logoMode: "artwork" },
   lmstudio: { key: "lmstudio", name: "LM Studio", shortName: "LM", color: "#654cdb", logo: lmStudioLogo, logoMode: "artwork" },
   meta: { key: "meta", name: "Meta", shortName: "M", color: "#0467df", logo: metaLogo },
@@ -98,10 +107,15 @@ const PROVIDER_BRANDS: Record<string, string> = {
   clinepass: "cline",
   commandcode: "commandcode",
   "commandcode-messages": "commandcode",
+  // A user-defined endpoint has no brand of its own to show, and a monogram
+  // built from the word "custom" says nothing. It shares the mark used for
+  // models whose maker is deliberately not disclosed.
+  custom: "stealth",
   "devin-cli": "cognition",
   deepseek: "deepseek",
   fireworks: "fireworks",
-  "gemini-api": "google",
+  "antigravity-oauth": "antigravity",
+  "gemini-api": "gemini",
   "github-copilot": "github",
   "grok-api": "xai",
   "grok-oauth": "xai",
@@ -156,7 +170,10 @@ export function brandForModel(model: BrandableModel): ProviderBrand {
   if (/\bglm(?:-|\b)/.test(identity)) return BRANDS.zai;
   if (/\bqwen(?:-|\d|\b)/.test(identity)) return BRANDS.qwen;
   if (/\bminimax\b/.test(identity)) return BRANDS.minimax;
-  if (/\b(?:gemini|gemma)\b/.test(identity)) return BRANDS.google;
+  // Gemini has carried its own mark since the 2024 rebrand; Google's "G" is
+  // the company, not the model. Gemma still ships under the company mark.
+  if (/\bgemini\b/.test(identity)) return BRANDS.gemini;
+  if (/\bgemma\b/.test(identity)) return BRANDS.google;
   if (/\b(?:gpt|codex)\b/.test(identity) || /^openai\//.test(model.slug.toLowerCase())) return BRANDS.openai;
   if (/\bmimo(?:-|\b)/.test(identity)) return BRANDS.xiaomi;
   if (/\bstep(?:-|\s)/.test(identity)) return BRANDS.stepfun;
@@ -166,6 +183,10 @@ export function brandForModel(model: BrandableModel): ProviderBrand {
   if (/\b(?:mistral|mixtral|codestral)\b/.test(identity)) return BRANDS.mistral;
   if (/\bnemotron\b/.test(identity)) return BRANDS.nvidia;
   if (/\bornith(?:-|\b)/.test(identity)) return BRANDS.deepreinforce;
+  // Anonymous preview models, matched last so a maker's own mark always wins.
+  if (/\b(?:ox alpha|ox-alpha|fugu|inkling)\b/.test(identity) || /x-preview/.test(identity)) {
+    return BRANDS.stealth;
+  }
   return brandForProvider(model.provider);
 }
 

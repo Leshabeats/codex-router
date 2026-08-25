@@ -5907,6 +5907,9 @@ private struct TrayView: View {
     // a subagent either, but dropping its row made it look deleted and left no
     // way back to it from this panel -- the tray must always show every model
     // it can still change.
+    // Every enabled model, the way the Models page lists them. Hiding the
+    // ones that cannot host a child does not make them easier to find; it
+    // makes the operator's own models look missing.
     private var subagentModels: [RouterModel] {
       target.models
         .filter(\.enabled)
@@ -7597,29 +7600,18 @@ private struct TrayView: View {
       Set(settings?.subagents.disabled ?? [])
     }
 
-    private var selectedSubagentSet: Set<String> {
-      Set(settings?.subagents.enabled ?? [])
-    }
-
+    // The capability the catalog actually published wins. A route the operator
+    // selected is v2 to Codex even though the registry never certified it, and
+    // asking the registry first told them a spawnable route could not be used.
     private func subagentCertification(for model: RouterModel) -> String {
-      if let certification = model.subagentCertification { return certification }
       if model.multiAgentVersion == "v2" { return "v2" }
+      if let certification = model.subagentCertification { return certification }
       if model.multiAgentVersion == "v1" { return "v1" }
       return "unknown"
     }
 
-    private func isKnownV1(_ model: RouterModel) -> Bool {
-      subagentCertification(for: model) == "v1"
-    }
-
     private func isCertifiedV2(_ model: RouterModel) -> Bool {
       subagentCertification(for: model) == "v2"
-    }
-
-    private func isCertificationCandidate(_ model: RouterModel) -> Bool {
-      guard subagentCertification(for: model) == "unknown" else { return false }
-      guard let status = settings?.subagents.proofs?[model.slug]?.status else { return false }
-      return ["candidate", "experimental", "proven"].contains(status)
     }
 
     // Status tags, effort controls, and enabled counts must reflect only the
@@ -7632,22 +7624,15 @@ private struct TrayView: View {
       return store.subagentModelEnabled(model.slug, authoritative: authoritative)
     }
 
-    // Unknown routes use the same row to request their one-time compatibility
-    // test. Keep that request checked while it runs (and after a failure so it
-    // can be switched off before retrying), but never feed it to isSubagent.
+    // The switch says one thing wherever it can be used: run this route as a
+    // subagent, or do not. On a route that cannot, it is simply unavailable --
+    // there is no test to request and no candidate state to decode.
     private func subagentToggleOn(_ model: RouterModel) -> Bool {
-      if isCertifiedV2(model) { return isSubagent(model) }
-      if !isPickerVisible(model) || isKnownV1(model) || isCertificationCandidate(model) {
-        return false
-      }
-      let authoritative = selectedSubagentSet.contains(model.slug)
-      return store.subagentModelEnabled(model.slug, authoritative: authoritative)
+      isSubagent(model)
     }
 
     private func subagentToggleDisabled(_ model: RouterModel) -> Bool {
-      if !isPickerVisible(model) { return true }
-      if isCertifiedV2(model) { return false }
-      return isKnownV1(model) || isCertificationCandidate(model)
+      !isPickerVisible(model) || !isCertifiedV2(model)
     }
 
     // Codex chooses which model a child runs on; this chooses how hard it
@@ -7704,22 +7689,12 @@ private struct TrayView: View {
 
     private func subagentDetail(for model: RouterModel) -> String {
       if !isPickerVisible(model) { return routerLocalized("Hidden from picker — show it below to use it here") }
-      if isKnownV1(model) { return routerLocalized("v1 only") }
-      if !isCertifiedV2(model), let proof = settings?.subagents.proofs?[model.slug] {
-        if proof.status == "checking" { return routerLocalized("Checking…") }
-        if isCertificationCandidate(model) {
-          return routerLocalized("Certification candidate")
-        }
-        if proof.status == "failed" {
-          return proof.reason ?? routerLocalized("Error")
-        }
-      }
-      if isCertifiedV2(model) && isSubagent(model) {
+      if !isCertifiedV2(model) { return routerLocalized("Cannot run subagents") }
+      if isSubagent(model) {
         let effort = settings?.subagents.efforts?[model.slug] ?? routerLocalized("Default")
-        return "\(routerLocalized("Proven v2")) · \(effort.capitalized) \(routerLocalized("thinking"))"
+        return "\(effort.capitalized) \(routerLocalized("thinking"))"
       }
-      if isCertifiedV2(model) { return routerLocalized("Proven v2") }
-      return routerLocalized("Not selected")
+      return routerLocalized("Off")
     }
 
   private var subagentSummary: String {

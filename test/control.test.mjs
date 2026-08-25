@@ -310,6 +310,9 @@ test("control exposes subagent and picker settings without credentials", () => {
   try {
     const env = {
       ...process.env,
+      // Without this the command republishes into the operator's real
+      // ~/.codex/agents and clears every routed subagent definition there.
+      CODEX_HOME: stateDir,
       MODEL_ROUTER_TARGET: "codex",
       MODEL_ROUTER_STATE_DIR: stateDir,
     };
@@ -341,6 +344,9 @@ test("control refuses to enable a repository-certified v1 model as a v2 subagent
   const stateDir = mkdtempSync(path.join(os.tmpdir(), "control-subagent-v1-"));
   const env = {
     ...process.env,
+    // Without this the command republishes into the operator's real
+    // ~/.codex/agents and clears every routed subagent definition there.
+    CODEX_HOME: stateDir,
     MODEL_ROUTER_TARGET: "codex",
     MODEL_ROUTER_STATE_DIR: stateDir,
   };
@@ -454,6 +460,9 @@ test("control can test an uncertified route despite its conservative merged-cata
   const slug = "deepseek/deepseek-v4-flash";
   const env = {
     ...process.env,
+    // Without this the command republishes into the operator's real
+    // ~/.codex/agents and clears every routed subagent definition there.
+    CODEX_HOME: stateDir,
     MODEL_ROUTER_TARGET: "codex",
     MODEL_ROUTER_STATE_DIR: stateDir,
   };
@@ -486,6 +495,9 @@ test("control toggles tool-result aging without a router restart", () => {
   const stateDir = mkdtempSync(path.join(os.tmpdir(), "control-tool-result-aging-"));
   const env = {
     ...process.env,
+    // Without this the command republishes into the operator's real
+    // ~/.codex/agents and clears every routed subagent definition there.
+    CODEX_HOME: stateDir,
     MODEL_ROUTER_TARGET: "codex",
     MODEL_ROUTER_STATE_DIR: stateDir,
   };
