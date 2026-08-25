@@ -25,8 +25,38 @@ import { ensureOllamaHeadless } from "./ollama-runtime.mjs";
 import { venvRuntimeProblem } from "./venv-runtime.mjs";
 import { dependencyRepairHint } from "./dependency-repair.mjs";
 import { clearServiceProcessState, writeServiceProcessState } from "./service-process.mjs";
-import { environmentProxyOptedIn } from "./proxy-environment.mjs";
+import {
+  environmentProxyOptedIn,
+  inheritedProxyEnvironment,
+  redactProxyCredentials,
+} from "./proxy-environment.mjs";
 import { antigravityOAuthStatus } from "./antigravity-oauth-status.mjs";
+
+// Before anything reads the environment or spawns a child. A service manager
+// hands this process the proxy the install recorded; a shell hands it whatever
+// the shell had, which for a desktop-app-spawned shell is nothing. Restoring
+// the recorded values here makes every start path -- managed, foreground, or
+// accidental -- reach upstreams the same way, and `commonEnv` below propagates
+// them to the router and the forwarders through `process.env`.
+const restoredProxy = inheritedProxyEnvironment();
+for (const [name, value] of Object.entries(restoredProxy)) {
+  process.env[name] = value;
+}
+// Unconditionally, and never behind MODEL_ROUTER_QUIET: this silently changes
+// where every upstream request goes, and the whole reason the original failure
+// took so long to find is that nothing near the router ever said which network
+// path it was using. A managed start never reaches here -- its environment is
+// declared -- so this line appears only on the paths that need it. The
+// credential in a proxy URL is stripped; the host and port are the point.
+if (Object.keys(restoredProxy).length > 0) {
+  const address = restoredProxy.https_proxy ?? restoredProxy.HTTPS_PROXY
+    ?? restoredProxy.http_proxy ?? restoredProxy.HTTP_PROXY;
+  const shown = redactProxyCredentials({ address }).address;
+  console.error(
+    "[model-router] no proxy environment was inherited; restored the installed one" +
+    `${shown ? ` (${shown})` : ""} from the install manifest.`,
+  );
+}
 
 const dependencyFix = dependencyRepairHint();
 
