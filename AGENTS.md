@@ -441,6 +441,48 @@ dependency tree. That tree is pinned and hashed rather than re-resolved.
    meaningless. Do not add a resolver cache there; a cache hit can serve an
    already-unpacked wheel and skip the hash check the job exists to perform.
 
+## `stop` and `start` act on the same layer, and the proxy survives either
+
+`bin/stop` unloads the background service. `bin/start` used to exec the
+supervisor in the foreground instead, so the obvious `stop; start` pair was
+asymmetric: it retired the managed service and left an unmanaged copy in its
+place. The copy carried the calling shell's environment rather than the
+installed one and died with the shell that started it.
+
+That is how a live installation lost its proxy. A `stop; start` issued from a
+`zsh -lc` that a desktop app had spawned produced a router with no
+`HTTP_PROXY` and no `NODE_USE_ENV_PROXY`, because the shell had neither. Every
+upstream was dialled directly, chatgpt.com timed out, and the router answered
+502 with the message from `src/transport-failure.mjs` telling the operator to
+set an opt-in that was already set -- in the LaunchAgent it had just unloaded.
+The service definition still looked correct at every glance.
+
+1. **Both verbs go through `src/service.mjs`.** `bin/start` starts the managed
+   service; `bin/stop` stops it. Never reintroduce a `bin/start` that execs
+   `src/start.mjs`, and never add a lifecycle verb that manages the service on
+   one side and bypasses it on the other.
+2. **The foreground supervisor stays reachable, never by accident.**
+   `bin/start --foreground` is the debugging path. It is opt-in because an
+   operator who types it has chosen to run unmanaged; an operator who types
+   `start` has not.
+3. **A silent environment adopts the recorded proxy.**
+   `inheritedProxyEnvironment()` in `src/proxy-environment.mjs` reads the
+   install manifest, and `src/start.mjs` applies it to `process.env` before it
+   reads anything or spawns a child, so the router and all three forwarders
+   inherit it. This is the belt to the service definition's braces: it makes
+   the foreground path, and any future path that execs the supervisor directly,
+   reach upstreams exactly as the managed one does.
+4. **Silence is the only trigger.** `proxyEnvironmentDeclared` already treats a
+   named proxy -- or any `NODE_USE_ENV_PROXY`, `0` included -- as the operator
+   speaking, and the restore defers to it. A deliberate unproxied run stays
+   unproxied. Do not widen the trigger to "no proxy reachable" or similar
+   inference; the manifest records a decision, not a guess.
+5. **Coverage.** `test/proxy-environment.test.mjs` holds the restore contract
+   and `test/service-lifecycle.test.mjs` holds the dispatch: that `bin/start`
+   reaches the service layer, that `--foreground` reaches the supervisor, and
+   that a supervisor booted with a silent environment comes up carrying the
+   manifest's proxy.
+
 ## The gateway is restarted in place; the router is not taken down with it
 
 `src/gateway-supervisor.mjs` watches the LiteLLM child and replaces it when it
@@ -696,6 +738,14 @@ so the unit of evidence is always the slug, never the model name.
    Codex collaboration: tool calls work, encrypted subagent payload relay works
    without disclosure, a marker-return spawn succeeds, and a same-thread
    follow-up succeeds. Otherwise omit it and retain conservative v1 behavior.
+   A route also reaches v2 on one machine through a completed local
+   verification — all five of those checks passing in one run, recorded in
+   `multi-agent-proofs.json`. That is a second promotion authority, not a
+   replacement: a partial run, a mismatched slug, or the legacy diagnostic
+   statuses still promote nothing, and only the pull request that moves the
+   registry entry may accept the matching `v2_agent/` application. Read
+   `docs/SUBAGENT-CERTIFICATION.md` in full before changing
+   `src/subagent-*.mjs`, `v2_agent/`, or the Subagents column.
 5. Remember that Codex advertises only a small priority-ordered subset of native
    spawn-model overrides. Adjust priority intentionally and keep the desired
    Kimi/Grok/GPT choices in that visible subset; do not crowd them out
