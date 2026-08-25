@@ -1183,13 +1183,15 @@ test("the model directory combines provider setup with de-duplicated model-famil
 
   // Flipping the switch is the whole interaction: it runs the checks and the
   // router promotes only on a complete pass. A refusal is one sentence.
-  assert.match(models, /certifySubagentModel\(model\.slug\)/);
-  assert.match(models, /if \(!outcome\?\.certified\)/);
+  assert.match(models, /const runCertifyBatch = async/);
+  assert.match(models, /if \(entry\?\.certified\) continue;/);
   assert.match(models, /Cannot run subagents/);
-  // A refusal outranks the spinner once the run is over, and a row waiting
-  // its turn in the mutation queue must not claim to be running.
-  assert.match(models, /checking === "running" \? "Checking…" : checking === "queued" \? "Queued"/);
-  assert.match(models, /position === 0 \? "running" : "queued"/);
+  // A refusal outranks the spinner once the run is over.
+  assert.match(models, /\{problem \? "No" : checking \? "Checking…" : "Off"\}/);
+  // Independent routes are checked together, in one command: the runs do not
+  // touch each other, but the proofs file and the catalog do.
+  assert.match(models, /certifySubagentModels\(slugs\)/);
+  assert.match(models, /certifyBatch\.current\.slugs\.add\(model\.slug\)/);
   assert.match(models, /subagent thinking effort/);
   assert.match(models, /<option value="default">Model default<\/option>/);
   assert.match(providerModelsCss, /\.pm-model-row\[data-subagent="enabled"\]/);

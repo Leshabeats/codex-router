@@ -152,10 +152,11 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
   // slowest thing this page starts; without a placeholder the models simply are
   // not there for the length of it and the click reads as having done nothing.
   const [pendingModels, setPendingModels] = useState<PendingCatalogModels>({});
-  // Checks run one at a time: the control process serialises every mutation,
-  // so flipping four switches starts one run and queues three. Keeping the
-  // order here lets a queued row say so instead of claiming to be running.
-  const [certifyQueue, setCertifyQueue] = useState<string[]>([]);
+  // Routes with a check in flight. Nothing about one route's checks touches
+  // another's, so a batch runs them together and every row in it is genuinely
+  // running rather than waiting a turn.
+  const [certifying, setCertifying] = useState<string[]>([]);
+  const certifyBatch = useRef<{ slugs: Set<string>; timer?: ReturnType<typeof setTimeout> }>({ slugs: new Set() });
   const [certifyProblems, setCertifyProblems] = useState<Record<string, string>>({});
 
   // External model identity and picker visibility come from the router-owned
@@ -482,30 +483,47 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
   // The switch is the whole interaction: it runs the checks, and the router
   // promotes the route only if every one of them passed. A refusal comes back
   // as one sentence rather than a state the reader has to decode.
-  const certifyRoute = async (model: RouterModel) => {
-    if (!api || certifyQueue.includes(model.slug)) return;
-    setCertifyQueue((current) => [...current, model.slug]);
+  const runCertifyBatch = async () => {
+    const slugs = [...certifyBatch.current.slugs];
+    certifyBatch.current.slugs = new Set();
+    if (!api || !slugs.length) return;
+    try {
+      await runAction(
+        slugs.length === 1 ? `Check ${slugs[0]} for subagents` : `Check ${slugs.length} routes for subagents`,
+        async () => {
+          const outcome = await api.certifySubagentModels(slugs);
+          const failures: Record<string, string> = {};
+          for (const slug of slugs) {
+            const entry = outcome?.results?.find((item) => item.slug === slug);
+            if (entry?.certified) continue;
+            const detail = entry?.reason || entry?.failedLabel;
+            failures[slug] = detail ? `Cannot run subagents — ${detail}` : "This route cannot run subagents.";
+          }
+          if (Object.keys(failures).length) {
+            setCertifyProblems((current) => ({ ...current, ...failures }));
+          }
+        },
+      );
+    } finally {
+      setCertifying((current) => current.filter((slug) => !slugs.includes(slug)));
+      onRefresh();
+    }
+  };
+
+  // Flipping several switches in a row should be one fan-out, not one command
+  // per click: the runs are independent, but the proofs file and the catalog
+  // are not, and a single command keeps that recording in one process.
+  const certifyRoute = (model: RouterModel) => {
+    if (!api || certifying.includes(model.slug)) return;
+    setCertifying((current) => [...current, model.slug]);
     setCertifyProblems((current) => {
       const next = { ...current };
       delete next[model.slug];
       return next;
     });
-    try {
-      await runAction(`Check ${model.displayName} for subagents`, async () => {
-        const outcome = await api.certifySubagentModel(model.slug);
-        if (!outcome?.certified) {
-          setCertifyProblems((current) => ({
-            ...current,
-            [model.slug]: outcome?.reason || outcome?.failedLabel
-              ? `Cannot run subagents — ${outcome.reason || outcome.failedLabel}`
-              : "This route cannot run subagents.",
-          }));
-        }
-      });
-    } finally {
-      setCertifyQueue((current) => current.filter((slug) => slug !== model.slug));
-      onRefresh();
-    }
+    certifyBatch.current.slugs.add(model.slug);
+    clearTimeout(certifyBatch.current.timer);
+    certifyBatch.current.timer = setTimeout(() => void runCertifyBatch(), 400);
   };
 
   const renderRow = ({ family, usable, inPicker, on }: (typeof rows)[number]) => (
@@ -525,11 +543,8 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
       onFamilyPicker={(visible) => void updateFamilyPicker(family, usable, inPicker, visible)}
       onRoutePicker={(model, visible) => void updatePicker(model.slug, visible)}
       onSubagent={(model, enabled) => void updateSubagent(model.slug, enabled)}
-      onCertify={(model) => void certifyRoute(model)}
-      certifyState={(model) => {
-        const position = certifyQueue.indexOf(model.slug);
-        return position < 0 ? undefined : position === 0 ? "running" : "queued";
-      }}
+      onCertify={(model) => certifyRoute(model)}
+      certifyState={(model) => (certifying.includes(model.slug) ? "running" : undefined)}
       certifyProblem={(model) => certifyProblems[model.slug]}
       onEffort={(model, effort) => void updateSubagentEffort(model.slug, effort)}
       onConnect={(providerId) => {
@@ -980,7 +995,7 @@ function ModelFamilyRow({
   onRoutePicker: (model: RouterModel, visible: boolean) => void;
   onSubagent: (model: RouterModel, enabled: boolean) => void;
   onCertify: (model: RouterModel) => void;
-  certifyState: (model: RouterModel) => "running" | "queued" | undefined;
+  certifyState: (model: RouterModel) => "running" | undefined;
   certifyProblem: (model: RouterModel) => string | undefined;
   onEffort: (model: RouterModel, effort: string) => void;
   onConnect: (providerId: string) => void;
@@ -1118,7 +1133,7 @@ function ModelDetails({
   selectedInSettings: boolean;
   subagentEffort: string;
   apiAvailable: boolean;
-  checking?: "running" | "queued";
+  checking?: "running";
   problem?: string;
   onSubagentChange: (checked: boolean) => void;
   onCertify: () => void;
@@ -1214,7 +1229,7 @@ function ModelRouteRow({
   subagentEffort: string;
   apiAvailable: boolean;
   onPickerChange: (checked: boolean) => void;
-  checking?: "running" | "queued";
+  checking?: "running";
   problem?: string;
   onSubagentChange: (checked: boolean) => void;
   onCertify: () => void;
@@ -1300,7 +1315,7 @@ function SubagentControl({
   selectedInSettings: boolean;
   subagentEffort: string;
   apiAvailable: boolean;
-  checking?: "running" | "queued";
+  checking?: "running";
   problem?: string;
   onSubagentChange: (checked: boolean) => void;
   onCertify: () => void;
@@ -1324,10 +1339,9 @@ function SubagentControl({
             onChange={(checked) => { if (checked) onCertify(); }}
           />
           {/* A refusal outranks the spinner: the run is over, and leaving
-              "Checking…" beside the reason reads as still working. A queued
-              row says so rather than claiming a run it has not started. */}
+              "Checking…" beside the reason reads as still working. */}
           <span className={problem ? "pm-route-problem" : undefined}>
-            {problem ? "No" : checking === "running" ? "Checking…" : checking === "queued" ? "Queued" : "Off"}
+            {problem ? "No" : checking ? "Checking…" : "Off"}
           </span>
         </div>
       </div>

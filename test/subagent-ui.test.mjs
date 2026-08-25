@@ -53,7 +53,8 @@ test("Control Center keeps legacy local proofs as candidates, not active v2 rout
 
   // No local-proof vocabulary survives anywhere on the page: no probe request,
   // no candidate state, and no wording that reads as one test away from working.
-  assert.doesNotMatch(source, /proofs/);
+  // The page must not read proof records as data; prose may mention the file.
+  assert.doesNotMatch(source, /subagentSettings\?\.proofs|\.proofs\[|proofs\?\./);
   // The legacy statuses must not be handled as data. Prose may still use the
   // word "candidate" for a route the switch can check.
   assert.doesNotMatch(source, /"candidate"|"experimental"|"proven"/);

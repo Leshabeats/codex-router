@@ -122,3 +122,26 @@ test("the checks call the endpoint the router actually serves", async () => {
   assert.match(source, /\(payload\?\.output \|\| \[\]\)\.find\(\(item\) => item\?\.type === "function_call"\)/);
   assert.match(source, /tool_choice: \{ type: "function", name: "codex_router_probe" \}/);
 });
+
+test("independent routes fan out, but recording and publishing do not", () => {
+  // Two control processes racing read-modify-write on the proofs file would
+  // silently drop a verdict, so the fan-out has to live inside one process
+  // with the recording after it.
+  const source = readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "control.mjs"),
+    "utf8",
+  );
+  const block = source.slice(
+    source.indexOf('} else if (action === "certify")'),
+    source.indexOf('} else if (action === "set")'),
+  );
+  assert.ok(block, "the certify verb must exist");
+  assert.match(block, /await Promise\.all\(\s*slugs\.map/);
+  // Recording happens after the fan-out, once per route, in this process.
+  assert.ok(block.indexOf("await Promise.all(") < block.indexOf("recordVerification(slug"));
+  // One republish for the whole batch, and only when something was promoted.
+  assert.match(block, /if \(promoted\) refreshModelSettingsCatalog\(\)/);
+  assert.equal(block.match(/refreshModelSettingsCatalog\(\)/g)?.length, 1);
+  // One route's crash is not a verdict on the others.
+  assert.match(block, /catch \(error\) \{[\s\S]{0,200}return \{ slug, error/);
+});

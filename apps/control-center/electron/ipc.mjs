@@ -854,9 +854,14 @@ export function registerIpcHandlers({ ipcMain, BrowserWindow, shell, fetchImpl =
   // A certification run makes live calls to the provider and to a native
   // parent that delegates to it, so it needs its own ceiling rather than the
   // catalog mutation one: the delegation alone can take a minute per turn.
-  handleAction("certifySubagentModel", async ({ slug } = {}) => {
-    const model = await validateModel(slug);
-    return runJson(["subagents", "certify", model], { timeoutMs: SUBAGENT_CERTIFY_TIMEOUT_MS });
+  handleAction("certifySubagentModels", async ({ slugs } = {}) => {
+    if (!Array.isArray(slugs) || !slugs.length) throw new Error("slugs must be a non-empty array.");
+    if (slugs.length > 24) throw new Error("Certify at most 24 routes at once.");
+    const models = [];
+    for (const slug of slugs) models.push(await validateModel(slug));
+    // One command for the whole batch: the runs fan out inside it, and the
+    // proofs write and catalog republish happen once, in that process.
+    return runJson(["subagents", "certify", ...models], { timeoutMs: SUBAGENT_CERTIFY_TIMEOUT_MS });
   });
   handleAction("setSubagentEffort", async ({ slug, effort } = {}) => {
     const model = await validateModel(slug);

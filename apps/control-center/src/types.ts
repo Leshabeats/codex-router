@@ -591,8 +591,10 @@ export interface RouterControlApi {
   setSubagentMode(mode: "all" | "selected" | "proven"): Promise<unknown>;
   setSubagentModel(slug: string, enabled: boolean): Promise<unknown>;
   setSubagentEffort(slug: string, effort: string): Promise<unknown>;
-  /** Runs the five live checks for one route; a complete pass promotes it here. */
-  certifySubagentModel(slug: string): Promise<{ certified?: boolean; failedLabel?: string; reason?: string }>;
+  /** Runs the five live checks for each route in parallel; a complete pass promotes that route here. */
+  certifySubagentModels(slugs: string[]): Promise<{
+    results?: Array<{ slug: string; certified?: boolean; failedLabel?: string; reason?: string }>;
+  }>;
   setSubagentSelection(selectAll: boolean): Promise<unknown>;
   setPickerModel(slug: string, visible: boolean): Promise<unknown>;
   setPickerModels(showAll: boolean): Promise<unknown>;
