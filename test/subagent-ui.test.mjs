@@ -65,16 +65,17 @@ test("Control Center keeps legacy local proofs as candidates, not active v2 rout
   assert.match(source, /disabled=\{!apiAvailable\}/);
 });
 
-test("the macOS tray lists only routes that can host a subagent", () => {
+test("the macOS tray lists every model and varies only the switch", () => {
   const source = readFileSync(
     path.join(root, "apps", "macos", "ModelRouterTray", "Sources", "ModelRouterTrayApp.swift"),
     "utf8",
   );
-  // The tray and the Control Center describe the same models, so they must not
-  // use two vocabularies. A route that cannot host a child is not a row with a
-  // disabled switch and an explanation; it is not in this list at all.
+  // The tray and the Models page describe the same models, so they must not
+  // use two vocabularies -- and must not disagree about which models exist.
+  // The page lists every model and varies only the Subagents column; hiding
+  // the rest here made the operator's own models look missing.
   assert.match(source, /private var subagentModels: \[RouterModel\]/);
-  assert.match(source, /\.filter \{ \$0\.enabled && isCertifiedV2\(\$0\) \}/);
+  assert.match(source, /\.filter\(\\\.enabled\)/);
   assert.match(source, /ForEach\(providerGroups\(subagentModels\)\)/);
 
   // Capability still comes only from the registry's certification.
@@ -94,7 +95,8 @@ test("the macOS tray lists only routes that can host a subagent", () => {
 
   // Every row's switch means one thing, so it needs no state to decode.
   assert.match(source, /private func subagentToggleOn\(_ model: RouterModel\) -> Bool \{\s*isSubagent\(model\)\s*\}/);
-  assert.match(source, /private func subagentToggleDisabled\(_ model: RouterModel\) -> Bool \{\s*!isPickerVisible\(model\)\s*\}/);
+  assert.match(source, /!isPickerVisible\(model\) \|\| !isCertifiedV2\(model\)/);
+  assert.match(source, /routerLocalized\("Cannot run subagents"\)/);
   assert.match(source, /get: \{ subagentToggleOn\(model\) \}/);
   assert.match(source, /disabled: subagentToggleDisabled\(model\)/);
   assert.match(source, /title: model\.displayName/);

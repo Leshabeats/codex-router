@@ -160,6 +160,7 @@ enum RouterKoreanText {
     "Engine": "엔진",
     "Paid (cloud)": "유료(클라우드)",
     "Your ChatGPT plan": "내 ChatGPT 요금제",
+    "Cannot run subagents": "서브에이전트를 실행할 수 없음",
     "Effort as subagent": "서브에이전트 추론 강도",
     "Model default": "모델 기본값",
     "Update": "업데이트",

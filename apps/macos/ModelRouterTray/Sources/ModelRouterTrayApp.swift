@@ -5883,12 +5883,12 @@ private struct TrayView: View {
     // a subagent either, but dropping its row made it look deleted and left no
     // way back to it from this panel -- the tray must always show every model
     // it can still change.
-    // Only routes that can actually host a child. A route that cannot is not
-    // a row with a disabled switch and an explanation -- it is not a subagent
-    // at all, and belongs in the Control Center where it can be checked.
+    // Every enabled model, the way the Models page lists them. Hiding the
+    // ones that cannot host a child does not make them easier to find; it
+    // makes the operator's own models look missing.
     private var subagentModels: [RouterModel] {
       target.models
-        .filter { $0.enabled && isCertifiedV2($0) }
+        .filter(\.enabled)
         .sorted {
           if $0.provider != $1.provider { return $0.provider < $1.provider }
           return $0.slug < $1.slug
@@ -7597,15 +7597,15 @@ private struct TrayView: View {
       return store.subagentModelEnabled(model.slug, authoritative: authoritative)
     }
 
-    // Every row here is a certified route, so the switch says one thing: use
-    // this route as a subagent, or do not. There is no test to request and no
-    // candidate state to explain.
+    // The switch says one thing wherever it can be used: run this route as a
+    // subagent, or do not. On a route that cannot, it is simply unavailable --
+    // there is no test to request and no candidate state to decode.
     private func subagentToggleOn(_ model: RouterModel) -> Bool {
       isSubagent(model)
     }
 
     private func subagentToggleDisabled(_ model: RouterModel) -> Bool {
-      !isPickerVisible(model)
+      !isPickerVisible(model) || !isCertifiedV2(model)
     }
 
     // Codex chooses which model a child runs on; this chooses how hard it
@@ -7662,6 +7662,7 @@ private struct TrayView: View {
 
     private func subagentDetail(for model: RouterModel) -> String {
       if !isPickerVisible(model) { return routerLocalized("Hidden from picker — show it below to use it here") }
+      if !isCertifiedV2(model) { return routerLocalized("Cannot run subagents") }
       if isSubagent(model) {
         let effort = settings?.subagents.efforts?[model.slug] ?? routerLocalized("Default")
         return "\(effort.capitalized) \(routerLocalized("thinking"))"

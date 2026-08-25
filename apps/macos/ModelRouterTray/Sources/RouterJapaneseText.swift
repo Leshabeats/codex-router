@@ -160,6 +160,7 @@ enum RouterJapaneseText {
     "Engine": "エンジン",
     "Paid (cloud)": "有料（クラウド）",
     "Your ChatGPT plan": "あなたの ChatGPT プラン",
+    "Cannot run subagents": "サブエージェントを実行できません",
     "Effort as subagent": "サブエージェント時の推論強度",
     "Model default": "モデルのデフォルト",
     "Update": "アップデート",
