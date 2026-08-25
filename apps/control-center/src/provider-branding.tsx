@@ -1,5 +1,6 @@
 import type { CSSProperties } from "react";
 
+import antigravityLogo from "./assets/providers/antigravity.png";
 import anthropicLogo from "./assets/providers/anthropic.png";
 import cerebrasLogo from "./assets/providers/cerebras.png";
 import chutesLogo from "./assets/providers/chutes.svg";
@@ -9,11 +10,12 @@ import cognitionLogo from "./assets/providers/cognition.svg";
 import deepSeekLogo from "./assets/providers/deepseek.png";
 import deepReinforceLogo from "./assets/providers/deepreinforce.svg";
 import fireworksLogo from "./assets/providers/fireworks.svg";
+import geminiLogo from "./assets/providers/gemini.svg";
 import githubCopilotLogo from "./assets/providers/github-copilot.svg";
 import googleLogo from "./assets/providers/google.svg";
 import groqLogo from "./assets/providers/groq.svg";
 import huggingFaceLogo from "./assets/providers/huggingface.svg";
-import kimiLogo from "./assets/providers/kimi.png";
+import kimiLogo from "./assets/providers/kimi.svg";
 import kiloLogo from "./assets/providers/kilo.svg";
 import lmStudioLogo from "./assets/providers/lmstudio.svg";
 import metaLogo from "./assets/providers/meta.svg";
@@ -54,6 +56,7 @@ interface BrandableModel {
 }
 
 const BRANDS: Record<string, ProviderBrand> = {
+  antigravity: { key: "antigravity", name: "Antigravity", shortName: "AG", color: "#4285f4", logo: antigravityLogo, logoMode: "artwork" },
   anthropic: { key: "anthropic", name: "Anthropic", shortName: "A", color: "#c66f4e", logo: anthropicLogo },
   cerebras: { key: "cerebras", name: "Cerebras", shortName: "C", color: "#f15a24", logo: cerebrasLogo, logoMode: "artwork" },
   chutes: { key: "chutes", name: "Chutes", shortName: "CH", color: "#42a875", logo: chutesLogo },
@@ -68,6 +71,7 @@ const BRANDS: Record<string, ProviderBrand> = {
   stealth: { key: "stealth", name: "Stealth preview", shortName: "SP", color: "#3f4550", logo: stealthLogo, logoMode: "artwork" },
   fireworks: { key: "fireworks", name: "Fireworks AI", shortName: "FW", color: "#6720ff", logo: fireworksLogo },
   github: { key: "github", name: "GitHub", shortName: "GH", color: "#59636e", logo: githubCopilotLogo },
+  gemini: { key: "gemini", name: "Gemini", shortName: "GM", color: "#8e75b2", logo: geminiLogo },
   google: { key: "google", name: "Google", shortName: "G", color: "#4285f4", logo: googleLogo },
   groq: { key: "groq", name: "Groq", shortName: "GQ", color: "#f43e01", logo: groqLogo, logoMode: "artwork" },
   huggingface: { key: "huggingface", name: "Hugging Face", shortName: "HF", color: "#d89b00", logo: huggingFaceLogo },
@@ -110,7 +114,8 @@ const PROVIDER_BRANDS: Record<string, string> = {
   "devin-cli": "cognition",
   deepseek: "deepseek",
   fireworks: "fireworks",
-  "gemini-api": "google",
+  "antigravity-oauth": "antigravity",
+  "gemini-api": "gemini",
   "github-copilot": "github",
   "grok-api": "xai",
   "grok-oauth": "xai",
@@ -165,7 +170,10 @@ export function brandForModel(model: BrandableModel): ProviderBrand {
   if (/\bglm(?:-|\b)/.test(identity)) return BRANDS.zai;
   if (/\bqwen(?:-|\d|\b)/.test(identity)) return BRANDS.qwen;
   if (/\bminimax\b/.test(identity)) return BRANDS.minimax;
-  if (/\b(?:gemini|gemma)\b/.test(identity)) return BRANDS.google;
+  // Gemini has carried its own mark since the 2024 rebrand; Google's "G" is
+  // the company, not the model. Gemma still ships under the company mark.
+  if (/\bgemini\b/.test(identity)) return BRANDS.gemini;
+  if (/\bgemma\b/.test(identity)) return BRANDS.google;
   if (/\b(?:gpt|codex)\b/.test(identity) || /^openai\//.test(model.slug.toLowerCase())) return BRANDS.openai;
   if (/\bmimo(?:-|\b)/.test(identity)) return BRANDS.xiaomi;
   if (/\bstep(?:-|\s)/.test(identity)) return BRANDS.stepfun;
