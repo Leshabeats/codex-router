@@ -87,6 +87,37 @@ function Assert-ControlCenterTransactionPath([string]$Target, [string]$Label, [s
   }
 }
 
+function Replace-ControlCenterTransactionJournal([string]$Temporary, [string]$JournalPath) {
+  # Prefer the atomic NTFS replacement. Some Windows PowerShell/.NET hosts have
+  # nevertheless rejected valid journal paths here with ArgumentException, so
+  # retain a recoverable same-volume fallback for that compatibility case.
+  try {
+    [IO.File]::Replace($Temporary, $JournalPath, $null)
+    return
+  } catch [ArgumentException] {
+    $FallbackBackup = $JournalPath + ".replace-backup-" + [Guid]::NewGuid().ToString("N")
+    Move-Item -LiteralPath $JournalPath -Destination $FallbackBackup -ErrorAction Stop
+    try {
+      Move-Item -LiteralPath $Temporary -Destination $JournalPath -ErrorAction Stop
+    } catch {
+      $ReplacementFailure = $_
+      try {
+        Move-Item -LiteralPath $FallbackBackup -Destination $JournalPath -ErrorAction Stop
+      } catch {
+        throw "Could not replace the Control Center transaction journal and could not restore its prior copy. $($_.Exception.Message)"
+      }
+      throw $ReplacementFailure
+    }
+    try {
+      Remove-Item -LiteralPath $FallbackBackup -Force -ErrorAction Stop
+    } catch {
+      # The new journal is already durable. A protected stale backup is safer
+      # than reporting a failed transaction after the replacement succeeded.
+      Write-Warning "Control Center transaction journal was replaced, but its stale fallback backup could not be removed: $FallbackBackup"
+    }
+  }
+}
+
 function Get-ControlCenterTaskSddl([string]$TaskName) {
   $Service = New-Object -ComObject "Schedule.Service"
   $Service.Connect()
@@ -171,7 +202,7 @@ function Write-ControlCenterTransactionJournal($Transaction, [string]$Phase) {
     Assert-ControlCenterTransactionPath $Temporary "temporary transaction journal" "File"
     if ([IO.File]::Exists($Transaction.JournalPath)) {
       Assert-ControlCenterTransactionPath $Transaction.JournalPath "transaction journal" "File"
-      [IO.File]::Replace($Temporary, $Transaction.JournalPath, $null)
+      Replace-ControlCenterTransactionJournal $Temporary $Transaction.JournalPath
     } else {
       [IO.File]::Move($Temporary, $Transaction.JournalPath)
     }
