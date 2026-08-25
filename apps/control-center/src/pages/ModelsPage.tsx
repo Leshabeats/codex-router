@@ -542,8 +542,13 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
         <section className="panel-section pm-model-catalog" id="model-catalog-controls">
           <div className="pm-model-toolbar">
             <SearchField value={modelSearch} onChange={setModelSearch} placeholder="Search models" />
+            {/* The count describes the list underneath it. Reporting the whole
+                catalogue while a filter is narrowing the view made the filter
+                look broken. */}
             <span className="pm-results-count" aria-live="polite">
-              {modelSearch ? `${filteredFamilies.length} of ${families.length} models` : `${families.length} models`}
+              {modelSearch || statusFilter !== "all"
+                ? `${visibleRows.length} of ${families.length} models`
+                : `${families.length} models`}
             </span>
             {/* A short list reads whole. Filters and bulk switches only earn
                 their space once scrolling starts. */}

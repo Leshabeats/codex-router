@@ -1133,6 +1133,8 @@ test("the model directory combines provider setup with de-duplicated model-famil
   // is long enough to need them.
   assert.match(models, /const CROWDED_LIST = 8/);
   assert.match(models, /const crowded = rows\.length > CROWDED_LIST/);
+  // The count describes the visible list, not the whole catalogue.
+  assert.match(models, /modelSearch \|\| statusFilter !== "all"[\s\S]{0,120}visibleRows\.length/);
   assert.match(models, /\{crowded \? \(/);
   assert.match(models, /aria-label="More model actions"/);
 
