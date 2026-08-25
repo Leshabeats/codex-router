@@ -54,6 +54,36 @@ There is no third way. In particular, the legacy diagnostic statuses in that
 proofs file — `candidate`, `experimental`, `proven` — promote nothing, and never
 have.
 
+## A ChatGPT account cannot certify a routed model
+
+Checks 3–5 cannot complete while Codex is signed in with a ChatGPT account.
+Codex says so in the parent's own message:
+
+```
+The '<provider>/<model>' model is not supported when using Codex with a
+ChatGPT account.
+```
+
+This is a property of the harness and the account, not of the route, so it
+records as **deferred** — never as a refusal. Do not "fix" it by relaxing the
+promotion gate.
+
+Two things that look like a way out and are not:
+
+- **Signed routing** (`set_signed_routing`) declares a provider block with
+  `requires_openai_auth = true`. That is the same ChatGPT-account auth, so it
+  changes nothing here.
+- **Marking the candidate v2 in the catalog** is already done: Codex only
+  offers a subagent for a route its catalog marks v2, so the run builds a
+  private catalog copy with just the candidate marked. That clears an earlier
+  "not supported with the current ChatGPT account" error and gets as far as the
+  refusal above — it does not get past it.
+
+The remaining untested path is running Codex under `auth_mode: "apikey"` rather
+than `"chatgpt"`. The wording of the refusal implies an API key would be
+accepted, but that has not been verified, and it bills separately from a
+ChatGPT plan. Verify before promising anyone this works.
+
 ## Running it
 
 From the Control Center: expand a model, flip the switch in the **Subagents**
