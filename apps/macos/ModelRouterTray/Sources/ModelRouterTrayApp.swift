@@ -4472,10 +4472,37 @@ struct MenuBarSettings: Equatable {
 
 enum MenuBarLayoutMetrics {
   static let standardReservedWidth: CGFloat = 180
-  static let iconOnlyWidth: CGFloat = 24
+  static let standardHeight: CGFloat = 22
+  static let iconOnlyWidth: CGFloat = 28
+  static let iconOnlyHeight: CGFloat = 22
+  static let iconOnlyIconSize: CGFloat = 17
+  static let attentionPulseScale: CGFloat = 1.4
+  static let activityBadgeSize: CGFloat = 5
+  static let activityBadgePulseScale: CGFloat = 1.6
+  static let standardIndicatorPulseScale: CGFloat = 2.1
+  static let iconOnlySpacing: CGFloat = 4
 
-  nonisolated static func statusItemWidth(displayMode: TrayMenuBarDisplayMode) -> CGFloat {
-    displayMode == .iconOnly ? iconOnlyWidth : standardReservedWidth
+  nonisolated static func statusItemWidth(
+    displayMode: TrayMenuBarDisplayMode,
+    pulsing: Bool = false,
+    showsActivityBadge: Bool = false
+  ) -> CGFloat {
+    guard displayMode == .iconOnly else { return standardReservedWidth }
+    guard pulsing else { return iconOnlyWidth }
+    let iconWidth = iconOnlyIconSize * attentionPulseScale
+    let badgeWidth = showsActivityBadge ? activityBadgeSize * activityBadgePulseScale : 0
+    let spacing = showsActivityBadge ? iconOnlySpacing : 0
+    return max(iconOnlyWidth, ceil(iconWidth + spacing + badgeWidth))
+  }
+
+  nonisolated static func statusItemHeight(
+    displayMode: TrayMenuBarDisplayMode,
+    pulsing: Bool = false
+  ) -> CGFloat {
+    guard displayMode == .iconOnly, pulsing else {
+      return standardHeight
+    }
+    return max(iconOnlyHeight, ceil(iconOnlyIconSize * attentionPulseScale))
   }
 
   nonisolated static func showsActivityBadge(iconStyle: TrayMenuBarIconStyle, isIdle: Bool) -> Bool {
@@ -4693,20 +4720,36 @@ private struct StatusItemLabel: View {
   var body: some View {
     if store.menuBarDisplayMode == .iconOnly {
       HStack(spacing: 4) {
-        MenuBarIconView(store: store, size: 14)
-          .scaleEffect(pulsing ? 1.4 : 1)
+        MenuBarIconView(store: store, size: MenuBarLayoutMetrics.iconOnlyIconSize)
+          .scaleEffect(pulsing ? MenuBarLayoutMetrics.attentionPulseScale : 1)
           .animation(.easeOut(duration: 0.45), value: pulsing)
-        if MenuBarLayoutMetrics.showsActivityBadge(
+        let showsActivityBadge = MenuBarLayoutMetrics.showsActivityBadge(
           iconStyle: store.menuBarIconStyle,
           isIdle: store.activityState == .idle
-        ) {
-          Image(nsImage: MenuBarActivityDotImage.make(state: store.activityState, size: 5))
+        )
+        if showsActivityBadge {
+          Image(nsImage: MenuBarActivityDotImage.make(state: store.activityState, size: MenuBarLayoutMetrics.activityBadgeSize))
             .resizable()
             .interpolation(.high)
-            .frame(width: 5, height: 5)
+            .frame(width: MenuBarLayoutMetrics.activityBadgeSize, height: MenuBarLayoutMetrics.activityBadgeSize)
+            .scaleEffect(pulsing ? MenuBarLayoutMetrics.activityBadgePulseScale : 1)
+            .animation(.easeOut(duration: 0.45), value: pulsing)
         }
       }
-      .frame(width: MenuBarLayoutMetrics.statusItemWidth(displayMode: store.menuBarDisplayMode), height: 22)
+      .frame(
+        width: MenuBarLayoutMetrics.statusItemWidth(
+          displayMode: store.menuBarDisplayMode,
+          pulsing: pulsing,
+          showsActivityBadge: MenuBarLayoutMetrics.showsActivityBadge(
+            iconStyle: store.menuBarIconStyle,
+            isIdle: store.activityState == .idle
+          )
+        ),
+        height: MenuBarLayoutMetrics.statusItemHeight(
+          displayMode: store.menuBarDisplayMode,
+          pulsing: pulsing
+        )
+      )
       .clipped()
       .contentShape(Rectangle())
       .help(tooltipText)
@@ -4724,12 +4767,14 @@ private struct StatusItemLabel: View {
             .resizable()
             .interpolation(.high)
             .frame(width: 6, height: 6)
-            .scaleEffect(pulsing ? 2.1 : 1)
+            .aspectRatio(1, contentMode: .fit)
+            .clipShape(Circle())
+            .scaleEffect(pulsing ? MenuBarLayoutMetrics.standardIndicatorPulseScale : 1)
             .opacity(pulsing ? 0.55 : 1)
             .animation(.easeOut(duration: 0.45), value: pulsing)
         } else {
-          MenuBarIconView(store: store, size: 13)
-            .scaleEffect(pulsing ? 1.4 : 1)
+          MenuBarIconView(store: store, size: 15)
+            .scaleEffect(pulsing ? MenuBarLayoutMetrics.attentionPulseScale : 1)
             .animation(.easeOut(duration: 0.45), value: pulsing)
         }
         if store.menuBarShowModelName {
@@ -4752,7 +4797,14 @@ private struct StatusItemLabel: View {
             .truncationMode(.tail)
         }
       }
-      .frame(width: MenuBarLayoutMetrics.statusItemWidth(displayMode: store.menuBarDisplayMode), alignment: .leading)
+      .frame(
+        width: MenuBarLayoutMetrics.statusItemWidth(displayMode: store.menuBarDisplayMode, pulsing: pulsing),
+        height: MenuBarLayoutMetrics.statusItemHeight(
+          displayMode: store.menuBarDisplayMode,
+          pulsing: pulsing
+        ),
+        alignment: .leading
+      )
       .clipped()
       .help(tooltipText)
       .onChange(of: store.attentionPulse) { _ in

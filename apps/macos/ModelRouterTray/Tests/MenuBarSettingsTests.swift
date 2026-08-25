@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 
@@ -67,7 +68,114 @@ struct MenuBarSettingsTests {
   @Test("standard mode keeps a reserved width even when the name is hidden")
   func standardWidthIsReserved() {
     #expect(MenuBarLayoutMetrics.statusItemWidth(displayMode: .standard) == 180)
-    #expect(MenuBarLayoutMetrics.statusItemWidth(displayMode: .iconOnly) == 24)
+    #expect(MenuBarLayoutMetrics.statusItemWidth(displayMode: .iconOnly) == 28)
+    #expect(MenuBarLayoutMetrics.statusItemHeight(displayMode: .standard) == 22)
+    #expect(MenuBarLayoutMetrics.statusItemHeight(displayMode: .iconOnly) == 22)
+  }
+
+  @Test("the icon-only pulse reserves space for the rendered mark and badge")
+  func iconOnlyPulseKeepsScaledContentInsideBounds() {
+    #expect(
+      MenuBarLayoutMetrics.statusItemWidth(
+        displayMode: .iconOnly,
+        pulsing: true,
+        showsActivityBadge: false
+      ) == 28
+    )
+    #expect(
+      MenuBarLayoutMetrics.statusItemWidth(
+        displayMode: .iconOnly,
+        pulsing: true,
+        showsActivityBadge: true
+      ) == 36
+    )
+    #expect(MenuBarLayoutMetrics.statusItemHeight(displayMode: .iconOnly, pulsing: true) == 24)
+    #expect(MenuBarLayoutMetrics.statusItemWidth(displayMode: .standard, pulsing: true) == 180)
+    #expect(MenuBarLayoutMetrics.statusItemHeight(displayMode: .standard, pulsing: true) == 22)
+  }
+
+  @Test("provider marks fit transparent crops without leaving the target slot")
+  func providerMarkCropFitsTargetSlot() {
+    let drawRect = ProviderIconLayout.fittedRect(
+      sourceRect: NSRect(x: 2, y: 1, width: 6, height: 8),
+      targetSize: NSSize(width: 20, height: 20)
+    )
+    #expect(drawRect.width == 15)
+    #expect(drawRect.height == 20)
+    #expect(drawRect.minX >= 0)
+    #expect(drawRect.maxX <= 20)
+    #expect(drawRect.minY >= 0)
+    #expect(drawRect.maxY <= 20)
+  }
+
+  @Test("provider layout finds visible content in a transparent bitmap")
+  func providerLayoutFindsVisibleContent() {
+    let url = URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+      .appendingPathComponent("Sources/Resources/ProviderIcons/openai.png")
+    guard let image = NSImage(contentsOf: url) else {
+      Issue.record("Provider icon fixture could not be loaded")
+      return
+    }
+
+    let visibleRect = ProviderIconLayout.visibleImageRect(image)
+    #expect(visibleRect.width > 0)
+    #expect(visibleRect.height > 0)
+    #expect(visibleRect.width <= image.size.width)
+    #expect(visibleRect.height <= image.size.height)
+    #expect(visibleRect.width < image.size.width || visibleRect.height < image.size.height)
+    let drawRect = ProviderIconLayout.fittedRect(
+      sourceRect: visibleRect,
+      targetSize: NSSize(width: 18, height: 18)
+    )
+    #expect(drawRect.minX >= 0)
+    #expect(drawRect.maxX <= 18)
+    #expect(drawRect.minY >= 0)
+    #expect(drawRect.maxY <= 18)
+  }
+
+  @Test("provider layout handles alpha-first bitmap representations")
+  func providerLayoutHandlesAlphaFirstBitmaps() {
+    guard let representation = NSBitmapImageRep(
+      bitmapDataPlanes: nil,
+      pixelsWide: 10,
+      pixelsHigh: 8,
+      bitsPerSample: 8,
+      samplesPerPixel: 4,
+      hasAlpha: true,
+      isPlanar: false,
+      colorSpaceName: .deviceRGB,
+      bitmapFormat: .alphaFirst,
+      bytesPerRow: 0,
+      bitsPerPixel: 0
+    ) else {
+      Issue.record("Alpha-first bitmap fixture could not be created")
+      return
+    }
+
+    func setPixel(_ values: [Int], atX x: Int, y: Int) {
+      var values = values
+      values.withUnsafeMutableBufferPointer { buffer in
+        representation.setPixel(buffer.baseAddress!, atX: x, y: y)
+      }
+    }
+
+    for y in 0..<representation.pixelsHigh {
+      for x in 0..<representation.pixelsWide {
+        setPixel([0, 0, 0, 0], atX: x, y: y)
+      }
+    }
+    setPixel([255, 255, 255, 255], atX: 2, y: 1)
+    setPixel([255, 255, 255, 255], atX: 7, y: 6)
+    let image = NSImage(size: NSSize(width: 10, height: 8))
+    image.addRepresentation(representation)
+
+    let visibleRect = ProviderIconLayout.visibleImageRect(image)
+    #expect(visibleRect.minX == 2)
+    #expect(visibleRect.minY == 1)
+    #expect(visibleRect.width == 6)
+    #expect(visibleRect.height == 6)
   }
 
   @Test("the activity badge is not a second dot on the indicator style")
