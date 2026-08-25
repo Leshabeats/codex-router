@@ -366,6 +366,7 @@ export class EmptyCompletionGuard extends Transform {
   #bufferedBytes = 0;
   #sawContent = false;
   #sawTerminal = false;
+  #sawParseableEvent = false;
   #empty = false;
   #released = false;
   #keepParsingAfterRelease = false;
@@ -476,7 +477,10 @@ export class EmptyCompletionGuard extends Transform {
       if (!this.#settled()) {
         this.#parseBuffer += this.#decoder.write(bytes);
         this.#consumeBlocks();
-        if (Buffer.byteLength(this.#parseBuffer) > this.#maxPreludeBytes) {
+        if (
+          !this.#settled() &&
+          Buffer.byteLength(this.#parseBuffer) > this.#maxPreludeBytes
+        ) {
           this.#failPrelude("bytes");
         }
         if (!this.#settled()) this.#startTimer({ reset: true });
@@ -488,7 +492,20 @@ export class EmptyCompletionGuard extends Transform {
     this.#parseBuffer += this.#decoder.write(bytes);
     this.#consumeBlocks();
     if (!this.#released && this.#bufferedBytes > this.#maxPreludeBytes) {
-      this.#failPrelude("bytes");
+      // A large but well-framed prologue is not a broken stream. Providers can
+      // echo substantial response metadata before the first delta; relaying a
+      // completed JSON event bounds our staging memory while parsing behind
+      // the relay preserves the eventual empty/content verdict. An unframed or
+      // unparseable body still fails closed at the same byte limit.
+      if (
+        this.#sawParseableEvent &&
+        !this.#sawTerminal &&
+        Buffer.byteLength(this.#parseBuffer) <= this.#maxPreludeBytes
+      ) {
+        this.#release({ preludeLimit: "bytes" });
+      } else {
+        this.#failPrelude("bytes");
+      }
     }
   }
 
@@ -570,6 +587,18 @@ export class EmptyCompletionGuard extends Transform {
 
   #classifyBlock(block) {
     const { eventType, dataText } = this.#fields(block);
+    if (dataText === "[DONE]") {
+      this.#sawParseableEvent = true;
+    } else if (dataText) {
+      try {
+        JSON.parse(dataText);
+        this.#sawParseableEvent = true;
+      } catch {
+        // `#contentOf` below keeps malformed terminal data indeterminate. The
+        // byte-budget decision remains fail-closed unless another complete
+        // JSON event already established framing.
+      }
+    }
     // Content is decided before the terminal check: a gateway that puts the
     // whole turn in `response.completed` emits a terminal event that is also
     // the only content event in the stream.

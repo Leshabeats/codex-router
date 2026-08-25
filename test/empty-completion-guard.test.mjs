@@ -602,6 +602,79 @@ test("a byte limit fails before relaying any staged bytes", async () => {
   assert.equal(Buffer.concat(chunks).length, 0);
 });
 
+test("a large parseable prologue is relayed at the byte budget and later content wins", async () => {
+  const prologue = [
+    "event: response.created",
+    `data: ${JSON.stringify({
+      type: "response.created",
+      response: { id: "r1", metadata: "x".repeat(256) },
+    })}`,
+    "",
+    "",
+  ].join("\n");
+  const answer = [
+    "event: response.output_text.delta",
+    'data: {"type":"response.output_text.delta","delta":"ok"}',
+    "",
+    "event: response.completed",
+    'data: {"type":"response.completed","response":{"id":"r1","output":[]}}',
+    "",
+    "",
+  ].join("\n");
+  const guard = new EmptyCompletionGuard("text/event-stream", {
+    maxPreludeBytes: 64,
+    maxPreludeMs: 1_000,
+  });
+  const chunks = [];
+  await pipeline(
+    Readable.from([Buffer.from(prologue), Buffer.from(answer)]),
+    guard,
+    new Writable({
+      write(chunk, _encoding, callback) {
+        chunks.push(Buffer.from(chunk));
+        callback();
+      },
+    }),
+  );
+  assert.equal(guard.hasContent(), true);
+  assert.equal(guard.isEmpty(), false);
+  assert.equal(guard.suppressedPrologue(), false);
+  assert.equal(guard.preludeLimitKind(), "bytes");
+  assert.equal(Buffer.concat(chunks).toString("utf8"), prologue + answer);
+});
+
+test("a valid event does not excuse a later oversized unterminated event", async () => {
+  const created = [
+    "event: response.created",
+    'data: {"type":"response.created","response":{"id":"r1"}}',
+    "",
+    "",
+  ].join("\n");
+  const guard = new EmptyCompletionGuard("text/event-stream", {
+    maxPreludeBytes: 64,
+    maxPreludeMs: 1_000,
+  });
+  const chunks = [];
+  await assert.rejects(
+    pipeline(
+      Readable.from([
+        Buffer.from(created + `event: response.in_progress\ndata: ${"x".repeat(128)}`),
+      ]),
+      guard,
+      new Writable({
+        write(chunk, _encoding, callback) {
+          chunks.push(Buffer.from(chunk));
+          callback();
+        },
+      }),
+    ),
+    (error) =>
+      error instanceof EmptyCompletionPreludeLimitError && error.kind === "bytes",
+  );
+  assert.equal(guard.suppressedPrologue(), true);
+  assert.equal(Buffer.concat(chunks).length, 0);
+});
+
 test("a time limit relays the staged stream but keeps its empty verdict", async () => {
   const split = SILENT_TURN.indexOf("event: response.completed");
   async function* delayedTurn() {
