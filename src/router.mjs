@@ -53,6 +53,7 @@ import {
   ZaiResponsesCompatTransform,
   zaiResponsesCompatTransform,
 } from "./zai-responses-compat.mjs";
+import { deepseekToolMessageCompatTransform } from "./deepseek-tool-message-compat.mjs";
 import {
   MERGED_CATALOG_PATH,
   NATIVE_CATALOG_PATH,
@@ -3046,6 +3047,10 @@ async function handleResponses(request, response, requestUrl) {
         envelopeCompat = new ZaiResponsesCompatTransform();
       }
       if (envelopeCompat) transforms.push(envelopeCompat);
+      const deepseekToolMessageCompat = route
+        ? deepseekToolMessageCompatTransform(route.provider, contentType)
+        : undefined;
+      if (deepseekToolMessageCompat) transforms.push(deepseekToolMessageCompat);
       // Restore flattened namespace calls for routed chat-completions providers,
       // and inject missing finished-child interrupts for both routed and native
       // multi-agent parents (San Francisco uses native GPT).
