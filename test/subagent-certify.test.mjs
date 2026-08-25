@@ -11,6 +11,7 @@ import {
   newMarker,
   parseEventLines,
   readDelegation,
+  runDeferred,
 } from "../src/subagent-certify.mjs";
 import { VERIFICATION_CHECKS } from "../src/subagent-proofs.mjs";
 
@@ -144,4 +145,49 @@ test("independent routes fan out, but recording and publishing do not", () => {
   assert.equal(block.match(/refreshModelSettingsCatalog\(\)/g)?.length, 1);
   // One route's crash is not a verdict on the others.
   assert.match(block, /catch \(error\) \{[\s\S]{0,200}return \{ slug, error/);
+});
+
+test("a rate limit is not a verdict about the route", () => {
+  // A 429 on the tool call recorded "Cannot run subagents" against a route
+  // that had never been asked a question it could fail.
+  const source = readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "subagent-certify.mjs"),
+    "utf8",
+  );
+  assert.match(source, /STATUS_ABOUT_THE_ACCOUNT = new Set\(\[401, 402, 403, 408, 429, 500, 502, 503, 504\]\)/);
+  assert.match(source, /outcome: "deferred"/);
+  assert.equal(runDeferred({ streaming: { outcome: "pass" }, toolCall: { outcome: "deferred" } }), true);
+  assert.equal(runDeferred({ streaming: { outcome: "pass" }, toolCall: { outcome: "fail" } }), false);
+
+  const control = readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "control.mjs"),
+    "utf8",
+  );
+  // Deferring clears the record so the switch stays retryable.
+  assert.match(control, /if \(!result\.ok && runDeferred\(result\.checks\)\) \{[\s\S]{0,120}clearSubagentProof\(slug\)/);
+});
+
+test("the delegation run is configured to reach the router at all", () => {
+  // Without a provider declaration and a real Codex home, no child can start
+  // for any route -- which is what "no child ran on this route" reported for
+  // five different providers in a row.
+  const source = readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "subagent-certify.mjs"),
+    "utf8",
+  );
+  assert.match(source, /model_providers\.codex-router\.base_url=/);
+  assert.match(source, /model_providers\.codex-router\.wire_api="responses"/);
+  assert.match(source, /model_catalog_json=/);
+  // The disposable thing is the working directory, never the Codex home.
+  assert.match(source, /codex-router-certify-/);
+  assert.doesNotMatch(source, /mkdtempSync[^)]*\)\s*;\s*\n\s*try \{[\s\S]{0,80}codexHome/);
+  // An agent definition written only for the check must not outlive it.
+  assert.match(source, /if \(!preExisting\) rmSync\(agentFile, \{ force: true \}\)/);
+
+  const control = readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "control.mjs"),
+    "utf8",
+  );
+  assert.match(control, /codexHome: CODEX_HOME/);
+  assert.match(control, /catalogPath: MERGED_CATALOG_PATH/);
 });

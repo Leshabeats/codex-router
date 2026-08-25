@@ -1257,8 +1257,8 @@ async function handleSubagents(action, value, flag, rest = []) {
       if (!(await knownModelSlug(slug))) throw new Error(`Unknown model slug: ${slug}`);
     }
     const [
-      { verifySubagentRoute, firstFailure, recordApplicationEvidence },
-      { recordVerification, recordVerificationStarted },
+      { verifySubagentRoute, firstFailure, recordApplicationEvidence, runDeferred },
+      { recordVerification, recordVerificationStarted, clearSubagentProof },
       { assertCallerSecret, callerBaseUrl },
       { CALLER_SECRET_PATH, PORTS },
       { findCodexBinary },
@@ -1280,11 +1280,22 @@ async function handleSubagents(action, value, flag, rest = []) {
     const secret = assertCallerSecret(readFileSync(CALLER_SECRET_PATH, "utf8").trim());
     const codexBin = findCodexBinary();
     const baseUrl = callerBaseUrl(PORTS.router, secret);
+    const { CODEX_HOME, MERGED_CATALOG_PATH } = await import("./paths.mjs");
     for (const slug of slugs) recordVerificationStarted(slug);
     const outcomes = await Promise.all(
       slugs.map(async (slug) => {
         try {
-          return { slug, result: await verifySubagentRoute(slug, { baseUrl, secret, codexBin, routerVersion: VERSION }) };
+          return {
+            slug,
+            result: await verifySubagentRoute(slug, {
+              baseUrl,
+              secret,
+              codexBin,
+              codexHome: CODEX_HOME,
+              catalogPath: MERGED_CATALOG_PATH,
+              routerVersion: VERSION,
+            }),
+          };
         } catch (error) {
           // One route's crash is not a verdict on the others, and must not
           // reject the whole fan-out.
@@ -1298,6 +1309,16 @@ async function handleSubagents(action, value, flag, rest = []) {
       if (!result) {
         recordVerification(slug, { checks: {}, routerVersion: VERSION, reason: error });
         results.push({ slug, certified: false, reason: error });
+        continue;
+      }
+      // A run that only met a rate limit, an outage, or a missing entitlement
+      // learned nothing about the route. Clearing the record leaves the switch
+      // retryable instead of leaving "No" next to a model that was never
+      // actually refused.
+      if (!result.ok && runDeferred(result.checks)) {
+        clearSubagentProof(slug);
+        const detail = firstFailure(result.checks)?.detail;
+        results.push({ slug, certified: false, deferred: true, reason: detail });
         continue;
       }
       recordVerification(slug, {

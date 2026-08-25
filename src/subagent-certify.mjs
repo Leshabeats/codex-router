@@ -44,8 +44,32 @@ function fail(detail, at = new Date().toISOString()) {
   return { outcome: "fail", ...(detail ? { detail: String(detail).slice(0, 300) } : {}), observedAt: at };
 }
 
-// The first check that did not pass, in reviewer order. A run stops at its
-// first failure, so this is also the reason the route was refused.
+// These answer about the account or the moment, never about the route: rate
+// limits, exhausted quota and outages clear on their own, and a missing
+// credential or plan entitlement clears when the operator fixes it. Recording
+// them as a refusal tells the operator their model cannot host subagents when
+// all that happened was a 429.
+const STATUS_ABOUT_THE_ACCOUNT = new Set([401, 402, 403, 408, 429, 500, 502, 503, 504]);
+
+function deferred(status, detail, at = new Date().toISOString()) {
+  return {
+    outcome: "deferred",
+    ...(status ? { status } : {}),
+    ...(detail ? { detail: String(detail).slice(0, 300) } : {}),
+    observedAt: at,
+  };
+}
+
+function httpOutcome(status, detail) {
+  return STATUS_ABOUT_THE_ACCOUNT.has(status) ? deferred(status, detail) : fail(detail);
+}
+
+export function runDeferred(checks) {
+  return VERIFICATION_CHECKS.some((name) => checks?.[name]?.outcome === "deferred");
+}
+
+// The first check that did not pass, in reviewer order. A run stops there, so
+// this is also the reason the route was not promoted.
 export function firstFailure(checks) {
   const name = VERIFICATION_CHECKS.find((check) => checks?.[check]?.outcome !== "pass");
   if (!name) return undefined;
@@ -119,7 +143,28 @@ function runCodex(args, { codexBin, codexHome, timeoutMs, cwd }) {
   });
 }
 
-function execArgs({ model, prompt, agentsHome, extra = [] }) {
+// `--ignore-user-config` means the run starts with no providers at all, so the
+// child's `model_provider = "codex-router"` has to be declared here or no child
+// can ever start -- which is what "no child ran on this route" was really
+// reporting, for every route, regardless of the route.
+function routerConfigArgs({ baseUrl, catalogPath }) {
+  const args = [
+    "--config",
+    'model_providers.codex-router.name="Codex Router"',
+    "--config",
+    `model_providers.codex-router.base_url=${JSON.stringify(baseUrl)}`,
+    "--config",
+    'model_providers.codex-router.wire_api="responses"',
+    "--config",
+    "model_providers.codex-router.requires_openai_auth=true",
+    "--config",
+    "model_providers.codex-router.supports_websockets=false",
+  ];
+  if (catalogPath) args.push("--config", `model_catalog_json=${JSON.stringify(catalogPath)}`);
+  return args;
+}
+
+function execArgs({ model, prompt, cwd, extra = [] }) {
   return [
     "exec",
     "--ignore-user-config",
@@ -136,7 +181,7 @@ function execArgs({ model, prompt, agentsHome, extra = [] }) {
     "disable_response_storage=true",
     ...extra,
     "--cd",
-    agentsHome,
+    cwd,
     prompt,
   ];
 }
@@ -170,7 +215,7 @@ async function runHttpChecks({ slug, baseUrl, secret, timeoutMs }) {
     const text = await response.text();
     results.streaming = response.ok && text.includes("data:")
       ? pass(response.status)
-      : fail(`streamed turn returned HTTP ${response.status}`);
+      : httpOutcome(response.status, `streamed turn returned HTTP ${response.status}`);
   } catch (error) {
     results.streaming = fail(error?.message || "streamed turn failed");
   }
@@ -212,7 +257,8 @@ async function runHttpChecks({ slug, baseUrl, secret, timeoutMs }) {
     })();
     results.toolCall = response.ok && call?.name === "codex_router_probe" && argumentsValid
       ? pass(response.status)
-      : fail(
+      : httpOutcome(
+        response.status,
         call
           ? "the forced call did not return valid JSON arguments"
           : `no tool call in the reply (HTTP ${response.status})`,
@@ -231,128 +277,91 @@ async function runDelegationChecks({
   parentModel,
   codexBin,
   codexHome,
+  baseUrl,
   catalogPath,
+  workDir,
   timeoutMs,
 }) {
   const results = {};
   const definition = routedAgentDefinition({ slug, displayName: slug });
+  // The parent is a native model signing in with this machine's ChatGPT
+  // session, so the run has to use the real CODEX_HOME. A throwaway home has
+  // no credentials, and an unauthenticated parent cannot delegate anything.
   const agentsDir = path.join(codexHome, "agents");
+  const agentFile = path.join(agentsDir, definition.fileName);
+  const preExisting = existsSync(agentFile);
   mkdirSync(agentsDir, { recursive: true, mode: 0o700 });
-  // The route is v1 today, so the catalog has not written its definition. The
-  // check needs the child spawnable without promoting anything first.
-  writeFileSync(path.join(agentsDir, definition.fileName), definition.contents, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
-
-  const marker = newMarker();
-  const first = await runCodex(
-    execArgs({
-      model: parentModel,
-      agentsHome: codexHome,
-      extra: catalogPath ? ["--config", `model_catalog_json=${JSON.stringify(catalogPath)}`] : [],
-      prompt:
-        `Delegate to the agent named ${definition.agentName}. Instruct that agent to reply with exactly ${marker}. ` +
-        "Do not answer yourself and do not repeat the token in your own message; report only what the agent returned.",
-    }),
-    { codexBin, codexHome, timeoutMs, cwd: codexHome },
-  );
-  const firstEvents = parseEventLines(first.stdout);
-  const firstDelegation = readDelegation(firstEvents, {
-    agentName: definition.agentName,
-    marker,
-  });
-  results.encryptedRelay = firstDelegation.childStarted
-    ? pass(200)
-    : fail(first.timedOut ? "the parent did not delegate before the timeout" : "no child ran on this route");
-  if (!firstDelegation.childStarted) return { results, agentName: definition.agentName };
-
-  results.markerReturn = firstDelegation.markerReturned
-    ? pass(200)
-    : fail("the child ran but did not return the marker");
-  if (!firstDelegation.markerReturned) return { results, agentName: definition.agentName };
-
-  const followUpMarker = newMarker("CRV2");
-  const second = await runCodex(
-    [
-      "exec",
-      "resume",
-      "--last",
-      "--ignore-user-config",
-      "--ignore-rules",
-      "--skip-git-repo-check",
-      "--sandbox",
-      "read-only",
-      "--color",
-      "never",
-      "--json",
-      "--config",
-      "disable_response_storage=true",
-      "--cd",
-      codexHome,
-      `Ask the same ${definition.agentName} agent, in this same thread, to reply with exactly ${followUpMarker}.`,
-    ],
-    { codexBin, codexHome, timeoutMs, cwd: codexHome },
-  );
-  const secondDelegation = readDelegation(parseEventLines(second.stdout), {
-    agentName: definition.agentName,
-    marker: followUpMarker,
-  });
-  results.sameThreadFollowUp = secondDelegation.markerReturned
-    ? pass(200)
-    : fail("the child did not answer a second turn in the same thread");
-  return { results, agentName: definition.agentName };
-}
-
-// A pass is worth more than one machine. The same five outcomes are what a
-// v2_agent application carries, so record them there too: once that artifact
-// is reviewed and its registry entry lands, every installer gets the route as
-// v2 and nobody -- including this operator on their next machine -- pays to
-// measure it again.
-//
-// Only outcomes, HTTP statuses, and timestamps are written. Prompts, response
-// bodies, decrypted payloads, and anything credential-shaped stay out, which
-// is both the README's rule and what CI refuses.
-export function applicationPath(slug, root = REPO_ROOT) {
-  const [provider, ...rest] = String(slug || "").split("/");
-  const model = rest.join("/");
-  if (!provider || !model) return undefined;
-  const safe = /^[a-z0-9][a-z0-9._-]*$/i;
-  if (!safe.test(provider) || !safe.test(model)) return undefined;
-  return path.join(root, "v2_agent", provider, model);
-}
-
-export function recordApplicationEvidence(slug, { checks, routerVersion, at, root = REPO_ROOT }) {
-  const directory = applicationPath(slug, root);
-  if (!directory) return undefined;
-  const target = path.join(directory, "proof.json");
-  // An existing draft already carries the upstream model id and the official
-  // sources a reviewer checked. Never overwrite those with a guess.
-  let existing;
-  if (existsSync(target)) {
-    try {
-      existing = JSON.parse(readFileSync(target, "utf8"));
-    } catch {
-      existing = undefined;
-    }
+  if (!preExisting) {
+    // The route is not v2 yet, so the catalog has not written its definition.
+    // The check needs the child spawnable without promoting anything first,
+    // and the file goes away again below unless it was already there.
+    writeFileSync(agentFile, definition.contents, { encoding: "utf8", mode: 0o600 });
   }
-  const [provider, ...rest] = String(slug).split("/");
-  const next = {
-    version: 1,
-    provider: existing?.provider || provider,
-    model: existing?.model || rest.join("/"),
-    slug: String(slug),
-    // Only the pull request that also moves the registry entry may accept an
-    // application, so a local pass never promotes itself past review.
-    status: existing?.status === "accepted" ? "accepted" : "draft",
-    officialSources: Array.isArray(existing?.officialSources) ? existing.officialSources : [],
-    testedAt: at,
-    routerVersion: String(routerVersion || ""),
-    checks,
-  };
-  mkdirSync(directory, { recursive: true });
-  writeFileSync(target, `${JSON.stringify(next, undefined, 2)}\n`, "utf8");
-  return target;
+
+  const config = routerConfigArgs({ baseUrl, catalogPath });
+  try {
+    const marker = newMarker();
+    const first = await runCodex(
+      execArgs({
+        model: parentModel,
+        cwd: workDir,
+        extra: config,
+        prompt:
+          `Delegate to the agent named ${definition.agentName}. Instruct that agent to reply with exactly ${marker}. ` +
+          "Do not answer yourself and do not repeat the token in your own message; report only what the agent returned.",
+      }),
+      { codexBin, codexHome, timeoutMs, cwd: workDir },
+    );
+    const firstDelegation = readDelegation(parseEventLines(first.stdout), {
+      agentName: definition.agentName,
+      marker,
+    });
+    results.encryptedRelay = firstDelegation.childStarted
+      ? pass(200)
+      : fail(first.timedOut ? "the parent did not delegate before the timeout" : "no child ran on this route");
+    if (!firstDelegation.childStarted) return { results, agentName: definition.agentName };
+
+    results.markerReturn = firstDelegation.markerReturned
+      ? pass(200)
+      : fail("the child ran but did not return the marker");
+    if (!firstDelegation.markerReturned) return { results, agentName: definition.agentName };
+
+    const followUpMarker = newMarker("CRV2");
+    const second = await runCodex(
+      [
+        "exec",
+        "resume",
+        "--last",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "read-only",
+        "--color",
+        "never",
+        "--json",
+        "--config",
+        "disable_response_storage=true",
+        ...config,
+        "--cd",
+        workDir,
+        `Ask the same ${definition.agentName} agent, in this same thread, to reply with exactly ${followUpMarker}.`,
+      ],
+      { codexBin, codexHome, timeoutMs, cwd: workDir },
+    );
+    const secondDelegation = readDelegation(parseEventLines(second.stdout), {
+      agentName: definition.agentName,
+      marker: followUpMarker,
+    });
+    results.sameThreadFollowUp = secondDelegation.markerReturned
+      ? pass(200)
+      : fail("the child did not answer a second turn in the same thread");
+    return { results, agentName: definition.agentName };
+  } finally {
+    // Leave the agents directory exactly as it was found. A definition left
+    // behind would keep an uncertified route spawnable by name.
+    if (!preExisting) rmSync(agentFile, { force: true });
+  }
 }
 
 // One route, all five checks, stopping at the first failure so a route that
@@ -363,6 +372,7 @@ export async function verifySubagentRoute(
     baseUrl,
     secret,
     codexBin,
+    codexHome,
     parentModel = "gpt-5.6-sol",
     catalogPath,
     routerVersion,
@@ -377,19 +387,23 @@ export async function verifySubagentRoute(
     return { slug, checks, ok: false, routerVersion, durationMs: Date.now() - started };
   }
 
-  const codexHome = mkdtempSync(path.join(os.tmpdir(), "codex-router-verify-"));
+  // Only the working directory is disposable. The Codex home stays real so the
+  // parent can authenticate.
+  const workDir = mkdtempSync(path.join(os.tmpdir(), "codex-router-certify-"));
   try {
     const { results } = await runDelegationChecks({
       slug,
       parentModel,
       codexBin,
       codexHome,
+      baseUrl,
       catalogPath,
+      workDir,
       timeoutMs,
     });
     Object.assign(checks, results);
   } finally {
-    rmSync(codexHome, { recursive: true, force: true });
+    rmSync(workDir, { recursive: true, force: true });
   }
   return {
     slug,
