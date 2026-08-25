@@ -1,19 +1,18 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { Check, ChevronDown, Filter, KeyRound, Link2, LogIn, SearchX, ShieldCheck, Trash2 } from "lucide-react";
-import { Badge, Button, CatalogSkeleton, Dialog, EmptyState, PageHeader, SearchField, SkeletonBlock, StatStrip, Toggle } from "../components";
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { Check, ChevronDown, Filter, KeyRound, Link2, LogIn, MoreHorizontal, Plus, SearchX, ShieldCheck, Trash2 } from "lucide-react";
+import { Badge, Button, CatalogSkeleton, Dialog, EmptyState, PageHeader, SearchField, SkeletonBlock, Toggle } from "../components";
 import { BrandLogo, ProviderLogo, brandForModel } from "../provider-branding";
 import { formatContext, formatDateTime } from "../lib";
 import {
   addPendingCatalogModels,
   beginCatalogRequest,
-  catalogModelName,
   catalogRequestIsCurrent,
   clearProviderCatalogStates,
   invalidateProviderCatalogRequests,
+  loadedCatalogModels,
   modelRouteKind,
   pendingCatalogModelIds,
   removePendingCatalogModels,
-  searchLoadedCatalogModels,
   type PendingCatalogModels,
 } from "../model-catalog-search.mjs";
 import { groupModelFamilies, preferredFamilyRoute } from "../model-families.mjs";
@@ -32,9 +31,42 @@ import type {
 } from "../types";
 import "./providers-models.css";
 
-type ConnectionFilter = "all" | "connected" | "available";
-type LoadedCatalogModel = ReturnType<typeof searchLoadedCatalogModels>[number];
+type StatusFilter = "all" | "on" | "off" | "blocked";
 const CATALOG_ADD_BATCH_LIMIT = 200;
+
+/** One model, and every provider route that can serve it. */
+interface ModelFamily {
+  id: string;
+  displayName: string;
+  routes: RouterModel[];
+}
+
+/** A model a connected provider offers but the router has not registered yet. */
+interface CatalogModel {
+  key: string;
+  modelId: string;
+  displayName: string;
+  providerId: string;
+  providerName: string;
+  sourceId: string;
+  sourceName: string;
+  registered: boolean;
+  addable: boolean;
+  blockedReason?: string;
+  contextWindow?: number;
+  isFree: boolean;
+}
+
+const STATUS_LABELS: Record<StatusFilter, string> = {
+  all: "All models",
+  on: "On",
+  off: "Off",
+  blocked: "Needs a provider",
+};
+
+/** Below this, a list is short enough to read whole; filters and bulk switches
+ *  would be more chrome than the list they act on. */
+const CROWDED_LIST = 8;
 
 interface ModelsPageProps {
   target?: RouterTarget;
@@ -63,8 +95,6 @@ interface CatalogViewState {
   refreshing: boolean;
   data?: ProviderCatalog;
   error?: string;
-  query: string;
-  selected: string[];
 }
 
 function catalogEligible(entry: ProviderDirectoryEntry): boolean {
@@ -95,15 +125,23 @@ function nativeClientManaged(model: RouterModel): boolean {
   return model.native === true && model.nativeClientManaged !== false;
 }
 
+function routeUsable(model: RouterModel): boolean {
+  return model.available !== false;
+}
+
 export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onRefresh, runAction, focusRequest }: ModelsPageProps) {
-  const [providerSearch, setProviderSearch] = useState("");
   const [modelSearch, setModelSearch] = useState("");
-  const [connectionFilter, setConnectionFilter] = useState<ConnectionFilter>("all");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [filterMenuOpen, setFilterMenuOpen] = useState(false);
   const filterMenuRef = useRef<HTMLDivElement | null>(null);
-  const [expandedProviderId, setExpandedProviderId] = useState<string | null>(null);
+  const [bulkMenuOpen, setBulkMenuOpen] = useState(false);
+  const bulkMenuRef = useRef<HTMLDivElement | null>(null);
+  // The connect menu lives in the connections strip but is also the first-run
+  // call to action, so the page owns whether it is open.
+  const [connectMenuOpen, setConnectMenuOpen] = useState(false);
   const [expandedFamilyId, setExpandedFamilyId] = useState<string | null>(null);
-  const [catalogSourceByProvider, setCatalogSourceByProvider] = useState<Record<string, string>>({});
+  const [managedProviderId, setManagedProviderId] = useState<string | null>(null);
+  const [addModelsOpen, setAddModelsOpen] = useState(false);
   const [loadingConnectedCatalogs, setLoadingConnectedCatalogs] = useState(false);
   const [credentialProvider, setCredentialProvider] = useState<ProviderSetup | null>(null);
   const [removeProvider, setRemoveProvider] = useState<ProviderSetup | null>(null);
@@ -133,8 +171,10 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
     [catalog?.enabledProviders, target?.enabledProviders],
   );
   const subagentSettings = catalog?.subagents ?? target?.modelSettings?.subagents;
-  const modelFamilies = useMemo(() => groupModelFamilies(models), [models]);
-  const researchModels = useMemo<RouterModel[]>(() => {
+  // One list covers configured routes and routes that are only known to the
+  // registry. A model nobody can reach yet is still the answer to "can I use
+  // this model", so it stays on the page with the connection it is waiting for.
+  const allModels = useMemo<RouterModel[]>(() => {
     const activeSlugs = new Set(models.map((model) => model.slug));
     return [
       ...models,
@@ -149,7 +189,7 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
         })),
     ];
   }, [catalog?.knownModels, models]);
-  const researchFamilies = useMemo(() => groupModelFamilies(researchModels), [researchModels]);
+  const families = useMemo<ModelFamily[]>(() => groupModelFamilies(allModels), [allModels]);
   const usageById = useMemo(
     () => new Map((usage?.providers ?? []).map((provider) => [provider.id, provider])),
     [usage?.providers],
@@ -195,6 +235,7 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
       return Number(rightConnected) - Number(leftConnected) || left.displayName.localeCompare(right.displayName);
     });
   }, [catalog?.knownModels, enabledProviders, models, setup?.providers, target?.providers]);
+  const directoryById = useMemo(() => new Map(directory.map((entry) => [entry.id, entry])), [directory]);
   const providerStates = useMemo(() => new Map(directory.map((entry) => [
     entry.id,
     enabledProviders.has(entry.id) || entry.models.some((model) => model.native),
@@ -218,12 +259,15 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
   const optimisticSubagentEfforts = useOptimisticValues(subagentEffortStates, runAction);
 
   useEffect(() => {
-    if (!filterMenuOpen) return;
+    if (!filterMenuOpen && !bulkMenuOpen) return;
     const closeOnOutsidePointer = (event: PointerEvent) => {
       if (!filterMenuRef.current?.contains(event.target as Node)) setFilterMenuOpen(false);
+      if (!bulkMenuRef.current?.contains(event.target as Node)) setBulkMenuOpen(false);
     };
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setFilterMenuOpen(false);
+      if (event.key !== "Escape") return;
+      setFilterMenuOpen(false);
+      setBulkMenuOpen(false);
     };
     document.addEventListener("pointerdown", closeOnOutsidePointer);
     document.addEventListener("keydown", closeOnEscape);
@@ -231,12 +275,12 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
       document.removeEventListener("pointerdown", closeOnOutsidePointer);
       document.removeEventListener("keydown", closeOnEscape);
     };
-  }, [filterMenuOpen]);
+  }, [bulkMenuOpen, filterMenuOpen]);
 
-  const updateCatalogState = (providerId: string, update: (current: CatalogViewState) => CatalogViewState) => {
+  const updateCatalogState = (sourceId: string, update: (current: CatalogViewState) => CatalogViewState) => {
     setCatalogStates((current) => ({
       ...current,
-      [providerId]: update(current[providerId] ?? { status: "idle", refreshing: false, query: "", selected: [] }),
+      [sourceId]: update(current[sourceId] ?? { status: "idle", refreshing: false }),
     }));
   };
 
@@ -262,15 +306,10 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
     }
   };
 
-  const activeCatalogSource = (entry: ProviderDirectoryEntry) => {
-    const sources = entry.setup?.catalogSources ?? [];
-    const requested = catalogSourceByProvider[entry.id];
-    return sources.find((source) => source.id === requested) ?? sources[0];
-  };
-
   const discoverCatalog = async (
     entry: ProviderDirectoryEntry,
-    { refresh = false, keepOnFailure = false, sourceId = activeCatalogSource(entry)?.id } = {},
+    sourceId: string,
+    { refresh = false, keepOnFailure = false } = {},
   ) => {
     if (!api || !catalogEligible(entry) || !sourceId) return;
     const generation = beginCatalogRequest(catalogRequestGenerations.current, sourceId);
@@ -283,19 +322,12 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
     try {
       const data = await api.discoverProviderModels(sourceId, { refresh });
       if (!catalogRequestIsCurrent(catalogRequestGenerations.current, sourceId, generation)) return;
-      updateCatalogState(sourceId, (current) => ({
-        ...current,
-        status: "ready",
-        refreshing: false,
-        data,
-        error: undefined,
-        selected: current.selected.filter((id) => (data.addable ?? data.unregistered).includes(id)),
-      }));
+      updateCatalogState(sourceId, (current) => ({ ...current, status: "ready", refreshing: false, data, error: undefined }));
       // A stored list past its trust window is shown immediately and re-read
       // behind it, so a model the provider shipped since the last visit does
       // not stay invisible until somebody thinks to press Reload. A failed
       // re-read leaves the list that is already on screen in place.
-      if (!refresh && data.stale) void discoverCatalog(entry, { refresh: true, keepOnFailure: true, sourceId });
+      if (!refresh && data.stale) void discoverCatalog(entry, sourceId, { refresh: true, keepOnFailure: true });
     } catch (error) {
       if (!catalogRequestIsCurrent(catalogRequestGenerations.current, sourceId, generation)) return;
       updateCatalogState(sourceId, (current) => keepOnFailure && current.data
@@ -309,21 +341,26 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
     }
   };
 
-  // A provider's list is stored after the first load, so opening a provider can
-  // show it immediately instead of making every visit start with a button and a
-  // network round trip. Only an explicit refresh re-asks the provider.
-  const openProvider = (entry: ProviderDirectoryEntry, expanded: boolean) => {
-    setExpandedProviderId(expanded ? null : entry.id);
-    if (expanded) return;
-    const sourceId = activeCatalogSource(entry)?.id;
-    if (!sourceId) return;
-    const state = catalogStates[sourceId];
-    if (state && state.status !== "idle") return;
-    void discoverCatalog(entry, { sourceId });
+  const catalogRequests = () => directory.flatMap((entry) => !catalogEligible(entry) || !providerConnected(entry, enabledProviders)
+    ? []
+    : (entry.setup?.catalogSources ?? []).map((source) => ({ entry, sourceId: source.id })));
+
+  // Opening the picker loads every connected provider at once, so one search
+  // box can cover them all. Stored lists answer immediately; only an explicit
+  // reload re-asks the providers.
+  const loadConnectedCatalogs = async ({ refresh = false } = {}) => {
+    if (!api || loadingConnectedCatalogs) return;
+    const requests = catalogRequests().filter(({ sourceId }) => refresh || (catalogStates[sourceId]?.status ?? "idle") === "idle");
+    if (!requests.length) return;
+    setLoadingConnectedCatalogs(true);
+    try {
+      await Promise.all(requests.map(({ entry, sourceId }) => discoverCatalog(entry, sourceId, { refresh })));
+    } finally {
+      setLoadingConnectedCatalogs(false);
+    }
   };
 
-  const publishCatalogModels = async (entry: ProviderDirectoryEntry, sourceId: string, selectedModels?: string[]) => {
-    const selected = selectedModels ?? catalogStates[sourceId]?.selected ?? [];
+  const publishCatalogModels = async (entry: ProviderDirectoryEntry, sourceId: string, selected: string[]) => {
     if (!api || !sourceId || !selected.length) return;
     let published = false;
     setPendingModels((current) => addPendingCatalogModels(current, entry.id, selected));
@@ -333,8 +370,7 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
         published = true;
       });
       if (!published) return;
-      updateCatalogState(sourceId, (current) => ({ ...current, selected: [] }));
-      await discoverCatalog(entry, { sourceId });
+      await discoverCatalog(entry, sourceId);
     } finally {
       // Cleared on failure too: a placeholder left behind after a failed add
       // would claim the model arrived. runAction reports the error itself.
@@ -342,60 +378,54 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
     }
   };
 
-  const loadConnectedCatalogs = async () => {
-    if (!api || loadingConnectedCatalogs) return;
-    const requests = directory.flatMap((entry) => !catalogEligible(entry) || !providerConnected(entry, enabledProviders)
-      ? []
-      : (entry.setup?.catalogSources ?? []).map((source) => ({ entry, sourceId: source.id })));
-    setLoadingConnectedCatalogs(true);
-    try {
-      await Promise.all(requests.map(({ entry, sourceId }) => discoverCatalog(entry, { sourceId })));
-    } finally {
-      setLoadingConnectedCatalogs(false);
+  const addCatalogModels = async (selection: CatalogModel[]) => {
+    const bySource = new Map<string, { entry: ProviderDirectoryEntry; modelIds: string[] }>();
+    for (const model of selection) {
+      const entry = directoryById.get(model.providerId);
+      if (!entry) continue;
+      const group = bySource.get(model.sourceId) ?? { entry, modelIds: [] };
+      group.modelIds.push(model.modelId);
+      bySource.set(model.sourceId, group);
+    }
+    for (const [sourceId, { entry, modelIds }] of bySource) {
+      await publishCatalogModels(entry, sourceId, modelIds);
     }
   };
 
-  const filteredDirectory = useMemo(() => {
-    const needle = providerSearch.trim().toLowerCase();
-    return directory.flatMap((entry) => {
-      const connected = providerConnected(entry, enabledProviders);
-      if (connectionFilter === "connected" && !connected) return [];
-      if (connectionFilter === "available" && connected) return [];
-      const providerMatch = !needle || `${entry.displayName} ${entry.id} ${entry.setup?.kind || ""}`.toLowerCase().includes(needle);
-      const visibleModels = entry.models.filter((model) => {
-        if (providerMatch) return true;
-        const maker = brandForModel(model).name;
-        return `${model.displayName} ${model.slug} ${maker}`.toLowerCase().includes(needle);
-      });
-      const matchedKnownModels = needle
-        ? entry.knownModels.filter((model) =>
-          `${model.displayName} ${model.slug} ${providerDisplayName(model.provider)}`.toLowerCase().includes(needle))
-        : [];
-      if (!providerMatch && !visibleModels.length && !matchedKnownModels.length) return [];
-      return [{ ...entry, visibleModels, matchedKnownModels }];
-    });
-  }, [connectionFilter, directory, enabledProviders, providerSearch]);
+  const openAddModels = () => {
+    setAddModelsOpen(true);
+    void loadConnectedCatalogs();
+  };
+
+  const openProviderMenu = (providerId: string) => {
+    setManagedProviderId((current) => (current === providerId ? null : providerId));
+  };
+
   const filteredFamilies = useMemo(() => {
     const needle = modelSearch.trim().toLowerCase();
-    if (!needle) return modelFamilies;
-    return researchFamilies.filter((family) =>
-      `${family.displayName} ${family.routes.map((model: RouterModel) => `${model.displayName} ${model.slug} ${providerDisplayName(model.provider)}`).join(" ")}`
+    if (!needle) return families;
+    return families.filter((family) =>
+      `${family.displayName} ${family.routes.map((model) => `${model.displayName} ${model.slug} ${providerDisplayName(model.provider)}`).join(" ")}`
         .toLowerCase()
-        .includes(needle),
-    );
-  }, [modelFamilies, modelSearch, researchFamilies]);
-  const filteredRouteCount = useMemo(
-    () => filteredFamilies.reduce((total, family) => total + family.routes.length, 0),
-    [filteredFamilies],
-  );
-  const loadedCatalogMatches = useMemo(
-    () => searchLoadedCatalogModels(directory, catalogStates, modelSearch),
-    [catalogStates, directory, modelSearch],
-  );
-  const directoryById = useMemo(
-    () => new Map(directory.map((entry) => [entry.id, entry])),
-    [directory],
-  );
+        .includes(needle));
+  }, [families, modelSearch]);
+
+  // Row order never depends on a switch. Sorting by on/off would throw the row
+  // you just clicked to the other end of the list, at the exact moment you are
+  // looking at it to confirm the click did what you meant.
+  const rows = useMemo(() => filteredFamilies.map((family) => {
+    const usable = family.routes.filter(routeUsable);
+    const inPicker = usable.filter((model) => optimisticPicker.value(model.slug, model.visible));
+    return { family, usable, inPicker, on: inPicker.length > 0 };
+  }), [filteredFamilies, optimisticPicker]);
+  const visibleRows = useMemo(() => rows.filter((row) => {
+    if (statusFilter === "all") return true;
+    if (statusFilter === "blocked") return !row.usable.length;
+    if (!row.usable.length) return false;
+    return statusFilter === "on" ? row.on : !row.on;
+  }), [rows, statusFilter]);
+  const readyRows = visibleRows.filter((row) => row.usable.length);
+  const blockedRows = visibleRows.filter((row) => !row.usable.length);
 
   useEffect(() => {
     if (!focusRequest) return;
@@ -408,12 +438,9 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
     return <EmptyState icon={<SearchX size={22} />} title="Router snapshot unavailable" body="Start the router or refresh after setup completes." />;
   }
 
-  const visibleCount = modelFamilies.filter((family) =>
-    family.routes.some((model: RouterModel) => optimisticPicker.value(model.slug, model.visible)),
-  ).length;
-  const enabledCount = models.filter((model) => model.enabled || model.native).length;
-  const v2Count = models.filter((model) => model.multiAgentVersion === "v2" && model.enabled).length;
   const connectedProviderCount = directory.filter((entry) => providerConnected(entry, enabledProviders)).length;
+  const pendingSlugs = directory.flatMap((entry) => pendingCatalogModelIds(pendingModels, entry.id)
+    .filter((slug) => !entry.models.some((model) => model.slug === slug)));
 
   const updatePicker = (slug: string, visible: boolean) => api
     ? optimisticPicker.mutate(slug, visible, `${visible ? "Show" : "Hide"} ${slug}`, () => api.setPickerModel(slug, visible))
@@ -424,320 +451,226 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
   const updateSubagentEffort = (slug: string, effort: string) => api
     ? optimisticSubagentEfforts.mutate(slug, effort, `Set ${slug} subagent thinking to ${effortLabel(effort)}`, () => api.setSubagentEffort(slug, effort))
     : Promise.resolve();
-  const connectionFilterLabel = connectionFilter === "available" ? "Needs setup" : connectionFilter === "connected" ? "Connected" : "All";
+
+  // The row-level switch speaks for the whole model: turning it on publishes
+  // the route the router would pick anyway, turning it off withdraws every
+  // route. Choosing between routes stays inside the expanded row.
+  const updateFamilyPicker = (family: ModelFamily, usable: RouterModel[], inPicker: RouterModel[], visible: boolean) => {
+    if (!api) return Promise.resolve();
+    const selectable = usable.filter((model) => !nativeClientManaged(model));
+    if (visible) {
+      const route = preferredFamilyRoute({ ...family, routes: selectable }) ?? selectable[0];
+      if (!route) return Promise.resolve();
+      return optimisticPicker.mutate(route.slug, true, `Show ${family.displayName}`, () => api.setPickerModel(route.slug, true));
+    }
+    const withdraw = inPicker.filter((model) => !nativeClientManaged(model));
+    if (!withdraw.length) return Promise.resolve();
+    return optimisticPicker.mutateMany(
+      withdraw.map((model) => [model.slug, false] as const),
+      `Hide ${family.displayName}`,
+      async () => {
+        for (const model of withdraw) await api.setPickerModel(model.slug, false);
+      },
+    );
+  };
+
+  const renderRow = ({ family, usable, inPicker, on }: (typeof rows)[number]) => (
+    <ModelFamilyRow
+      key={family.id}
+      family={family}
+      usable={usable}
+      inPicker={inPicker}
+      on={on}
+      expanded={expandedFamilyId === family.id}
+      onToggleExpanded={() => setExpandedFamilyId(expandedFamilyId === family.id ? null : family.id)}
+      apiAvailable={Boolean(api)}
+      providerNames={providerNames}
+      subagentSettings={subagentSettings}
+      pickerValue={(model) => optimisticPicker.value(model.slug, model.visible)}
+      subagentValue={(model) => optimisticSubagents.value(model.slug, Boolean(subagentEnabled(target, model.slug, subagentSettings)))}
+      effortValue={(model) => optimisticSubagentEfforts.value(model.slug, subagentSettings?.efforts?.[model.slug] ?? "default")}
+      onFamilyPicker={(visible) => void updateFamilyPicker(family, usable, inPicker, visible)}
+      onRoutePicker={(model, visible) => void updatePicker(model.slug, visible)}
+      onSubagent={(model, enabled) => void updateSubagent(model.slug, enabled)}
+      onEffort={(model, effort) => void updateSubagentEffort(model.slug, effort)}
+      onConnect={(providerId) => {
+        const entry = directoryById.get(providerId);
+        if (!entry?.setup) return;
+        if (entry.setup.kind === "oauth" || entry.setup.signIn) openProviderMenu(providerId);
+        else setCredentialProvider(entry.setup);
+      }}
+    />
+  );
+
+  const crowded = rows.length > CROWDED_LIST;
 
   return (
     <>
       <div className="providers-models-page models-page">
         <PageHeader
-          eyebrow="Providers and picker"
+          eyebrow="Models"
           title="Models"
-          description="Connect providers and choose which router-managed models appear in installed clients and subagent workflows."
+          description="Choose which models your installed clients can use, and connect the accounts that serve them."
           onRefresh={onRefresh}
           refreshing={refreshing}
         />
 
-        <StatStrip items={[
-          { label: "Providers", value: connectedProviderCount, detail: `${directory.length} registered` },
-          { label: "Models", value: modelFamilies.length, detail: `${enabledCount} provider routes` },
-          { label: "In picker", value: visibleCount, detail: `${modelFamilies.length - visibleCount} families hidden` },
-          { label: "Agent-ready", value: v2Count, detail: "Native v2 relay" },
-        ]} />
+        <ConnectionsBar
+          directory={directory}
+          enabledProviders={enabledProviders}
+          usageById={usageById}
+          apiAvailable={Boolean(api)}
+          platform={api?.platform}
+          openProviderId={managedProviderId}
+          onOpenProvider={openProviderMenu}
+          onCloseProvider={() => setManagedProviderId(null)}
+          connectMenuOpen={connectMenuOpen}
+          onConnectMenuOpen={setConnectMenuOpen}
+          isEnabled={(entry) => optimisticProviders.value(entry.id, enabledProviders.has(entry.id) || entry.models.some((model) => model.native))}
+          onEnabledChange={(entry, checked) => {
+            if (!api) return;
+            void optimisticProviders.mutate(entry.id, checked, `${checked ? "Enable" : "Disable"} ${entry.displayName}`, () => api.setProviderEnabled(entry.id, checked));
+          }}
+          onSignIn={(entry) => {
+            if (!api || !entry.setup) return;
+            void runProviderCredentialAction(entry.setup, `Start ${entry.displayName} sign-in`, () => api.connectProvider(entry.id));
+          }}
+          onKey={(entry) => entry.setup && setCredentialProvider(entry.setup)}
+          onRemove={(entry) => entry.setup && setRemoveProvider(entry.setup)}
+        />
 
-        <section className="panel-section pm-provider-directory pm-unified-directory" id="model-provider-directory">
-            <div className="pm-family-heading pm-provider-heading">
-              <div>
-                <strong>All providers</strong>
-                <span>Every supported provider stays visible. Search checked-in routes before connecting; connect one to browse its live account-specific catalog.</span>
+        <section className="panel-section pm-model-catalog" id="model-catalog-controls">
+          <div className="pm-model-toolbar">
+            <SearchField value={modelSearch} onChange={setModelSearch} placeholder="Search models" />
+            <span className="pm-results-count" aria-live="polite">
+              {modelSearch ? `${filteredFamilies.length} of ${families.length} models` : `${families.length} models`}
+            </span>
+            {/* A short list reads whole. Filters and bulk switches only earn
+                their space once scrolling starts. */}
+            {crowded ? (
+              <div className="pm-filter-menu-wrap" ref={filterMenuRef}>
+                <button
+                  type="button"
+                  className="pm-filter-trigger"
+                  aria-haspopup="menu"
+                  aria-expanded={filterMenuOpen}
+                  onClick={() => setFilterMenuOpen((open) => !open)}
+                >
+                  <Filter aria-hidden size={14} strokeWidth={1.7} />
+                  <span>Show</span>
+                  <strong>{STATUS_LABELS[statusFilter]}</strong>
+                  <ChevronDown aria-hidden size={14} strokeWidth={1.7} className={filterMenuOpen ? "is-open" : ""} />
+                </button>
+                {filterMenuOpen ? (
+                  <div className="pm-filter-menu" role="menu" aria-label="Filter models">
+                    {(["all", "on", "off", "blocked"] as const).map((value) => (
+                      <button
+                        key={value}
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked={statusFilter === value}
+                        className={statusFilter === value ? "is-selected" : ""}
+                        onClick={() => {
+                          setStatusFilter(value);
+                          setFilterMenuOpen(false);
+                        }}
+                      >
+                        <span>{STATUS_LABELS[value]}</span>
+                        {statusFilter === value ? <Check aria-hidden size={14} strokeWidth={1.9} /> : null}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
               </div>
-              <span>{directory.length} providers · {connectedProviderCount} connected</span>
-            </div>
-            <div className="pm-provider-toolbar">
-              <div className="pm-provider-toolbar-primary">
-                <SearchField value={providerSearch} onChange={setProviderSearch} placeholder="Search providers or known models" />
-                <span className="pm-results-count" aria-live="polite">{filteredDirectory.length} providers</span>
-              </div>
-              <div className="pm-provider-toolbar-actions">
-                <Button variant="ghost" disabled={!api || loadingConnectedCatalogs} onClick={() => void loadConnectedCatalogs()}>
-                  {loadingConnectedCatalogs ? "Loading catalogs" : "Load connected catalogs"}
-                </Button>
-                <div className="pm-filter-menu-wrap" ref={filterMenuRef}>
+            ) : null}
+            <div className="pm-filter-menu-wrap" ref={bulkMenuRef}>
+              <button
+                type="button"
+                className="pm-icon-trigger"
+                aria-haspopup="menu"
+                aria-expanded={bulkMenuOpen}
+                aria-label="More model actions"
+                disabled={!api}
+                onClick={() => setBulkMenuOpen((open) => !open)}
+              >
+                <MoreHorizontal aria-hidden size={15} strokeWidth={1.9} />
+              </button>
+              {bulkMenuOpen ? (
+                <div className="pm-filter-menu" role="menu" aria-label="Bulk model actions">
                   <button
                     type="button"
-                    className="pm-filter-trigger"
-                    aria-haspopup="menu"
-                    aria-expanded={filterMenuOpen}
-                    onClick={() => setFilterMenuOpen((open) => !open)}
+                    role="menuitem"
+                    onClick={() => {
+                      setBulkMenuOpen(false);
+                      if (api) void optimisticPicker.mutateMany(models.filter((model) => !nativeClientManaged(model)).map((model) => [model.slug, true] as const), "Show all router models", () => api.setPickerModels(true));
+                    }}
                   >
-                    <Filter aria-hidden size={14} strokeWidth={1.7} />
-                    <span>Filter</span>
-                    <strong>{connectionFilterLabel}</strong>
-                    <ChevronDown aria-hidden size={14} strokeWidth={1.7} className={filterMenuOpen ? "is-open" : ""} />
+                    <span>Turn all on</span>
                   </button>
-                  {filterMenuOpen ? (
-                    <div className="pm-filter-menu" role="menu" aria-label="Filter providers">
-                      <span className="pm-filter-menu-label">Show providers</span>
-                      {(["all", "connected", "available"] as const).map((value) => {
-                        const label = value === "available" ? "Needs setup" : value === "connected" ? "Connected" : "All";
-                        return (
-                          <button
-                            key={value}
-                            type="button"
-                            role="menuitemradio"
-                            aria-checked={connectionFilter === value}
-                            className={connectionFilter === value ? "is-selected" : ""}
-                            onClick={() => {
-                              setConnectionFilter(value);
-                              setFilterMenuOpen(false);
-                            }}
-                          >
-                            <span>{label}</span>
-                            {connectionFilter === value ? <Check aria-hidden size={14} strokeWidth={1.9} /> : null}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  ) : null}
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setBulkMenuOpen(false);
+                      if (api) void optimisticPicker.mutateMany(models.filter((model) => !nativeClientManaged(model)).map((model) => [model.slug, false] as const), "Hide all router models", () => api.setPickerModels(false));
+                    }}
+                  >
+                    <span>Turn all off</span>
+                  </button>
                 </div>
-              </div>
+              ) : null}
             </div>
-
-            {filteredDirectory.length ? (
-              <div className="pm-provider-list">
-                {filteredDirectory.map((entry) => {
-                  const providerUsage = usageById.get(entry.id);
-                  const configured = providerConnected(entry, enabledProviders);
-                  const authoritativeEnabled = enabledProviders.has(entry.id) || entry.models.some((model) => model.native);
-                  const isEnabled = optimisticProviders.value(entry.id, authoritativeEnabled);
-                  const needsCuration = configured && entry.models.length === 0 && catalogEligible(entry);
-                  const expanded = expandedProviderId === entry.id;
-                  const catalogSources = entry.setup?.catalogSources ?? [];
-                  const catalogSource = activeCatalogSource(entry);
-                  const catalog = catalogSource ? catalogStates[catalogSource.id] : undefined;
-                  // A slug already in the picker needs no placeholder, so
-                  // re-adding one shows the real row rather than a duplicate
-                  // ghost beside it.
-                  const pending = pendingCatalogModelIds(pendingModels, entry.id)
-                    .filter((slug) => !entry.models.some((model) => model.slug === slug));
-                  const triggerId = `provider-trigger-${safeId(entry.id)}`;
-                  const panelId = `provider-panel-${safeId(entry.id)}`;
-                  return (
-                    <article className="pm-provider-row" key={entry.id} data-connection={configured ? "connected" : "setup"} data-expanded={expanded}>
-                      <button id={triggerId} className="pm-provider-summary" type="button" aria-expanded={expanded} aria-controls={panelId} onClick={() => openProvider(entry, expanded)}>
-                        <ProviderLogo providerId={entry.id} displayName={entry.displayName} size="large" />
-                        <div className="pm-provider-main">
-                          <div className="pm-provider-title-line">
-                            <strong>{entry.displayName}</strong>
-                            <div className="pm-provider-tags">
-                              <Badge tone={configured ? "success" : "neutral"}>{configured ? "connected" : "not connected"}</Badge>
-                              <Badge tone="neutral">{connectionMethod(entry)}</Badge>
-                              <Badge tone="accent">{entry.models.length} active {entry.models.length === 1 ? "route" : "routes"}</Badge>
-                              {entry.matchedKnownModels.length ? <Badge tone="neutral">{entry.matchedKnownModels.length} known {entry.matchedKnownModels.length === 1 ? "match" : "matches"}</Badge> : null}
-                            </div>
-                          </div>
-                          <small>{entry.id}</small>
-                        </div>
-                        <ChevronDown className="pm-accordion-chevron" aria-hidden size={16} strokeWidth={1.7} />
-                      </button>
-                      <div id={panelId} className="pm-provider-detail" role="region" aria-labelledby={triggerId} hidden={!expanded}>
-                        <div className="pm-provider-connection">
-                          <div className="pm-provider-panel-copy">
-                            <p>{entry.setup?.planNote || connectionDetail(entry, providerUsage?.account?.status, providerUsage?.account?.message, needsCuration, api?.platform === "darwin")}</p>
-                            {needsCuration ? <span className="pm-curation-note">No routes selected yet. Browse this provider's model catalog to choose candidates.</span> : null}
-                            {providerUsage?.requests ? <small className="pm-provider-requests">{providerUsage.requests} {providerUsage.requests === 1 ? "request" : "requests"}</small> : null}
-                          </div>
-                          {entry.setup ? (
-                            <div className="pm-provider-controls">
-                              <div className="pm-provider-actions">
-                                {entry.setup.kind === "oauth" || entry.setup.signIn ? (
-                                  <Button variant="ghost" disabled={!api || api.platform !== "darwin"} title={api?.platform === "darwin" ? undefined : "Open the provider CLI in your own terminal on Windows or Linux."} onClick={() => api && void runProviderCredentialAction(entry.setup!, `Start ${entry.displayName} sign-in`, () => api.connectProvider(entry.id))}>
-                                    <LogIn aria-hidden size={14} strokeWidth={1.7} />
-                                    {entry.setup.configured ? "Reconnect in terminal" : entry.setup.cliInstalled === false ? "Install and open sign-in" : "Open sign-in"}
-                                  </Button>
-                                ) : null}
-                                {entry.setup.kind === "api" && entry.id !== "local" ? (
-                                  <Button variant="ghost" disabled={!api} onClick={() => setCredentialProvider(entry.setup!)}>
-                                    <KeyRound aria-hidden size={14} strokeWidth={1.7} /> {entry.setup.configured ? "Replace key" : "Add key"}
-                                  </Button>
-                                ) : null}
-                                {entry.setup.kind === "api" && entry.setup.configured && entry.id !== "local" ? (
-                                  <Button variant="ghost" disabled={!api} aria-label={`Remove ${entry.displayName} credential`} title="Remove credential" onClick={() => setRemoveProvider(entry.setup!)}>
-                                    <Trash2 aria-hidden size={14} strokeWidth={1.7} />
-                                  </Button>
-                                ) : null}
-                              </div>
-                              <div className="pm-provider-enable">
-                                <span>{isEnabled ? "Enabled for installed clients" : "Disabled for installed clients"}</span>
-                                <Toggle checked={isEnabled} disabled={!api || !entry.setup.configured} label={`Enable ${entry.displayName} for installed clients`} onChange={(checked) => api && void optimisticProviders.mutate(entry.id, checked, `${checked ? "Enable" : "Disable"} ${entry.displayName}`, () => api.setProviderEnabled(entry.id, checked))} />
-                              </div>
-                            </div>
-                          ) : null}
-                        </div>
-
-                        <div className="pm-selected-models-heading">
-                          <div>
-                            <strong>Provider catalog</strong>
-                            <span>{entry.models.length ? `${entry.models.length} routes selected from this provider` : "No routes selected from this provider"}</span>
-                          </div>
-                          {catalogEligible(entry) ? (
-                            <div className="pm-catalog-source-actions">
-                              {catalogSources.length > 1 ? (
-                                <label className="pm-catalog-source">
-                                  <span>Catalog</span>
-                                  <select
-                                    aria-label={`${entry.displayName} catalog source`}
-                                    value={catalogSource?.id}
-                                    onChange={(event) => {
-                                      const sourceId = event.target.value;
-                                      setCatalogSourceByProvider((current) => ({ ...current, [entry.id]: sourceId }));
-                                      if (expanded && !catalogStates[sourceId]) void discoverCatalog(entry, { sourceId });
-                                    }}
-                                  >
-                                    {catalogSources.map((source) => <option key={source.id} value={source.id}>{source.displayName}</option>)}
-                                  </select>
-                                </label>
-                              ) : null}
-                              <Button
-                                variant="ghost"
-                                disabled={!api || !catalogSource || catalog?.status === "loading"}
-                                onClick={() => catalogSource && void discoverCatalog(entry, { refresh: Boolean(catalog?.data), sourceId: catalogSource.id })}
-                              >
-                                {catalog?.status === "loading"
-                                  ? catalog.refreshing ? "Asking provider" : "Loading models"
-                                  : catalog?.data ? "Reload catalog" : "Browse model catalog"}
-                              </Button>
-                            </div>
-                          ) : null}
-                        </div>
-
-                        {pending.length ? (
-                          <div className="pm-model-list" role="list" aria-label={`${entry.displayName} models`}>
-                            <PendingModelRows slugs={pending} />
-                          </div>
-                        ) : !entry.models.length ? <div className="pm-provider-model-empty">No models are selected for this provider yet.</div> : null}
-
-                        {catalogEligible(entry) && catalog ? (
-                          <ProviderCatalogManager
-                            key={catalogSource?.id}
-                            entry={entry}
-                            state={catalog}
-                            disabled={!api}
-                            onReload={() => catalogSource && void discoverCatalog(entry, { refresh: true, sourceId: catalogSource.id })}
-                            onQuery={(query) => catalogSource && updateCatalogState(catalogSource.id, (current) => ({ ...current, query }))}
-                            onSelection={(selected) => catalogSource && updateCatalogState(catalogSource.id, (current) => ({ ...current, selected }))}
-                            onPublish={() => catalogSource && void publishCatalogModels(entry, catalogSource.id)}
-                          />
-                        ) : null}
-                      </div>
-                    </article>
-                  );
-                })}
-              </div>
-            ) : <EmptyState icon={<SearchX size={20} />} title="No providers or known models match" body="Clear a filter or try another provider or model name." />}
-        </section>
-
-        <section className="panel-section pm-model-catalog pm-family-catalog" id="model-catalog-controls">
-          <div className="pm-family-heading">
-            <div>
-              <strong>Model families</strong>
-              <span>One model row. Expand it only when you need to choose a provider route.</span>
-            </div>
-            <span>{filteredFamilies.length} models · {filteredRouteCount} routes · {loadedCatalogMatches.length} catalog matches</span>
+            <Button variant="primary" disabled={!api || !connectedProviderCount} onClick={openAddModels}>
+              <Plus aria-hidden size={14} strokeWidth={1.9} /> Add models
+            </Button>
           </div>
-          <div className="pm-family-toolbar">
-            <SearchField value={modelSearch} onChange={setModelSearch} placeholder="Search active, known, or loaded catalog models" />
-            <span className="pm-results-count" aria-live="polite">{filteredFamilies.length} families · {loadedCatalogMatches.length} catalog models</span>
-            <Button variant="ghost" disabled={!api} onClick={() => api && void optimisticPicker.mutateMany(models.filter((model) => !nativeClientManaged(model)).map((model) => [model.slug, true] as const), "Show all router models", () => api.setPickerModels(true))}>Show all</Button>
-            <Button variant="ghost" disabled={!api} onClick={() => api && void optimisticPicker.mutateMany(models.filter((model) => !nativeClientManaged(model)).map((model) => [model.slug, false] as const), "Hide all router models", () => api.setPickerModels(false))}>Hide all</Button>
-          </div>
-          {loadedCatalogMatches.length ? (
-            <LoadedCatalogSearchResults
-              models={loadedCatalogMatches}
-              disabled={!api}
-              pendingModels={pendingModels}
-              onAdd={(result) => {
-                const entry = directoryById.get(result.providerId);
-                if (entry) void publishCatalogModels(entry, result.sourceId, [result.modelId]);
-              }}
+
+          {!connectedProviderCount && !families.length ? (
+            <EmptyState
+              icon={<Plus size={20} />}
+              title="Connect a provider to get started"
+              body="A provider is the account the router calls on your behalf. Connect one and its models appear here, ready to switch on."
+              action={<Button variant="primary" disabled={!api} onClick={() => setConnectMenuOpen(true)}>Connect provider</Button>}
             />
-          ) : null}
-          {filteredFamilies.length ? (
-            <div className="pm-family-list">
-              {filteredFamilies.map((family) => {
-                const expanded = expandedFamilyId === family.id;
-                const preferred = preferredFamilyRoute(family);
-                const maker = brandForModel(preferred);
-                const providerCount = new Set(family.routes.map((model: RouterModel) => model.provider)).size;
-                const makerLabel = providerCount > 1 ? `${providerCount} providers` : maker.name;
-                const visibleRoutes = family.routes.filter((model: RouterModel) =>
-                  optimisticPicker.value(model.slug, model.visible),
-                ).length;
-                const triggerId = `family-trigger-${safeId(family.id)}`;
-                const panelId = `family-panel-${safeId(family.id)}`;
-                return (
-                  <article className="pm-family-row" key={family.id} data-expanded={expanded}>
-                    <button
-                      id={triggerId}
-                      className="pm-family-summary"
-                      type="button"
-                      aria-expanded={expanded}
-                      aria-controls={panelId}
-                      onClick={() => setExpandedFamilyId(expanded ? null : family.id)}
-                    >
-                      <BrandLogo brand={maker} size="large" />
-                      <div className="pm-family-main">
-                        <strong>{family.displayName}</strong>
-                        <small>{makerLabel}</small>
-                      </div>
-                      <div className="pm-family-facts">
-                        {family.routes.some((model: RouterModel) => model.isFree) ? <Badge tone="success">Free route</Badge> : null}
-                        <Badge tone="neutral">{family.routes.length} {family.routes.length === 1 ? "route" : "routes"}</Badge>
-                        <span>{visibleRoutes ? `${visibleRoutes} in picker` : "Hidden"}</span>
-                      </div>
-                      <ChevronDown className="pm-accordion-chevron" aria-hidden size={16} strokeWidth={1.7} />
-                    </button>
-                    <div
-                      id={panelId}
-                      className="pm-family-routes"
-                      role="region"
-                      aria-labelledby={triggerId}
-                      hidden={!expanded}
-                    >
-                      <div className="pm-family-route-note">
-                        These routes use different credentials, quotas, and provider policies. Show only the route you want in the picker.
-                      </div>
-                      <div className="pm-model-list" role="list" aria-label={`${family.displayName} provider routes`}>
-                        {family.routes.map((model: RouterModel) => (
-                          <ModelRouteRow
-                            key={model.slug}
-                            model={model}
-                            providerName={providerNames.get(model.provider) || providerDisplayName(model.provider)}
-                            subagentSettings={subagentSettings}
-                            pickerVisible={optimisticPicker.value(model.slug, model.visible)}
-                            selectedInSettings={optimisticSubagents.value(
-                              model.slug,
-                              Boolean(subagentEnabled(target, model.slug, subagentSettings)),
-                            )}
-                            subagentEffort={optimisticSubagentEfforts.value(
-                              model.slug,
-                              subagentSettings?.efforts?.[model.slug] ?? "default",
-                            )}
-                            apiAvailable={Boolean(api)}
-                            onPickerChange={(checked) => void updatePicker(model.slug, checked)}
-                            onSubagentChange={(checked) => void updateSubagent(model.slug, checked)}
-                            onEffortChange={(effort) => void updateSubagentEffort(model.slug, effort)}
-                          />
-                        ))}
-                      </div>
-                    </div>
-                  </article>
-                );
-              })}
-            </div>
-          ) : loadedCatalogMatches.length ? null : <EmptyState icon={<SearchX size={20} />} title="No models match" body="Load connected catalogs or clear the search to see configured models." />}
+          ) : readyRows.length || blockedRows.length || pendingSlugs.length ? (
+            <>
+              {readyRows.length || pendingSlugs.length ? (
+                <div className="pm-family-list">
+                  {pendingSlugs.length ? <PendingModelRows slugs={pendingSlugs} /> : null}
+                  {readyRows.map(renderRow)}
+                </div>
+              ) : null}
+              {blockedRows.length ? (
+                <section className="pm-group" data-group="blocked">
+                  <h3 className="pm-group-heading">
+                    <span>Needs a provider</span>
+                    <small>{blockedRows.length}</small>
+                  </h3>
+                  <div className="pm-family-list">{blockedRows.map(renderRow)}</div>
+                </section>
+              ) : null}
+            </>
+          ) : (
+            <EmptyState
+              icon={<SearchX size={20} />}
+              title="No models match"
+              body={modelSearch ? "Clear the search, or add models from a connected provider." : "Add models from a connected provider to fill this list."}
+            />
+          )}
         </section>
       </div>
 
+      <AddModelsDialog
+        open={addModelsOpen}
+        directory={directory}
+        catalogStates={catalogStates}
+        loading={loadingConnectedCatalogs}
+        disabled={!api}
+        pendingModels={pendingModels}
+        onReload={() => void loadConnectedCatalogs({ refresh: true })}
+        onAdd={(selection) => void addCatalogModels(selection)}
+        onClose={() => setAddModelsOpen(false)}
+      />
       <CredentialDialog
         provider={credentialProvider}
         onSave={(provider, secret) => api
@@ -745,15 +678,483 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
           : Promise.resolve()}
         onClose={() => setCredentialProvider(null)}
       />
-      <Dialog open={Boolean(removeProvider)} title="Remove provider credential" description="The provider is withdrawn from installed clients before its managed credential is deleted." onClose={() => setRemoveProvider(null)}>
+      <Dialog open={Boolean(removeProvider)} title="Disconnect provider" description="The provider is withdrawn from installed clients before its managed credential is deleted." onClose={() => setRemoveProvider(null)}>
         <div className="pm-credential-warning"><ShieldCheck aria-hidden size={17} strokeWidth={1.7} /><p>If a credential also exists in the environment or Keychain, the router will still report it as connected.</p></div>
         <div className="dialog-actions">
           <Button variant="secondary" onClick={() => setRemoveProvider(null)}>Cancel</Button>
-          <Button variant="danger" onClick={() => { const provider = removeProvider; setRemoveProvider(null); if (provider && api) void runProviderCredentialAction(provider, `Remove ${provider.displayName} credential`, () => api.removeProviderCredential(provider.id)); }}><Trash2 aria-hidden size={14} strokeWidth={1.7} /> Remove credential</Button>
+          <Button variant="danger" onClick={() => { const provider = removeProvider; setRemoveProvider(null); if (provider && api) void runProviderCredentialAction(provider, `Remove ${provider.displayName} credential`, () => api.removeProviderCredential(provider.id)); }}><Trash2 aria-hidden size={14} strokeWidth={1.7} /> Disconnect</Button>
         </div>
       </Dialog>
     </>
   );
+}
+
+function ConnectionsBar({
+  directory,
+  enabledProviders,
+  usageById,
+  apiAvailable,
+  platform,
+  openProviderId,
+  onOpenProvider,
+  onCloseProvider,
+  connectMenuOpen,
+  onConnectMenuOpen,
+  isEnabled,
+  onEnabledChange,
+  onSignIn,
+  onKey,
+  onRemove,
+}: {
+  directory: ProviderDirectoryEntry[];
+  enabledProviders: Set<string>;
+  usageById: Map<string, NonNullable<ProviderUsageSnapshot["providers"]>[number]>;
+  apiAvailable: boolean;
+  platform?: string;
+  openProviderId: string | null;
+  onOpenProvider: (providerId: string) => void;
+  onCloseProvider: () => void;
+  connectMenuOpen: boolean;
+  onConnectMenuOpen: (open: boolean) => void;
+  isEnabled: (entry: ProviderDirectoryEntry) => boolean;
+  onEnabledChange: (entry: ProviderDirectoryEntry, checked: boolean) => void;
+  onSignIn: (entry: ProviderDirectoryEntry) => void;
+  onKey: (entry: ProviderDirectoryEntry) => void;
+  onRemove: (entry: ProviderDirectoryEntry) => void;
+}) {
+  const barRef = useRef<HTMLElement | null>(null);
+  const setConnectMenuOpen = onConnectMenuOpen;
+  const connected = directory.filter((entry) => providerConnected(entry, enabledProviders));
+  const available = directory.filter((entry) => !providerConnected(entry, enabledProviders));
+
+  useEffect(() => {
+    if (!openProviderId && !connectMenuOpen) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (barRef.current?.contains(event.target as Node)) return;
+      onCloseProvider();
+      onConnectMenuOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      onCloseProvider();
+      onConnectMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointer);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [connectMenuOpen, onCloseProvider, onConnectMenuOpen, openProviderId]);
+
+  return (
+    <section className="panel-section pm-connections" id="model-provider-directory" ref={barRef} aria-label="Provider connections">
+      <div className="pm-connections-label">
+        <strong>Connections</strong>
+        <small>{connected.length} of {directory.length} connected</small>
+      </div>
+      <div className="pm-connections-chips">
+        {connected.map((entry) => (
+          <div className="pm-chip-wrap" key={entry.id}>
+            <button
+              type="button"
+              className="pm-chip"
+              data-state="connected"
+              aria-haspopup="dialog"
+              aria-expanded={openProviderId === entry.id}
+              onClick={() => { setConnectMenuOpen(false); onOpenProvider(entry.id); }}
+            >
+              <ProviderLogo providerId={entry.id} displayName={entry.displayName} size="small" />
+              <span>{entry.displayName}</span>
+              <i className="pm-chip-dot" data-enabled={isEnabled(entry)} aria-hidden />
+            </button>
+            {openProviderId === entry.id ? (
+              <ProviderMenu
+                entry={entry}
+                usage={usageById.get(entry.id)}
+                apiAvailable={apiAvailable}
+                platform={platform}
+                enabled={isEnabled(entry)}
+                onEnabledChange={(checked) => onEnabledChange(entry, checked)}
+                onSignIn={() => onSignIn(entry)}
+                onKey={() => onKey(entry)}
+                onRemove={() => onRemove(entry)}
+              />
+            ) : null}
+          </div>
+        ))}
+        {available.length ? (
+          <div className="pm-chip-wrap">
+            <button
+              type="button"
+              className="pm-chip pm-chip-add"
+              aria-haspopup="menu"
+              aria-expanded={connectMenuOpen}
+              onClick={() => { onCloseProvider(); onConnectMenuOpen(!connectMenuOpen); }}
+            >
+              <Plus aria-hidden size={13} strokeWidth={2} />
+              <span>Connect provider</span>
+            </button>
+            {connectMenuOpen ? (
+              <div className="pm-connect-menu" role="menu" aria-label="Providers you can connect">
+                {available.map((entry) => (
+                  <button
+                    key={entry.id}
+                    type="button"
+                    role="menuitem"
+                    disabled={!apiAvailable || !entry.setup}
+                    onClick={() => {
+                      setConnectMenuOpen(false);
+                      if (!entry.setup) return;
+                      if (entry.setup.kind === "oauth" || entry.setup.signIn) onSignIn(entry);
+                      else if (entry.setup.kind === "anonymous") onEnabledChange(entry, true);
+                      else onKey(entry);
+                    }}
+                  >
+                    <ProviderLogo providerId={entry.id} displayName={entry.displayName} size="small" />
+                    <span>{entry.displayName}</span>
+                    <small>{connectionMethod(entry)}</small>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function ProviderMenu({
+  entry,
+  usage,
+  apiAvailable,
+  platform,
+  enabled,
+  onEnabledChange,
+  onSignIn,
+  onKey,
+  onRemove,
+}: {
+  entry: ProviderDirectoryEntry;
+  usage?: NonNullable<ProviderUsageSnapshot["providers"]>[number];
+  apiAvailable: boolean;
+  platform?: string;
+  enabled: boolean;
+  onEnabledChange: (checked: boolean) => void;
+  onSignIn: () => void;
+  onKey: () => void;
+  onRemove: () => void;
+}) {
+  const setup = entry.setup;
+  return (
+    <div className="pm-connection-menu" role="dialog" aria-label={`${entry.displayName} connection`}>
+      <div className="pm-connection-menu-head">
+        <ProviderLogo providerId={entry.id} displayName={entry.displayName} size="large" />
+        <div>
+          <strong>{entry.displayName}</strong>
+          <small>{connectionMethod(entry)}</small>
+        </div>
+      </div>
+      <p className="pm-connection-menu-copy">
+        {setup?.planNote || connectionDetail(entry, usage?.account?.status, usage?.account?.message, platform === "darwin")}
+      </p>
+      {usage?.requests ? <small className="pm-connection-menu-usage">{usage.requests} {usage.requests === 1 ? "request" : "requests"} so far</small> : null}
+      {setup ? (
+        <>
+          <label className="pm-connection-menu-enable">
+            <span>Available to installed clients</span>
+            <Toggle
+              checked={enabled}
+              disabled={!apiAvailable || !setup.configured}
+              label={`Make ${entry.displayName} available to installed clients`}
+              onChange={onEnabledChange}
+            />
+          </label>
+          <div className="pm-connection-menu-actions">
+            {setup.kind === "oauth" || setup.signIn ? (
+              <Button
+                variant="ghost"
+                disabled={!apiAvailable || platform !== "darwin"}
+                title={platform === "darwin" ? undefined : "Open the provider CLI in your own terminal on Windows or Linux."}
+                onClick={onSignIn}
+              >
+                <LogIn aria-hidden size={14} strokeWidth={1.7} />
+                {setup.configured ? "Sign in again" : "Open sign-in"}
+              </Button>
+            ) : null}
+            {setup.kind === "api" && entry.id !== "local" ? (
+              <Button variant="ghost" disabled={!apiAvailable} onClick={onKey}>
+                <KeyRound aria-hidden size={14} strokeWidth={1.7} /> {setup.configured ? "Replace key" : "Add key"}
+              </Button>
+            ) : null}
+            {setup.kind === "api" && setup.configured && entry.id !== "local" ? (
+              <Button variant="ghost" disabled={!apiAvailable} onClick={onRemove}>
+                <Trash2 aria-hidden size={14} strokeWidth={1.7} /> Disconnect
+              </Button>
+            ) : null}
+          </div>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+function ModelFamilyRow({
+  family,
+  usable,
+  inPicker,
+  on,
+  expanded,
+  onToggleExpanded,
+  apiAvailable,
+  providerNames,
+  subagentSettings,
+  pickerValue,
+  subagentValue,
+  effortValue,
+  onFamilyPicker,
+  onRoutePicker,
+  onSubagent,
+  onEffort,
+  onConnect,
+}: {
+  family: ModelFamily;
+  usable: RouterModel[];
+  inPicker: RouterModel[];
+  on: boolean;
+  expanded: boolean;
+  onToggleExpanded: () => void;
+  apiAvailable: boolean;
+  providerNames: Map<string, string>;
+  subagentSettings?: NonNullable<RouterTarget["modelSettings"]>["subagents"];
+  pickerValue: (model: RouterModel) => boolean;
+  subagentValue: (model: RouterModel) => boolean;
+  effortValue: (model: RouterModel) => string;
+  onFamilyPicker: (visible: boolean) => void;
+  onRoutePicker: (model: RouterModel, visible: boolean) => void;
+  onSubagent: (model: RouterModel, enabled: boolean) => void;
+  onEffort: (model: RouterModel, effort: string) => void;
+  onConnect: (providerId: string) => void;
+}) {
+  const preferred = preferredFamilyRoute(family);
+  const maker = brandForModel(preferred);
+  const providerIds = [...new Set(family.routes.map((model) => model.provider))];
+  const multiRoute = family.routes.length > 1;
+  const blocked = usable.length === 0;
+  const managedByClient = usable.length > 0 && usable.every(nativeClientManaged);
+  const triggerId = `family-trigger-${safeId(family.id)}`;
+  const panelId = `family-panel-${safeId(family.id)}`;
+
+  // One muted line under the name instead of a row of columns. Reading left to
+  // right beats hunting the same fact in four different x-positions.
+  const facts = [
+    providerIds.length > 1 ? `${providerIds.length} providers` : providerNames.get(providerIds[0]) || maker.name,
+    preferred?.contextWindow ? formatContext(preferred.contextWindow) : undefined,
+    family.routes.some((model) => model.inputModalities?.includes("image")) ? "Text + image" : "Text",
+    family.routes.some((model) => model.isFree) ? "Free" : undefined,
+    multiRoute ? `${family.routes.length} routes` : undefined,
+  ].filter(Boolean);
+
+  return (
+    <article className="pm-family-row" data-expanded={expanded} data-on={on} data-blocked={blocked}>
+      <div className="pm-family-summary">
+        <button
+          id={triggerId}
+          className="pm-family-open"
+          type="button"
+          aria-expanded={expanded}
+          aria-controls={panelId}
+          onClick={onToggleExpanded}
+        >
+          {/* The disclosure sits at the far left, where a caret means "open
+              this". Beside the switch it only ever read as part of it. */}
+          <ChevronDown className="pm-accordion-chevron" aria-hidden size={14} strokeWidth={2} />
+          <BrandLogo brand={maker} size="large" />
+          <span className="pm-family-main">
+            <strong>{family.displayName}</strong>
+            <small>{facts.join(" · ")}</small>
+          </span>
+        </button>
+        <div className="pm-family-action">
+          {blocked ? (
+            <Button variant="secondary" disabled={!apiAvailable} onClick={() => onConnect(providerIds[0])}>
+              {providerIds.length > 1 ? "Connect a provider" : `Connect ${providerNames.get(providerIds[0]) || providerIds[0]}`}
+            </Button>
+          ) : (
+            <>
+              <span className="pm-family-state" aria-hidden>{on ? "On" : "Off"}</span>
+              <Toggle
+                checked={on}
+                disabled={!apiAvailable || managedByClient}
+                label={managedByClient ? `${family.displayName} is managed by Codex` : `Use ${family.displayName} in Codex`}
+                onChange={onFamilyPicker}
+              />
+            </>
+          )}
+        </div>
+      </div>
+      <div id={panelId} className="pm-family-panel" role="region" aria-labelledby={triggerId} hidden={!expanded}>
+        {multiRoute ? (
+          <>
+            <div className="pm-family-route-note">
+              The same model reaches you through more than one account. Each route has its own credential, quota, and pricing — keep the one you want in the picker.
+            </div>
+            <div className="pm-model-list" role="list" aria-label={`${family.displayName} routes`}>
+              {family.routes.map((model) => (
+                <ModelRouteRow
+                  key={model.slug}
+                  model={model}
+                  providerName={providerNames.get(model.provider) || providerDisplayName(model.provider)}
+                  subagentSettings={subagentSettings}
+                  pickerVisible={pickerValue(model)}
+                  selectedInSettings={subagentValue(model)}
+                  subagentEffort={effortValue(model)}
+                  apiAvailable={apiAvailable}
+                  onPickerChange={(checked) => onRoutePicker(model, checked)}
+                  onSubagentChange={(checked) => onSubagent(model, checked)}
+                  onEffortChange={(effort) => onEffort(model, effort)}
+                />
+              ))}
+            </div>
+          </>
+        ) : (
+          // A single-route model already showed its name and provider in the
+          // row above. Repeating that row inside itself explains nothing, so
+          // the panel carries only what the summary had to leave out.
+          <ModelDetails
+            model={family.routes[0]}
+            providerName={providerNames.get(family.routes[0].provider) || providerDisplayName(family.routes[0].provider)}
+            subagentSettings={subagentSettings}
+            selectedInSettings={subagentValue(family.routes[0])}
+            subagentEffort={effortValue(family.routes[0])}
+            apiAvailable={apiAvailable}
+            onSubagentChange={(checked) => onSubagent(family.routes[0], checked)}
+            onEffortChange={(effort) => onEffort(family.routes[0], effort)}
+          />
+        )}
+      </div>
+    </article>
+  );
+}
+
+function ModelDetails({
+  model,
+  providerName,
+  subagentSettings,
+  selectedInSettings,
+  subagentEffort,
+  apiAvailable,
+  onSubagentChange,
+  onEffortChange,
+}: {
+  model: RouterModel;
+  providerName: string;
+  subagentSettings?: NonNullable<RouterTarget["modelSettings"]>["subagents"];
+  selectedInSettings: boolean;
+  subagentEffort: string;
+  apiAvailable: boolean;
+  onSubagentChange: (checked: boolean) => void;
+  onEffortChange: (effort: string) => void;
+}) {
+  return (
+    <dl className="pm-model-details">
+      <div>
+        <dt>Model id</dt>
+        <dd className="pm-model-details-mono">{model.slug}</dd>
+      </div>
+      <div>
+        <dt>Route</dt>
+        <dd>{providerName} · {modelRouteKind(model)}</dd>
+      </div>
+      {routeUsable(model) ? (
+        <div>
+          <dt>Subagents</dt>
+          <dd>
+            <SubagentControl
+              model={model}
+              providerName={providerName}
+              subagentSettings={subagentSettings}
+              selectedInSettings={selectedInSettings}
+              subagentEffort={subagentEffort}
+              apiAvailable={apiAvailable}
+              onSubagentChange={onSubagentChange}
+              onEffortChange={onEffortChange}
+            />
+          </dd>
+        </div>
+      ) : (
+        <div>
+          <dt>Status</dt>
+          <dd>Connect {providerName} to use this route.</dd>
+        </div>
+      )}
+    </dl>
+  );
+}
+
+// One vocabulary for subagent support. A route either runs subagents, cannot,
+// or has never been tested — the protocol version behind that is a detail the
+// tooltip carries, not four different words on four different controls.
+function subagentControl(model: RouterModel, subagentSettings: NonNullable<RouterTarget["modelSettings"]>["subagents"] | undefined, selectedInSettings: boolean) {
+  const certification = subagentCertification(model);
+  const proof = subagentSettings?.proofs?.[model.slug];
+  if (certification === "v2") {
+    return {
+      kind: "subagent" as const,
+      label: "Subagents",
+      hint: "This route is certified to run subagents.",
+      badge: { tone: "accent" as const, text: "Runs subagents" },
+      checked: selectedInSettings,
+      disabled: false,
+      showEffort: true,
+    };
+  }
+  if (certification === "v1") {
+    return {
+      kind: "unsupported" as const,
+      label: "Subagents",
+      hint: "This route speaks the older v1 protocol and cannot host subagents.",
+      badge: { tone: "neutral" as const, text: "No subagents" },
+      checked: false,
+      disabled: true,
+      showEffort: false,
+    };
+  }
+  if (proof?.status === "checking") {
+    return {
+      kind: "test" as const,
+      label: "Test subagents",
+      hint: "Running a one-time low-cost compatibility test. This does not enable subagents by itself.",
+      badge: { tone: "neutral" as const, text: "Testing" },
+      checked: selectedInSettings,
+      disabled: false,
+      showEffort: false,
+    };
+  }
+  if (["candidate", "experimental", "proven"].includes(proof?.status ?? "")) {
+    return {
+      kind: "unsupported" as const,
+      label: "Subagents",
+      hint: "This route passed a local test but is still waiting on a reviewed certification.",
+      badge: { tone: "neutral" as const, text: "Awaiting certification" },
+      checked: false,
+      disabled: true,
+      showEffort: false,
+    };
+  }
+  const failed = proof?.status === "failed";
+  return {
+    kind: "test" as const,
+    label: "Test subagents",
+    hint: failed
+      ? proof?.reason || "The last compatibility test failed."
+      : "Run a one-time low-cost test to see whether this route can host subagents.",
+    badge: failed ? { tone: "danger" as const, text: "Test failed" } : { tone: "neutral" as const, text: "Untested" },
+    checked: selectedInSettings,
+    disabled: false,
+    showEffort: false,
+  };
 }
 
 function ModelRouteRow({
@@ -779,38 +1180,27 @@ function ModelRouteRow({
   onSubagentChange: (checked: boolean) => void;
   onEffortChange: (effort: string) => void;
 }) {
-  if (model.available === false) {
+  if (!routeUsable(model)) {
     return (
       <article className="pm-model-row pm-route-row pm-route-row-unavailable" role="listitem" data-availability="known">
         <div className="pm-model-identity">
           <ProviderLogo providerId={model.provider} displayName={providerName} size="medium" />
-          <div><strong>{providerName}</strong><span>Checked-in route</span><small title={model.slug}>{model.slug}</small></div>
+          <div><strong>{providerName}</strong><span>Known route</span><small title={model.slug}>{model.slug}</small></div>
         </div>
         <div className="pm-model-meta">
           {model.contextWindow ? <span>{formatContext(model.contextWindow)}</span> : null}
           <span>{model.inputModalities?.includes("image") ? "Text + image" : "Text"}</span>
           {model.isFree ? <Badge tone="success">Free</Badge> : null}
-          <Badge tone="neutral">Enable or connect provider</Badge>
         </div>
         <div className="pm-model-controls pm-model-unavailable-copy">
-          Enable and connect this provider before adding the route to installed clients.
+          Connect {providerName} to use this route.
         </div>
       </article>
     );
   }
-  const certification = subagentCertification(model);
-  const certified = certification === "v2";
-  const knownV1 = certification === "v1";
-  const proof = subagentSettings?.proofs?.[model.slug];
-  const checking = !certified && !knownV1 && proof?.status === "checking";
-  // Old local probe verdicts remain diagnostic candidates. They are never a
-  // repository certificate and never make the route look enabled as v2.
-  const candidate = !certified && !knownV1 && ["candidate", "experimental", "proven"].includes(proof?.status ?? "");
-  const selectedAsSubagent = certified && selectedInSettings;
-  const testActive = !certified && !knownV1 && !candidate && selectedInSettings;
-  const effortOptions = model.reasoningLevels ?? [];
+  const subagent = subagentControl(model, subagentSettings, selectedInSettings);
   return (
-    <article className="pm-model-row pm-route-row" role="listitem" data-subagent={selectedAsSubagent ? "enabled" : "disabled"}>
+    <article className="pm-model-row pm-route-row" role="listitem" data-subagent={subagent.kind === "subagent" && subagent.checked ? "enabled" : "disabled"}>
       <div className="pm-model-identity">
         <ProviderLogo providerId={model.provider} displayName={providerName} size="medium" />
         <div><strong>{providerName}</strong><span>{modelRouteKind(model)}</span><small title={model.slug}>{model.slug}</small></div>
@@ -819,29 +1209,86 @@ function ModelRouteRow({
         <span>{formatContext(model.contextWindow)}</span>
         <span>{model.inputModalities?.includes("image") ? "Text + image" : "Text"}</span>
         {model.isFree ? <Badge tone="success">Free</Badge> : null}
-        <Badge tone={certified ? "accent" : proof?.status === "failed" && !knownV1 ? "danger" : "neutral"}>
-          {certified ? "v2 relay" : knownV1 ? "v1 only" : checking ? "Checking compatibility" : candidate ? "Certification candidate" : proof?.status === "failed" ? "Compatibility failed" : "Untested"}
-        </Badge>
-        {selectedAsSubagent ? <Badge tone="accent">Subagent</Badge> : null}
-        {selectedAsSubagent && effortOptions.length ? <Badge tone="neutral">{effortLabel(subagentEffort)} thinking</Badge> : null}
+        <Badge tone={subagent.badge.tone}>{subagent.badge.text}</Badge>
       </div>
       <div className="pm-model-controls">
-        <div className="pm-model-control"><span>Picker</span><Toggle checked={pickerVisible} disabled={!apiAvailable || nativeClientManaged(model)} label={nativeClientManaged(model) ? `${model.displayName} is managed by Codex` : `Show ${model.displayName} through ${providerName} in picker`} onChange={onPickerChange} /></div>
-        <div className="pm-subagent-controls" title={certified ? "Expose this certified v2 route as a subagent" : knownV1 ? "This route is certified v1 and is not retested automatically" : checking ? "Testing low-cost compatibility; this does not enable v2" : candidate ? "Awaiting a reviewed native v2 certification" : "Run the one-time low-cost compatibility test"}>
-          <div className="pm-model-control"><span>{certified ? "Subagent" : knownV1 ? "v1 only" : "Test v2"}</span><Toggle checked={certified ? selectedAsSubagent : testActive} disabled={!apiAvailable || candidate || knownV1} label={certified ? `Use ${model.displayName} through ${providerName} as subagent` : knownV1 ? `${model.displayName} is certified v1` : `Test ${model.displayName} through ${providerName} for v2 compatibility`} onChange={onSubagentChange} /></div>
-          {!certified && !knownV1 && proof?.status === "failed" && proof.reason ? <small className="pm-subagent-proof-error" title={proof.reason}>Test failed</small> : null}
-          {certified && effortOptions.length ? (
-            <label className="pm-model-effort">
-              <span>Thinking</span>
-              <select aria-label={`${model.displayName} ${providerName} subagent thinking effort`} value={subagentEffort} disabled={!apiAvailable || !selectedAsSubagent} onChange={(event) => onEffortChange(event.target.value)}>
-                <option value="default">Model default</option>
-                {effortOptions.map((effort) => <option key={effort} value={effort}>{effortLabel(effort)}</option>)}
-              </select>
-            </label>
-          ) : null}
+        <div className="pm-model-control">
+          <span>In picker</span>
+          <Toggle
+            checked={pickerVisible}
+            disabled={!apiAvailable || nativeClientManaged(model)}
+            label={nativeClientManaged(model) ? `${model.displayName} is managed by Codex` : `Show ${model.displayName} through ${providerName} in the picker`}
+            onChange={onPickerChange}
+          />
         </div>
+        <SubagentControl
+          model={model}
+          providerName={providerName}
+          subagentSettings={subagentSettings}
+          selectedInSettings={selectedInSettings}
+          subagentEffort={subagentEffort}
+          apiAvailable={apiAvailable}
+          onSubagentChange={onSubagentChange}
+          onEffortChange={onEffortChange}
+        />
       </div>
     </article>
+  );
+}
+
+// The route row and the single-route details panel must say the same thing
+// about subagents, so they share the control rather than the wording.
+function SubagentControl({
+  model,
+  providerName,
+  subagentSettings,
+  selectedInSettings,
+  subagentEffort,
+  apiAvailable,
+  onSubagentChange,
+  onEffortChange,
+}: {
+  model: RouterModel;
+  providerName: string;
+  subagentSettings?: NonNullable<RouterTarget["modelSettings"]>["subagents"];
+  selectedInSettings: boolean;
+  subagentEffort: string;
+  apiAvailable: boolean;
+  onSubagentChange: (checked: boolean) => void;
+  onEffortChange: (effort: string) => void;
+}) {
+  const subagent = subagentControl(model, subagentSettings, selectedInSettings);
+  const effortOptions = model.reasoningLevels ?? [];
+  return (
+    <div className="pm-subagent-controls" title={subagent.hint}>
+      {subagent.kind === "unsupported" ? (
+        <span className="pm-model-control-note">{subagent.badge.text}</span>
+      ) : (
+        <div className="pm-model-control">
+          <span>{subagent.label}</span>
+          <Toggle
+            checked={subagent.checked}
+            disabled={!apiAvailable || subagent.disabled}
+            label={`${subagent.label}: ${model.displayName} through ${providerName}`}
+            onChange={onSubagentChange}
+          />
+        </div>
+      )}
+      {subagent.showEffort && effortOptions.length ? (
+        <label className="pm-model-effort">
+          <span>Thinking</span>
+          <select
+            aria-label={`${model.displayName} ${providerName} subagent thinking effort`}
+            value={subagentEffort}
+            disabled={!apiAvailable || !subagent.checked}
+            onChange={(event) => onEffortChange(event.target.value)}
+          >
+            <option value="default">Model default</option>
+            {effortOptions.map((effort) => <option key={effort} value={effort}>{effortLabel(effort)}</option>)}
+          </select>
+        </label>
+      ) : null}
+    </div>
   );
 }
 
@@ -859,7 +1306,7 @@ function PendingModelRows({ slugs }: { slugs: string[] }) {
             <SkeletonBlock className="pm-pending-logo" />
             <div>
               <strong>{slug}</strong>
-              <small>Adding to the picker…</small>
+              <small>Adding…</small>
             </div>
           </div>
           <div className="pm-pending-meta" aria-hidden="true">
@@ -878,169 +1325,171 @@ function effortLabel(effort: string): string {
   return effort === "default" ? "Default" : effort.charAt(0).toUpperCase() + effort.slice(1);
 }
 
-function LoadedCatalogSearchResults({
-  models,
+// One place to add a model, searching every connected provider at once. The
+// per-provider catalog browsers this replaces made the same list reachable
+// only after picking the right provider first.
+function AddModelsDialog({
+  open,
+  directory,
+  catalogStates,
+  loading,
   disabled,
   pendingModels,
+  onReload,
   onAdd,
+  onClose,
 }: {
-  models: LoadedCatalogModel[];
+  open: boolean;
+  directory: ProviderDirectoryEntry[];
+  catalogStates: Record<string, CatalogViewState>;
+  loading: boolean;
   disabled: boolean;
   pendingModels: PendingCatalogModels;
-  onAdd: (model: LoadedCatalogModel) => void;
-}) {
-  return (
-    <section className="pm-catalog-search-results" aria-label="Loaded provider catalog matches">
-      <div className="pm-catalog-search-heading">
-        <div><strong>Available from loaded catalogs</strong><span>These models are not limited to routes already selected in the router.</span></div>
-        <span>{models.length} matches</span>
-      </div>
-      <div className="pm-catalog-search-list" role="list">
-        {models.map((model) => {
-          const adding = (pendingModels[model.providerId]?.[model.modelId] ?? 0) > 0;
-          return (
-            <article className="pm-catalog-search-row" role="listitem" key={model.key}>
-              <ProviderLogo providerId={model.providerId} displayName={model.providerName} size="medium" />
-              <div className="pm-catalog-search-identity">
-                <strong>{model.displayName}</strong>
-                <small title={model.modelId}>{model.modelId}</small>
-                {model.blockedReason ? <small className="pm-catalog-block-reason" title={model.blockedReason}>{model.blockedReason}</small> : null}
-              </div>
-              <div className="pm-catalog-search-source">
-                <span>{model.providerName}</span>
-                <small title={model.sourceId}>{model.sourceName} catalog</small>
-              </div>
-              <div className="pm-catalog-search-meta">
-                {model.contextWindow ? <span>{formatContext(model.contextWindow)}</span> : null}
-                {model.isFree ? <Badge tone="success">Free</Badge> : null}
-              </div>
-              {model.registered ? <Badge tone="neutral">Selected</Badge> : (
-                <Button
-                  variant="primary"
-                  disabled={disabled || adding || !model.addable}
-                  title={model.blockedReason}
-                  onClick={() => onAdd(model)}
-                >
-                  {adding ? "Adding" : model.addable ? "Add" : model.blockedReason ? "Not yet supported" : "Unavailable"}
-                </Button>
-              )}
-            </article>
-          );
-        })}
-      </div>
-    </section>
-  );
-}
-
-function ProviderCatalogManager({
-  entry,
-  state,
-  disabled,
-  onReload,
-  onQuery,
-  onSelection,
-  onPublish,
-}: {
-  entry: ProviderDirectoryEntry;
-  state?: CatalogViewState;
-  disabled: boolean;
   onReload: () => void;
-  onQuery: (query: string) => void;
-  onSelection: (selected: string[]) => void;
-  onPublish: () => void;
+  onAdd: (selection: CatalogModel[]) => void;
+  onClose: () => void;
 }) {
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState<string[]>([]);
   const [shownLimit, setShownLimit] = useState(120);
-  const loading = !state || state.status === "idle" || (state.status === "loading" && !state.refreshing);
-  if (loading) {
-    return (
-      <section className="pm-live-catalog" aria-label={`${entry.displayName} available models`}>
-        <div className="pm-live-catalog-heading"><div><strong>Loading models</strong><span>Reading this provider's model list</span></div></div>
-        <CatalogSkeleton label={`Loading ${entry.displayName} models`} />
-      </section>
-    );
-  }
-  if (state.status === "error" || !state.data) {
-    return (
-      <section className="pm-live-catalog" aria-label={`${entry.displayName} available models`}>
-        <div className="pm-live-catalog-error" role="alert">
-          <div><strong>Available models could not load</strong><span>{state.error || "The provider model list could not be loaded."}</span></div>
-          <Button variant="ghost" disabled={disabled} onClick={onReload}>Try again</Button>
-        </div>
-      </section>
-    );
-  }
-  const busy = state.status === "loading";
 
-  const registered = new Set(state.data.registered);
-  const addable = new Set(state.data.addable ?? state.data.unregistered);
-  const selected = new Set(state.selected.filter((id) => addable.has(id)));
-  const needle = state.query.trim().toLowerCase();
-  const matching = state.data.discovered.filter((id) => !needle || catalogModelName(id).toLowerCase().includes(needle) || id.toLowerCase().includes(needle));
+  useEffect(() => {
+    if (open) return;
+    setQuery("");
+    setSelected([]);
+    setShownLimit(120);
+  }, [open]);
+
+  const catalogModels = useMemo(
+    (): CatalogModel[] => (open ? loadedCatalogModels(directory, catalogStates) : []),
+    [catalogStates, directory, open],
+  );
+  const matching = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return catalogModels;
+    return catalogModels.filter((model) => (
+      `${model.displayName} ${model.modelId} ${model.providerName} ${model.sourceName}`.toLowerCase().includes(needle)
+    ));
+  }, [catalogModels, query]);
+  // Freshness belongs next to the list it describes: a stored catalog can be
+  // up to a day old, and nothing else on this surface would say so.
+  const lastRead = useMemo(() => Object.values(catalogStates)
+    .map((state) => state.data?.fetchedAt)
+    .filter((value): value is string => Boolean(value))
+    .sort()
+    .at(-1), [catalogStates]);
+  const selectedKeys = new Set(selected);
+  const selectedModels = catalogModels.filter((model) => selectedKeys.has(model.key));
+  const errors = Object.values(catalogStates).filter((state) => state.status === "error");
   const shown = matching.slice(0, shownLimit);
-  const selectable = state.data.unregistered.filter((id) => addable.has(id) && (!needle || catalogModelName(id).toLowerCase().includes(needle) || id.toLowerCase().includes(needle)));
-  const toggle = (modelId: string, checked: boolean) => {
-    const next = new Set(selected);
-    if (checked && addable.has(modelId) && next.size < CATALOG_ADD_BATCH_LIMIT) next.add(modelId);
-    else next.delete(modelId);
-    onSelection([...next]);
+
+  const toggle = (model: CatalogModel, checked: boolean) => {
+    setSelected((current) => {
+      if (!checked) return current.filter((key) => key !== model.key);
+      if (current.length >= CATALOG_ADD_BATCH_LIMIT || current.includes(model.key)) return current;
+      return [...current, model.key];
+    });
   };
 
   return (
-    <section className="pm-live-catalog" aria-label={`${entry.displayName} available models`}>
-      <div className="pm-live-catalog-heading">
-        <div>
-          <strong>Available models</strong>
-          <span>
-            {state.data.discovered.length} found · {state.data.registered.length} already selected
-            {state.data.fetchedAt ? ` · ${state.data.cached ? "saved list from" : "read"} ${formatDateTime(state.data.fetchedAt)}` : ""}
-            {state.data.stale && !busy ? " · could not re-read" : ""}
+    <Dialog
+      open={open}
+      title="Add models"
+      description="Everything your connected providers offer. Adding a model makes it available to the router; use the picker switch to show it in your clients."
+      onClose={onClose}
+    >
+      <div className="pm-add-models">
+        <div className="pm-add-models-toolbar">
+          <SearchField value={query} onChange={setQuery} placeholder="Search every connected provider" />
+          <span className="pm-results-count" aria-live="polite">
+            {loading
+              ? "Loading catalogs"
+              : `${matching.length} of ${catalogModels.length} models${lastRead ? ` · read ${formatDateTime(lastRead)}` : ""}`}
           </span>
-        </div>
-        <div className="pm-live-catalog-actions">
-          <Button variant="ghost" disabled={disabled || busy} onClick={onReload}>
-            {busy ? "Asking provider" : "Reload from provider"}
+          <Button variant="ghost" disabled={disabled || loading} onClick={onReload}>
+            {loading ? "Asking providers" : "Reload"}
           </Button>
-          <Button variant="primary" disabled={disabled || busy || !selected.size} onClick={onPublish}>
-            Add {selected.size || "selected"}
+        </div>
+
+        {loading && !catalogModels.length ? <CatalogSkeleton label="Loading provider catalogs" /> : null}
+
+        {!loading && !catalogModels.length ? (
+          <EmptyState
+            icon={<SearchX size={20} />}
+            title={errors.length ? "Catalogs could not be loaded" : "No catalogs available"}
+            body={errors[0]?.error || "Connect a provider that publishes a model catalog, then reload."}
+          />
+        ) : null}
+
+        {shown.length ? (
+          <div className="pm-add-models-list" role="list" aria-label="Provider catalog models">
+            {shown.map((model) => {
+              const adding = (pendingModels[model.providerId]?.[model.modelId] ?? 0) > 0;
+              const checked = model.registered || selectedKeys.has(model.key);
+              const blocked = !model.registered && !model.addable;
+              return (
+                <label
+                  className="pm-add-models-row"
+                  role="listitem"
+                  key={model.key}
+                  data-published={model.registered}
+                  data-blocked={blocked}
+                  title={model.blockedReason}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    disabled={disabled || model.registered || blocked || adding
+                      || (!selectedKeys.has(model.key) && selected.length >= CATALOG_ADD_BATCH_LIMIT)}
+                    onChange={(event) => toggle(model, event.target.checked)}
+                  />
+                  <ProviderLogo providerId={model.providerId} displayName={model.providerName} size="medium" />
+                  <div className="pm-add-models-identity">
+                    <strong>{model.displayName}</strong>
+                    <small title={model.modelId}>{model.modelId}</small>
+                    {model.blockedReason ? <small className="pm-catalog-block-reason">{model.blockedReason}</small> : null}
+                  </div>
+                  <span className="pm-add-models-provider">{model.providerName}</span>
+                  <div className="pm-add-models-meta">
+                    {model.contextWindow ? <span>{formatContext(model.contextWindow)}</span> : null}
+                    {model.isFree ? <Badge tone="success">Free</Badge> : null}
+                  </div>
+                  {adding ? <Badge tone="neutral">Adding</Badge>
+                    : model.registered ? <Badge tone="neutral">Added</Badge>
+                    : blocked ? <Badge tone="neutral">Not yet supported</Badge>
+                    : null}
+                </label>
+              );
+            })}
+          </div>
+        ) : null}
+
+        {matching.length > shown.length ? (
+          <div className="pm-add-models-more">
+            <span>{matching.length - shown.length} more models</span>
+            <Button variant="ghost" onClick={() => setShownLimit((current) => current + 120)}>Show 120 more</Button>
+          </div>
+        ) : null}
+
+        {catalogModels.length && !matching.length ? (
+          <div className="pm-add-models-empty">No catalog model matches this search.</div>
+        ) : null}
+
+        <div className="dialog-actions">
+          <span className="pm-add-models-hint">
+            Lists are stored locally and re-read in the background once a day. Up to {CATALOG_ADD_BATCH_LIMIT} at a time.
+          </span>
+          <Button variant="secondary" onClick={onClose}>Cancel</Button>
+          <Button
+            variant="primary"
+            disabled={disabled || !selectedModels.length}
+            onClick={() => { onAdd(selectedModels); setSelected([]); onClose(); }}
+          >
+            {selectedModels.length ? `Add ${selectedModels.length} model${selectedModels.length === 1 ? "" : "s"}` : "Add models"}
           </Button>
         </div>
       </div>
-      <div className="pm-live-catalog-toolbar">
-        <SearchField value={state.query} onChange={onQuery} placeholder="Search available models" />
-        <span>{matching.length} matches</span>
-        <Button variant="ghost" disabled={!selectable.length} onClick={() => onSelection(selectable.slice(0, CATALOG_ADD_BATCH_LIMIT))}>Select up to 200</Button>
-        <Button variant="ghost" disabled={!selected.size} onClick={() => onSelection([])}>Clear</Button>
-      </div>
-      {shown.length ? (
-        <div className="pm-live-catalog-list" role="list" aria-label={`${entry.displayName} available models`}>
-          {shown.map((modelId) => {
-            const published = registered.has(modelId);
-            const blockedReason = published ? undefined : state.data?.blocked?.[modelId];
-            const context = state.data?.contextLengths?.[modelId];
-            return (
-              <label className="pm-live-catalog-row" data-published={published} data-blocked={Boolean(blockedReason)} title={blockedReason} key={modelId}>
-                <input type="checkbox" checked={published || selected.has(modelId)} disabled={published || !addable.has(modelId) || disabled || (!selected.has(modelId) && selected.size >= CATALOG_ADD_BATCH_LIMIT)} onChange={(event) => toggle(modelId, event.target.checked)} />
-                <span>
-                  <strong>{catalogModelName(modelId)}</strong>
-                  <small>{modelId}</small>
-                  {blockedReason ? <small className="pm-catalog-block-reason">{blockedReason}</small> : null}
-                </span>
-                {state.data?.free?.includes(modelId) || modelId === "big-pickle" || modelId.endsWith("-free") ? <Badge tone="success">Free</Badge> : null}
-                {context ? <small>{formatContext(context)}</small> : null}
-                {published ? <Badge tone="neutral">Selected</Badge> : blockedReason ? <Badge tone="neutral">Not yet supported</Badge> : null}
-              </label>
-            );
-          })}
-        </div>
-      ) : <div className="pm-live-catalog-empty">No catalog models match this search.</div>}
-      {matching.length > shown.length ? (
-        <div className="pm-live-catalog-more">
-          <span>{matching.length - shown.length} more models</span>
-          <Button variant="ghost" onClick={() => setShownLimit((current) => current + 120)}>Show 120 more</Button>
-        </div>
-      ) : null}
-      <p className="pm-live-catalog-note">This list is saved locally, so opening a provider does not re-ask it every time; a list older than a day is re-read in the background. Reload fetches it again now. Candidates are added explicitly in batches of up to 200 because raw provider catalogs may also contain non-chat or protocol-specific models.</p>
-    </section>
+    </Dialog>
   );
 }
 
@@ -1073,8 +1522,7 @@ function providerConnected(entry: ProviderDirectoryEntry, enabledProviders: Set<
   // connected on its own. Treating `configured: true` as a connection here
   // both mislabels an unselected provider and includes its off-box catalog in
   // the bulk "connected" request. Its explicit provider selection is the
-  // connection boundary instead; opening its own card remains an explicit way
-  // to browse the catalog before enabling routed prompts.
+  // connection boundary instead.
   if (entry.setup?.kind === "anonymous") return enabledProviders.has(entry.id);
   if (entry.setup) return entry.setup.configured;
   return entry.models.some((model) => model.native) || enabledProviders.has(entry.id);
@@ -1088,21 +1536,21 @@ function connectionMethod(entry: ProviderDirectoryEntry): string {
   if (entry.id === "openai") return "ChatGPT session";
   if (entry.id === "local") return "Local runtime";
   if (!entry.setup) return "Managed catalog";
-  if (entry.setup.kind === "oauth") return "OAuth";
+  if (entry.setup.kind === "oauth") return "Sign-in";
+  if (entry.setup.kind === "anonymous") return "No key needed";
   if (entry.setup.signIn) return "Key or sign-in";
   return entry.setup.credentialLabel || "API key";
 }
 
-function connectionDetail(entry: ProviderDirectoryEntry, accountStatus?: string, accountMessage?: string, needsCuration?: boolean, canOpenTerminal?: boolean): string {
+function connectionDetail(entry: ProviderDirectoryEntry, accountStatus?: string, accountMessage?: string, canOpenTerminal?: boolean): string {
   if (entry.id === "openai") return "Uses the signed-in ChatGPT session available to this Codex installation.";
   if (!entry.setup) return "This provider catalog is managed by the router and has no separate credential action here.";
-  if (entry.setup.kind === "anonymous") return "No API key is required. Enable this provider explicitly before routed prompts or bulk catalog loading can use its endpoint.";
-  if (needsCuration) return "The credential is ready, but this catalog-only provider has no locally selected models.";
-  if (accountStatus === "unavailable") return accountMessage || "Account usage is unavailable. Reconnect if the session expired.";
-  if (entry.setup.configured) return "Credential ready. You can disable routing without disconnecting the account.";
+  if (entry.setup.kind === "anonymous") return "No API key is required. Make it available before routed prompts or catalog loading can use its endpoint.";
+  if (accountStatus === "unavailable") return accountMessage || "Account usage is unavailable. Sign in again if the session expired.";
+  if (entry.setup.configured) return "Credential ready. You can take it away from your clients without disconnecting the account.";
   if (entry.setup.kind === "oauth") {
     if (!canOpenTerminal) return "Run the official provider sign-in command in your own terminal, then refresh this page.";
-    return entry.setup.cliInstalled === false ? "The official CLI will be installed, then sign-in will open in your system terminal." : "Sign in through the official provider CLI in your system terminal, then refresh to enable it.";
+    return entry.setup.cliInstalled === false ? "The official CLI will be installed, then sign-in will open in your system terminal." : "Sign in through the official provider CLI in your system terminal, then refresh.";
   }
   if (entry.setup.signIn) return `Add ${entry.setup.credentialLabel || "an API key"}, or use the provider's browser sign-in.`;
   return `Add ${entry.setup.credentialLabel || "an API key"} to connect this provider.`;

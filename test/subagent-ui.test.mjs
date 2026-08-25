@@ -30,16 +30,54 @@ test("Control Center keeps legacy local proofs as candidates, not active v2 rout
     path.join(root, "apps", "control-center", "src", "pages", "ModelsPage.tsx"),
     "utf8",
   );
-  assert.match(source, /const selectedAsSubagent = certified && selectedInSettings/);
-  assert.match(source, /const certified = certification === "v2"/);
-  assert.match(source, /model\.multiAgentVersion === "v1" \? "v1" : "unknown"/);
-  assert.match(source, /\{certified \? "v2 relay" : knownV1 \? "v1 only" : checking/);
   assert.match(source, /if \(!model \|\| model\.visible === false\) return false/);
   assert.match(source, /if \(subagentCertification\(model\) === "v2"\)/);
+  assert.match(source, /model\.multiAgentVersion === "v1" \? "v1" : "unknown"/);
   assert.match(source, /settings\.mode === "selected" && settings\.enabled\.includes\(slug\)/);
-  assert.match(source, /\["candidate", "experimental", "proven"\]\.includes\(proof\?\.status \?\? ""\)/);
-  assert.match(source, /const testActive = !certified && !knownV1 && !candidate && selectedInSettings/);
-  assert.match(source, /disabled=\{!apiAvailable \|\| candidate \|\| knownV1\}/);
+
+  // The four states share one control and one vocabulary. What must not blur is
+  // which of them can actually host a subagent: only a certified v2 route.
+  const control = source.slice(
+    source.indexOf("function subagentControl("),
+    source.indexOf("function ModelRouteRow("),
+  );
+  assert.ok(control, "subagentControl is the single source of subagent wording");
+  const certified = control.slice(
+    control.indexOf('if (certification === "v2")'),
+    control.indexOf('if (certification === "v1")'),
+  );
+  assert.match(certified, /kind: "subagent" as const/);
+  assert.match(certified, /checked: selectedInSettings/);
+  assert.match(certified, /showEffort: true/);
+  // Thinking effort belongs to a route that really runs subagents, so exactly
+  // one branch may offer it.
+  assert.equal(control.match(/showEffort: true/g)?.length, 1);
+
+  const knownV1 = control.slice(
+    control.indexOf('if (certification === "v1")'),
+    control.indexOf('if (proof?.status === "checking")'),
+  );
+  assert.match(knownV1, /kind: "unsupported" as const/);
+  assert.match(knownV1, /checked: false/);
+  assert.match(knownV1, /disabled: true/);
+
+  // A local proof is diagnostic only. It stays a candidate: never checked,
+  // never toggleable, and never presented as a working subagent route.
+  assert.match(control, /\["candidate", "experimental", "proven"\]\.includes\(proof\?\.status \?\? ""\)/);
+  const candidate = control.slice(
+    control.indexOf('["candidate", "experimental", "proven"].includes(proof?.status ?? "")'),
+    control.indexOf("const failed = proof?.status === \"failed\""),
+  );
+  assert.match(candidate, /kind: "unsupported" as const/);
+  assert.match(candidate, /checked: false/);
+  assert.match(candidate, /disabled: true/);
+  assert.doesNotMatch(candidate, /kind: "subagent"/);
+
+  // An unsupported route offers no switch at all, so there is nothing to click
+  // that could imply the route is one test away from working.
+  assert.match(source, /subagent\.kind === "unsupported" \? \(/);
+  assert.match(source, /className="pm-model-control-note"/);
+  assert.match(source, /disabled=\{!apiAvailable \|\| subagent\.disabled\}/);
 });
 
 test("macOS subagent settings show native and unverified enabled models", () => {
