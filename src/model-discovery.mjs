@@ -239,7 +239,7 @@ async function providerPayload(provider, identity) {
  */
 export async function discoverProviderModels(
   providerId,
-  { refresh = false, cache = true, loadPayload = providerPayload } = {},
+  { refresh = false, cache = true, fixture = false, loadPayload = providerPayload } = {},
 ) {
   const provider = PROVIDERS.get(providerId);
   if (!provider) throw new Error(`Unknown provider: ${providerId}`);
@@ -259,7 +259,7 @@ export async function discoverProviderModels(
   // A fixture is a file the caller handed in, not what the provider serves.
   // It must never be answered from the stored list and must never become it,
   // whichever entrypoint asked -- discovery's own CLI or curation's.
-  const usingFixture = option("--fixture") !== undefined;
+  const usingFixture = fixture || option("--fixture") !== undefined;
   const storeAnswer = cache && !usingFixture;
   let cached;
   let identity;
