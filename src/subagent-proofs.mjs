@@ -33,7 +33,26 @@ export const SUBAGENT_PROOFS_PATH =
   process.env.MODEL_ROUTER_SUBAGENT_PROOFS ||
   path.join(STATE_DIR, "multi-agent-proofs.json");
 
-const KNOWN_STATUSES = new Set(["checking", "candidate", "experimental", "proven", "failed"]);
+const KNOWN_STATUSES = new Set([
+  "checking",
+  "candidate",
+  "experimental",
+  "proven",
+  "failed",
+  "verified",
+]);
+
+// The five live checks in v2_agent/README.md, in the order a reviewer runs
+// them. A record may promote only when every one of them passed in the same
+// run: 1-2 are the cheap stream/tool probe that must never stand in for native
+// collaboration, and 3-5 are the delegation itself.
+export const VERIFICATION_CHECKS = Object.freeze([
+  "streaming",
+  "toolCall",
+  "encryptedRelay",
+  "markerReturn",
+  "sameThreadFollowUp",
+]);
 
 // A file that exists but cannot be parsed promotes nothing: somebody's
 // evidence was here and we can no longer read it, so the conservative v1
@@ -130,16 +149,83 @@ export function subagentProofSnapshot(filePath = SUBAGENT_PROOFS_PATH) {
   return readSubagentProofs(filePath).proofs;
 }
 
-// Local proof records are diagnostic and application material only. Promoting
-// from this file let a stream/tool probe masquerade as native collaboration
-// proof, creating a path where an actually-v1 route appeared in Codex's v2
-// subagent list. Repository `multiAgentVersion: "v2"` is the sole promotion
-// authority.
-export function applySubagentProofs(models, proofs, { hidden, disabled } = {}) {
-  void proofs;
-  void hidden;
-  void disabled;
-  return models;
+// Whether one record is a completed local verification of THIS route.
+//
+// Every clause here keeps the original failure closed: a stream/tool probe
+// must never masquerade as native collaboration proof, or an actually-v1 route
+// reaches Codex's v2 subagent list and breaks at spawn time, after the user
+// picked it. So a diagnostic status can never promote, a partial run can never
+// promote, and a record can never promote a route it was not produced for.
+export function verifiedForRoute(proof, slug, { routerVersion } = {}) {
+  if (!proof || typeof proof !== "object") return false;
+  if (proof.status !== "verified") return false;
+  if (String(proof.slug || "") !== String(slug)) return false;
+  const checks = proof.checks;
+  if (!checks || typeof checks !== "object") return false;
+  for (const name of VERIFICATION_CHECKS) {
+    if (checks[name]?.outcome !== "pass") return false;
+  }
+  // A verification describes one build's relay behaviour. Carrying it across a
+  // router upgrade would advertise v2 on evidence nobody gathered for it.
+  if (routerVersion && String(proof.routerVersion || "") !== String(routerVersion)) {
+    return false;
+  }
+  return true;
+}
+
+// Registry `multiAgentVersion: "v2"` and a completed local verification are
+// the only two ways a route becomes a subagent. Local records reach this only
+// through `verifiedForRoute`, so the diagnostic statuses this file has always
+// held -- candidate, experimental, proven -- still promote nothing.
+export function applySubagentProofs(
+  models,
+  proofs,
+  { hidden, disabled, routerVersion } = {},
+) {
+  const hiddenSlugs = hidden instanceof Set ? hidden : new Set(hidden || []);
+  const disabledSlugs = disabled instanceof Set ? disabled : new Set(disabled || []);
+  const records = proofs && typeof proofs === "object" ? proofs : {};
+  if (!Array.isArray(models)) return [];
+  let promotedAny = false;
+  const next = models.map((model) => {
+    const slug = String(model?.slug || "");
+    if (!slug || model.multiAgentVersion === "v2") return model;
+    if (hiddenSlugs.has(slug) || disabledSlugs.has(slug)) return model;
+    if (!verifiedForRoute(records[slug], slug, { routerVersion })) return model;
+    promotedAny = true;
+    return { ...model, multiAgentVersion: "v2", subagentVerifiedLocally: true };
+  });
+  // Promoting nothing is a pass-through, not a rewrite. Callers compare the
+  // result by identity to tell "no local evidence applied" from "applied".
+  return promotedAny ? next : models;
+}
+
+export function recordVerificationStarted(slug, { at = new Date().toISOString() } = {}) {
+  return updateProof(slug, { status: "checking", slug: String(slug), startedAt: at });
+}
+
+// Written from one run, as a whole. The `checks` object is replaced rather
+// than merged, so a caller cannot lay a fresh pass over a stale record to
+// complete a set: a run that reached only three checks leaves a record that
+// promotes nothing.
+export function recordVerification(
+  slug,
+  { checks, routerVersion, failed, reason, at = new Date().toISOString() },
+) {
+  const complete = VERIFICATION_CHECKS.every((name) => checks?.[name]?.outcome === "pass");
+  return updateProof(slug, {
+    slug: String(slug),
+    status: complete ? "verified" : "failed",
+    checks: { ...(checks || {}) },
+    routerVersion: routerVersion ? String(routerVersion) : undefined,
+    verifiedAt: complete ? at : undefined,
+    failedCheck: complete ? undefined : failed || firstIncompleteCheck(checks),
+    reason: complete ? undefined : reason || "subagent verification did not complete",
+  });
+}
+
+function firstIncompleteCheck(checks) {
+  return VERIFICATION_CHECKS.find((name) => checks?.[name]?.outcome !== "pass");
 }
 
 // Legacy helper retained only to refine an historical experimental record from
