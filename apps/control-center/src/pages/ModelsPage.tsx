@@ -152,10 +152,10 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
   // slowest thing this page starts; without a placeholder the models simply are
   // not there for the length of it and the click reads as having done nothing.
   const [pendingModels, setPendingModels] = useState<PendingCatalogModels>({});
-  // Routes with a check in flight, and the one-line reason for the ones that
-  // came back unable. Both are per-route so a slow provider never freezes the
-  // rest of the list.
-  const [certifying, setCertifying] = useState<Record<string, boolean>>({});
+  // Checks run one at a time: the control process serialises every mutation,
+  // so flipping four switches starts one run and queues three. Keeping the
+  // order here lets a queued row say so instead of claiming to be running.
+  const [certifyQueue, setCertifyQueue] = useState<string[]>([]);
   const [certifyProblems, setCertifyProblems] = useState<Record<string, string>>({});
 
   // External model identity and picker visibility come from the router-owned
@@ -483,8 +483,8 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
   // promotes the route only if every one of them passed. A refusal comes back
   // as one sentence rather than a state the reader has to decode.
   const certifyRoute = async (model: RouterModel) => {
-    if (!api || certifying[model.slug]) return;
-    setCertifying((current) => ({ ...current, [model.slug]: true }));
+    if (!api || certifyQueue.includes(model.slug)) return;
+    setCertifyQueue((current) => [...current, model.slug]);
     setCertifyProblems((current) => {
       const next = { ...current };
       delete next[model.slug];
@@ -503,11 +503,7 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
         }
       });
     } finally {
-      setCertifying((current) => {
-        const next = { ...current };
-        delete next[model.slug];
-        return next;
-      });
+      setCertifyQueue((current) => current.filter((slug) => slug !== model.slug));
       onRefresh();
     }
   };
@@ -530,7 +526,10 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
       onRoutePicker={(model, visible) => void updatePicker(model.slug, visible)}
       onSubagent={(model, enabled) => void updateSubagent(model.slug, enabled)}
       onCertify={(model) => void certifyRoute(model)}
-      certifying={(model) => Boolean(certifying[model.slug])}
+      certifyState={(model) => {
+        const position = certifyQueue.indexOf(model.slug);
+        return position < 0 ? undefined : position === 0 ? "running" : "queued";
+      }}
       certifyProblem={(model) => certifyProblems[model.slug]}
       onEffort={(model, effort) => void updateSubagentEffort(model.slug, effort)}
       onConnect={(providerId) => {
@@ -961,7 +960,7 @@ function ModelFamilyRow({
   onRoutePicker,
   onSubagent,
   onCertify,
-  certifying,
+  certifyState,
   certifyProblem,
   onEffort,
   onConnect,
@@ -981,7 +980,7 @@ function ModelFamilyRow({
   onRoutePicker: (model: RouterModel, visible: boolean) => void;
   onSubagent: (model: RouterModel, enabled: boolean) => void;
   onCertify: (model: RouterModel) => void;
-  certifying: (model: RouterModel) => boolean;
+  certifyState: (model: RouterModel) => "running" | "queued" | undefined;
   certifyProblem: (model: RouterModel) => string | undefined;
   onEffort: (model: RouterModel, effort: string) => void;
   onConnect: (providerId: string) => void;
@@ -1070,7 +1069,7 @@ function ModelFamilyRow({
                   subagentEffort={effortValue(model)}
                   apiAvailable={apiAvailable}
                   onPickerChange={(checked) => onRoutePicker(model, checked)}
-                  checking={certifying(model)}
+                  checking={certifyState(model)}
                   problem={certifyProblem(model)}
                   onSubagentChange={(checked) => onSubagent(model, checked)}
                   onCertify={() => onCertify(model)}
@@ -1090,7 +1089,7 @@ function ModelFamilyRow({
             selectedInSettings={subagentValue(family.routes[0])}
             subagentEffort={effortValue(family.routes[0])}
             apiAvailable={apiAvailable}
-            checking={certifying(family.routes[0])}
+            checking={certifyState(family.routes[0])}
             problem={certifyProblem(family.routes[0])}
             onSubagentChange={(checked) => onSubagent(family.routes[0], checked)}
             onCertify={() => onCertify(family.routes[0])}
@@ -1119,7 +1118,7 @@ function ModelDetails({
   selectedInSettings: boolean;
   subagentEffort: string;
   apiAvailable: boolean;
-  checking?: boolean;
+  checking?: "running" | "queued";
   problem?: string;
   onSubagentChange: (checked: boolean) => void;
   onCertify: () => void;
@@ -1215,7 +1214,7 @@ function ModelRouteRow({
   subagentEffort: string;
   apiAvailable: boolean;
   onPickerChange: (checked: boolean) => void;
-  checking?: boolean;
+  checking?: "running" | "queued";
   problem?: string;
   onSubagentChange: (checked: boolean) => void;
   onCertify: () => void;
@@ -1301,7 +1300,7 @@ function SubagentControl({
   selectedInSettings: boolean;
   subagentEffort: string;
   apiAvailable: boolean;
-  checking?: boolean;
+  checking?: "running" | "queued";
   problem?: string;
   onSubagentChange: (checked: boolean) => void;
   onCertify: () => void;
@@ -1320,14 +1319,15 @@ function SubagentControl({
         <div className="pm-model-control">
           <Toggle
             checked={Boolean(checking)}
-            disabled={!apiAvailable || checking}
+            disabled={!apiAvailable || Boolean(checking)}
             label={`Check whether ${model.displayName} through ${providerName} can run subagents`}
             onChange={(checked) => { if (checked) onCertify(); }}
           />
           {/* A refusal outranks the spinner: the run is over, and leaving
-              "Checking…" on screen beside the reason reads as still working. */}
+              "Checking…" beside the reason reads as still working. A queued
+              row says so rather than claiming a run it has not started. */}
           <span className={problem ? "pm-route-problem" : undefined}>
-            {problem ? "No" : checking ? "Checking…" : "Off"}
+            {problem ? "No" : checking === "running" ? "Checking…" : checking === "queued" ? "Queued" : "Off"}
           </span>
         </div>
       </div>

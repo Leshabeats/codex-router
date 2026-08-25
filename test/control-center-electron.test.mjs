@@ -1186,8 +1186,10 @@ test("the model directory combines provider setup with de-duplicated model-famil
   assert.match(models, /certifySubagentModel\(model\.slug\)/);
   assert.match(models, /if \(!outcome\?\.certified\)/);
   assert.match(models, /Cannot run subagents/);
-  // A refusal outranks the spinner once the run is over.
-  assert.match(models, /\{problem \? "No" : checking \? "Checking…" : "Off"\}/);
+  // A refusal outranks the spinner once the run is over, and a row waiting
+  // its turn in the mutation queue must not claim to be running.
+  assert.match(models, /checking === "running" \? "Checking…" : checking === "queued" \? "Queued"/);
+  assert.match(models, /position === 0 \? "running" : "queued"/);
   assert.match(models, /subagent thinking effort/);
   assert.match(models, /<option value="default">Model default<\/option>/);
   assert.match(providerModelsCss, /\.pm-model-row\[data-subagent="enabled"\]/);
