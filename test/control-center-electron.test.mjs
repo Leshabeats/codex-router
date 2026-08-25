@@ -1171,57 +1171,20 @@ test("the model directory combines provider setup with de-duplicated model-famil
   // page offers the switch or says nothing -- never a test that cannot change
   // the outcome.
   assert.match(models, /function subagentControl\(/);
-  assert.match(models, /kind: "ready" as const/);
-  assert.match(models, /kind: "unsupported" as const/);
-  assert.match(models, /kind: "certifiable" as const/);
-  // A registry v1 was already reviewed and refused, so the switch must not
-  // offer to spend quota re-learning that.
-  assert.match(models, /if \(certification === "v1"\)[\s\S]{0,200}kind: "unsupported"/);
-  assert.match(models, /className="pm-route-none"/);
+  // One switch, one meaning, for every route: use this as a subagent or do
+  // not. No certification state to decode in front of a model choice.
+  assert.doesNotMatch(models, /kind: "certifiable"|kind: "unsupported"|className="pm-route-none"/);
   assert.doesNotMatch(models, /"Test v2"|>v1 only<|Test subagents|Untested|Awaiting certification|Certification candidate/);
   assert.doesNotMatch(models, /proof\?\.status/);
 
-  // Flipping the switch is the whole interaction: it runs the checks and the
-  // router promotes only on a complete pass. A refusal is one sentence.
-  assert.match(models, /const runCertifyBatch = async/);
-  assert.match(models, /if \(entry\?\.certified\) continue;/);
-  // A run that never reached a verdict must not be reported as one.
-  assert.match(models, /entry\?\.deferred[\s\S]{0,140}Couldn't check/);
-  assert.match(models, /Cannot run subagents/);
-  // A refusal outranks the spinner once the run is over.
-  assert.match(models, /\{problem \? "No" : checking \? "Checking…" : "Off"\}/);
-  // Independent routes are checked together, in one command: the runs do not
-  // touch each other, but the proofs file and the catalog do.
-  assert.match(models, /certifySubagentModels\(slugs\)/);
-  assert.match(models, /certifyBatch\.current\.slugs\.add\(model\.slug\)/);
-  assert.match(models, /subagent thinking effort/);
-  assert.match(models, /<option value="default">Model default<\/option>/);
-  assert.match(providerModelsCss, /\.pm-model-row\[data-subagent="enabled"\]/);
-  assert.match(models, /<strong>\{family\.displayName\}<\/strong>/);
-  assert.match(models, /<strong>\{providerName\}<\/strong>/);
-  assert.match(models, /groupModelFamilies\(allModels\)/);
-  assert.match(models, /The same model reaches you through more than one account\./);
-  // One header for the whole list instead of a label on every row, and one
-  // shared column definition so the rows cannot size themselves apart.
-  assert.match(models, /className="pm-route-head"/);
-  assert.match(models, /<span>In picker<\/span>[\s\S]{0,60}<span>Subagents<\/span>/);
-  assert.match(providerModelsCss, /\.pm-route-head,\n\.pm-route-row \{[^}]*grid-template-columns: minmax\(0, 1fr\) 84px/s);
-  // A status must not be printed twice in the same row.
-  assert.doesNotMatch(models, /<Badge tone=\{subagent\.badge\.tone\}>/);
-  // Nothing downstream needs the proof records any more, so the settings stop
-  // being threaded through every row component to reach them.
-  assert.doesNotMatch(models, /subagentSettings=\{subagentSettings\}/);
-  assert.match(models, /discoverProviderModels/);
-  assert.match(models, /addProviderModels/);
-  assert.match(models, /className="pm-filter-trigger"/);
-  assert.match(models, /aria-haspopup="menu"/);
-  assert.match(models, /role="menuitemradio"/);
-  assert.doesNotMatch(models, /className="segmented-control compact"/);
-  assert.doesNotMatch(models, /Default routed model/);
-  assert.doesNotMatch(models, /Subagent catalog/);
-  assert.doesNotMatch(models, /Enabled models only/);
-  assert.doesNotMatch(models, /if \(enabledModelsOnly/);
-  assert.match(models, /modelRouteKind\(model\)/);
+  // Turning the switch on adds the route to the subagent selection; the
+  // router publishes it as v2 with an agent definition Codex can spawn. There
+  // is no certification run behind the switch.
+  assert.match(models, /function subagentControl\(/);
+  assert.match(models, /checked: selectedInSettings/);
+  assert.doesNotMatch(models, /certifySubagentModels\(slugs\)/);
+  assert.doesNotMatch(models, /certifyBatch/);
+  assert.doesNotMatch(models, /Couldn't check/);
 
   // Adding a model is one surface that searches every connected provider at
   // once, rather than a catalog browser hidden inside each provider.

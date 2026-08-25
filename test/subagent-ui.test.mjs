@@ -35,33 +35,22 @@ test("Control Center keeps legacy local proofs as candidates, not active v2 rout
   assert.match(source, /model\.multiAgentVersion === "v1" \? "v1" : "unknown"/);
   assert.match(source, /settings\.mode === "selected" && settings\.enabled\.includes\(slug\)/);
 
-  // The registry is the sole promotion authority and applySubagentProofs()
-  // discards local probe results, so the page must not offer a control that
-  // implies otherwise. A route certified v2 gets the switch; every other route
-  // gets nothing to click at all.
+  // The switch adds the route to the subagent selection, which the router
+  // publishes as v2. It never asks a local probe to decide that.
   const control = source.slice(
     source.indexOf("function subagentControl("),
     source.indexOf("function ModelRouteRow("),
   );
   assert.ok(control, "subagentControl is the single source of subagent wording");
-  assert.match(control, /if \(certification === "v2"\)[\s\S]{0,140}kind: "ready" as const/);
-  assert.match(control, /kind: "ready" as const[\s\S]{0,120}checked: selectedInSettings/);
-  // Only an unknown route is a candidate. v2 is already able; v1 was reviewed
-  // and refused, and re-checking it would spend quota on a settled answer.
-  assert.match(control, /if \(certification === "v1"\)[\s\S]{0,200}kind: "unsupported" as const/);
-  assert.match(control, /kind: "certifiable" as const/);
+  assert.match(control, /checked: selectedInSettings/);
+  // It may read the registry certification to word its hint; what it must not
+  // do is consult a local proof record to decide anything.
+  assert.doesNotMatch(control, /proofs|candidate|experimental/i);
 
-  // No local-proof vocabulary survives anywhere on the page: no probe request,
-  // no candidate state, and no wording that reads as one test away from working.
-  // The page must not read proof records as data; prose may mention the file.
+  // No local-proof vocabulary reaches the page at all.
   assert.doesNotMatch(source, /subagentSettings\?\.proofs|\.proofs\[|proofs\?\./);
-  // The legacy statuses must not be handled as data. Prose may still use the
-  // word "candidate" for a route the switch can check.
   assert.doesNotMatch(source, /"candidate"|"experimental"|"proven"/);
   assert.doesNotMatch(source, /Test subagents|Untested|Awaiting certification|Test failed|Checking compatibility/);
-
-  // An uncertified route renders an inert marker, never a Toggle.
-  assert.match(source, /if \(subagent\.kind === "unsupported"\) \{[\s\S]{0,200}className="pm-route-none"/);
   assert.match(source, /disabled=\{!apiAvailable\}/);
 });
 

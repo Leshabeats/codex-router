@@ -190,14 +190,29 @@ export function replaceMultiAgentState({ mode, enabled = [], disabled = [], effo
   return subagentSettingsSnapshot();
 }
 
+// The three modes documented in `.claude/skills/codex-subagents/SKILL.md`:
+// `proven` ships only what the registry verified, `selected` adds the routes
+// the operator explicitly turned on, and `all` advertises every non-hidden
+// route "regardless of whether it works".
+//
+// Only these lines promote, and only from an explicit choice the operator made
+// and can see in `subagents status`. A machine-local probe still promotes
+// nothing on its own -- that distinction is the whole point of the guard in
+// subagent-proofs.mjs, and it is not weakened by honouring a deliberate
+// selection here.
 export function applyMultiAgentSettings(models, settings, hidden = new Set()) {
   const disabled = new Set(settings.disabled || []);
+  const enabled = new Set(settings.enabled || []);
+  const mode = settings.mode || "proven";
   return models.map((model) => {
-    if (hidden.has(model.slug)) {
+    const slug = String(model.slug || "");
+    // An explicit `off` beats every mode, including `all`.
+    if (hidden.has(model.slug) || disabled.has(slug)) {
       return { ...model, multiAgentVersion: "v1" };
     }
-    if (disabled.has(model.slug)) {
-      return { ...model, multiAgentVersion: "v1" };
+    if (model.multiAgentVersion === "v2") return model;
+    if (mode === "all" || (mode === "selected" && enabled.has(slug))) {
+      return { ...model, multiAgentVersion: "v2", subagentSelectedByOperator: true };
     }
     return model;
   });
