@@ -7576,9 +7576,12 @@ private struct TrayView: View {
       Set(settings?.subagents.disabled ?? [])
     }
 
+    // The capability the catalog actually published wins. A route the operator
+    // selected is v2 to Codex even though the registry never certified it, and
+    // asking the registry first told them a spawnable route could not be used.
     private func subagentCertification(for model: RouterModel) -> String {
-      if let certification = model.subagentCertification { return certification }
       if model.multiAgentVersion == "v2" { return "v2" }
+      if let certification = model.subagentCertification { return certification }
       if model.multiAgentVersion == "v1" { return "v1" }
       return "unknown"
     }

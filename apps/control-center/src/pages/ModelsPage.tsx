@@ -101,9 +101,13 @@ function catalogEligible(entry: ProviderDirectoryEntry): boolean {
   return Boolean(entry.setup?.configured && entry.setup.catalogSources?.length);
 }
 
+// The capability the catalog published wins over the registry's provenance: a
+// route the operator selected is v2 to Codex even though the registry never
+// certified it, and asking the registry first described it as unusable.
 function subagentCertification(model: RouterModel): "v1" | "v2" | "unknown" | string {
+  if (model.multiAgentVersion === "v2") return "v2";
   return model.subagentCertification
-    ?? (model.multiAgentVersion === "v2" ? "v2" : model.multiAgentVersion === "v1" ? "v1" : "unknown");
+    ?? (model.multiAgentVersion === "v1" ? "v1" : "unknown");
 }
 
 function subagentEnabled(target: RouterTarget, slug: string, settings = target.modelSettings?.subagents): boolean {
