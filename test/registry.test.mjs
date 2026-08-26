@@ -103,7 +103,34 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "meta/muse-spark-1.2-contributor",
       "meta/muse-spark-1.2",
       "minimax-token-plan/minimax-m3",
+      "nousresearch/claude-fable-5",
+      "nousresearch/claude-opus-5",
+      "nousresearch/claude-sonnet-5",
+      "nousresearch/deepseek-v4-flash",
+      "nousresearch/deepseek-v4-pro",
+      "nousresearch/gemini-3.7-flash",
+      "nousresearch/glm-5.2",
+      "nousresearch/glm-5.3",
+      "nousresearch/gpt-5.6-terra",
+      "nousresearch/grok-4.6",
+      "nousresearch/hermes-4-405b",
+      "nousresearch/hermes-4-70b",
+      "nousresearch/hy3-free",
+      "nousresearch/kat-coder-pro-v2.5",
+      "nousresearch/kimi-k2.7-code",
+      "nousresearch/kimi-k3",
+      "nousresearch/laguna-s-2.1-free",
+      "nousresearch/laguna-xs-2.1-free",
+      "nousresearch/longcat-2.0-free",
+      "nousresearch/mimo-v2.5-pro",
+      "nousresearch/minimax-m3",
+      "nousresearch/muse-spark-1.2-contributor",
+      "nousresearch/nemotron-3-ultra",
       "nousresearch/ox-alpha",
+      "nousresearch/qwen3.7-max",
+      "nousresearch/qwen3.8-max",
+      "nousresearch/solar-pro4-free",
+      "nousresearch/step-3.7-flash-free",
       "ollama-cloud/deepseek-v4-flash",
       "ollama-cloud/deepseek-v4-pro",
       "ollama-cloud/glm-5.2",
@@ -1081,6 +1108,39 @@ test("isFree is a boolean model tag", async () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("Nous Research free models are tagged isFree, Hermes 4 is not", () => {
+  // Six free portal routes via :free upstream ids should be tagged isFree: true
+  const freeModels = [
+    "nousresearch/longcat-2.0-free",
+    "nousresearch/laguna-s-2.1-free",
+    "nousresearch/laguna-xs-2.1-free",
+    "nousresearch/step-3.7-flash-free",
+    "nousresearch/hy3-free",
+    "nousresearch/solar-pro4-free",
+  ];
+  for (const slug of freeModels) {
+    const model = MODEL_BY_SLUG.get(slug);
+    assert.ok(model, `${slug} should exist in registry`);
+    assert.strictEqual(model.isFree, true, `${slug} should be tagged isFree: true`);
+  }
+
+  // Hermes 4 models are paid, not free
+  const paidModels = [
+    "nousresearch/hermes-4-405b",
+    "nousresearch/hermes-4-70b",
+  ];
+  for (const slug of paidModels) {
+    const model = MODEL_BY_SLUG.get(slug);
+    assert.ok(model, `${slug} should exist in registry`);
+    assert.notEqual(model.isFree, true, `${slug} should not be tagged isFree: true`);
+  }
+
+  // ox-alpha should remain isFree: true (existing)
+  const oxAlpha = MODEL_BY_SLUG.get("nousresearch/ox-alpha");
+  assert.ok(oxAlpha);
+  assert.strictEqual(oxAlpha.isFree, true, "nousresearch/ox-alpha should remain isFree: true");
 });
 
 // A keyless provider skips the credential requirement, which is only safe
