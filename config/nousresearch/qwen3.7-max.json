@@ -2,14 +2,14 @@
   "version": 1,
   "models": [
     {
-      "slug": "nousresearch/solar-pro4-free",
-      "gatewayModel": "nousresearch-solar-pro4-free",
-      "upstreamModel": "upstage/solar-pro4:free",
+      "slug": "nousresearch/qwen3.7-max",
+      "gatewayModel": "nousresearch-qwen3-7-max",
+      "upstreamModel": "qwen/qwen3.7-max",
       "provider": "nousresearch",
       "listed": true,
-      "displayName": "Solar Pro 4 (Nous Research)",
-      "description": "Solar Pro 4 through the Nous Portal free tier.",
-      "priority": 65,
+      "displayName": "Qwen 3.7 Max (Nous Research)",
+      "description": "Qwen 3.7 Max through the Nous Portal.",
+      "priority": 83,
       "defaultEffort": "high",
       "reasoningLevels": [
         {
@@ -25,13 +25,12 @@
           "description": "Deep reasoning"
         }
       ],
-      "contextWindow": 524288,
-      "autoCompact": 472000,
+      "contextWindow": 1000000,
+      "autoCompact": 900000,
       "inputModalities": [
         "text"
       ],
-      "isFree": true,
-      "compHash": "nousresearch-solar-pro4-free-v1"
+      "compHash": "nousresearch-qwen3-7-max-v1"
     }
   ]
 }

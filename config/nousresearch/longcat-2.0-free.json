@@ -9,7 +9,7 @@
       "listed": true,
       "displayName": "LongCat 2.0 (Nous Research)",
       "description": "1.6T MoE / 48B active, coding and reasoning, through the Nous Portal free tier.",
-      "priority": 80,
+      "priority": 89,
       "defaultEffort": "high",
       "reasoningLevels": [
         {

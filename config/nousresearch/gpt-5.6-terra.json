@@ -2,14 +2,14 @@
   "version": 1,
   "models": [
     {
-      "slug": "nousresearch/solar-pro4-free",
-      "gatewayModel": "nousresearch-solar-pro4-free",
-      "upstreamModel": "upstage/solar-pro4:free",
+      "slug": "nousresearch/gpt-5.6-terra",
+      "gatewayModel": "nousresearch-gpt-5-6-terra",
+      "upstreamModel": "openai/gpt-5.6-terra",
       "provider": "nousresearch",
       "listed": true,
-      "displayName": "Solar Pro 4 (Nous Research)",
-      "description": "Solar Pro 4 through the Nous Portal free tier.",
-      "priority": 65,
+      "displayName": "GPT-5.6 Terra (Nous Research)",
+      "description": "OpenAI GPT-5.6 Terra through the Nous Portal.",
+      "priority": 75,
       "defaultEffort": "high",
       "reasoningLevels": [
         {
@@ -25,13 +25,12 @@
           "description": "Deep reasoning"
         }
       ],
-      "contextWindow": 524288,
-      "autoCompact": 472000,
+      "contextWindow": 1050000,
+      "autoCompact": 945000,
       "inputModalities": [
         "text"
       ],
-      "isFree": true,
-      "compHash": "nousresearch-solar-pro4-free-v1"
+      "compHash": "nousresearch-gpt-5-6-terra-v1"
     }
   ]
 }

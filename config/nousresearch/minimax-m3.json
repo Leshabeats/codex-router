@@ -2,14 +2,14 @@
   "version": 1,
   "models": [
     {
-      "slug": "nousresearch/solar-pro4-free",
-      "gatewayModel": "nousresearch-solar-pro4-free",
-      "upstreamModel": "upstage/solar-pro4:free",
+      "slug": "nousresearch/minimax-m3",
+      "gatewayModel": "nousresearch-minimax-m3",
+      "upstreamModel": "minimax/minimax-m3",
       "provider": "nousresearch",
       "listed": true,
-      "displayName": "Solar Pro 4 (Nous Research)",
-      "description": "Solar Pro 4 through the Nous Portal free tier.",
-      "priority": 65,
+      "displayName": "MiniMax M3 (Nous Research)",
+      "description": "MiniMax M3 through the Nous Portal.",
+      "priority": 80,
       "defaultEffort": "high",
       "reasoningLevels": [
         {
@@ -25,13 +25,12 @@
           "description": "Deep reasoning"
         }
       ],
-      "contextWindow": 524288,
-      "autoCompact": 472000,
+      "contextWindow": 1048576,
+      "autoCompact": 943000,
       "inputModalities": [
         "text"
       ],
-      "isFree": true,
-      "compHash": "nousresearch-solar-pro4-free-v1"
+      "compHash": "nousresearch-minimax-m3-v1"
     }
   ]
 }

@@ -9,7 +9,7 @@
       "listed": true,
       "displayName": "Hy3 (Nous Research)",
       "description": "Tencent Hy3 through the Nous Portal free tier.",
-      "priority": 76,
+      "priority": 66,
       "defaultEffort": "high",
       "reasoningLevels": [
         {

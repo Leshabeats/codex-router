@@ -9,7 +9,7 @@
       "listed": true,
       "displayName": "Laguna XS 2.1 (Nous Research)",
       "description": "Laguna XS 2.1 through the Nous Portal free tier, with reasoning enabled by default.",
-      "priority": 78,
+      "priority": 68,
       "defaultEffort": "high",
       "reasoningLevels": [
         {

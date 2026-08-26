@@ -2,15 +2,15 @@
   "version": 1,
   "models": [
     {
-      "slug": "nousresearch/step-3.7-flash-free",
-      "gatewayModel": "nousresearch-step-3-7-flash-free",
-      "upstreamModel": "stepfun/step-3.7-flash:free",
+      "slug": "nousresearch/kimi-k2.7-code",
+      "gatewayModel": "nousresearch-kimi-k2-7-code",
+      "upstreamModel": "moonshotai/kimi-k2.7-code",
       "provider": "nousresearch",
       "listed": true,
-      "displayName": "Step 3.7 Flash (Nous Research)",
-      "description": "Step 3.7 Flash through the Nous Portal free tier, with mandatory reasoning.",
-      "priority": 67,
-      "defaultEffort": "medium",
+      "displayName": "Kimi K2.7 Code (Nous Research)",
+      "description": "Moonshot Kimi K2.7 Code through the Nous Portal.",
+      "priority": 85,
+      "defaultEffort": "high",
       "reasoningLevels": [
         {
           "effort": "low",
@@ -28,11 +28,9 @@
       "contextWindow": 262144,
       "autoCompact": 235000,
       "inputModalities": [
-        "text",
-        "image"
+        "text"
       ],
-      "isFree": true,
-      "compHash": "nousresearch-step-3-7-flash-free-v1"
+      "compHash": "nousresearch-kimi-k2-7-code-v1"
     }
   ]
 }

@@ -2,14 +2,14 @@
   "version": 1,
   "models": [
     {
-      "slug": "nousresearch/solar-pro4-free",
-      "gatewayModel": "nousresearch-solar-pro4-free",
-      "upstreamModel": "upstage/solar-pro4:free",
+      "slug": "nousresearch/mimo-v2.5-pro",
+      "gatewayModel": "nousresearch-mimo-v2-5-pro",
+      "upstreamModel": "xiaomi/mimo-v2.5-pro",
       "provider": "nousresearch",
       "listed": true,
-      "displayName": "Solar Pro 4 (Nous Research)",
-      "description": "Solar Pro 4 through the Nous Portal free tier.",
-      "priority": 65,
+      "displayName": "MiMo v2.5 Pro (Nous Research)",
+      "description": "Xiaomi MiMo v2.5 Pro through the Nous Portal.",
+      "priority": 79,
       "defaultEffort": "high",
       "reasoningLevels": [
         {
@@ -25,13 +25,12 @@
           "description": "Deep reasoning"
         }
       ],
-      "contextWindow": 524288,
-      "autoCompact": 472000,
+      "contextWindow": 1050000,
+      "autoCompact": 945000,
       "inputModalities": [
         "text"
       ],
-      "isFree": true,
-      "compHash": "nousresearch-solar-pro4-free-v1"
+      "compHash": "nousresearch-mimo-v2-5-pro-v1"
     }
   ]
 }

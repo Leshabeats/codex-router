@@ -2,14 +2,14 @@
   "version": 1,
   "models": [
     {
-      "slug": "nousresearch/solar-pro4-free",
-      "gatewayModel": "nousresearch-solar-pro4-free",
-      "upstreamModel": "upstage/solar-pro4:free",
+      "slug": "nousresearch/nemotron-3-ultra",
+      "gatewayModel": "nousresearch-nemotron-3-ultra",
+      "upstreamModel": "nvidia/nemotron-3-ultra-550b-a55b",
       "provider": "nousresearch",
       "listed": true,
-      "displayName": "Solar Pro 4 (Nous Research)",
-      "description": "Solar Pro 4 through the Nous Portal free tier.",
-      "priority": 65,
+      "displayName": "Nemotron 3 Ultra (Nous Research)",
+      "description": "NVIDIA Nemotron 3 Ultra 550B through the Nous Portal.",
+      "priority": 71,
       "defaultEffort": "high",
       "reasoningLevels": [
         {
@@ -25,13 +25,12 @@
           "description": "Deep reasoning"
         }
       ],
-      "contextWindow": 524288,
-      "autoCompact": 472000,
+      "contextWindow": 512288,
+      "autoCompact": 461000,
       "inputModalities": [
         "text"
       ],
-      "isFree": true,
-      "compHash": "nousresearch-solar-pro4-free-v1"
+      "compHash": "nousresearch-nemotron-3-ultra-v1"
     }
   ]
 }
