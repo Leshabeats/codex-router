@@ -203,6 +203,7 @@ const CURATION_ROUTES = Object.freeze({
     responsesModels: Object.freeze([
       "gpt-5.6-luna",
       "grok-4.5",
+      "grok-4.6",
       "muse-spark-1.2-contributor",
     ]),
     primaryModels: Object.freeze([

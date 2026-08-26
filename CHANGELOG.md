@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Grok 4.6 ships on opencode Go.** OpenCode's current Go list and endpoint
+  table publish `grok-4.6` on `/zen/go/v1/responses` (not chat, not messages).
+  The checked-in route is `opencode-go-responses/grok-4.6`, 500,000 context
+  with auto-compact at 440,000, text+image, and the low/medium/high/xhigh
+  ladder models.dev publishes for this id, defaulting to high. No Free twin
+  exists. Grok 4.5 stays on the same Responses variant.
+
 - **Subagent selection is honoured again.** `applyMultiAgentSettings` only ever
   demoted: it read `disabled` and `hidden` and nothing else, so the three modes
   documented in `.claude/skills/codex-subagents/SKILL.md` — `proven`,

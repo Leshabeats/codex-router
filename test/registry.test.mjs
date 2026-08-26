@@ -132,6 +132,7 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "opencode-go-messages/qwen3.8-max",
       "opencode-go-responses/gpt-5.6-luna",
       "opencode-go-responses/grok-4.5",
+      "opencode-go-responses/grok-4.6",
       "opencode-go-responses/muse-spark-1.2-contributor",
       "opencode-free/ox-alpha",
       "openrouter/ox-alpha",
