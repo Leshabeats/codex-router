@@ -46,17 +46,16 @@ import {
 test("Control Center groups provider routes under one model family", () => {
   const families = groupModelFamilies([
     { slug: "opencode-free/ox-alpha", displayName: "Ox Alpha (OpenCode Free)", provider: "opencode-free", visible: false, enabled: true },
-    { slug: "opencode-go/ox-alpha", displayName: "Ox Alpha (opencode Go)", provider: "opencode-go", visible: true, enabled: true },
+    { slug: "opencode-go/glm-5.3-flash", displayName: "GLM-5.3-Flash (opencode Go)", provider: "opencode-go", visible: true, enabled: true },
     { slug: "opencode-free/x-preview-f-free", displayName: "Ox Alpha Free", provider: "opencode-free", visible: true, enabled: true },
     { slug: "deepseek/deepseek-v4-pro", displayName: "DeepSeek V4 Pro (API)", provider: "deepseek", visible: true, enabled: true },
   ]);
-  assert.equal(families.length, 2);
+  assert.equal(families.length, 3);
   const ox = families.find((family) => family.id === "ox-alpha");
   assert.equal(ox.displayName, "Ox Alpha");
   assert.deepEqual(ox.routes.map((route) => route.slug), [
     "opencode-free/ox-alpha",
     "opencode-free/x-preview-f-free",
-    "opencode-go/ox-alpha",
   ]);
   assert.equal(modelFamilyKey({ displayName: "Kimi K3 (OAuth)" }), "kimi-k3");
   assert.equal(modelFamilyKey({ displayName: "Kimi K3 (opencode Go)" }), "kimi-k3");

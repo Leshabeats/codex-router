@@ -21,10 +21,9 @@ const {
   veniceBalanceMetrics,
 } = await import("../src/provider-account-usage.mjs");
 
-// One model, six routes, and each route names it differently. Every id here was
-// read from that provider's own live catalog. These assertions keep the local
-// registry from drifting; only a fresh catalog read or inference probe can
-// detect a later upstream rename or withdrawal.
+// One preview model, five checked-in routes, and each route names it differently.
+// Only Command Code and Venice still publish it; these assertions pin registry
+// metadata and do not claim current upstream availability.
 //
 // The ladder is the model's, not the reseller's: its upstream answers an
 // off-ladder rung with "[1210] This model always engages in thinking and cannot
@@ -35,7 +34,6 @@ const {
 // it contains a rung the model refuses by name. The model wins.
 const ROUTES = [
   ["opencode-free/ox-alpha", "x-preview-f-free"],
-  ["opencode-go/ox-alpha", "ox-alpha-free"],
   ["openrouter/ox-alpha", "stealth/ox-alpha"],
   ["commandcode/ox-alpha", "stealth/ox-alpha"],
   ["nousresearch/ox-alpha", "stealth/ox-alpha"],
@@ -66,10 +64,33 @@ test("every Ox Alpha route records the upstream id, window and ladder the model 
   }
 });
 
+test("OpenCode Go replaces its withdrawn Ox Alpha preview with named GLM-5.3-Flash", () => {
+  const model = MODEL_BY_SLUG.get("opencode-go/glm-5.3-flash");
+  assert.ok(model);
+  assert.equal(model.upstreamModel, "glm-5.3-flash");
+  assert.equal(model.listed, true);
+  assert.equal(model.isFree, undefined);
+  assert.deepEqual(model.reasoningLevels.map((level) => level.effort), ["low", "high", "max"]);
+  assert.equal(model.defaultEffort, "max");
+  // OpenCode Go publishes a 1,000,000-token provider limit even though the
+  // released base model supports 1,048,576. Do not use the ordinary 0.85
+  // curation ratio here: large live Codex histories repeatedly returned empty
+  // completions before that point. Compact conservatively and keep the
+  // advertised window for catalog truth.
+  assert.equal(model.contextWindow, 1_000_000);
+  assert.equal(model.autoCompact, 400_000);
+  assert.ok(model.contextWindow - model.autoCompact >= 131_072);
+  assert.deepEqual(model.inputModalities, ["text", "image"]);
+  assert.equal(model.requestProfile, "ox-alpha");
+  assert.equal(MODEL_BY_SLUG.get("opencode-go/ox-alpha"), model);
+  assert.equal(MODEL_BY_SLUG.get("opencode-go/ox-alpha-free"), model);
+});
+
 test("only the credential-free Ox Alpha route ships announcement copy", () => {
   // Every installer sees curated `availabilityNux`, so it belongs on the one
   // route a reader can act on without first buying or connecting anything. The
-  // other five still self-announce, but only once they are actually routable.
+  // other four carry no curated copy; any automatic announcement is conditional
+  // on the route actually being enabled and credentialed.
   const announced = ROUTES
     .map(([slug]) => slug)
     .filter((slug) => MODEL_BY_SLUG.get(slug).availabilityNux !== undefined);
@@ -103,13 +124,13 @@ test("a checked-in fragment names itself, and the official-name table only fills
   );
 });
 
-test("an older Codex clamps Ox Alpha to xhigh, which the forwarder must undo", () => {
+test("an older Codex clamps GLM-5.3-Flash to xhigh, which the forwarder must undo", () => {
   // This is the coupling that makes the request profile load-bearing rather
   // than defensive: Codex gained the `max` effort variant in 0.143.0, so on
   // anything older the catalog rewrites this model's default down to `xhigh`
   // -- a rung every Ox Alpha route answers with HTTP 400. The forwarder's
   // ox-alpha profile is what maps it back to the model's own top rung.
-  const model = MODEL_BY_SLUG.get("opencode-go/ox-alpha");
+  const model = MODEL_BY_SLUG.get("opencode-go/glm-5.3-flash");
   const [clamped] = clampModelEfforts([model], codexEffortVocabulary("0.142.5"));
   assert.equal(clamped.defaultEffort, "xhigh");
   assert.deepEqual(clamped.reasoningLevels.map((level) => level.effort), ["low", "high", "xhigh"]);

@@ -984,7 +984,6 @@ test("aggregate overview exposes the router-owned catalog separately from client
       ["commandcode/ox-alpha", false],
       ["nousresearch/ox-alpha", false],
       ["opencode-free/ox-alpha", true],
-      ["opencode-go/ox-alpha", false],
       ["openrouter/ox-alpha", false],
       ["venice/ox-alpha", false],
     ]);
@@ -1000,6 +999,10 @@ test("aggregate overview exposes the router-owned catalog separately from client
     );
     assert.equal(activeOxAlpha.contextWindow, 1_048_576);
     assert.deepEqual(activeOxAlpha.inputModalities, ["text", "image"]);
+    const flash = parsed.catalog.knownModels.find(
+      (model) => model.slug === "opencode-go/glm-5.3-flash",
+    );
+    assert.equal(flash.available, false);
   } finally {
     rmSync(stateDir, { recursive: true, force: true });
   }

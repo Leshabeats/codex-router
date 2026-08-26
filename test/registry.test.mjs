@@ -142,6 +142,7 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "opencode-go/deepseek-v4-pro",
       "opencode-go/glm-5.1",
       "opencode-go/glm-5.2",
+      "opencode-go/glm-5.3-flash",
       "opencode-go/glm-5.3",
       "opencode-go/hy3",
       "opencode-go/kimi-k2.6",
@@ -149,7 +150,6 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "opencode-go/kimi-k3",
       "opencode-go/mimo-v2.5-pro",
       "opencode-go/mimo-v2.5",
-      "opencode-go/ox-alpha",
       "opencode-go-messages/minimax-m2.5",
       "opencode-go-messages/minimax-m2.7",
       "opencode-go-messages/minimax-m3",
@@ -699,6 +699,18 @@ test("GLM-5.3 on OpenCode Go carries the 1M GLM-5.3 window, not GLM-5.1's 200K",
   // verification that the upstream preserves tool/function-call history, and
   // no probe of the opencode Go relay has been recorded.
   assert.equal(model?.searchTool, undefined);
+});
+
+test("GLM-5.3-Flash replaces OpenCode Go's withdrawn Ox Alpha route", () => {
+  const model = MODEL_BY_SLUG.get("opencode-go/glm-5.3-flash");
+  assert.equal(model?.upstreamModel, "glm-5.3-flash");
+  assert.equal(model?.contextWindow, 1_000_000);
+  assert.equal(model?.autoCompact, 400_000);
+  assert.ok(model.contextWindow - model.autoCompact >= 131_072);
+  assert.deepEqual(model?.inputModalities, ["text", "image"]);
+  assert.equal(MODEL_SLUG_ALIASES.get("opencode-go/ox-alpha"), model.slug);
+  assert.equal(MODEL_SLUG_ALIASES.get("opencode-go/ox-alpha-free"), model.slug);
+  assert.equal(MODEL_BY_SLUG.get("opencode-go/ox-alpha"), model);
 });
 
 test("GLM-5.3 Coding Plan opts in to GPT-5.6 behavior, concise execution, and standalone search", () => {
@@ -1510,6 +1522,14 @@ test("opencode's DeepSeek models never receive a forced tool_choice", () => {
   assert.equal(
     MODEL_SLUG_ALIASES.get("opencode-go/grok-4.5"),
     "opencode-go-responses/grok-4.5",
+  );
+  assert.equal(
+    MODEL_SLUG_ALIASES.get("opencode-go/ox-alpha"),
+    "opencode-go/glm-5.3-flash",
+  );
+  assert.equal(
+    MODEL_SLUG_ALIASES.get("opencode-go/ox-alpha-free"),
+    "opencode-go/glm-5.3-flash",
   );
   assert.equal(MODEL_BY_SLUG.get("opencode-go/grok-4.5"), goGrok);
 });
