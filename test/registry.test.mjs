@@ -166,6 +166,7 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "opencode-go-responses/grok-4.6",
       "opencode-go-responses/muse-spark-1.2-contributor",
       "openrouter/glm-5.3-flash",
+      "openrouter/grok-4.6",
       "qwen-plan/deepseek-v4-flash-0731",
       "qwen-plan/deepseek-v4-pro-0813",
       "qwen-plan/deepseek-v4-pro",
