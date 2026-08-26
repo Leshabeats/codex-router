@@ -18,6 +18,8 @@ import { fileURLToPath } from "node:url";
 
 import { CODEX_APP_TOOLS } from "../src/codex-app-tools.mjs";
 import {
+  approveExternalSkills,
+  revokeExternalSkills,
   installedSkillsFresh,
   installSkills,
   managedSkillNames,
@@ -95,6 +97,104 @@ test("install is idempotent and refreshes managed skills", () => {
   }
 });
 
+test("an approved external skill satisfies the pack without becoming router-owned", () => {
+  const home = tempCodexHome();
+  const fakeSource = mkdtempSync(path.join(os.tmpdir(), "codex-skills-source-"));
+  try {
+    const name = "codex-router";
+    mkdirSync(path.join(fakeSource, name), { recursive: true });
+    writeFileSync(path.join(fakeSource, name, "SKILL.md"), "# router contract\n");
+    mkdirSync(path.join(home, "skills", name), { recursive: true });
+    const target = path.join(home, "skills", name, "SKILL.md");
+    writeFileSync(target, "# router contract\n\n# external catalog guidance\n");
+    process.env.CODEX_ROUTER_SKILLS_DIR = fakeSource;
+
+    assert.deepEqual(approveExternalSkills(home, [name], { quiet: true }), [name]);
+    const status = skillPackStatus(home);
+    assert.deepEqual(status.managed, []);
+    assert.deepEqual(status.external, [name]);
+    assert.deepEqual(status.missing, []);
+    assert.deepEqual(status.collisions, []);
+
+    const before = readFileSync(target, "utf8");
+    assert.deepEqual(installSkills(home, { quiet: true }), {
+      installed: 0,
+      skipped: 0,
+      external: 1,
+    });
+    assert.equal(readFileSync(target, "utf8"), before);
+    assert.equal(uninstallSkills(home, { quiet: true }), 0);
+    assert.ok(existsSync(path.dirname(target)), "external skill survives uninstall");
+    assert.deepEqual(revokeExternalSkills(home, [name], { quiet: true }), [name]);
+    assert.deepEqual(skillPackStatus(home).external, []);
+    assert.deepEqual(approveExternalSkills(home, [name], { quiet: true }), [name]);
+
+    rmSync(path.dirname(target), { recursive: true, force: true });
+    assert.equal(installSkills(home, { quiet: true }).installed, 1);
+    const recovered = skillPackStatus(home);
+    assert.deepEqual(recovered.managed, [name]);
+    assert.deepEqual(recovered.external, []);
+    assert.deepEqual(recovered.staleExternal, []);
+  } finally {
+    delete process.env.CODEX_ROUTER_SKILLS_DIR;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(fakeSource, { recursive: true, force: true });
+  }
+});
+
+test("external approval fails closed when the external skill changes", () => {
+  const home = tempCodexHome();
+  const fakeSource = mkdtempSync(path.join(os.tmpdir(), "codex-skills-source-"));
+  try {
+    const name = "codex-router";
+    mkdirSync(path.join(fakeSource, name), { recursive: true });
+    writeFileSync(path.join(fakeSource, name, "SKILL.md"), "# router contract\n");
+    mkdirSync(path.join(home, "skills", name), { recursive: true });
+    const target = path.join(home, "skills", name, "SKILL.md");
+    writeFileSync(target, "# router contract\n\n# reviewed extension\n");
+    process.env.CODEX_ROUTER_SKILLS_DIR = fakeSource;
+    approveExternalSkills(home, [name], { quiet: true });
+
+    writeFileSync(target, "# router contract\n\n# reviewed extension\nDO THE OPPOSITE\n");
+    const status = skillPackStatus(home);
+    assert.deepEqual(status.external, []);
+    assert.deepEqual(status.staleExternal, [name]);
+    assert.deepEqual(status.missing, [name]);
+    assert.deepEqual(status.collisions, [name]);
+    assert.equal(installSkills(home, { quiet: true }).skipped, 1);
+    assert.match(readFileSync(target, "utf8"), /DO THE OPPOSITE/);
+  } finally {
+    delete process.env.CODEX_ROUTER_SKILLS_DIR;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(fakeSource, { recursive: true, force: true });
+  }
+});
+
+test("external approval fails closed when the router skill contract changes", () => {
+  const home = tempCodexHome();
+  const fakeSource = mkdtempSync(path.join(os.tmpdir(), "codex-skills-source-"));
+  try {
+    const name = "codex-router";
+    const source = path.join(fakeSource, name, "SKILL.md");
+    mkdirSync(path.dirname(source), { recursive: true });
+    writeFileSync(source, "# router contract v1\n");
+    mkdirSync(path.join(home, "skills", name), { recursive: true });
+    writeFileSync(path.join(home, "skills", name, "SKILL.md"), "# external reviewed v1\n");
+    process.env.CODEX_ROUTER_SKILLS_DIR = fakeSource;
+    approveExternalSkills(home, [name], { quiet: true });
+
+    writeFileSync(source, "# router contract v2\n");
+    const status = skillPackStatus(home);
+    assert.deepEqual(status.external, []);
+    assert.deepEqual(status.staleExternal, [name]);
+    assert.deepEqual(status.missing, [name]);
+    assert.deepEqual(status.collisions, [name]);
+  } finally {
+    delete process.env.CODEX_ROUTER_SKILLS_DIR;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(fakeSource, { recursive: true, force: true });
+  }
+});
 test("install never clobbers a skill the user owns", () => {
   const home = tempCodexHome();
   try {

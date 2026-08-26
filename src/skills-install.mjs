@@ -6,11 +6,12 @@
 // that filename too. Replacement and removal require a random token to match
 // both the marker and a protected ownership file under codex-router's private
 // state directory. Unknown files, symlinks, directories, and legacy markers
-// are always preserved.
+// are always preserved. Reviewed external skill directories can be explicitly
+// approved by exact content digest without granting router ownership.
 //
-// CLI: node src/skills-install.mjs install|uninstall
+// CLI: node src/skills-install.mjs install|uninstall|approve-external|revoke-external
 import { execFileSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   chmodSync,
   cpSync,
@@ -95,29 +96,73 @@ function lstat(target) {
   }
 }
 
+function directoryDigest(target) {
+  const hash = createHash("sha256");
+  function walk(directory, relative = "") {
+    const stat = lstat(directory);
+    if (!stat?.isDirectory() || stat.isSymbolicLink()) return false;
+    hash.update(`D\0${relative}\0`);
+    const entries = readdirSync(directory, { withFileTypes: true }).sort((a, b) =>
+      a.name.localeCompare(b.name),
+    );
+    for (const entry of entries) {
+      const full = path.join(directory, entry.name);
+      const childRelative = relative ? `${relative}/${entry.name}` : entry.name;
+      const childStat = lstat(full);
+      if (!childStat || childStat.isSymbolicLink()) return false;
+      if (childStat.isDirectory()) {
+        if (!walk(full, childRelative)) return false;
+      } else if (childStat.isFile()) {
+        const content = readFileSync(full);
+        hash.update(`F\0${childRelative}\0${content.length}\0`);
+        hash.update(content);
+      } else {
+        return false;
+      }
+    }
+    return true;
+  }
+  return walk(target) ? hash.digest("hex") : undefined;
+}
+
+function invalidOwnership(path, exists = true) {
+  return {
+    exists,
+    valid: false,
+    path,
+    skills: emptySkills(),
+    external: emptySkills(),
+  };
+}
+
 function readOwnership(codexHome) {
   const target = skillOwnershipPath(codexHome);
   const targetStat = lstat(target);
   if (!targetStat) {
-    return { exists: false, valid: true, path: target, skills: emptySkills() };
+    return {
+      exists: false,
+      valid: true,
+      path: target,
+      skills: emptySkills(),
+      external: emptySkills(),
+    };
   }
-  if (!targetStat.isFile() || targetStat.isSymbolicLink()) {
-    return { exists: true, valid: false, path: target, skills: emptySkills() };
-  }
-  if (!privateFileIsProtected(target)) {
-    return { exists: true, valid: false, path: target, skills: emptySkills() };
-  }
+  if (!targetStat.isFile() || targetStat.isSymbolicLink()) return invalidOwnership(target);
+  if (!privateFileIsProtected(target)) return invalidOwnership(target);
   try {
     const parsed = JSON.parse(readFileSync(target, "utf8"));
     if (
       parsed?.version !== OWNERSHIP_VERSION ||
       !parsed.skills ||
       typeof parsed.skills !== "object" ||
-      Array.isArray(parsed.skills)
+      Array.isArray(parsed.skills) ||
+      (parsed.external !== undefined &&
+        (!parsed.external || typeof parsed.external !== "object" || Array.isArray(parsed.external)))
     ) {
-      return { exists: true, valid: false, path: target, skills: emptySkills() };
+      return invalidOwnership(target);
     }
     const skills = emptySkills();
+    const external = emptySkills();
     let valid = true;
     for (const [name, record] of Object.entries(parsed.skills)) {
       if (!validSkillName(name) || !validToken(record?.token)) {
@@ -126,27 +171,43 @@ function readOwnership(codexHome) {
       }
       skills[name] = { token: record.token };
     }
+    for (const [name, record] of Object.entries(parsed.external || {})) {
+      if (
+        !validSkillName(name) ||
+        !validToken(record?.targetDigest) ||
+        !validToken(record?.sourceDigest)
+      ) {
+        valid = false;
+        continue;
+      }
+      external[name] = {
+        targetDigest: record.targetDigest,
+        sourceDigest: record.sourceDigest,
+      };
+    }
     return {
       exists: true,
       valid,
       path: target,
       skills: valid ? skills : emptySkills(),
+      external: valid ? external : emptySkills(),
     };
   } catch {
-    return { exists: true, valid: false, path: target, skills: emptySkills() };
+    return invalidOwnership(target);
   }
 }
 
-function writeOwnership(target, skills) {
+function writeOwnership(target, skills, external = emptySkills()) {
   const stateDir = path.dirname(target);
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   chmodSync(stateDir, 0o700);
   const temporary = `${target}.tmp.${process.pid}`;
-  writeFileSync(
-    temporary,
-    `${JSON.stringify({ version: OWNERSHIP_VERSION, skills }, null, 2)}\n`,
-    { encoding: "utf8", mode: 0o600 },
-  );
+  const state = { version: OWNERSHIP_VERSION, skills };
+  if (Object.keys(external).length > 0) state.external = external;
+  writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
   protectPrivateFile(temporary);
   renameSync(temporary, target);
   protectPrivateFile(target);
@@ -223,6 +284,91 @@ export function managedSkillNames(codexHome) {
     .sort();
 }
 
+function externalEvidence(codexHome, name, ownership) {
+  const record = ownership.external[name];
+  if (!record) return { approved: false, reason: "not approved" };
+  const target = path.join(codexSkillsDir(codexHome), name);
+  const targetDigest = directoryDigest(target);
+  if (!targetDigest) return { approved: false, reason: "target is not a real directory tree" };
+  if (targetDigest !== record.targetDigest) {
+    return { approved: false, reason: "external skill changed since approval" };
+  }
+  const sourceDigest = directoryDigest(path.join(skillsSource(), name));
+  if (!sourceDigest) return { approved: false, reason: "router skill source is unavailable" };
+  if (sourceDigest !== record.sourceDigest) {
+    return { approved: false, reason: "router skill changed since approval" };
+  }
+  return { approved: true, reason: "verified exact approved contents" };
+}
+
+export function approveExternalSkills(codexHome, names, { quiet = false } = {}) {
+  if (!Array.isArray(names) || names.length === 0) {
+    throw new Error("Name at least one external skill to approve.");
+  }
+  const requested = [...new Set(names)];
+  const pack = new Set(packSkillNames());
+  const ownership = readOwnership(codexHome);
+  if (!ownership.valid) {
+    throw new Error("Cannot approve external skills while private skill state is malformed.");
+  }
+  const approvals = [];
+  for (const name of requested) {
+    if (!validSkillName(name) || !pack.has(name)) {
+      throw new Error(`Cannot approve unknown router skill "${name}".`);
+    }
+    if (ownershipEvidence(codexHome, name, ownership).owned) {
+      throw new Error(`Cannot approve "${name}" as external because codex-router owns it.`);
+    }
+    const target = path.join(codexSkillsDir(codexHome), name);
+    const skillFile = path.join(target, "SKILL.md");
+    const skillStat = lstat(skillFile);
+    if (!skillStat?.isFile() || skillStat.isSymbolicLink()) {
+      throw new Error(`Cannot approve "${name}": external SKILL.md is missing or not a real file.`);
+    }
+    const targetDigest = directoryDigest(target);
+    const sourceDigest = directoryDigest(path.join(skillsSource(), name));
+    if (!targetDigest || !sourceDigest) {
+      throw new Error(`Cannot approve "${name}": skill tree contains an unsupported entry.`);
+    }
+    approvals.push({ name, targetDigest, sourceDigest });
+  }
+  for (const { name, targetDigest, sourceDigest } of approvals) {
+    ownership.external[name] = { targetDigest, sourceDigest };
+  }
+  writeOwnership(ownership.path, ownership.skills, ownership.external);
+  if (!quiet) {
+    console.error(
+      `codex-router: approved ${approvals.length} external skill(s); exact content changes require re-approval.`,
+    );
+  }
+  return approvals.map(({ name }) => name);
+}
+
+export function revokeExternalSkills(codexHome, names, { quiet = false } = {}) {
+  if (!Array.isArray(names) || names.length === 0) {
+    throw new Error("Name at least one external skill approval to revoke.");
+  }
+  const ownership = readOwnership(codexHome);
+  if (!ownership.valid) {
+    throw new Error("Cannot revoke external skills while private skill state is malformed.");
+  }
+  const removed = [];
+  for (const name of [...new Set(names)]) {
+    if (!validSkillName(name)) throw new Error(`Invalid skill name "${name}".`);
+    if (ownership.external[name]) {
+      delete ownership.external[name];
+      removed.push(name);
+    }
+  }
+  if (removed.length > 0 || ownership.exists) {
+    writeOwnership(ownership.path, ownership.skills, ownership.external);
+  }
+  if (!quiet && removed.length > 0) {
+    console.error(`codex-router: revoked ${removed.length} external skill approval(s).`);
+  }
+  return removed;
+}
+
 // Compare the installed pack against the checkout. Returns the names of
 // skills whose installed content differs from the source (missing, changed,
 // or extra files). The root ownership marker alone is ignored.
@@ -287,12 +433,25 @@ export function skillPackStatus(codexHome) {
     .filter((name) => ownershipEvidence(codexHome, name, ownership).owned)
     .sort();
   const managedSet = new Set(managed);
-  const missing = pack.filter((name) => !managedSet.has(name));
+  const external = pack
+    .filter(
+      (name) =>
+        !managedSet.has(name) && externalEvidence(codexHome, name, ownership).approved,
+    )
+    .sort();
+  const externalSet = new Set(external);
+  const missing = pack.filter((name) => !managedSet.has(name) && !externalSet.has(name));
   const collisions = pack.filter(
-    (name) => lstat(path.join(codexSkillsDir(codexHome), name)) && !managedSet.has(name),
+    (name) =>
+      lstat(path.join(codexSkillsDir(codexHome), name)) &&
+      !managedSet.has(name) &&
+      !externalSet.has(name),
   );
   const staleOwnership = Object.keys(ownership.skills)
     .filter((name) => !managedSet.has(name) || !pack.includes(name))
+    .sort();
+  const staleExternal = Object.keys(ownership.external)
+    .filter((name) => !externalSet.has(name) || !pack.includes(name))
     .sort();
   const stale = managed.filter(
     (name) =>
@@ -302,10 +461,12 @@ export function skillPackStatus(codexHome) {
   return {
     pack,
     managed,
+    external,
     missing,
     collisions,
     stale,
     staleOwnership,
+    staleExternal,
     ownershipStateValid: ownership.valid,
   };
 }
@@ -342,7 +503,7 @@ export function installSkills(codexHome, { quiet = false } = {}) {
     if (!quiet) {
       console.error("codex-router: no skills/ directory in this checkout; nothing to install.");
     }
-    return { installed: 0, skipped: 0 };
+    return { installed: 0, skipped: 0, external: 0 };
   }
   const target = codexSkillsDir(codexHome);
   mkdirSync(target, { recursive: true });
@@ -351,6 +512,7 @@ export function installSkills(codexHome, { quiet = false } = {}) {
   const provenance = sourceProvenance();
   let installed = 0;
   let skipped = 0;
+  let external = 0;
   let stateChanged = !ownership.valid;
   for (const entry of readdirSync(sourceRoot, { withFileTypes: true })) {
     if (!entry.isDirectory() || entry.name.startsWith(".") || !validSkillName(entry.name)) continue;
@@ -363,6 +525,16 @@ export function installSkills(codexHome, { quiet = false } = {}) {
     const dest = path.join(target, entry.name);
     const destStat = lstat(dest);
     const evidence = ownershipEvidence(codexHome, entry.name, ownership);
+    const coexistence = externalEvidence(codexHome, entry.name, ownership);
+    if (destStat && !evidence.owned && coexistence.approved) {
+      external += 1;
+      if (!quiet) {
+        console.error(
+          `codex-router: using approved external skill "${entry.name}"; content preserved.`,
+        );
+      }
+      continue;
+    }
     if (destStat && !evidence.owned) {
       if (ownership.skills[entry.name]) {
         delete ownership.skills[entry.name];
@@ -381,6 +553,7 @@ export function installSkills(codexHome, { quiet = false } = {}) {
     cpSync(source, dest, { recursive: true });
     writeFileSync(path.join(dest, MARKER), markerContent(entry.name, token, provenance));
     ownership.skills[entry.name] = { token };
+    if (ownership.external[entry.name]) delete ownership.external[entry.name];
     stateChanged = true;
     installed += 1;
   }
@@ -398,8 +571,10 @@ export function installSkills(codexHome, { quiet = false } = {}) {
     delete ownership.skills[name];
     stateChanged = true;
   }
-  if (stateChanged || ownership.exists) writeOwnership(ownership.path, ownership.skills);
-  return { installed, skipped };
+  if (stateChanged || ownership.exists) {
+    writeOwnership(ownership.path, ownership.skills, ownership.external);
+  }
+  return { installed, skipped, external };
 }
 
 export function uninstallSkills(codexHome, { quiet = false } = {}) {
@@ -418,7 +593,7 @@ export function uninstallSkills(codexHome, { quiet = false } = {}) {
     delete ownership.skills[name];
   }
   if (ownership.exists || removed > 0 || !ownership.valid) {
-    writeOwnership(ownership.path, ownership.skills);
+    writeOwnership(ownership.path, ownership.skills, ownership.external);
   }
   if (!quiet && removed > 0) {
     console.error(`codex-router: removed ${removed} verified managed skill(s).`);
@@ -438,22 +613,30 @@ const [, , command] = process.argv;
 const invokedDirectly =
   Boolean(process.argv[1]) &&
   path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
-if (invokedDirectly && (command === "install" || command === "uninstall")) {
+if (
+  invokedDirectly &&
+  ["install", "uninstall", "approve-external", "revoke-external"].includes(command)
+) {
   try {
     if (command === "install") {
-      const { installed, skipped } = installSkills(codexHome());
+      const { installed, skipped, external } = installSkills(codexHome());
       console.error(
         `codex-router: installed ${installed} skill(s) into ${codexSkillsDir(codexHome())}${
-          skipped ? `, skipped ${skipped} (existing content preserved)` : ""
-        }.`,
+          external ? `, using ${external} approved external skill(s)` : ""
+        }${skipped ? `, skipped ${skipped} (existing content preserved)` : ""}.`,
       );
-    } else {
+    } else if (command === "uninstall") {
       uninstallSkills(codexHome());
       console.error("codex-router: codex-router skills removed.");
+    } else if (command === "approve-external") {
+      approveExternalSkills(codexHome(), process.argv.slice(3));
+    } else {
+      revokeExternalSkills(codexHome(), process.argv.slice(3));
     }
   } catch (error) {
-    // Best effort: a skill install failure must never roll back the router.
     console.error(`codex-router: skill ${command} failed: ${error.message}`);
+    if (command === "approve-external" || command === "revoke-external") {
+      process.exitCode = 2;
+    }
   }
-  process.exit(0);
 }

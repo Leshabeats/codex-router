@@ -1167,7 +1167,7 @@ if (codexTarget) {
     status.missing.length === 0 ? "ok" : "fail",
     "Codex skill pack",
     status.missing.length === 0
-      ? `${status.managed.length} verified managed skill(s)`
+      ? `${status.managed.length} verified managed skill(s), ${status.external.length} approved external skill(s)`
       : `missing: ${status.missing.join(", ")}`,
     "./bin/install",
   );
@@ -1175,16 +1175,16 @@ if (codexTarget) {
     status.stale.length === 0 ? "ok" : "warn",
     "Codex skill pack freshness",
     status.stale.length === 0
-      ? "verified skills match the checkout"
-      : `verified skills differ from the checkout: ${status.stale.join(", ")}`,
-    "./bin/install (replaces managed skills)",
+      ? "verified managed skills match the checkout; approved external skills are digest-bound"
+      : `verified managed skills differ from the checkout: ${status.stale.join(", ")}`,
+    "./bin/install (replaces managed skills only)",
   );
   if (status.collisions.length > 0) {
     add(
       "warn",
       "Codex skill pack collisions",
       `existing skills not verified as codex-router-owned: ${status.collisions.join(", ")}`,
-      "rename or remove the conflicting skills, then run ./bin/install",
+      `after review: node src/skills-install.mjs approve-external ${status.collisions.join(" ")}; or rename/remove conflicts, then run ./bin/install`,
     );
   }
   if (!status.ownershipStateValid || status.staleOwnership.length > 0) {
@@ -1195,6 +1195,14 @@ if (codexTarget) {
         ? "private ownership state is malformed; no existing skill will be replaced"
         : `stale ownership records: ${status.staleOwnership.join(", ")}`,
       "run ./bin/install; unverified existing content will be preserved",
+    );
+  }
+  if (status.staleExternal.length > 0) {
+    add(
+      "warn",
+      "Codex skill pack external approvals",
+      `external approvals require re-review: ${status.staleExternal.join(", ")}`,
+      "re-approve only after reviewing the current external and router skill contents",
     );
   }
   // The declaration comes from the skill itself, then is compared with the
