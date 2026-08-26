@@ -164,6 +164,7 @@ const CURATION_ROUTES = Object.freeze({
       "xiaomi/mimo-v2.5-pro",
       "zai-org/GLM-5.2",
       "zai-org/GLM-5.2-Fast",
+      "z-ai/glm-5.3-flash",
     ]),
     models: Object.freeze({}),
   }),

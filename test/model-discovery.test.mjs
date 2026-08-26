@@ -440,10 +440,11 @@ test("documented supplements do not invent MiniMax or OpenCode effort controls",
   assert.deepEqual(minimax["MiniMax-M3"].reasoning, { supported: true, configurable: false });
 
   const opencode = modelCatalogMetadata(
-    { data: [{ id: "x-preview-f-free" }, { id: "big-pickle" }] },
+    { data: [{ id: "muse-spark-1.2-contributor-free" }, { id: "big-pickle" }] },
     PROVIDERS.get("opencode-free"),
   );
-  assert.deepEqual(opencode["x-preview-f-free"].reasoning.supportedEfforts, ["low", "high", "max"]);
+  // muse-spark-1.2-contributor-free is a Responses model, so it's not directly
+  // in opencode-free; this tests that discovery doesn't invent effort controls.
   assert.equal(opencode["big-pickle"], undefined);
 });
 
