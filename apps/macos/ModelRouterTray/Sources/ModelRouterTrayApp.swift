@@ -3653,6 +3653,9 @@ enum ChatGptSessionControlPolicy {
 
 struct RouterSnapshot: Decodable {
   let targets: [String: RouterTarget]
+  // Metadata-only route summary. Older routers omit it and the tray falls
+  // back to the target snapshot below.
+  let dashboard: RouterDashboardSnapshot?
   // Absent from an older router's output, so the tray keeps working against one
   // rather than failing the whole decode over a field it gained later.
   let presence: RouterPresence?
@@ -3667,6 +3670,8 @@ struct RouterSnapshot: Decodable {
     case presence
     case harness
     case chatgptSession
+    case dashboard
+    case catalog
   }
 
   init(from decoder: Decoder) throws {
@@ -3682,15 +3687,22 @@ struct RouterSnapshot: Decodable {
     } catch {
       chatgptSession = nil
     }
+    if let directDashboard = try values.decodeIfPresent(RouterDashboardSnapshot.self, forKey: .dashboard) {
+      dashboard = directDashboard
+    } else {
+      dashboard = try values.decodeIfPresent(RouterDashboardCatalogEnvelope.self, forKey: .catalog)?.dashboard
+    }
   }
 
   init(
     targets: [String: RouterTarget],
     presence: RouterPresence?,
     harness: RouterHarness?,
-    chatgptSession: ChatGptSessionStatus?
+    chatgptSession: ChatGptSessionStatus?,
+    dashboard: RouterDashboardSnapshot? = nil
   ) {
     self.targets = targets
+    self.dashboard = dashboard
     self.presence = presence
     self.harness = harness
     self.chatgptSession = chatgptSession
@@ -3700,8 +3712,34 @@ struct RouterSnapshot: Decodable {
     targets: [:],
     presence: nil,
     harness: nil,
-    chatgptSession: nil
+    chatgptSession: nil,
+    dashboard: nil
   )
+}
+
+struct RouterDashboardSnapshot: Decodable {
+  let enabledProviders: [String]
+  let providers: [RouterDashboardProvider]
+  let models: [RouterDashboardModel]
+}
+
+private struct RouterDashboardCatalogEnvelope: Decodable {
+  let dashboard: RouterDashboardSnapshot?
+}
+
+struct RouterDashboardProvider: Decodable, Identifiable {
+  let id: String
+  let displayName: String
+  let kind: String
+  let enabled: Bool
+}
+
+struct RouterDashboardModel: Decodable {
+  let slug: String
+  let displayName: String
+  let provider: String
+  let enabled: Bool
+  let visible: Bool
 }
 
 struct HarnessStopResult: Decodable {
@@ -4882,6 +4920,14 @@ private struct TrayView: View {
       .sorted { $0.id < $1.id }
   }
 
+  private var providerDashboardSummary: String {
+    if let dashboard = store.snapshot.dashboard, !dashboard.providers.isEmpty {
+      let enabled = dashboard.providers.filter(\.enabled).count
+      return "\(enabled)/\(dashboard.providers.count) routes enabled"
+    }
+    return routerLocalized("Auto-saved")
+  }
+
   // Vendors that publish more than one provider read as unrelated services in a
   // flat list -- "Z.ai GLM Coding Plan" and "Z.ai API" sit apart under Z, and
   // Kimi's three sit under K with nothing saying they are one account family.
@@ -5852,7 +5898,7 @@ private struct TrayView: View {
     maintenanceRow
     AccordionPanel(
       title: routerLocalized("Providers"),
-      summary: store.providerOperation == nil ? routerLocalized("Auto-saved") : routerLocalized("Applying…"),
+      summary: store.providerOperation == nil ? providerDashboardSummary : routerLocalized("Applying…"),
       expanded: $providersExpanded
     ) {
       // Bound once per body pass. Reading the property inside the loop instead
