@@ -14,7 +14,7 @@ import path from "node:path";
 
 import { discoveryDisabled } from "./discovery-mode.mjs";
 import { protectPrivateFile } from "./file-security.mjs";
-import { LEGACY_STATE_DIRS, STATE_DIR, TARGET } from "./paths.mjs";
+import { LEGACY_STATE_DIRS, ROUTER_PLANE_TARGET, STATE_DIR, TARGET } from "./paths.mjs";
 import { targetCli } from "./target-integration.mjs";
 import { PROVIDERS } from "./model-registry.mjs";
 import {
@@ -257,7 +257,7 @@ export function resolveProviderCredentialReference(providerOrId, secretRef) {
   }
   const referenceKeys = new Set(["type", "providerId", "target", "service", "name"]);
   if (Object.keys(secretRef).some((key) => !referenceKeys.has(key))) return undefined;
-  if (secretRef.target !== TARGET) return undefined;
+  if (secretRef.target !== ROUTER_PLANE_TARGET) return undefined;
   if (secretRef.providerId !== canonicalProviderId(provider)) {
     return undefined;
   }

@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 
+import { withAtomicStateLock } from "./atomic-state-lock.mjs";
 import { credentialPaths } from "./provider-credentials.mjs";
 import { protectPrivateFile } from "./file-security.mjs";
 import { PROVIDERS } from "./model-registry.mjs";
@@ -18,8 +19,8 @@ import {
   CODEX_HOME,
   PROVIDER_CREDENTIAL_MIGRATIONS_DIR,
   PROVIDER_CREDENTIAL_STORE_PATH,
+  ROUTER_PLANE_TARGET,
   STATE_DIR,
-  TARGET,
 } from "./paths.mjs";
 
 /**
@@ -259,12 +260,12 @@ function normalizeSecretRef(value, providerId, { legacy = false } = {}) {
   if (referenceProviderId !== providerId) {
     throw new Error("secretRef.providerId must match providerId.");
   }
-  const target = value.target === undefined && legacy ? TARGET : normalizeText(
+  const target = value.target === undefined && legacy ? ROUTER_PLANE_TARGET : normalizeText(
     value.target,
     "secretRef.target",
     { max: 20, required: true },
   );
-  if (target !== TARGET) throw new Error("secretRef.target does not match this router target.");
+  if (target !== ROUTER_PLANE_TARGET) throw new Error("secretRef.target does not match this router plane.");
   const normalized = { type, providerId: referenceProviderId, target };
   const provider = PROVIDERS.get(referenceProviderId);
   if (!provider?.credential) throw new Error(`Provider ${referenceProviderId} has no credential policy.`);
@@ -438,7 +439,7 @@ export function createCredentialReference(input = {}) {
     providerId: normalizedProviderId,
     kind,
     secretRef: secretRef && typeof secretRef === "object"
-      ? { ...secretRef, target: secretRef.target ?? TARGET }
+      ? { ...secretRef, target: secretRef.target ?? ROUTER_PLANE_TARGET }
       : secretRef,
     label,
     account,
@@ -451,23 +452,27 @@ export function createCredentialReference(input = {}) {
 
 export function addCredentialReference(input, filePath = PROVIDER_CREDENTIAL_STORE_PATH) {
   const target = managedStatePath(filePath, "credential store path");
-  const store = readProviderCredentialStoreStrict(target);
-  const credential = createCredentialReference(input);
-  if (store.credentials.some((entry) => entry.id === credential.id)) {
-    throw new Error(`Credential id already exists: ${credential.id}`);
-  }
-  store.credentials.push(credential);
-  return writeProviderCredentialStore(store, target).credentials.at(-1);
+  return withAtomicStateLock(target, () => {
+    const store = readProviderCredentialStoreStrict(target);
+    const credential = createCredentialReference(input);
+    if (store.credentials.some((entry) => entry.id === credential.id)) {
+      throw new Error(`Credential id already exists: ${credential.id}`);
+    }
+    store.credentials.push(credential);
+    return writeProviderCredentialStore(store, target).credentials.at(-1);
+  });
 }
 
 export function removeCredentialReference(id, filePath = PROVIDER_CREDENTIAL_STORE_PATH) {
   const credentialId = validateCredentialId(id);
   const target = managedStatePath(filePath, "credential store path");
-  const store = readProviderCredentialStoreStrict(target);
-  const next = store.credentials.filter((entry) => entry.id !== credentialId);
-  if (next.length === store.credentials.length) return false;
-  writeProviderCredentialStore({ credentials: next }, target);
-  return true;
+  return withAtomicStateLock(target, () => {
+    const store = readProviderCredentialStoreStrict(target);
+    const next = store.credentials.filter((entry) => entry.id !== credentialId);
+    if (next.length === store.credentials.length) return false;
+    writeProviderCredentialStore({ credentials: next }, target);
+    return true;
+  });
 }
 
 function readProviderCredentialStoreStrict(filePath) {
@@ -604,7 +609,7 @@ function existingProviderFileReferences() {
       providerId,
       kind: "api_key",
       label: provider.credential.label,
-      secretRef: { type: "provider-file", providerId, target: TARGET },
+      secretRef: { type: "provider-file", providerId, target: ROUTER_PLANE_TARGET },
       state: "active",
       createdAt: now(),
       updatedAt: now(),

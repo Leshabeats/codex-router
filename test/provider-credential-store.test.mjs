@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync, spawn } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -13,6 +14,10 @@ import {
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+
+const atomicStateLockModule = new URL("../src/atomic-state-lock.mjs", import.meta.url).href;
+const credentialStoreModule = new URL("../src/provider-credential-store.mjs", import.meta.url).href;
+const providerCredentialsModule = new URL("../src/provider-credentials.mjs", import.meta.url).href;
 
 const root = mkdtempSync(path.join(os.tmpdir(), "codex-router-credential-store-"));
 process.env.CODEX_HOME = path.join(root, "codex");
@@ -48,6 +53,47 @@ test.after(() => rmSync(root, { recursive: true, force: true }));
 
 function ref(providerId = "deepseek") {
   return { type: "provider-file", providerId, target: "codex" };
+}
+
+async function holdStateLock(filePath, milliseconds = 350) {
+  const script = `
+    import { withAtomicStateLock } from ${JSON.stringify(atomicStateLockModule)};
+    withAtomicStateLock(process.argv[1], () => {
+      process.stdout.write("locked\\n");
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.argv[2]));
+    });
+  `;
+  const child = spawn(process.execPath, [
+    "--input-type=module",
+    "--eval",
+    script,
+    filePath,
+    String(milliseconds),
+  ], {
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  let errors = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => { errors += chunk; });
+  const exited = new Promise((resolve) => {
+    child.once("exit", (code, signal) => resolve({ code, signal }));
+  });
+  await new Promise((resolve, reject) => {
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      output += chunk;
+      if (output.includes("locked\n")) resolve();
+    });
+    child.once("error", reject);
+    child.once("exit", (code, signal) => {
+      if (!output.includes("locked\n")) {
+        reject(new Error(`Lock holder exited before acquiring the lock (${code ?? signal}): ${errors}`));
+      }
+    });
+  });
+  return { exited, errors: () => errors };
 }
 
 test("credential references contain no secret and use protected metadata storage", () => {
@@ -245,7 +291,7 @@ test("failed migration restores the exact original bytes", () => {
   assert.equal(readFileSync(outside, "utf8"), "do not touch\n");
 });
 
-test("credential references are target- and provider-bound at resolution time", () => {
+test("credential references are router-plane- and provider-bound at resolution time", () => {
   const providerPath = writeProviderCredential("deepseek", "TEST_BOUND_SECRET");
   const configured = resolveProviderCredentialReference("deepseek", ref());
   assert.equal(configured?.value, "TEST_BOUND_SECRET");
@@ -271,4 +317,76 @@ test("credential references are target- and provider-bound at resolution time", 
   symlinkSync(external, providerPath);
   assert.equal(resolveProviderCredentialReference("deepseek", ref()), undefined);
   assert.deepEqual(credentialPaths(PROVIDERS.get("deepseek")).filter((candidate) => candidate === providerPath), [providerPath]);
+});
+
+test("credential references written by every client resolve through the shared router plane", () => {
+  writeProviderCredential("deepseek", "TEST_SHARED_PLANE_SECRET");
+  const storePath = path.join(root, "state", "cross-target-references.json");
+  const script = `
+    const { addCredentialReference } = await import(${JSON.stringify(credentialStoreModule)});
+    const { resolveProviderCredentialReference } = await import(${JSON.stringify(providerCredentialsModule)});
+    const client = process.env.MODEL_ROUTER_TARGET;
+    const entry = addCredentialReference({
+      id: \`cred_cross_target_\${client}_123456\`,
+      providerId: "deepseek",
+      kind: "api_key",
+      secretRef: { type: "provider-file", providerId: "deepseek" },
+    });
+    const credential = resolveProviderCredentialReference("deepseek", entry.secretRef);
+    process.stdout.write(JSON.stringify({
+      client,
+      referenceTarget: entry.secretRef.target,
+      resolved: credential?.value === "TEST_SHARED_PLANE_SECRET",
+    }));
+  `;
+  for (const client of ["codex", "dsh", "gemini"]) {
+    const result = JSON.parse(execFileSync(process.execPath, [
+      "--input-type=module",
+      "--eval",
+      script,
+    ], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        MODEL_ROUTER_TARGET: client,
+        MODEL_ROUTER_PROVIDER_CREDENTIAL_STORE: storePath,
+      },
+    }));
+    assert.deepEqual(result, {
+      client,
+      referenceTarget: "codex",
+      resolved: true,
+    });
+  }
+  const stored = JSON.parse(readFileSync(storePath, "utf8"));
+  assert.equal(stored.credentials.length, 3);
+  assert.deepEqual(new Set(stored.credentials.map((entry) => entry.secretRef.target)), new Set(["codex"]));
+});
+
+test("credential reference add and remove wait for concurrent state transactions", async () => {
+  const filePath = path.join(root, "state", "concurrent-references.json");
+  const id = "cred_concurrent_write_123456";
+  const input = {
+    id,
+    providerId: "deepseek",
+    kind: "api_key",
+    secretRef: ref(),
+  };
+
+  const addHolder = await holdStateLock(filePath);
+  const addStarted = Date.now();
+  addCredentialReference(input, filePath);
+  const addElapsed = Date.now() - addStarted;
+  const addExit = await addHolder.exited;
+  assert.equal(addExit.code, 0, addHolder.errors());
+  assert.ok(addElapsed >= 200, `add bypassed the state lock (${addElapsed}ms)`);
+
+  const removeHolder = await holdStateLock(filePath);
+  const removeStarted = Date.now();
+  assert.equal(removeCredentialReference(id, filePath), true);
+  const removeElapsed = Date.now() - removeStarted;
+  const removeExit = await removeHolder.exited;
+  assert.equal(removeExit.code, 0, removeHolder.errors());
+  assert.ok(removeElapsed >= 200, `remove bypassed the state lock (${removeElapsed}ms)`);
+  assert.deepEqual(readProviderCredentialStore(filePath).credentials, []);
 });
