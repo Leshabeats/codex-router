@@ -6,7 +6,7 @@ import Testing
 @Suite("Native control contract")
 struct ControlContractTests {
   private static func fixture(
-    version: String = "0.4.0-beta.4",
+    version: String = "0.4.0-beta.5",
     protocolVersion: Int = 1
   ) throws -> (root: URL, package: URL) {
     let root = FileManager.default.temporaryDirectory
@@ -85,11 +85,11 @@ struct ControlContractTests {
     let fixture = try Self.fixture()
     defer { try? FileManager.default.removeItem(at: fixture.root) }
     let installed = RouterControlContractPolicy.installedContract(sourceRoot: fixture.root)
-    #expect(installed == RouterControlContract(version: "0.4.0-beta.4", controlProtocol: 1))
+    #expect(installed == RouterControlContract(version: "0.4.0-beta.5", controlProtocol: 1))
     #expect(
       RouterControlContractPolicy.matches(
         installed: installed,
-        expectedVersion: "0.4.0-beta.4",
+        expectedVersion: "0.4.0-beta.5",
         expectedProtocol: 1
       )
     )

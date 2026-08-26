@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.0-beta.5
+
 - **Subagent selection is honoured again.** `applyMultiAgentSettings` only ever
   demoted: it read `disabled` and `hidden` and nothing else, so the three modes
   documented in `.claude/skills/codex-subagents/SKILL.md` — `proven`,
