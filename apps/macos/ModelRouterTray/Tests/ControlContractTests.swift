@@ -96,7 +96,7 @@ struct ControlContractTests {
     #expect(
       !RouterControlContractPolicy.matches(
         installed: installed,
-        expectedVersion: "0.5.0",
+        expectedVersion: "0.4.0-beta.4",
         expectedProtocol: 1
       )
     )
