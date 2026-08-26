@@ -36,15 +36,17 @@ test("every Grok 4.6 route records the upstream id and window", () => {
 });
 
 test("Grok 4.6 reasoning ladders match catalog documentation", () => {
-  // Nous Portal documents low/medium/high/xhigh for Grok 4.6.
-  const nousModel = MODEL_BY_SLUG.get("nousresearch/grok-4.6");
-  assert.deepEqual(
-    nousModel.reasoningLevels.map((level) => level.effort),
-    ["low", "medium", "high", "xhigh"],
-  );
+  // Nous Portal and grok-oauth document low/medium/high/xhigh for Grok 4.6.
+  for (const slug of ["nousresearch/grok-4.6", "grok-oauth/grok-4.6"]) {
+    const model = MODEL_BY_SLUG.get(slug);
+    assert.deepEqual(
+      model.reasoningLevels.map((level) => level.effort),
+      ["low", "medium", "high", "xhigh"],
+    );
+  }
 
-  // Command Code, OpenRouter, and grok-oauth document low/medium/high (no xhigh).
-  for (const slug of ["commandcode/grok-4.6", "openrouter/grok-4.6", "grok-oauth/grok-4.6"]) {
+  // Command Code and OpenRouter document low/medium/high (no xhigh).
+  for (const slug of ["commandcode/grok-4.6", "openrouter/grok-4.6"]) {
     const model = MODEL_BY_SLUG.get(slug);
     assert.deepEqual(
       model.reasoningLevels.map((level) => level.effort),
@@ -54,15 +56,13 @@ test("Grok 4.6 reasoning ladders match catalog documentation", () => {
 });
 
 test("Grok 4.6 input modalities match catalog documentation", () => {
-  // Command Code and grok-oauth document text+image support.
-  for (const slug of ["commandcode/grok-4.6", "grok-oauth/grok-4.6"]) {
+  // Command Code, grok-oauth, and OpenRouter document text+image support.
+  for (const slug of ["commandcode/grok-4.6", "grok-oauth/grok-4.6", "openrouter/grok-4.6"]) {
     const model = MODEL_BY_SLUG.get(slug);
     assert.deepEqual(model.inputModalities, ["text", "image"]);
   }
 
-  // Nous Research and OpenRouter document text-only (as of the pin date).
-  for (const slug of ["nousresearch/grok-4.6", "openrouter/grok-4.6"]) {
-    const model = MODEL_BY_SLUG.get(slug);
-    assert.deepEqual(model.inputModalities, ["text"]);
-  }
+  // Nous Research documents text-only.
+  const nousModel = MODEL_BY_SLUG.get("nousresearch/grok-4.6");
+  assert.deepEqual(nousModel.inputModalities, ["text"]);
 });
