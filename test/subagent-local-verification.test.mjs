@@ -7,7 +7,7 @@ import {
   verifiedForRoute,
 } from "../src/subagent-proofs.mjs";
 
-const ROUTER_VERSION = "0.4.0-beta.4";
+const ROUTER_VERSION = "0.5.0";
 
 function passingChecks(overrides = {}) {
   const checks = {};

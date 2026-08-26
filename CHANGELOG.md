@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0
 
 - **Grok 4.6 ships on opencode Go.** OpenCode's current Go list and endpoint
   table publish `grok-4.6` on `/zen/go/v1/responses` (not chat, not messages).
