@@ -213,6 +213,7 @@ const CURATION_ROUTES = Object.freeze({
       "glm-5.1",
       "glm-5.2",
       "glm-5.3",
+      "glm-5.3-flash",
       "hy3",
       "kimi-k2.6",
       "kimi-k2.7-code",

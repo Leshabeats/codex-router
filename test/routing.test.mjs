@@ -8131,15 +8131,15 @@ test("API forwarder clamps Ox Alpha efforts onto the ladder the model accepts", 
     });
     for (const [gatewayModel, upstreamModel, credential, sentEffort, expectedEffort] of [
       // The three rungs the upstream names.
-      ["opencode-go-ox-alpha", "ox-alpha-free", "TEST_OPENCODE_OX_KEY", "low", "low"],
-      ["opencode-go-ox-alpha", "ox-alpha-free", "TEST_OPENCODE_OX_KEY", "high", "high"],
-      ["opencode-go-ox-alpha", "ox-alpha-free", "TEST_OPENCODE_OX_KEY", "max", "max"],
+      ["opencode-go-glm-5-3-flash", "glm-5.3-flash", "TEST_OPENCODE_OX_KEY", "low", "low"],
+      ["opencode-go-glm-5-3-flash", "glm-5.3-flash", "TEST_OPENCODE_OX_KEY", "high", "high"],
+      ["opencode-go-glm-5-3-flash", "glm-5.3-flash", "TEST_OPENCODE_OX_KEY", "max", "max"],
       // The pre-0.143 Codex enum tops out at xhigh; it must not reach upstream.
-      ["opencode-go-ox-alpha", "ox-alpha-free", "TEST_OPENCODE_OX_KEY", "xhigh", "max"],
-      ["opencode-go-ox-alpha", "ox-alpha-free", "TEST_OPENCODE_OX_KEY", "ultra", "max"],
+      ["opencode-go-glm-5-3-flash", "glm-5.3-flash", "TEST_OPENCODE_OX_KEY", "xhigh", "max"],
+      ["opencode-go-glm-5-3-flash", "glm-5.3-flash", "TEST_OPENCODE_OX_KEY", "ultra", "max"],
       // Rungs the route does not publish take the nearest one at or below.
-      ["opencode-go-ox-alpha", "ox-alpha-free", "TEST_OPENCODE_OX_KEY", "medium", "low"],
-      ["opencode-go-ox-alpha", "ox-alpha-free", "TEST_OPENCODE_OX_KEY", "minimal", "low"],
+      ["opencode-go-glm-5-3-flash", "glm-5.3-flash", "TEST_OPENCODE_OX_KEY", "medium", "low"],
+      ["opencode-go-glm-5-3-flash", "glm-5.3-flash", "TEST_OPENCODE_OX_KEY", "minimal", "low"],
       // Every credentialed reseller reaches its own id and credential while
       // sharing the model's ladder normalization.
       ["openrouter-ox-alpha", "stealth/ox-alpha", "TEST_OPENROUTER_OX_KEY", "xhigh", "max"],
@@ -8185,7 +8185,7 @@ test("API forwarder clamps Ox Alpha efforts onto the ladder the model accepts", 
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "opencode-go-ox-alpha",
+        model: "opencode-go-glm-5-3-flash",
         messages: [{ role: "user", content: "test" }],
       }),
     });
@@ -8194,7 +8194,7 @@ test("API forwarder clamps Ox Alpha efforts onto the ladder the model accepts", 
     // Forcing a tool choice is observed to work on every Ox Alpha route, so the
     // profile must not quietly downgrade it the way the thinking providers do.
     for (const model of [
-      "opencode-go-ox-alpha",
+      "opencode-go-glm-5-3-flash",
       "openrouter-ox-alpha",
       "commandcode-ox-alpha",
       "nousresearch-ox-alpha",

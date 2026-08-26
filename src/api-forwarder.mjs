@@ -811,7 +811,8 @@ function normalizeBody(buffer, contentType, route) {
     payload.thinking = { type: "adaptive" };
     payload.reasoning_split = true;
   } else if (model.requestProfile === "ox-alpha") {
-    // Ox Alpha always thinks, and every route validates reasoning_effort
+    // Ox Alpha -- now published on OpenCode Go as GLM-5.3-Flash -- always
+    // thinks, and every measured route validates reasoning_effort
     // against the rungs the model accepts -- an off-ladder value comes
     // back as HTTP 400 "This model always engages in thinking and cannot be
     // disabled" rather than being ignored. Every route accepts low/high/max;
