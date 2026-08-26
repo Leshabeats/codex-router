@@ -412,7 +412,13 @@ if [ "$target" = dsh ]; then
   echo "The harness reloads its settings document on the next request; no restart is needed."
 else
   echo "Installed the selected external model routes for Codex."
-  echo "Fully quit and reopen Codex, then start a new task."
+  # The configuration this install just rewrote is read once, at client start.
+  # A client that was already running keeps serving the previous routing, and
+  # the connection error that follows names neither the install nor the client.
+  # So state which it is: running right now, or not running at all. A probe that
+  # cannot answer must never fail an otherwise good install, hence the fallback.
+  node src/target-integration.mjs restart-notice 2>/dev/null \
+    || echo "Fully quit and reopen Codex, then start a new task."
 fi
 echo "Kimi API key: $repo_dir/bin/provider-key kimi-api set"
 echo "DeepSeek API key: $repo_dir/bin/provider-key deepseek set"

@@ -17,6 +17,8 @@ import {
 // is a command-line script, so the prefix is restated here rather than
 // imported; the markers are a compatibility surface that lives in users'
 // config files and cannot change without a migration anyway.
+import { clientRestartNotice } from "./client-restart-notice.mjs";
+
 const managedMarkerPattern = /^# BEGIN (?:kimi-)?codex-(?:router|proxy)-/m;
 
 function run(script, args = []) {
@@ -136,8 +138,13 @@ export function refreshTargetPickerIfInstalled() {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   if (process.argv[2] === "installed-targets") {
     process.stdout.write(`${installedTargets().join(",")}\n`);
+  } else if (process.argv[2] === "restart-notice") {
+    // Prints nothing for a client that reloads on its own, so the installer can
+    // call this unconditionally and stay silent where silence is correct.
+    const notice = clientRestartNotice(TARGET);
+    if (notice) process.stdout.write(`${notice}\n`);
   } else {
-    console.error("Usage: target-integration installed-targets");
+    console.error("Usage: target-integration installed-targets|restart-notice");
     process.exit(2);
   }
 }
