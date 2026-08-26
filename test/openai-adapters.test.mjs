@@ -198,6 +198,18 @@ test("Responses provider errors stay structured and do not gain a second termina
   }]);
 });
 
+test("Responses stream rejects malformed JSON event data without relaying it", async () => {
+  await assert.rejects(
+    transformText(createResponsesStreamTransform(), [
+      "event: response.output_text.delta\ndata: {not-json}\n\n",
+    ]),
+    (error) =>
+      error.status === 502 &&
+      error.code === "invalid_responses_stream" &&
+      /malformed JSON/.test(error.message),
+  );
+});
+
 test("Responses JSON transform preserves usage and error-shaped payloads", async () => {
   const response = {
     id: "resp-3",
@@ -208,4 +220,21 @@ test("Responses JSON transform preserves usage and error-shaped payloads", async
   assert.deepEqual(JSON.parse(await transformText(createResponsesJsonTransform(), [JSON.stringify(response)])), response);
   const errorPayload = { error: { type: "invalid_request_error", message: "bad" } };
   assert.deepEqual(JSON.parse(await transformText(createResponsesJsonTransform(), [JSON.stringify(errorPayload)])), errorPayload);
+});
+
+test("Responses JSON transform rejects malformed and invalid upstream bodies", async () => {
+  await assert.rejects(
+    transformText(createResponsesJsonTransform(), ["{not-json}"]),
+    (error) =>
+      error.status === 502 &&
+      error.code === "invalid_responses_response" &&
+      /not valid JSON/.test(error.message),
+  );
+  await assert.rejects(
+    transformText(createResponsesJsonTransform(), [JSON.stringify({ output: {} })]),
+    (error) =>
+      error.status === 502 &&
+      error.code === "invalid_responses_response" &&
+      /invalid output array/.test(error.message),
+  );
 });

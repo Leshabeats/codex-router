@@ -9,6 +9,13 @@ function adapterError(message, code = "invalid_responses_request") {
   return error;
 }
 
+function upstreamResponseError(message, code = "invalid_responses_response") {
+  const error = new Error(message);
+  error.status = 502;
+  error.code = code;
+  return error;
+}
+
 function clone(value) {
   if (value === undefined) return undefined;
   try {
@@ -191,9 +198,12 @@ function normalizeResponsesRequest(payload) {
 }
 
 function normalizeResponseBody(payload) {
-  const next = object(clone(payload), "Responses response");
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw upstreamResponseError("The upstream Responses response must be an object.");
+  }
+  const next = clone(payload);
   if (next.output !== undefined && !Array.isArray(next.output)) {
-    throw new Error("The upstream Responses response has an invalid output array.");
+    throw upstreamResponseError("The upstream Responses response has an invalid output array.");
   }
   return next;
 }
@@ -222,7 +232,10 @@ function frameData(frame) {
   try {
     return JSON.parse(frame.data);
   } catch {
-    return frame.data;
+    throw upstreamResponseError(
+      "The upstream Responses stream emitted malformed JSON event data.",
+      "invalid_responses_stream",
+    );
   }
 }
 
@@ -414,11 +427,18 @@ export function createResponsesJsonTransform() {
       callback();
     },
     flush(callback) {
+      let parsed;
       try {
-        const parsed = JSON.parse(body);
-        this.push(JSON.stringify(normalizeResponseBody(parsed)));
+        parsed = JSON.parse(body);
       } catch {
-        this.push(body);
+        callback(upstreamResponseError("The upstream Responses response was not valid JSON."));
+        return;
+      }
+      try {
+        this.push(JSON.stringify(normalizeResponseBody(parsed)));
+      } catch (error) {
+        callback(error);
+        return;
       }
       callback();
     },
