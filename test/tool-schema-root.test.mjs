@@ -626,7 +626,7 @@ test("a decorated $defs alias chain resolves through pure aliases", () => {
   assert.deepEqual(schema.$defs.decorated.$ref, "#/$defs/alias");
 });
 
-test("a conflicting $defs ref sibling degrades to a pure reference", () => {
+test("a conflicting $defs ref sibling remains intact", () => {
   const schema = {
     type: "object",
     properties: { value: { $ref: "#/$defs/narrow" } },
@@ -641,10 +641,32 @@ test("a conflicting $defs ref sibling degrades to a pure reference", () => {
   };
   assert.deepEqual(inlineForeignRefs(schema).$defs.narrow, {
     $ref: "#/$defs/base",
+    type: "string",
+    minLength: 1,
   });
 });
 
-test("a cyclic $defs ref sibling keeps only the cycle-edge reference", () => {
+test("a conflicting stricter $defs ref sibling also remains intact", () => {
+  const schema = {
+    type: "object",
+    properties: { value: { $ref: "#/$defs/narrow" } },
+    $defs: {
+      base: { type: "string", minLength: 1 },
+      narrow: {
+        $ref: "#/$defs/base",
+        type: "string",
+        minLength: 2,
+      },
+    },
+  };
+  assert.deepEqual(inlineForeignRefs(schema).$defs.narrow, {
+    $ref: "#/$defs/base",
+    type: "string",
+    minLength: 2,
+  });
+});
+
+test("a cyclic $defs ref sibling remains intact", () => {
   const schema = {
     type: "object",
     properties: { node: { $ref: "#/$defs/node" } },
@@ -658,6 +680,8 @@ test("a cyclic $defs ref sibling keeps only the cycle-edge reference", () => {
   };
   assert.deepEqual(inlineForeignRefs(schema).$defs.node, {
     $ref: "#/$defs/node",
+    type: "object",
+    description: "Cyclic node.",
   });
 });
 

@@ -372,17 +372,18 @@ function inlineNodeRefs(
   );
   const strictDefsRef = inlineDefsWithSiblings && isDefsRef;
   // A definition expansion that still carries its own reference reached a
-  // cycle. Moonshot accepts that pure edge, but not the siblings this node
-  // added around it.
-  if (strictDefsRef && expanded.$ref !== undefined) return { $ref: ref };
+  // cycle. Removing this node's siblings would weaken the original schema, so
+  // keep the decorated node intact and let the provider fail closed if it
+  // cannot represent that conjunction.
+  if (strictDefsRef && expanded.$ref !== undefined) return node;
   if (strictDefsRef) {
     const conflicts = Object.keys(rewrittenSiblings).some((key) => (
       Object.hasOwn(expanded, key) && !isDeepStrictEqual(rewrittenSiblings[key], expanded[key])
     ));
-    // Overwriting a conflicting assertion would weaken the schema the target
-    // declares. Keep the pure reference instead; the client's sibling and target
-    // already disagree, so this malformed case has no lossless expansion.
-    if (conflicts) return { $ref: ref };
+    // Overwriting either assertion would weaken one side of the conjunction.
+    // Keep the original decorated node instead; this malformed case has no
+    // lossless expansion.
+    if (conflicts) return node;
   }
   return { ...expanded, ...rewrittenSiblings };
 }
