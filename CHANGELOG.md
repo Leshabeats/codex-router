@@ -1,8 +1,25 @@
 # Changelog
 
-## Unreleased
-
 ## 0.5.0
+
+- **Grok 4.6 ships on opencode Go.** OpenCode's current Go list and endpoint
+  table publish `grok-4.6` on `/zen/go/v1/responses` (not chat, not messages).
+  The checked-in route is `opencode-go-responses/grok-4.6`, 500,000 context
+  with auto-compact at 440,000, text+image, and the low/medium/high/xhigh
+  ladder models.dev publishes for this id, defaulting to high. No Free twin
+  exists. Grok 4.5 stays on the same Responses variant.
+
+- **Nous Research now lists ~27 new models including Hermes 4, free portal
+  routes, and coding flagships.** The checked-in registry adds
+  `nousresearch/hermes-4-405b` and `nousresearch/hermes-4-70b`, six free-tier
+  routes (`longcat-2.0-free`, `laguna-s-2.1-free`, `laguna-xs-2.1-free`,
+  `step-3.7-flash-free`, `hy3-free`, `solar-pro4-free`) tagged Free in the Models
+  page, plus coding flagships (DeepSeek V4, Kimi K3, Qwen 3.8/3.7 Max, GLM-5.3/5.2,
+  MiniMax M3, Claude Opus/Sonnet/Fable 5, GPT-5.6 Terra, Gemini 3.7 Flash, Grok 4.6,
+  and others). 28 listed models total including the existing `ox-alpha`. Routing
+  still requires a Nous Portal API key (the `:free` ids are billed through the
+  portal credential, not anonymous like OpenCode Free). This is not the full
+  372-model catalog.
 
 - **Subagent selection is honoured again.** `applyMultiAgentSettings` only ever
   demoted: it read `disabled` and `hidden` and nothing else, so the three modes
