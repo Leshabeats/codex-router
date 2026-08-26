@@ -2711,6 +2711,19 @@ async function handleHarness(action) {
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 
+async function handleClientExport() {
+  const values = args.slice(1);
+  let secretEnv;
+  for (let index = 0; index < values.length; index += 1) {
+    if (values[index] !== "--secret-env" || !values[index + 1]) {
+      throw new Error("Usage: control client-export [--secret-env NAME]");
+    }
+    secretEnv = values[++index];
+  }
+  const { renderRouterEndpointExport } = await import("./client-exports.mjs");
+  process.stdout.write(renderRouterEndpointExport(secretEnv ? { secretEnv } : {}));
+}
+
 async function handlePresence(action, value) {
   const { PRESENCE_MODES, presenceSnapshot, setPresenceMode } = await import(
     "./presence-state.mjs"
@@ -2816,6 +2829,8 @@ if (args.includes("--probe")) {
   handleTray(args[1]);
 } else if (args[0] === "harness") {
   await handleHarness(args[1]);
+} else if (args[0] === "client-export") {
+  await handleClientExport();
 } else if (args[0] === "presence") {
   await handlePresence(args[1], args[2]);
 } else if (args[0] === "chatgpt-session") {
