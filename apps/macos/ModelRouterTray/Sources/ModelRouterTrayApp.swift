@@ -8667,12 +8667,14 @@ private struct ProviderUsageSection: View {
         }
       }
 
-      HStack(alignment: .firstTextBaseline) {
+      HStack(alignment: .center, spacing: 8) {
         Text(routerLocalized(store.selectedUsageUsesChatGPT ? "Daily token usage" : "Router traffic"))
           .font(.system(size: 10, weight: .medium))
           .foregroundStyle(routerMuted)
-        Spacer()
-        HStack(spacing: 5) {
+          .lineLimit(1)
+          .minimumScaleFactor(0.85)
+        Spacer(minLength: 8)
+        HStack(spacing: 6) {
           UsageRangePicker(selection: $range)
           TokenDisplayUnitPicker(selection: Binding(
             get: { self.tokenDisplayUnit },
@@ -9150,11 +9152,14 @@ struct UsageRangePicker: View {
   var body: some View {
     HStack(spacing: 2) {
       ForEach(UsageRange.allCases) { range in
-        Button(range.label) { selection = range }
+        Button { selection = range } label: {
+          Text(range.label)
+            .lineLimit(1)
+            .frame(minWidth: 26)
+        }
           .buttonStyle(.plain)
           .font(.system(size: 9, weight: .medium))
           .foregroundStyle(selection == range ? routerText : routerMuted)
-          .padding(.horizontal, 7)
           .padding(.vertical, 4)
           .background(
             selection == range ? Color.primary.opacity(0.10) : Color.clear,
@@ -9164,6 +9169,7 @@ struct UsageRangePicker: View {
     }
     .padding(2)
     .background(Color.primary.opacity(0.045), in: Capsule())
+    .fixedSize(horizontal: true, vertical: false)
   }
 }
 
@@ -9173,7 +9179,11 @@ struct TokenDisplayUnitPicker: View {
   var body: some View {
     HStack(spacing: 2) {
       ForEach(TokenDisplayUnit.allCases) { unit in
-        Button(unit.label) { self.selection = unit }
+        Button { self.selection = unit } label: {
+          Text(unit.label)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+        }
           .buttonStyle(.plain)
           .font(.system(size: 9, weight: .medium))
           .foregroundStyle(self.selection == unit ? routerText : routerMuted)
@@ -9189,6 +9199,7 @@ struct TokenDisplayUnitPicker: View {
     }
     .padding(2)
     .background(Color.primary.opacity(0.045), in: Capsule())
+    .fixedSize(horizontal: true, vertical: false)
     .accessibilityLabel(routerLocalized("Token unit"))
   }
 }

@@ -15,19 +15,22 @@ existing router configuration.
 ## Opening it like an app
 
 `./bin/model-router-tray` installs **Codex Router.app** into `~/Applications`,
-where Finder, Spotlight, and Launchpad can all find it by name and icon. The
-icon is built from `apps/macos/ModelRouterTray/Resources/AppIcon.svg`; edit the
-SVG and run `scripts/build-app-icon.sh` to regenerate the committed
-`AppIcon.icns`. That script needs `sips` and `iconutil`, which is why the
-`.icns` is committed rather than rasterized during a normal tray build.
+where Finder, Spotlight, and Launchpad can all find it by name and icon. Every
+desktop icon is built from
+`apps/macos/ModelRouterTray/Resources/AppIcon.svg`; edit the SVG and run
+`scripts/build-app-icon.sh` to regenerate the committed native `.icns` plus
+the Control Center PNG and ICO assets used by the sidebar, Dock, Windows, and
+Linux. That script needs `sips` and `iconutil`, which is why the generated
+assets are committed rather than rasterized during a normal tray build.
 
-The Swift host stays `LSUIElement`, so it does not add a second Dock icon. A
-person opening `Codex Router.app` gets the embedded Control Center as a normal
-window and also reveals the native tray surfaces for 20 seconds if **With
-Codex** would otherwise hide them. Closing the Control Center window leaves the
-native host running; reopen the app or choose **Control Center** from the
-menu-bar panel to restore it. The temporary reveal also starts the router and
-pulses the status dot, then follow mode resumes on its own.
+The Swift host stays `LSUIElement`, so it does not add a Dock icon. A person
+opening `Codex Router.app` gets the embedded Control Center as a normal window;
+that window supplies the product's Dock and Command-Tab entry only while it is
+open. Opening the app also reveals the native tray surfaces for 20 seconds if
+**With Codex** would otherwise hide them. Closing the Control Center window
+leaves the native host running; reopen the app or choose **Control Center**
+from the menu-bar panel to restore it. The temporary reveal also starts the
+router and pulses the status dot, then follow mode resumes on its own.
 
 launchd passes `--supervised` when it starts the native host at login. That
 starts the menu-bar host without opening the Control Center window or forcing

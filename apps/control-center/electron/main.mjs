@@ -96,6 +96,17 @@ function appIconPath() {
   return app.isPackaged ? path.join(process.resourcesPath, "icon.png") : DEVELOPMENT_ICON;
 }
 
+function showDockForVisibleWindow() {
+  if (process.platform !== "darwin" || !nativeTrayOwnedByHost || !app.dock) return;
+  app.dock.setIcon(appIconPath());
+  void app.dock.show();
+}
+
+function hideDockForHiddenWindow() {
+  if (process.platform !== "darwin" || !nativeTrayOwnedByHost || !app.dock) return;
+  app.dock.hide();
+}
+
 function createWindow() {
   const createdWindow = new BrowserWindow({
     width: 1280,
@@ -174,6 +185,7 @@ function createWindow() {
   createdWindow.on("hide", () => {
     windowVisible = false;
     publishLifecycleState();
+    hideDockForHiddenWindow();
   });
   createdWindow.once("closed", () => {
     if (mainWindow !== createdWindow) return;
@@ -182,6 +194,7 @@ function createWindow() {
     showWhenContentReady = false;
     windowVisible = false;
     publishLifecycleState();
+    hideDockForHiddenWindow();
   });
   const loading = RENDERER.development
     ? createdWindow.loadURL(RENDERER.url)
@@ -193,6 +206,11 @@ function createWindow() {
 function revealWindow() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   if (mainWindow.isMinimized()) mainWindow.restore();
+  // The native host is an LSUIElement and never owns a Dock tile. Let its
+  // embedded Control Center represent the product in the Dock and Command-Tab
+  // while the actual application window is visible, then retire that tile
+  // when the window closes so the menu-bar host remains unobtrusive.
+  showDockForVisibleWindow();
   mainWindow.show();
   mainWindow.focus();
   windowVisible = true;
@@ -280,7 +298,7 @@ if (primaryInstance && !quitForUpdateInvocation) {
       Menu.setApplicationMenu(null);
     }
     if (process.platform === "darwin") {
-      if (nativeTrayOwnedByHost) app.dock?.hide();
+      if (nativeTrayOwnedByHost) hideDockForHiddenWindow();
       else app.dock?.setIcon(appIconPath());
     }
     session.defaultSession.setPermissionCheckHandler(() => false);

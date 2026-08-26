@@ -720,6 +720,10 @@ test("electron boundary does not enable node integration or shell argv", async (
   assert.match(main, /setApplicationMenu\(null\)/);
   assert.match(main, /icon:\s*appIconPath\(\)/);
   assert.match(main, /app\.dock\?\.setIcon\(appIconPath\(\)\)/);
+  assert.match(main, /function showDockForVisibleWindow\(\)[\s\S]*app\.dock\.setIcon\(appIconPath\(\)\)[\s\S]*app\.dock\.show\(\)/);
+  assert.match(main, /function hideDockForHiddenWindow\(\)[\s\S]*app\.dock\.hide\(\)/);
+  assert.match(main, /function revealWindow\(\)[\s\S]{0,420}showDockForVisibleWindow\(\)[\s\S]{0,120}mainWindow\.show\(\)/);
+  assert.match(main, /createdWindow\.on\("hide"[\s\S]{0,180}hideDockForHiddenWindow\(\)/);
   assert.match(main, /setWindowOpenHandler\(\(\) => \(\{ action: "deny" \}\)\)/);
   assert.match(main, /if \(app\.isPackaged \|\| !requested\)/);
   assert.match(main, /\["127\.0\.0\.1", "localhost", "\[::1\]"\]\.includes\(parsed\.hostname\)/);
