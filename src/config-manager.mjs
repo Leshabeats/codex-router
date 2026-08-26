@@ -558,11 +558,19 @@ function managedSignedProviderBlock(providerId, baseUrl) {
     `base_url = ${JSON.stringify(baseUrl)}`,
     'wire_api = "responses"',
     "requires_openai_auth = true",
+    // Current Codex builds expose the standalone web-search client tool only
+    // when both the provider and the selected model advertise support. Keep
+    // the provider half enabled; the catalog's supports_search_tool field is
+    // the per-model gate.
+    "supports_standalone_web_search = true",
     "supports_websockets = false",
     signedProviderEndMarker,
   ].join("\n");
 }
 
+// Keep accepting the pre-standalone-search managed block while upgrading it
+// in place. Existing signed state must not become user-owned merely because
+// this optional Codex capability was added.
 function managedSignedProviderBlockLegacy(providerId, baseUrl) {
   const headerId = /^[A-Za-z0-9_-]+$/.test(providerId)
     ? providerId
@@ -579,28 +587,10 @@ function managedSignedProviderBlockLegacy(providerId, baseUrl) {
   ].join("\n");
 }
 
-function managedSignedProviderBlockWithSearch(providerId, baseUrl) {
-  const headerId = /^[A-Za-z0-9_-]+$/.test(providerId)
-    ? providerId
-    : JSON.stringify(providerId);
-  return [
-    signedProviderStartMarker,
-    `[model_providers.${headerId}]`,
-    'name = "Codex Router (with ChatGPT)"',
-    `base_url = ${JSON.stringify(baseUrl)}`,
-    'wire_api = "responses"',
-    "requires_openai_auth = true",
-    "supports_standalone_web_search = true",
-    "supports_websockets = false",
-    signedProviderEndMarker,
-  ].join("\n");
-}
-
 function managedSignedProviderBlockMatches(actual, providerId, baseUrl) {
   return [
     managedSignedProviderBlock(providerId, baseUrl),
     managedSignedProviderBlockLegacy(providerId, baseUrl),
-    managedSignedProviderBlockWithSearch(providerId, baseUrl),
   ].includes(actual);
 }
 
@@ -1095,6 +1085,10 @@ function enabledContents(contents) {
     'name = "Codex Router (external models)"',
     `base_url = ${JSON.stringify(routerBaseUrl)}`,
     'wire_api = "responses"',
+    // Provider support is necessary but not sufficient: Codex also reads the
+    // selected catalog model's supports_search_tool value before exposing the
+    // standalone web-search client tool.
+    "supports_standalone_web_search = true",
     providerEndMarker,
   ];
   return withManagedAgentConcurrency(

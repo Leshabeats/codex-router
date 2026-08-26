@@ -128,7 +128,7 @@ approval_policy = "never"
     assert.doesNotMatch(configured, /\[agents\]/);
     assert.match(configured, /\[model_providers\.codex-router\]/);
     assert.match(configured, /wire_api = "responses"/);
-    assert.doesNotMatch(configured, /supports_standalone_web_search\s*=/);
+    assert.match(configured, /^supports_standalone_web_search = true$/m);
     assert.ok(
       configured.includes(
         `openai_base_url = "http://127.0.0.1:46192/_codex-router/${CALLER_KEY}/v1"`,
@@ -162,7 +162,7 @@ approval_policy = "never"
         .length,
       1,
     );
-    assert.doesNotMatch(readFileSync(configPath, "utf8"), /standalone_web_search\s*=/);
+    assert.doesNotMatch(readFileSync(configPath, "utf8"), /^standalone_web_search\s*=/m);
 
     const disabled = run("disable", codexHome);
     assert.equal(disabled.mode, "native");
@@ -237,7 +237,7 @@ supports_standalone_web_search = true
     const configured = readFileSync(configPath, "utf8");
     assert.doesNotMatch(configured, /codex-router-standalone-web-search-managed/);
     assert.doesNotMatch(configured, /^standalone_web_search\s*=/m);
-    assert.doesNotMatch(configured, /^supports_standalone_web_search\s*=/m);
+    assert.match(configured, /^supports_standalone_web_search = true$/m);
   } finally {
     rmSync(codexHome, { recursive: true, force: true });
   }
@@ -967,7 +967,7 @@ Authorization = "Bearer PROVIDER_HEADER_SECRET"
     assert.match(configured, new RegExp(`base_url = "http://127\\.0\\.0\\.1:46192/_codex-router/${CALLER_KEY}/v1"`));
     assert.match(configured, /requires_openai_auth = true/);
     assert.match(configured, /supports_websockets = false/);
-    assert.doesNotMatch(configured, /supports_standalone_web_search\s*=/);
+    assert.match(configured, /^supports_standalone_web_search = true$/m);
     assert.doesNotMatch(configured, /PROVIDER_(?:QUERY|AUTH|HEADER)_SECRET/);
     assert.doesNotMatch(
       configured,
