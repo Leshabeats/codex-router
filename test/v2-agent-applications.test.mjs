@@ -50,7 +50,7 @@ function acceptedProof() {
     status: "accepted",
     officialSources: ["https://api-docs.deepseek.com/models/alpha"],
     testedAt: now,
-    routerVersion: "0.4.0-beta.4",
+    routerVersion: "0.5.0",
     checks: Object.fromEntries(
       ["streaming", "toolCall", "encryptedRelay", "markerReturn", "sameThreadFollowUp"]
         .map((name) => [name, { outcome: "pass", status: 200, observedAt: now }]),
