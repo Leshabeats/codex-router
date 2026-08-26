@@ -3,10 +3,23 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+// Discovery compares fixtures with the checked-in registry. Keep a developer's
+// locally curated models out of both this process and the child processes below
+// before model-registry.mjs resolves the overlay path at import time.
+const stateRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-model-discovery-test-"));
+const originalUserModels = process.env.MODEL_ROUTER_USER_MODELS;
+process.env.MODEL_ROUTER_USER_MODELS = path.join(stateRoot, "user-models.json");
+after(() => {
+  rmSync(stateRoot, { recursive: true, force: true });
+  if (originalUserModels === undefined) delete process.env.MODEL_ROUTER_USER_MODELS;
+  else process.env.MODEL_ROUTER_USER_MODELS = originalUserModels;
+});
+
 const { MODELS, PROVIDERS } = await import("../src/model-registry.mjs");
 const { modelCatalogMetadata } = await import("../src/model-catalog-metadata.mjs");
 const { modelContextLengths, modelIds } = await import("../src/model-discovery.mjs");
