@@ -1,5 +1,9 @@
 import { LISTED_MODELS, PROVIDERS } from "./model-registry.mjs";
-import { canonicalProviderId, readProviderSelection } from "./provider-selection.mjs";
+import {
+  canonicalProviderId,
+  configuredProviderIds,
+  readProviderSelection,
+} from "./provider-selection.mjs";
 
 const MAX_MODELS = 500;
 
@@ -38,16 +42,12 @@ function dashboardModel(model) {
  * session identifiers, request policy, and provider health error text.
  */
 export function routerDashboardState({ models } = {}) {
-  const enabled = new Set(readProviderSelection());
+  const enabled = new Set(readProviderSelection().map(canonicalProviderId));
+  const configured = new Set(configuredProviderIds().map(canonicalProviderId));
   const candidates = Array.isArray(models) ? models : LISTED_MODELS;
-  const routableProviders = new Set(
-    candidates
-      .map((model) => canonicalProviderId(model?.provider))
-      .filter(Boolean),
-  );
   const providers = [...PROVIDERS.values()]
     .filter((provider) => !provider.variantOf)
-    .filter((provider) => enabled.has(provider.id) || routableProviders.has(provider.id))
+    .filter((provider) => configured.has(provider.id))
     .map((provider) => dashboardProvider(provider, enabled.has(provider.id)));
   const safeModels = candidates
     .filter((model) => model && typeof model.slug === "string" && model.slug.trim())
