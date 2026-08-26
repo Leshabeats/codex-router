@@ -355,6 +355,20 @@ enum MenuBarActivityDotImage {
   }
 }
 
+enum MenuBarRouterMarkImage {
+  static func make(resourceName: String = "RouterMark", size: CGFloat? = nil) -> NSImage? {
+    guard
+      let url = Bundle.module.url(forResource: resourceName, withExtension: "svg"),
+      let image = NSImage(contentsOf: url)
+    else { return nil }
+    if let size {
+      image.size = NSSize(width: size, height: size)
+    }
+    image.isTemplate = true
+    return image
+  }
+}
+
 @main
 struct ModelRouterTrayApp: App {
   @NSApplicationDelegateAdaptor private var appDelegate: AppDelegate
@@ -722,8 +736,8 @@ final class RouterStore: ObservableObject {
     return hasLaunchedBefore ? .notch : .off
   }
 
-  // Missing keys keep the look that shipped before custom icons: standard
-  // width, model name on, activity dot. An explicit Settings choice always
+  // Missing keys use the compact product mark without provider/model text.
+  // An explicit Settings choice always
   // wins; garbage raw values fall through the same way island mode does.
   nonisolated static func resolveMenuBarSettings(
     storedDisplayMode: String?,
@@ -735,9 +749,9 @@ final class RouterStore: ObservableObject {
     let custom = storedCustomIconPath.flatMap { $0.isEmpty ? nil : $0 }
     let preset = storedPresetIcon.flatMap { $0.isEmpty ? nil : $0 } ?? "cpu"
     return MenuBarSettings(
-      displayMode: storedDisplayMode.flatMap(TrayMenuBarDisplayMode.init(rawValue:)) ?? .standard,
+      displayMode: storedDisplayMode.flatMap(TrayMenuBarDisplayMode.init(rawValue:)) ?? .iconOnly,
       showModelName: storedShowModelName ?? true,
-      iconStyle: storedIconStyle.flatMap(TrayMenuBarIconStyle.init(rawValue:)) ?? .indicator,
+      iconStyle: storedIconStyle.flatMap(TrayMenuBarIconStyle.init(rawValue:)) ?? .router,
       presetIcon: preset,
       customIconPath: custom
     )
@@ -4480,6 +4494,7 @@ enum TrayMenuBarDisplayMode: String, CaseIterable, Identifiable, Equatable {
 }
 
 enum TrayMenuBarIconStyle: String, CaseIterable, Identifiable, Equatable {
+  case router
   case provider
   case indicator
   case preset
@@ -4488,6 +4503,7 @@ enum TrayMenuBarIconStyle: String, CaseIterable, Identifiable, Equatable {
   var id: String { rawValue }
   var label: String {
     switch self {
+    case .router: return routerLocalized("Router mark")
     case .provider: return routerLocalized("Provider icon")
     case .indicator: return routerLocalized("Activity dot")
     case .preset: return routerLocalized("Preset icon")
@@ -4511,26 +4527,21 @@ struct MenuBarSettings: Equatable {
 enum MenuBarLayoutMetrics {
   static let standardReservedWidth: CGFloat = 180
   static let standardHeight: CGFloat = 22
-  static let iconOnlyWidth: CGFloat = 28
+  static let standardIconSize: CGFloat = 15
+  static let iconOnlyWidth: CGFloat = standardHeight
   static let iconOnlyHeight: CGFloat = 22
-  static let iconOnlyIconSize: CGFloat = 17
+  static let iconOnlyIconSize: CGFloat = standardIconSize
   static let attentionPulseScale: CGFloat = 1.4
-  static let activityBadgeSize: CGFloat = 5
-  static let activityBadgePulseScale: CGFloat = 1.6
   static let standardIndicatorPulseScale: CGFloat = 2.1
-  static let iconOnlySpacing: CGFloat = 4
 
   nonisolated static func statusItemWidth(
     displayMode: TrayMenuBarDisplayMode,
-    pulsing: Bool = false,
-    showsActivityBadge: Bool = false
+    pulsing: Bool = false
   ) -> CGFloat {
     guard displayMode == .iconOnly else { return standardReservedWidth }
     guard pulsing else { return iconOnlyWidth }
     let iconWidth = iconOnlyIconSize * attentionPulseScale
-    let badgeWidth = showsActivityBadge ? activityBadgeSize * activityBadgePulseScale : 0
-    let spacing = showsActivityBadge ? iconOnlySpacing : 0
-    return max(iconOnlyWidth, ceil(iconWidth + spacing + badgeWidth))
+    return max(iconOnlyWidth, ceil(iconWidth))
   }
 
   nonisolated static func statusItemHeight(
@@ -4541,10 +4552,6 @@ enum MenuBarLayoutMetrics {
       return standardHeight
     }
     return max(iconOnlyHeight, ceil(iconOnlyIconSize * attentionPulseScale))
-  }
-
-  nonisolated static func showsActivityBadge(iconStyle: TrayMenuBarIconStyle, isIdle: Bool) -> Bool {
-    iconStyle != .indicator && !isIdle
   }
 }
 
@@ -4716,6 +4723,19 @@ private struct MenuBarIconView: View {
 
   var body: some View {
     switch store.menuBarIconStyle {
+    case .router:
+      let resourceName = store.activityState == .idle ? "RouterMark" : "RouterMarkActive"
+      if let mark = MenuBarRouterMarkImage.make(resourceName: resourceName, size: size) {
+        Image(nsImage: mark)
+          .renderingMode(.template)
+          .foregroundStyle(Color.primary)
+          .frame(width: size, height: size)
+      } else {
+        Image(systemName: "network")
+          .font(.system(size: size, weight: .medium))
+          .foregroundStyle(Color.primary)
+          .frame(width: size, height: size)
+      }
     case .provider:
       ProviderIcon(providerID: providerID, size: size, showsHelp: false)
     case .indicator:
@@ -4757,47 +4777,29 @@ private struct StatusItemLabel: View {
 
   var body: some View {
     if store.menuBarDisplayMode == .iconOnly {
-      HStack(spacing: 4) {
-        MenuBarIconView(store: store, size: MenuBarLayoutMetrics.iconOnlyIconSize)
-          .scaleEffect(pulsing ? MenuBarLayoutMetrics.attentionPulseScale : 1)
-          .animation(.easeOut(duration: 0.45), value: pulsing)
-        let showsActivityBadge = MenuBarLayoutMetrics.showsActivityBadge(
-          iconStyle: store.menuBarIconStyle,
-          isIdle: store.activityState == .idle
-        )
-        if showsActivityBadge {
-          Image(nsImage: MenuBarActivityDotImage.make(state: store.activityState, size: MenuBarLayoutMetrics.activityBadgeSize))
-            .resizable()
-            .interpolation(.high)
-            .frame(width: MenuBarLayoutMetrics.activityBadgeSize, height: MenuBarLayoutMetrics.activityBadgeSize)
-            .scaleEffect(pulsing ? MenuBarLayoutMetrics.activityBadgePulseScale : 1)
-            .animation(.easeOut(duration: 0.45), value: pulsing)
-        }
-      }
-      .frame(
-        width: MenuBarLayoutMetrics.statusItemWidth(
-          displayMode: store.menuBarDisplayMode,
-          pulsing: pulsing,
-          showsActivityBadge: MenuBarLayoutMetrics.showsActivityBadge(
-            iconStyle: store.menuBarIconStyle,
-            isIdle: store.activityState == .idle
+      MenuBarIconView(store: store, size: MenuBarLayoutMetrics.iconOnlyIconSize)
+        .scaleEffect(pulsing ? MenuBarLayoutMetrics.attentionPulseScale : 1)
+        .animation(.easeOut(duration: 0.45), value: pulsing)
+        .frame(
+          width: MenuBarLayoutMetrics.statusItemWidth(
+            displayMode: store.menuBarDisplayMode,
+            pulsing: pulsing
+          ),
+          height: MenuBarLayoutMetrics.statusItemHeight(
+            displayMode: store.menuBarDisplayMode,
+            pulsing: pulsing
           )
-        ),
-        height: MenuBarLayoutMetrics.statusItemHeight(
-          displayMode: store.menuBarDisplayMode,
-          pulsing: pulsing
         )
-      )
-      .clipped()
-      .contentShape(Rectangle())
-      .help(tooltipText)
-      .onChange(of: store.attentionPulse) { _ in
-        pulsing = true
-        Task {
-          try? await Task.sleep(for: .milliseconds(450))
-          pulsing = false
+        .clipped()
+        .contentShape(Rectangle())
+        .help(tooltipText)
+        .onChange(of: store.attentionPulse) { _ in
+          pulsing = true
+          Task {
+            try? await Task.sleep(for: .milliseconds(450))
+            pulsing = false
+          }
         }
-      }
     } else {
       HStack(spacing: 5) {
         if store.menuBarIconStyle == .indicator {
@@ -4811,7 +4813,7 @@ private struct StatusItemLabel: View {
             .opacity(pulsing ? 0.55 : 1)
             .animation(.easeOut(duration: 0.45), value: pulsing)
         } else {
-          MenuBarIconView(store: store, size: 15)
+          MenuBarIconView(store: store, size: MenuBarLayoutMetrics.standardIconSize)
             .scaleEffect(pulsing ? MenuBarLayoutMetrics.attentionPulseScale : 1)
             .animation(.easeOut(duration: 0.45), value: pulsing)
         }
