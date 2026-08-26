@@ -223,12 +223,12 @@ const ERROR_STATUS_DURATION_MS = 8_000;
 const configuredDecodedBodyBytes = Number(
   process.env.MODEL_ROUTER_MAX_DECODED_BODY_BYTES ||
     process.env.CODEX_ROUTER_MAX_DECODED_BODY_BYTES ||
-    64 * 1024 * 1024,
+    256 * 1024 * 1024,
 );
 const MAX_DECODED_BODY_BYTES =
   Number.isFinite(configuredDecodedBodyBytes) && configuredDecodedBodyBytes > 0
     ? Math.floor(configuredDecodedBodyBytes)
-    : 64 * 1024 * 1024;
+    : 256 * 1024 * 1024;
 const configuredActiveRequests = Number(
   process.env.MODEL_ROUTER_MAX_ACTIVE_REQUESTS ||
     process.env.CODEX_ROUTER_MAX_ACTIVE_REQUESTS ||
@@ -238,18 +238,32 @@ export const MAX_ACTIVE_REQUESTS =
   Number.isFinite(configuredActiveRequests) && configuredActiveRequests > 0
     ? Math.floor(configuredActiveRequests)
     : 64;
-// No single Codex turn streams for this long. Anything still marked in-flight
-// past this point leaked (crashed client, half-closed socket) and would
-// otherwise inflate the tray activity count until the router restarts.
-const configuredStaleActivityMs = Number(
-  process.env.MODEL_ROUTER_STALE_ACTIVITY_MS ||
-    process.env.CODEX_ROUTER_STALE_ACTIVITY_MS ||
+// This bounds only the tray's activity records. It must not cancel an operation
+// or release its admission slot: a healthy SSE turn can outlive presentation
+// bookkeeping and still retain real buffers and an upstream connection.
+const configuredActivityRecordRetentionMs = Number(
+  process.env.MODEL_ROUTER_ACTIVITY_RECORD_RETENTION_MS ||
+    process.env.CODEX_ROUTER_ACTIVITY_RECORD_RETENTION_MS ||
     15 * 60_000,
 );
-const STALE_ACTIVITY_MS =
-  Number.isFinite(configuredStaleActivityMs) && configuredStaleActivityMs > 0
-    ? Math.floor(configuredStaleActivityMs)
+const ACTIVITY_RECORD_RETENTION_MS =
+  Number.isFinite(configuredActivityRecordRetentionMs) &&
+  configuredActivityRecordRetentionMs > 0
+    ? Math.floor(configuredActivityRecordRetentionMs)
     : 15 * 60_000;
+// Execution has its own deliberately conservative deadline. Keeping it
+// independent from tray retention prevents a 15-minute accounting cleanup from
+// becoming a compatibility-breaking timeout for long reasoning or SSE turns.
+const configuredRequestExecutionTimeoutMs = Number(
+  process.env.MODEL_ROUTER_REQUEST_EXECUTION_TIMEOUT_MS ||
+    process.env.CODEX_ROUTER_REQUEST_EXECUTION_TIMEOUT_MS ||
+    24 * 60 * 60_000,
+);
+const REQUEST_EXECUTION_TIMEOUT_MS =
+  Number.isFinite(configuredRequestExecutionTimeoutMs) &&
+  configuredRequestExecutionTimeoutMs > 0
+    ? Math.floor(configuredRequestExecutionTimeoutMs)
+    : 24 * 60 * 60_000;
 const NATIVE_IMAGE_PATHS = new Set([
   "/images/edits",
   "/images/generations",
@@ -281,7 +295,8 @@ const agentPayloadCacheMetrics = {
 };
 
 let requestSequence = 0;
-const activeRequests = new Map();
+const activityRecords = new Map();
+const inFlightRequests = new Map();
 let lastUsedProvider;
 let lastUsedModel;
 let lastUsedSessionName;
@@ -290,17 +305,17 @@ let errorStatusUntil = 0;
 if (!INTERNAL_KEY) throw new Error("CODEX_ROUTER_INTERNAL_KEY is required.");
 assertCallerSecret(CALLER_KEY);
 
-function pruneStaleActivity(now = Date.now()) {
-  for (const entry of activeRequests.values()) {
-    if (now - (entry?.startedAt ?? 0) > STALE_ACTIVITY_MS) {
-      entry.abortStale?.();
+function pruneExpiredActivityRecords(now = Date.now()) {
+  for (const [requestId, entry] of activityRecords) {
+    if (now - (entry?.startedAt ?? 0) > ACTIVITY_RECORD_RETENTION_MS) {
+      activityRecords.delete(requestId);
     }
   }
 }
 
 function activityPayload() {
-  pruneStaleActivity();
-  const active = [...activeRequests.values()].filter(
+  pruneExpiredActivityRecords();
+  const active = [...activityRecords.values()].filter(
     (entry) => entry && typeof entry === "object" && entry.provider,
   );
   const latest = active.at(-1);
@@ -309,12 +324,12 @@ function activityPayload() {
   const sessionName = latest?.sessionName || lastUsedSessionName;
   return {
     state:
-      activeRequests.size > 0
+      activityRecords.size > 0
         ? "generating"
         : Date.now() < errorStatusUntil
           ? "error"
           : "idle",
-    activeCount: activeRequests.size,
+    activeCount: activityRecords.size,
     active,
     ...(provider ? { provider } : {}),
     ...(model ? { model } : {}),
@@ -322,11 +337,13 @@ function activityPayload() {
   };
 }
 
-function retentionPayload() {
+function resourceLimitsPayload() {
   purgeExpiredAgentPayloads();
   return {
-    activeRequests: activeRequests.size,
+    inFlightRequests: inFlightRequests.size,
     maxActiveRequests: MAX_ACTIVE_REQUESTS,
+    activityRecordRetentionMs: ACTIVITY_RECORD_RETENTION_MS,
+    requestExecutionTimeoutMs: REQUEST_EXECUTION_TIMEOUT_MS,
     maxDecodedBodyBytes: MAX_DECODED_BODY_BYTES,
     maxBufferedResponseBytes: MAX_BUFFERED_RESPONSE_BYTES,
     agentPayloadCache: {
@@ -342,8 +359,8 @@ function retentionPayload() {
 }
 
 function beginRequestActivity({ request, response, controller } = {}) {
-  pruneStaleActivity();
-  if (activeRequests.size >= MAX_ACTIVE_REQUESTS) {
+  pruneExpiredActivityRecords();
+  if (inFlightRequests.size >= MAX_ACTIVE_REQUESTS) {
     request?.resume?.();
     const error = new Error(
       `The router is at its active request limit (${MAX_ACTIVE_REQUESTS}).`,
@@ -355,35 +372,43 @@ function beginRequestActivity({ request, response, controller } = {}) {
   const requestId = ++requestSequence;
   const startedAt = Date.now();
   let finished = false;
-  let stale = false;
-  let staleTimer;
+  let deadlineExceeded = false;
+  let executionTimer;
   const finish = (status) => {
     if (finished) return;
     finished = true;
-    if (staleTimer) clearTimeout(staleTimer);
-    activeRequests.delete(requestId);
+    if (executionTimer) clearTimeout(executionTimer);
+    activityRecords.delete(requestId);
+    inFlightRequests.delete(requestId);
     if (status >= 400) errorStatusUntil = Date.now() + ERROR_STATUS_DURATION_MS;
   };
-  const abortStale = () => {
-    if (finished || stale) return;
-    stale = true;
-    const error = new Error("Router request exceeded its stale activity limit.");
-    error.code = "ERR_ROUTER_STALE_REQUEST";
+  const abortAtExecutionDeadline = () => {
+    if (finished || deadlineExceeded) return;
+    deadlineExceeded = true;
+    const error = new Error("Router request exceeded its execution deadline.");
+    error.code = "ERR_ROUTER_REQUEST_TIMEOUT";
     error.status = 504;
     controller?.abort(error);
     request?.resume?.();
-    // Keep the activity entry until the handler's catch/finally path has
-    // settled the aborted operation and usage. Removing it here would make
-    // health report an idle router while the request still retains buffers.
+    // Keep the in-flight entry until the handler has released the upstream,
+    // buffers, and usage path. The timer marks the deadline; `finish` releases
+    // accounting only after the aborted operation has actually settled.
   };
-  staleTimer = setTimeout(abortStale, STALE_ACTIVITY_MS + 1);
-  staleTimer.unref?.();
-  activeRequests.set(requestId, { startedAt, abortStale });
+  executionTimer = setTimeout(
+    abortAtExecutionDeadline,
+    REQUEST_EXECUTION_TIMEOUT_MS + 1,
+  );
+  executionTimer.unref?.();
+  inFlightRequests.set(requestId, { startedAt });
+  activityRecords.set(requestId, { startedAt });
   return {
     setRoute({ provider, model, sessionName, ...metadata } = {}) {
       if (!provider || finished) return;
+      // Once presentation bookkeeping expires, later route updates must not
+      // resurrect it. The operation remains counted in `inFlightRequests`.
+      if (!activityRecords.has(requestId)) return;
       const entry = {
-        ...(activeRequests.get(requestId) || {}),
+        ...(activityRecords.get(requestId) || {}),
         id: String(requestId),
         provider,
         ...(model ? { model } : {}),
@@ -391,13 +416,13 @@ function beginRequestActivity({ request, response, controller } = {}) {
         ...metadata,
         startedAt,
       };
-      activeRequests.set(requestId, entry);
+      activityRecords.set(requestId, entry);
       lastUsedProvider = provider;
       if (model) lastUsedModel = model;
       if (sessionName) lastUsedSessionName = sessionName;
     },
     finish,
-    wasStale: () => stale,
+    deadlineExceeded: () => deadlineExceeded,
   };
 }
 
@@ -999,7 +1024,7 @@ async function healthPayload() {
     router: "ready",
     degraded,
     activity: activityPayload(),
-    retention: retentionPayload(),
+    resources: resourceLimitsPayload(),
     oauth,
     api,
     grokOauth,
@@ -1180,14 +1205,36 @@ function parseRelayedAgentPayloadSse(bytes) {
   return undefined;
 }
 
-function agentPayloadCacheKey(encrypted) {
-  return createHash("sha256").update(encrypted).digest("base64url");
+function nativeRelayContext(request) {
+  const headers = nativeHeaders(request);
+  const authorization =
+    typeof headers.authorization === "string" ? headers.authorization : "";
+  const account = nativeAccountKey(headers);
+  // The digest is an in-memory partition key only. It prevents a cache hit or
+  // coalesced relay from bypassing the native authorization check for another
+  // resolved credential/account pair without retaining either identifier.
+  const accountScope = createHash("sha256")
+    .update(authorization)
+    .update("\0")
+    .update(account)
+    .digest("base64url");
+  return { accountScope, headers };
 }
 
-function eraseAgentPayload(key, { expired = false, evicted = false } = {}) {
+function agentPayloadCacheKey(encrypted, accountScope) {
+  return createHash("sha256")
+    .update(accountScope)
+    .update("\0")
+    .update(encrypted)
+    .digest("base64url");
+}
+
+function evictAgentPayload(key, { expired = false, evicted = false } = {}) {
   const entry = agentPayloadCache.get(key);
   if (!entry) return;
   const bytes = entry.bytes || 0;
+  // Drop the retained reference eagerly. JavaScript strings cannot be securely
+  // erased, so this is cache eviction and must never be described otherwise.
   entry.plaintext = "";
   entry.bytes = 0;
   agentPayloadCache.delete(key);
@@ -1198,12 +1245,11 @@ function eraseAgentPayload(key, { expired = false, evicted = false } = {}) {
 
 function purgeExpiredAgentPayloads(now = Date.now()) {
   for (const [key, entry] of agentPayloadCache) {
-    if (entry.expiresAt <= now) eraseAgentPayload(key, { expired: true });
+    if (entry.expiresAt <= now) evictAgentPayload(key, { expired: true });
   }
 }
 
-function cachedAgentPayload(encrypted) {
-  const key = agentPayloadCacheKey(encrypted);
+function cachedAgentPayload(key) {
   purgeExpiredAgentPayloads();
   const entry = agentPayloadCache.get(key);
   if (!entry) {
@@ -1216,11 +1262,10 @@ function cachedAgentPayload(encrypted) {
   return entry.plaintext;
 }
 
-function rememberAgentPayload(encrypted, plaintext) {
+function rememberAgentPayload(key, plaintext) {
   purgeExpiredAgentPayloads();
-  const key = agentPayloadCacheKey(encrypted);
   const existing = agentPayloadCache.get(key);
-  if (existing) eraseAgentPayload(key);
+  if (existing) evictAgentPayload(key);
   const bytes = Buffer.byteLength(plaintext, "utf8");
   agentPayloadCache.set(key, {
     plaintext,
@@ -1233,7 +1278,7 @@ function rememberAgentPayload(encrypted, plaintext) {
     agentPayloadCacheBytes > AGENT_PAYLOAD_CACHE_MAX_BYTES
   ) {
     const oldestKey = agentPayloadCache.keys().next().value;
-    eraseAgentPayload(oldestKey, { evicted: true });
+    evictAgentPayload(oldestKey, { evicted: true });
   }
 }
 
@@ -1243,7 +1288,12 @@ const agentPayloadCachePurgeTimer = setInterval(
 );
 agentPayloadCachePurgeTimer.unref?.();
 
-async function relayEncryptedAgentPayloadOnce(request, item, encrypted, signal) {
+async function relayEncryptedAgentPayloadOnce(
+  item,
+  cacheKey,
+  headers,
+  signal,
+) {
   const body = {
     model: nativeAgentRelayModel(),
     stream: true,
@@ -1271,7 +1321,7 @@ async function relayEncryptedAgentPayloadOnce(request, item, encrypted, signal) 
   };
   const upstream = await fetch(nativeTarget("/responses", ""), {
     method: "POST",
-    headers: { ...nativeHeaders(request), Accept: "text/event-stream" },
+    headers: { ...headers, Accept: "text/event-stream" },
     body: JSON.stringify(body),
     signal,
   });
@@ -1308,28 +1358,79 @@ async function relayEncryptedAgentPayloadOnce(request, item, encrypted, signal) 
     error.status = 502;
     throw error;
   }
-  rememberAgentPayload(encrypted, plaintext);
+  rememberAgentPayload(cacheKey, plaintext);
   return plaintext;
 }
 
+function relayWaiterAbortReason(signal) {
+  if (signal?.reason instanceof Error) return signal.reason;
+  const error = new Error("The relay waiter was aborted.");
+  error.name = "AbortError";
+  return error;
+}
+
+function waitForAgentPayloadRelay(pending, signal) {
+  pending.waiters += 1;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => signal?.removeEventListener("abort", onAbort);
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback(value);
+    };
+    const onAbort = () => finish(reject, relayWaiterAbortReason(signal));
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+    pending.promise.then(
+      (value) => finish(resolve, value),
+      (error) => finish(reject, error),
+    );
+  }).finally(() => {
+    pending.waiters = Math.max(0, pending.waiters - 1);
+    if (pending.waiters === 0 && !pending.settled) {
+      pending.controller.abort(new Error("Every relay waiter disconnected."));
+    }
+  });
+}
+
 async function relayEncryptedAgentPayload(request, item, encrypted, signal) {
-  const cached = cachedAgentPayload(encrypted);
+  const { accountScope, headers } = nativeRelayContext(request);
+  const key = agentPayloadCacheKey(encrypted, accountScope);
+  const cached = cachedAgentPayload(key);
   if (cached !== undefined) return cached;
-  const key = agentPayloadCacheKey(encrypted);
   const pending = agentPayloadCacheInFlight.get(key);
   if (pending) {
     agentPayloadCacheMetrics.coalesced += 1;
-    return pending;
+    return waitForAgentPayloadRelay(pending, signal);
   }
-  const operation = relayEncryptedAgentPayloadOnce(request, item, encrypted, signal);
-  agentPayloadCacheInFlight.set(key, operation);
-  try {
-    return await operation;
-  } finally {
+  const controller = new AbortController();
+  const operation = {
+    controller,
+    promise: undefined,
+    settled: false,
+    waiters: 0,
+  };
+  operation.promise = relayEncryptedAgentPayloadOnce(
+    item,
+    key,
+    headers,
+    controller.signal,
+  ).finally(() => {
+    operation.settled = true;
     if (agentPayloadCacheInFlight.get(key) === operation) {
       agentPayloadCacheInFlight.delete(key);
     }
-  }
+  });
+  // If every waiter disconnects, the shared operation is aborted and may
+  // reject after nobody remains to await it. Mark that rejection observed.
+  operation.promise.catch(() => {});
+  agentPayloadCacheInFlight.set(key, operation);
+  return waitForAgentPayloadRelay(operation, signal);
 }
 
 async function normalizeRoutedAgentInput(request, input, signal) {
@@ -3561,7 +3662,7 @@ async function handleResponses(request, response, requestUrl) {
     }
   } catch (error) {
     upstreamLatencyMs ??= Date.now() - startedAt;
-    if (activity.wasStale()) {
+    if (activity.deadlineExceeded()) {
       finalStatus = 504;
       activityStatus = 504;
       if (!usageRecorded) {
@@ -3571,20 +3672,20 @@ async function handleResponses(request, response, requestUrl) {
           status: 504,
           durationMs: Date.now() - startedAt,
           responseStartMs: upstreamLatencyMs,
-          staleRequest: true,
+          requestDeadlineExceeded: true,
         });
         usageRecorded = true;
       }
       if (!response.headersSent) {
         writeJson(response, 504, {
           error: {
-            type: "router_stale_request",
-            message: "The router canceled a request that exceeded its retention limit.",
+            type: "router_request_timeout",
+            message: "The router canceled a request that exceeded its execution deadline.",
           },
         });
       } else {
         endStreamedResponse(response, {
-          message: "The router canceled a request that exceeded its retention limit.",
+          message: "The router canceled a request that exceeded its execution deadline.",
         });
       }
       return;
@@ -3796,18 +3897,18 @@ async function handleNativeRequest(request, response, requestUrl, defaultModel) 
       );
     }
   } catch (error) {
-    if (activity.wasStale()) {
+    if (activity.deadlineExceeded()) {
       const status = 504;
       if (!response.headersSent) {
         writeJson(response, status, {
           error: {
-            type: "router_stale_request",
-            message: "The router canceled a request that exceeded its retention limit.",
+            type: "router_request_timeout",
+            message: "The router canceled a request that exceeded its execution deadline.",
           },
         });
       } else {
         endStreamedResponse(response, {
-          message: "The router canceled a request that exceeded its retention limit.",
+          message: "The router canceled a request that exceeded its execution deadline.",
         });
       }
       recordUsageEvent({
@@ -3816,7 +3917,7 @@ async function handleNativeRequest(request, response, requestUrl, defaultModel) 
         status,
         durationMs: Date.now() - startedAt,
         ...(response.headersSent ? { streamAborted: true } : {}),
-        staleRequest: true,
+        requestDeadlineExceeded: true,
       });
       activity.finish(status);
       return;

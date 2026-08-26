@@ -2,7 +2,15 @@ import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 import test from "node:test";
 
-import { readRequestBody, readResponseBody } from "../src/http-utils.mjs";
+import {
+  MAX_BODY_BYTES,
+  readRequestBody,
+  readResponseBody,
+} from "../src/http-utils.mjs";
+
+test("request body handling keeps the established 64 MiB compatibility ceiling", () => {
+  assert.equal(MAX_BODY_BYTES, 64 * 1024 * 1024);
+});
 
 test("an oversized request is rejected without retaining or abandoning its tail", async () => {
   const request = Readable.from([Buffer.from("1234"), Buffer.from("5678")]);

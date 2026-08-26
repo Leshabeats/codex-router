@@ -130,9 +130,9 @@ export function recordUsageEvent({
   // for the provider having recovered -- and a run of these events is the
   // signal that it has not.
   estimatedInputTokens,
-  // True when the router canceled a request that exceeded its stale retention
-  // deadline before releasing the activity slot.
-  staleRequest,
+  // True when the router canceled a request at its separately configured
+  // execution deadline. Activity-record retention never sets this field.
+  requestDeadlineExceeded,
   // Present only when the routed request compacted old results or pressure-
   // shaped noisy results. Counts and bytes describe the request sent upstream,
   // never the result contents themselves.
@@ -181,7 +181,7 @@ export function recordUsageEvent({
     ...(emptyCompletionGuardReleased === true
       ? { emptyCompletionGuardReleased: true }
       : {}),
-    ...(staleRequest === true ? { staleRequest: true } : {}),
+    ...(requestDeadlineExceeded === true ? { requestDeadlineExceeded: true } : {}),
     ...(emptyCompletionPreludeLimit === "bytes" ||
     emptyCompletionPreludeLimit === "time"
       ? { emptyCompletionPreludeLimit }

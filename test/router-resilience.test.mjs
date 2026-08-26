@@ -105,6 +105,48 @@ async function closeServer(server) {
   await new Promise((resolve) => server.close(resolve));
 }
 
+function relayEventStream(payload) {
+  const argumentsText = JSON.stringify({ payload });
+  const events = [
+    {
+      type: "response.output_item.added",
+      item: {
+        type: "function_call",
+        id: "fc_relay",
+        name: "relay_external_agent_payload",
+        arguments: "",
+      },
+    },
+    {
+      type: "response.function_call_arguments.done",
+      item_id: "fc_relay",
+      arguments: argumentsText,
+    },
+  ];
+  return `${events
+    .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+    .join("")}data: [DONE]\n\n`;
+}
+
+function encryptedRelayBody(encrypted = "gAAAAA-shared-payload=") {
+  return {
+    model: "deepseek/deepseek-v4-pro",
+    stream: false,
+    input: [
+      {
+        type: "agent_message",
+        content: [
+          {
+            type: "input_text",
+            text: "Message Type: NEW_TASK\nTask name: /root/critic\nSender: /root\nPayload:\n",
+          },
+          { type: "encrypted_content", encrypted_content: encrypted },
+        ],
+      },
+    ],
+  };
+}
+
 // Read the routed turn with the raw client so a socket reset stays
 // distinguishable from a complete message. A reset mid-chunked-body leaves
 // `response.complete` false, which is the transport failure a reqwest client
@@ -230,7 +272,7 @@ test("a gateway that dies mid-stream ends the routed body and logs the cause", a
   }
 });
 
-test("stale activity aborts the operation before releasing its accounting slot", async () => {
+test("the execution deadline aborts before releasing the in-flight slot", async () => {
   let upstreamAborted = false;
   const gateway = await mockServer(async (request, response) => {
     if (request.method === "GET" && request.url === "/health") {
@@ -253,7 +295,7 @@ test("stale activity aborts the operation before releasing its accounting slot",
   const routerPort = await openPort();
   const router = run({
     CODEX_ROUTER_PORT: String(routerPort),
-    CODEX_ROUTER_STALE_ACTIVITY_MS: "80",
+    CODEX_ROUTER_REQUEST_EXECUTION_TIMEOUT_MS: "80",
     CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
     CODEX_ROUTER_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
     CODEX_ROUTER_API_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
@@ -268,17 +310,17 @@ test("stale activity aborts the operation before releasing its accounting slot",
         Authorization: "Bearer codex-caller-auth",
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ model: "deepseek/deepseek-v4-pro", input: "stale" }),
+      body: JSON.stringify({ model: "deepseek/deepseek-v4-pro", input: "deadline" }),
     });
     const responseBody = await response.json();
     assert.equal(response.status, 504, JSON.stringify(responseBody));
-    assert.equal(responseBody.error.type, "router_stale_request");
+    assert.equal(responseBody.error.type, "router_request_timeout");
     const health = await fetch(`${callerBaseUrl(routerPort, CALLER_KEY)}/health`).then((r) => r.json());
-    assert.equal(health.retention.activeRequests, 0);
+    assert.equal(health.resources.inFlightRequests, 0);
     assert.equal(health.activity.state, "error");
     const events = await waitForUsageEvents(router.stateDir, 1, router);
     assert.equal(events[0].status, 504);
-    assert.equal(events[0].staleRequest, true);
+    assert.equal(events[0].requestDeadlineExceeded, true);
     const abortDeadline = Date.now() + 1_000;
     while (!upstreamAborted && Date.now() < abortDeadline) {
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -292,31 +334,72 @@ test("stale activity aborts the operation before releasing its accounting slot",
   }
 });
 
+test("activity record retention never cancels or releases a live request", async () => {
+  let requestStarted;
+  const started = new Promise((resolve) => {
+    requestStarted = resolve;
+  });
+  const gateway = await mockServer(async (request, response) => {
+    if (request.method === "GET" && request.url === "/health") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    requestStarted();
+    await new Promise((resolve) => setTimeout(resolve, 160));
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ id: "long-lived", object: "response", output: [] }));
+  });
+  const routerPort = await openPort();
+  const router = run({
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_ACTIVITY_RECORD_RETENTION_MS: "40",
+    CODEX_ROUTER_REQUEST_EXECUTION_TIMEOUT_MS: "1000",
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_API_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_GROK_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_GATEWAY_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+  });
+  try {
+    await waitFor(`http://127.0.0.1:${routerPort}/health`, router);
+    const pending = fetch(`${callerBaseUrl(routerPort, CALLER_KEY)}/responses`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer codex-caller-auth",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ model: "deepseek/deepseek-v4-pro", input: "long" }),
+    });
+    await started;
+
+    const retentionDeadline = Date.now() + 1_000;
+    let health;
+    do {
+      health = await fetch(`${callerBaseUrl(routerPort, CALLER_KEY)}/health`).then((r) => r.json());
+      if (health.activity.activeCount === 0) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    } while (Date.now() < retentionDeadline);
+    assert.equal(health.activity.activeCount, 0);
+    assert.equal(health.resources.inFlightRequests, 1);
+
+    const response = await pending;
+    assert.equal(response.status, 200, await response.text());
+    const settled = await fetch(`${callerBaseUrl(routerPort, CALLER_KEY)}/health`).then((r) => r.json());
+    assert.equal(settled.resources.inFlightRequests, 0);
+  } finally {
+    await stopChild(router);
+    await closeServer(gateway.server);
+  }
+});
+
 test("same encrypted payload shares one relay and expiry removes the retained plaintext", async () => {
   let nativeRequests = 0;
   const native = await mockServer(async (_request, response) => {
     nativeRequests += 1;
     await new Promise((resolve) => setTimeout(resolve, 60));
-    const argumentsText = JSON.stringify({ payload: "coalesced payload" });
-    const added = {
-      type: "response.output_item.added",
-      item: {
-        type: "function_call",
-        id: "fc_relay",
-        name: "relay_external_agent_payload",
-        arguments: "",
-      },
-    };
-    const done = {
-      type: "response.function_call_arguments.done",
-      item_id: "fc_relay",
-      arguments: argumentsText,
-    };
-    const body = [added, done]
-      .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
-      .join("") + "data: [DONE]\n\n";
     response.writeHead(200, { "Content-Type": "text/event-stream" });
-    response.end(body);
+    response.end(relayEventStream("coalesced payload"));
   });
   const gateway = await mockServer(async (request, response) => {
     if (request.method === "GET" && request.url === "/health") {
@@ -356,6 +439,7 @@ test("same encrypted payload shares one relay and expiry removes the retained pl
   };
   const headers = {
     Authorization: "Bearer CHATGPT_SESSION_TOKEN",
+    "ChatGPT-Account-Id": "account-a",
     "Content-Type": "application/json",
   };
   try {
@@ -376,14 +460,159 @@ test("same encrypted payload shares one relay and expiry removes the retained pl
     assert.equal(second.status, 200, await second.text());
     assert.equal(nativeRequests, 1);
     const retained = await fetch(`${callerBaseUrl(routerPort, CALLER_KEY)}/health`).then((r) => r.json());
-    assert.equal(retained.retention.agentPayloadCache.entries, 1);
-    assert.ok(retained.retention.agentPayloadCache.coalesced >= 1);
+    assert.equal(retained.resources.maxDecodedBodyBytes, 256 * 1024 * 1024);
+    assert.equal(retained.resources.agentPayloadCache.entries, 1);
+    assert.ok(retained.resources.agentPayloadCache.coalesced >= 1);
     await new Promise((resolve) => setTimeout(resolve, 80));
     const expired = await fetch(`${callerBaseUrl(routerPort, CALLER_KEY)}/health`).then((r) => r.json());
-    assert.equal(expired.retention.agentPayloadCache.entries, 0);
-    assert.equal(expired.retention.agentPayloadCache.bytes, 0);
-    assert.ok(expired.retention.agentPayloadCache.expirations >= 1);
+    assert.equal(expired.resources.agentPayloadCache.entries, 0);
+    assert.equal(expired.resources.agentPayloadCache.bytes, 0);
+    assert.ok(expired.resources.agentPayloadCache.expirations >= 1);
   } finally {
+    await stopChild(router);
+    await Promise.all([closeServer(native.server), closeServer(gateway.server)]);
+  }
+});
+
+test("same ciphertext never coalesces or caches across native accounts", async () => {
+  const nativeRequests = [];
+  const native = await mockServer(async (request, response) => {
+    nativeRequests.push({
+      account: request.headers["chatgpt-account-id"],
+      authorization: request.headers.authorization,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    response.end(relayEventStream(`payload for ${request.headers["chatgpt-account-id"]}`));
+  });
+  let gatewayRequests = 0;
+  const gateway = await mockServer(async (request, response) => {
+    if (request.method === "GET" && request.url === "/health") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    gatewayRequests += 1;
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ id: "account-scoped", output: [] }));
+  });
+  const routerPort = await openPort();
+  const router = run({
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_NATIVE_BASE_URL: `http://127.0.0.1:${native.port}/backend-api/codex`,
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_API_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_GROK_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_GATEWAY_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+  });
+  const body = JSON.stringify(encryptedRelayBody("gAAAAA-account-boundary="));
+  const requestFor = (account) =>
+    fetch(`${callerBaseUrl(routerPort, CALLER_KEY)}/responses`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer session-${account}`,
+        "ChatGPT-Account-Id": account,
+        "Content-Type": "application/json",
+      },
+      body,
+    });
+  try {
+    await waitFor(`http://127.0.0.1:${routerPort}/health`, router);
+    const [first, second] = await Promise.all([
+      requestFor("account-a"),
+      requestFor("account-b"),
+    ]);
+    assert.equal(first.status, 200, await first.text());
+    assert.equal(second.status, 200, await second.text());
+    assert.equal(gatewayRequests, 2);
+    assert.deepEqual(
+      nativeRequests
+        .map(({ account, authorization }) => `${account}:${authorization}`)
+        .sort(),
+      ["account-a:Bearer session-account-a", "account-b:Bearer session-account-b"],
+    );
+  } finally {
+    await stopChild(router);
+    await Promise.all([closeServer(native.server), closeServer(gateway.server)]);
+  }
+});
+
+test("canceling one coalesced relay waiter does not abort another", async () => {
+  let nativeRequests = 0;
+  let nativeAborted = false;
+  let relayStarted;
+  const started = new Promise((resolve) => {
+    relayStarted = resolve;
+  });
+  const native = await mockServer(async (request, response) => {
+    nativeRequests += 1;
+    request.once("aborted", () => {
+      nativeAborted = true;
+    });
+    relayStarted();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    response.end(relayEventStream("shared result"));
+  });
+  const gateway = await mockServer(async (request, response) => {
+    if (request.method === "GET" && request.url === "/health") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ id: "surviving-waiter", output: [] }));
+  });
+  const routerPort = await openPort();
+  const router = run({
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_NATIVE_BASE_URL: `http://127.0.0.1:${native.port}/backend-api/codex`,
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_API_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_GROK_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_GATEWAY_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+  });
+  const controller = new AbortController();
+  const headers = {
+    Authorization: "Bearer shared-session",
+    "ChatGPT-Account-Id": "shared-account",
+    "Content-Type": "application/json",
+  };
+  const body = JSON.stringify(encryptedRelayBody("gAAAAA-cancel-boundary="));
+  try {
+    await waitFor(`http://127.0.0.1:${routerPort}/health`, router);
+    const first = fetch(`${callerBaseUrl(routerPort, CALLER_KEY)}/responses`, {
+      method: "POST",
+      headers,
+      body,
+      signal: controller.signal,
+    }).catch((error) => error);
+    await started;
+    const second = fetch(`${callerBaseUrl(routerPort, CALLER_KEY)}/responses`, {
+      method: "POST",
+      headers,
+      body,
+    });
+
+    const coalescingDeadline = Date.now() + 1_000;
+    let health;
+    do {
+      health = await fetch(`${callerBaseUrl(routerPort, CALLER_KEY)}/health`).then((r) => r.json());
+      if (health.resources.agentPayloadCache.coalesced >= 1) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    } while (Date.now() < coalescingDeadline);
+    assert.ok(health.resources.agentPayloadCache.coalesced >= 1);
+
+    controller.abort();
+    assert.ok((await first) instanceof Error);
+    const surviving = await second;
+    assert.equal(surviving.status, 200, await surviving.text());
+    assert.equal(nativeRequests, 1);
+    assert.equal(nativeAborted, false);
+  } finally {
+    controller.abort();
     await stopChild(router);
     await Promise.all([closeServer(native.server), closeServer(gateway.server)]);
   }
