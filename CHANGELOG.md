@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Grok 4.6 ships on opencode Go.** OpenCode's current Go list and endpoint
+  table publish `grok-4.6` on `/zen/go/v1/responses` (not chat, not messages).
+  The checked-in route is `opencode-go-responses/grok-4.6`, 500,000 context
+  with auto-compact at 440,000, text+image, and the low/medium/high/xhigh
+  ladder models.dev publishes for this id, defaulting to high. No Free twin
+  exists. Grok 4.5 stays on the same Responses variant.
+
 - **Nous Research now lists ~27 new models including Hermes 4, free portal
   routes, and coding flagships.** The checked-in registry adds
   `nousresearch/hermes-4-405b` and `nousresearch/hermes-4-70b`, six free-tier
