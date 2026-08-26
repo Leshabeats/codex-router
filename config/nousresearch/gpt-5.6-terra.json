@@ -10,7 +10,7 @@
       "displayName": "GPT-5.6 Terra (Nous Research)",
       "description": "OpenAI GPT-5.6 Terra through the Nous Portal.",
       "priority": 75,
-      "defaultEffort": "high",
+      "defaultEffort": "medium",
       "reasoningLevels": [
         {
           "effort": "low",
@@ -23,6 +23,14 @@
         {
           "effort": "high",
           "description": "Deep reasoning"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Extra deep reasoning"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum reasoning depth"
         }
       ],
       "contextWindow": 1050000,

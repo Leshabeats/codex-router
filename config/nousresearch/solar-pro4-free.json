@@ -13,20 +13,12 @@
       "defaultEffort": "high",
       "reasoningLevels": [
         {
-          "effort": "low",
-          "description": "Faster reasoning"
-        },
-        {
-          "effort": "medium",
-          "description": "Balanced reasoning"
-        },
-        {
           "effort": "high",
           "description": "Deep reasoning"
         }
       ],
       "contextWindow": 524288,
-      "autoCompact": 472000,
+      "autoCompact": 471859,
       "inputModalities": [
         "text"
       ],

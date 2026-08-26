@@ -17,16 +17,12 @@
           "description": "Faster reasoning"
         },
         {
-          "effort": "medium",
-          "description": "Balanced reasoning"
-        },
-        {
           "effort": "high",
           "description": "Deep reasoning"
         }
       ],
       "contextWindow": 131072,
-      "autoCompact": 118000,
+      "autoCompact": 117964,
       "inputModalities": [
         "text"
       ],

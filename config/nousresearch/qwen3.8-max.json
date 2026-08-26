@@ -10,8 +10,12 @@
       "displayName": "Qwen 3.8 Max (Nous Research)",
       "description": "Qwen 3.8 Max through the Nous Portal.",
       "priority": 84,
-      "defaultEffort": "high",
+      "defaultEffort": "xhigh",
       "reasoningLevels": [
+        {
+          "effort": "minimal",
+          "description": "Minimal reasoning"
+        },
         {
           "effort": "low",
           "description": "Faster reasoning"
@@ -23,6 +27,10 @@
         {
           "effort": "high",
           "description": "Deep reasoning"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Maximum reasoning depth"
         }
       ],
       "contextWindow": 1000000,

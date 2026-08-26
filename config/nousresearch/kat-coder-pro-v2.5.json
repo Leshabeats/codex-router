@@ -13,14 +13,6 @@
       "defaultEffort": "high",
       "reasoningLevels": [
         {
-          "effort": "low",
-          "description": "Faster reasoning"
-        },
-        {
-          "effort": "medium",
-          "description": "Balanced reasoning"
-        },
-        {
           "effort": "high",
           "description": "Deep reasoning"
         }

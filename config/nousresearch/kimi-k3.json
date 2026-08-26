@@ -10,19 +10,19 @@
       "displayName": "Kimi K3 (Nous Research)",
       "description": "Moonshot Kimi K3 through the Nous Portal.",
       "priority": 86,
-      "defaultEffort": "high",
+      "defaultEffort": "max",
       "reasoningLevels": [
         {
           "effort": "low",
           "description": "Faster reasoning"
         },
         {
-          "effort": "medium",
-          "description": "Balanced reasoning"
-        },
-        {
           "effort": "high",
           "description": "Deep reasoning"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum reasoning depth"
         }
       ],
       "contextWindow": 1048576,
