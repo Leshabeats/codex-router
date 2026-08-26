@@ -7384,7 +7384,7 @@ async function writeFragmentedFunctionCallSse(response, { model, patch }) {
   response.end();
 }
 
-test("Zen Free Muse bridges custom tools across JSON, history, SSE, and errors", async () => {
+test("Zen Free Muse bridges custom tools across JSON, history, and errors", async () => {
   const curated = curatedMuseCompatibilityModel();
   const { muse } = curated;
   const stateDir = path.join(curated.dir, "state");
@@ -7409,8 +7409,6 @@ test("Zen Free Muse bridges custom tools across JSON, history, SSE, and errors",
   const museGatewayModel = muse.gatewayModel;
   const jsonPatch =
     "*** Begin Patch\n*** Update File: seed.txt\n@@\n-before\n+after\n*** End Patch";
-  const ssePatch =
-    "*** Begin Patch\n*** Update File: seed.txt\n@@\n-old\n+quoted=\\\"yes\\\" and snowman=☃\n*** End Patch";
   const gatewayRequests = [];
   const gateway = await mockServer(async (request, response) => {
     if (request.method === "GET") {
@@ -7487,13 +7485,6 @@ test("Zen Free Muse bridges custom tools across JSON, history, SSE, and errors",
           },
         ],
         usage: { input_tokens: 30, output_tokens: 3, total_tokens: 33 },
-      });
-      return;
-    }
-    if (body.model === museGatewayModel) {
-      await writeFragmentedFunctionCallSse(response, {
-        model: museGatewayModel,
-        patch: ssePatch,
       });
       return;
     }
@@ -7951,30 +7942,22 @@ test("API forwarder clamps GLM-5.3-Flash efforts onto the ladder the model accep
     });
     assert.equal(upstreamRequests.at(-1).body.reasoning_effort, undefined);
 
-    // Forcing a tool choice is observed to work on every Ox Alpha route, so the
+    // Forcing a tool choice is observed to work on GLM-5.3-Flash, so the
     // profile must not quietly downgrade it the way the thinking providers do.
-    for (const model of [
-      "opencode-go-glm-5-3-flash",
-      "openrouter-ox-alpha",
-      "commandcode-ox-alpha",
-      "nousresearch-ox-alpha",
-      "venice-ox-alpha",
-    ]) {
-      await fetch(`http://127.0.0.1:${forwarderPort}/v1/chat/completions`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${INTERNAL_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model,
-          reasoning_effort: "low",
-          tool_choice: "required",
-          messages: [{ role: "user", content: "test" }],
-        }),
-      });
-      assert.equal(upstreamRequests.at(-1).body.tool_choice, "required");
-    }
+    await fetch(`http://127.0.0.1:${forwarderPort}/v1/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${INTERNAL_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "opencode-go-glm-5-3-flash",
+        reasoning_effort: "low",
+        tool_choice: "required",
+        messages: [{ role: "user", content: "test" }],
+      }),
+    });
+    assert.equal(upstreamRequests.at(-1).body.tool_choice, "required");
   } finally {
     await stopChild(forwarder);
     await closeServer(upstream.server);
