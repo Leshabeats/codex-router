@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const { MODELS, PROVIDERS } = await import("../src/model-registry.mjs");
+const { modelCatalogMetadata } = await import("../src/model-catalog-metadata.mjs");
 const { modelContextLengths, modelIds } = await import("../src/model-discovery.mjs");
 
 test("model discovery compares fixtures without needing or exposing a key", () => {
@@ -348,4 +349,85 @@ test("Copilot advertises its window under the capability limits", () => {
     ),
     { "gpt-responses": 128_000 },
   );
+});
+
+test("OpenRouter metadata preserves exact context, modalities, tools, and effort controls", () => {
+  const metadata = modelCatalogMetadata({ data: [{
+    id: "vendor/reasoner",
+    context_length: 1_000_000,
+    top_provider: { context_length: 900_000, max_completion_tokens: 128_000 },
+    architecture: {
+      input_modalities: ["text", "image"],
+      output_modalities: ["text"],
+    },
+    supported_parameters: ["tools", "tool_choice", "reasoning_effort"],
+    reasoning: {
+      mandatory: true,
+      default_enabled: true,
+      supported_efforts: ["max", "high", "low"],
+      default_effort: "high",
+    },
+  }] }, PROVIDERS.get("openrouter"));
+  assert.deepEqual(metadata["vendor/reasoner"], {
+    contextWindow: 900_000,
+    maxOutputTokens: 128_000,
+    inputModalities: ["image", "text"],
+    outputModalities: ["text"],
+    supportsTools: true,
+    supportsToolChoice: true,
+    reasoning: {
+      supported: true,
+      configurable: true,
+      supportedEfforts: ["low", "high", "max"],
+      defaultEffort: "high",
+      mandatory: true,
+      defaultEnabled: true,
+    },
+    metadataSource: "provider-catalog",
+  });
+});
+
+test("Venice records its Ox Alpha advertisement separately from the proven effective ladder", () => {
+  const metadata = modelCatalogMetadata({ data: [{
+    id: "stealth-ox-alpha",
+    context_length: 1_048_576,
+    type: "text",
+    model_spec: {
+      availableContextTokens: 1_048_576,
+      maxCompletionTokens: 131_072,
+      capabilities: {
+        supportsFunctionCalling: true,
+        supportsReasoning: true,
+        supportsReasoningEffort: true,
+        reasoningEffortOptions: ["none", "low", "medium", "high"],
+        defaultReasoningEffort: "high",
+        supportsVision: true,
+        supportsAudioInput: false,
+        supportsVideoInput: true,
+      },
+    },
+  }] }, PROVIDERS.get("venice"))["stealth-ox-alpha"];
+  assert.equal(metadata.contextWindow, 1_048_576);
+  assert.equal(metadata.maxOutputTokens, 131_072);
+  assert.deepEqual(metadata.reasoning.supportedEfforts, ["low", "high", "max"]);
+  assert.deepEqual(metadata.reasoning.advertisedSupportedEfforts, ["none", "low", "medium", "high"]);
+  assert.equal(metadata.reasoning.advertisedDefaultEffort, "high");
+  assert.equal(metadata.reasoning.defaultEffort, undefined);
+});
+
+test("documented supplements do not invent MiniMax or OpenCode effort controls", () => {
+  const minimax = modelCatalogMetadata(
+    { data: [{ id: "MiniMax-M3" }, { id: "MiniMax-M2.7-highspeed" }] },
+    PROVIDERS.get("minimax-token-plan"),
+  );
+  assert.equal(minimax["MiniMax-M3"].contextWindow, 1_000_000);
+  assert.equal(minimax["MiniMax-M2.7-highspeed"].contextWindow, 204_800);
+  assert.deepEqual(minimax["MiniMax-M3"].reasoning, { supported: true, configurable: false });
+
+  const opencode = modelCatalogMetadata(
+    { data: [{ id: "x-preview-f-free" }, { id: "big-pickle" }] },
+    PROVIDERS.get("opencode-free"),
+  );
+  assert.deepEqual(opencode["x-preview-f-free"].reasoning.supportedEfforts, ["low", "high", "max"]);
+  assert.equal(opencode["big-pickle"], undefined);
 });

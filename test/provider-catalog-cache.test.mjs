@@ -60,6 +60,17 @@ test("a provider's published list survives for the next visit", async () => {
     discovered: ["deepseek-v5", "deepseek-v4-flash"],
     free: ["deepseek-v5"],
     contextLengths: { "deepseek-v5": 262_144, unlisted: 4096 },
+    metadata: {
+      "deepseek-v5": {
+        contextWindow: 262_144,
+        maxOutputTokens: 32_000,
+        inputModalities: ["text", "image"],
+        supportsTools: true,
+        reasoning: { supported: true, configurable: true, supportedEfforts: ["low", "high"] },
+        metadataSource: "provider-catalog",
+      },
+      unlisted: { contextWindow: 4096 },
+    },
     fetchedAt: "2020-01-01T00:00:00.000Z",
     identityFingerprint: TEST_IDENTITY,
   });
@@ -84,6 +95,16 @@ test("a provider's published list survives for the next visit", async () => {
   assert.deepEqual(entry.free, ["deepseek-v5"]);
   // Sizes for models the provider did not list are not part of its answer.
   assert.deepEqual(entry.contextLengths, { "deepseek-v5": 262_144 });
+  assert.deepEqual(entry.metadata, {
+    "deepseek-v5": {
+      contextWindow: 262_144,
+      maxOutputTokens: 32_000,
+      inputModalities: ["text", "image"],
+      supportsTools: true,
+      reasoning: { supported: true, configurable: true, supportedEfforts: ["low", "high"] },
+      metadataSource: "provider-catalog",
+    },
+  });
   assert.equal(entry.fetchedAt, "2020-01-01T00:00:00.000Z");
 
   if (process.platform !== "win32") {

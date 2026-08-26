@@ -48,6 +48,13 @@ test("the audit preserves successes when another configured provider fails", asy
         blocked: {},
         unavailable: [],
         contextLengths: { "new-model": 200_000 },
+        metadata: {
+          "new-model": {
+            contextWindow: 200_000,
+            reasoning: { supported: true, configurable: true, supportedEfforts: ["low", "high"] },
+            metadataSource: "provider-catalog",
+          },
+        },
       };
     },
   });
@@ -61,6 +68,7 @@ test("the audit preserves successes when another configured provider fails", asy
     unavailable: 0,
   });
   assert.deepEqual(audit.results[0].models, ["deepseek-v4-pro", "new-model"]);
+  assert.equal(audit.results[0].metadata["new-model"].contextWindow, 200_000);
   assert.equal(audit.results[1].status, "failed");
   assert.doesNotMatch(JSON.stringify(audit), new RegExp(secret));
   assert.match(audit.results[1].error, /\[redacted\]/);

@@ -7,6 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { discoverProviderModels } from "./model-discovery.mjs";
+import { MODEL_CATALOG_METADATA_SOURCES } from "./model-catalog-metadata.mjs";
 import { PROVIDERS } from "./model-registry.mjs";
 import {
   providerCatalogKind,
@@ -109,6 +110,9 @@ function safeDiscoveryResult(result) {
   const contextLengths = Object.fromEntries(
     Object.entries(result.contextLengths || {}).sort(([left], [right]) => left.localeCompare(right)),
   );
+  const metadata = Object.fromEntries(
+    Object.entries(result.metadata || {}).sort(([left], [right]) => left.localeCompare(right)),
+  );
   return {
     models: sortedStrings(result.discovered),
     registered: sortedStrings(result.registered),
@@ -117,6 +121,7 @@ function safeDiscoveryResult(result) {
     blocked,
     unavailable: sortedStrings(result.unavailable),
     contextLengths,
+    metadata,
     ...(Array.isArray(result.free) ? { free: sortedStrings(result.free) } : {}),
   };
 }
@@ -162,6 +167,7 @@ export async function auditProviderModels({
         provider: providerId,
         displayName: provider.displayName,
         status: "succeeded",
+        sources: [...(MODEL_CATALOG_METADATA_SOURCES[providerId] || [])],
         ...safeDiscoveryResult(result),
       });
     } catch (error) {
@@ -243,11 +249,12 @@ async function main() {
   if (args.includes("--help")) {
     process.stdout.write(`Usage: model-discovery-audit.mjs [--provider all|ID[,ID...]]
   [--output FILE] [--summary FILE] [--fixture-dir DIR] [--generated-at ISO]
-  [--fail-on-error] [--fail-on-skipped]
+  [--store-cache] [--fail-on-error] [--fail-on-skipped]
 
 Audits each canonical provider catalog and writes a credential-free JSON report.
 Missing credentials are skipped during an all-provider audit. The command never
-edits the registry or curates discovered model IDs.
+edits the registry or curates discovered model IDs. --store-cache records the
+same live answers in the current installation's private catalog cache.
 `);
     return;
   }
@@ -266,6 +273,13 @@ edits the registry or curates discovered model IDs.
           discover: fixtureDiscovery(path.resolve(fixtureDirectory)),
           readiness: () => ({ ready: true }),
         }
+      : args.includes("--store-cache")
+        ? {
+            discover: (providerId) => discoverProviderModels(providerId, {
+              refresh: true,
+              cache: true,
+            }),
+          }
       : {}),
     generatedAt: new Date(generatedAt).toISOString(),
   });

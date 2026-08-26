@@ -97,6 +97,69 @@ function contextMap(value, allowed) {
   return Object.keys(lengths).length ? lengths : undefined;
 }
 
+function boundedStringList(value, limit = 16) {
+  if (!Array.isArray(value)) return undefined;
+  const kept = [...new Set(value
+    .filter((item) => typeof item === "string" && item.trim())
+    .map((item) => item.trim().slice(0, 80)))]
+    .slice(0, limit);
+  return kept.length ? kept : undefined;
+}
+
+function optionalBoolean(value) {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function positiveInteger(value) {
+  return Number.isInteger(value) && value > 0 ? value : undefined;
+}
+
+function normalizedReasoning(value) {
+  if (!value || typeof value !== "object") return undefined;
+  const normalized = Object.fromEntries(Object.entries({
+    supported: optionalBoolean(value.supported),
+    configurable: optionalBoolean(value.configurable),
+    supportedEfforts: boundedStringList(value.supportedEfforts),
+    defaultEffort: typeof value.defaultEffort === "string" && value.defaultEffort.trim()
+      ? value.defaultEffort.trim().slice(0, 80)
+      : undefined,
+    mandatory: optionalBoolean(value.mandatory),
+    defaultEnabled: optionalBoolean(value.defaultEnabled),
+    advertisedSupportedEfforts: boundedStringList(value.advertisedSupportedEfforts),
+    advertisedDefaultEffort:
+      typeof value.advertisedDefaultEffort === "string" && value.advertisedDefaultEffort.trim()
+        ? value.advertisedDefaultEffort.trim().slice(0, 80)
+        : undefined,
+    effectiveMetadataSource:
+      typeof value.effectiveMetadataSource === "string" && value.effectiveMetadataSource.trim()
+        ? value.effectiveMetadataSource.trim().slice(0, 120)
+        : undefined,
+  }).filter(([, item]) => item !== undefined));
+  return Object.keys(normalized).length ? normalized : undefined;
+}
+
+function metadataMap(value, allowed) {
+  if (!value || typeof value !== "object") return undefined;
+  const entries = [];
+  for (const [id, item] of Object.entries(value)) {
+    if (!allowed.has(id) || !item || typeof item !== "object") continue;
+    const normalized = Object.fromEntries(Object.entries({
+      contextWindow: positiveInteger(item.contextWindow),
+      maxOutputTokens: positiveInteger(item.maxOutputTokens),
+      inputModalities: boundedStringList(item.inputModalities),
+      outputModalities: boundedStringList(item.outputModalities),
+      supportsTools: optionalBoolean(item.supportsTools),
+      supportsToolChoice: optionalBoolean(item.supportsToolChoice),
+      reasoning: normalizedReasoning(item.reasoning),
+      metadataSource: typeof item.metadataSource === "string" && item.metadataSource.trim()
+        ? item.metadataSource.trim().slice(0, 120)
+        : undefined,
+    }).filter(([, entry]) => entry !== undefined));
+    if (Object.keys(normalized).length) entries.push([id, normalized]);
+  }
+  return entries.length ? Object.fromEntries(entries) : undefined;
+}
+
 function normalizedEntry(entry) {
   if (!entry || typeof entry !== "object") return undefined;
   const identityFingerprint = typeof entry.identityFingerprint === "string"
@@ -115,12 +178,14 @@ function normalizedEntry(entry) {
   if (!fetchedAt) return undefined;
   const known = new Set(discovered);
   const free = stringList(entry.free)?.filter((id) => known.has(id));
+  const metadata = metadataMap(entry.metadata, known);
   return {
     identityFingerprint,
     fetchedAt,
     discovered,
     ...(free?.length ? { free } : {}),
     ...(contextMap(entry.contextLengths, known) ? { contextLengths: contextMap(entry.contextLengths, known) } : {}),
+    ...(metadata ? { metadata } : {}),
   };
 }
 
@@ -152,13 +217,14 @@ export function readProviderCatalogCache(providerId) {
  */
 function writeProviderCatalogCacheInTransaction(
   providerId,
-  { discovered, free, contextLengths, fetchedAt, identityFingerprint } = {},
+  { discovered, free, contextLengths, metadata, fetchedAt, identityFingerprint } = {},
 ) {
   if (!PROVIDER_ID.test(String(providerId || ""))) return undefined;
   const entry = normalizedEntry({
     discovered,
     free,
     contextLengths,
+    metadata,
     fetchedAt: fetchedAt || new Date().toISOString(),
     identityFingerprint,
   });
