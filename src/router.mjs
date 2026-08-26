@@ -594,17 +594,15 @@ function needsZenFreeToolCompatibility(route) {
   );
 }
 
-// Moonshot accepts a `$ref` only when it points into `#/$defs/` and rejects the
-// whole request -- not the one tool -- over any other pointer, including the
-// sibling-property pointers Codex App connector tools ship: Wego
-// `_flights_search` points `inboundTotalDurationRange` at its own sibling
-// `priceRange` (issue #353). Scope this to the provider the rejection was
-// reproduced on. The Moonshot platform keys (`kimi-api`, `kimi-api-cn`) reach a
-// different front end and were never observed rejecting these schemas, and
-// inlining for everyone would rewrite the wire payload for providers that work
-// today.
-function needsMoonshotDefsOnlyRefs(route) {
-  return providerForModel(route)?.id === "kimi-oauth";
+// Moonshot accepts only pure `$ref` pointers into `#/$defs/`, and rejects the
+// whole request -- not the one tool -- over any other pointer (issue #353) or a
+// definition reference carrying sibling keywords. The OAuth and platform-key
+// routes are separate products, but their first-party validators share this
+// schema flavor. Keep the rewrite off every non-Moonshot provider.
+const MOONSHOT_PROVIDER_IDS = new Set(["kimi-oauth", "kimi-api", "kimi-api-cn"]);
+
+function needsMoonshotSchemaCompatibility(route) {
+  return MOONSHOT_PROVIDER_IDS.has(providerForModel(route)?.id);
 }
 
 function zenFreeCompatibleInput(input, route) {
@@ -2321,7 +2319,7 @@ async function buildRoutedRequest({ request, payload, route, agedInput, tokenMax
     tools = repairToolSchemaRoots(tools, { nonRecursive: true });
     tools = stripSearchContentTypes(tools);
   }
-  if (needsMoonshotDefsOnlyRefs(route)) {
+  if (needsMoonshotSchemaCompatibility(route)) {
     // After the namespace flattening above, so the connector tools Codex ships
     // inside `codex_app` are repaired in the shape Moonshot actually receives.
     tools = repairToolSchemaRoots(tools, { inlineForeignRefs: true });
