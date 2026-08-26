@@ -3534,6 +3534,16 @@ async function handleNativeRequest(request, response, requestUrl, defaultModel) 
       writeIdleNoProviderError(response);
       return;
     }
+    const headers = nativeHeaders(request);
+    if (!hasNativeSession(headers)) {
+      writeJson(response, 401, {
+        error: {
+          type: "native_session_required",
+          message: "This native OpenAI route requires an active ChatGPT/Codex session.",
+        },
+      });
+      return;
+    }
     const encoded = await readRequestBody(request);
     const body = decodeBody(encoded, request.headers["content-encoding"]);
     const payload = await parseBodyAsync(body);
@@ -3545,7 +3555,6 @@ async function handleNativeRequest(request, response, requestUrl, defaultModel) 
       ...activityMetadataFromHeaders(request.headers),
     });
 
-    const headers = nativeHeaders(request);
     // The same slug translation the turn path does, for the same reason: these
     // endpoints normally carry their own model ("gpt-image-2", the search
     // model), but nothing stops a client from naming the picked one, and an

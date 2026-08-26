@@ -241,10 +241,11 @@ Other routed providers can use Codex's client-side (standalone) web search when
 the selected model has been verified for it. DeepSeek V4 Flash is enabled on
 its direct API and opencode Go routes. A compatible model declares
 `"searchTool": { "mode": "standalone" }` in its registry or user-model
-metadata, and the managed Codex provider table advertises
-`supports_standalone_web_search = true`. This is intentionally opt-in per
-model; the router does not infer search compatibility from an OpenAI-compatible
-endpoint.
+metadata. This capability is resolved from the selected model/provider pair;
+the router does not enable a global web-search switch or infer compatibility
+from an OpenAI-compatible endpoint. A model is advertised only after its
+provider path has been verified to preserve Codex search-result items and
+tool-call history.
 
 ```sh
 npm install -g @xai-official/grok
@@ -933,7 +934,6 @@ model_catalog_json = "/absolute/path/to/.codex/codex-router/merged-models.json"
 name = "Codex Router (external models)"
 base_url = "http://127.0.0.1:4202/_codex-router/<generated-capability>/v1"
 wire_api = "responses"
-supports_standalone_web_search = true
 # END codex-router-provider-managed
 ```
 

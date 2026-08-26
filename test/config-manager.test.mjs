@@ -60,7 +60,6 @@ exit 1
   writeFileSync(file, contents, { mode: 0o755 });
   return file;
 })();
-
 function run(
   command,
   codexHome,
@@ -118,6 +117,8 @@ approval_policy = "never"
     assert.match(configured, /# BEGIN codex-router-managed/);
     assert.match(configured, /# BEGIN codex-router-provider-managed/);
     assert.match(configured, /# BEGIN codex-router-multi-agent-v2-managed/);
+    assert.doesNotMatch(configured, /codex-router-standalone-web-search-managed/);
+    assert.doesNotMatch(configured, /^standalone_web_search\s*=/m);
     assert.match(
       configured,
       /multi_agent_v2 = \{ enabled = true, max_concurrent_threads_per_session = 6, expose_spawn_agent_model_overrides = true, usage_hint_enabled = true, root_agent_usage_hint_text = "When a child agent finishes \(FINAL_ANSWER, task_complete, or an idle\/errored wait snapshot\), call interrupt_agent on that child so Codex can mark it done\. Do not leave finished children in the working state\." \}/,
@@ -127,7 +128,7 @@ approval_policy = "never"
     assert.doesNotMatch(configured, /\[agents\]/);
     assert.match(configured, /\[model_providers\.codex-router\]/);
     assert.match(configured, /wire_api = "responses"/);
-    assert.match(configured, /supports_standalone_web_search = true/);
+    assert.match(configured, /^supports_standalone_web_search = true$/m);
     assert.ok(
       configured.includes(
         `openai_base_url = "http://127.0.0.1:46192/_codex-router/${CALLER_KEY}/v1"`,
@@ -161,6 +162,7 @@ approval_policy = "never"
         .length,
       1,
     );
+    assert.doesNotMatch(readFileSync(configPath, "utf8"), /^standalone_web_search\s*=/m);
 
     const disabled = run("disable", codexHome);
     assert.equal(disabled.mode, "native");
@@ -168,13 +170,74 @@ approval_policy = "never"
     const restored = readFileSync(configPath, "utf8");
     assert.doesNotMatch(
       restored,
-      /codex-router-(?:(?:provider|agent-concurrency|multi-agent-v2)-)?managed|codex-router-created-agents-table|openai_base_url|model_catalog_json|experimental_realtime_(?:webrtc_call|ws)_base_url/,
+      /codex-router-(?:(?:provider|agent-concurrency|multi-agent-v2|standalone-web-search)-)?managed|codex-router-created-agents-table|openai_base_url|model_catalog_json|experimental_realtime_(?:webrtc_call|ws)_base_url/,
     );
     assert.doesNotMatch(restored, /\[agents\]|max_concurrent_threads_per_session/);
     assert.match(restored, /model = "gpt-5\.6-sol"/);
     assert.match(restored, /model_provider = "openai"/);
     assert.match(restored, /model_reasoning_effort = "xhigh"/);
     assert.match(restored, /\[profiles\.work\]/);
+  } finally {
+    rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
+test("config manager preserves a user-owned standalone web search setting", () => {
+  const codexHome = mkdtempSync(path.join(os.tmpdir(), "codex-router-config-"));
+  const configPath = path.join(codexHome, "config.toml");
+  const original = `model = "gpt-5.6-sol"
+model_provider = "openai"
+
+[features]
+standalone_web_search = false
+apps = true
+`;
+  writeFileSync(configPath, original, { mode: 0o600 });
+
+  try {
+    run("enable", codexHome);
+    const configured = readFileSync(configPath, "utf8");
+    assert.match(configured, /^standalone_web_search = false$/m);
+    assert.doesNotMatch(configured, /codex-router-standalone-web-search-managed/);
+
+    run("disable", codexHome);
+    const restored = readFileSync(configPath, "utf8");
+    assert.match(restored, /^standalone_web_search = false$/m);
+    assert.match(restored, /^apps = true$/m);
+  } finally {
+    rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
+test("config manager removes only router-owned standalone web search state", () => {
+  const codexHome = mkdtempSync(path.join(os.tmpdir(), "codex-router-config-"));
+  const configPath = path.join(codexHome, "config.toml");
+  writeFileSync(
+    configPath,
+    `model = "gpt-5.6-sol"
+model_provider = "openai"
+
+# BEGIN codex-router-standalone-web-search-managed
+standalone_web_search = true
+# END codex-router-standalone-web-search-managed
+
+# BEGIN codex-router-provider-managed
+[model_providers.codex-router]
+name = "Codex Router (external models)"
+base_url = "http://127.0.0.1:46192/_codex-router/${CALLER_KEY}/v1"
+wire_api = "responses"
+supports_standalone_web_search = true
+# END codex-router-provider-managed
+`,
+    { mode: 0o600 },
+  );
+
+  try {
+    run("enable", codexHome);
+    const configured = readFileSync(configPath, "utf8");
+    assert.doesNotMatch(configured, /codex-router-standalone-web-search-managed/);
+    assert.doesNotMatch(configured, /^standalone_web_search\s*=/m);
+    assert.match(configured, /^supports_standalone_web_search = true$/m);
   } finally {
     rmSync(codexHome, { recursive: true, force: true });
   }
@@ -904,7 +967,7 @@ Authorization = "Bearer PROVIDER_HEADER_SECRET"
     assert.match(configured, new RegExp(`base_url = "http://127\\.0\\.0\\.1:46192/_codex-router/${CALLER_KEY}/v1"`));
     assert.match(configured, /requires_openai_auth = true/);
     assert.match(configured, /supports_websockets = false/);
-    assert.match(configured, /supports_standalone_web_search = true/);
+    assert.match(configured, /^supports_standalone_web_search = true$/m);
     assert.doesNotMatch(configured, /PROVIDER_(?:QUERY|AUTH|HEADER)_SECRET/);
     assert.doesNotMatch(
       configured,
