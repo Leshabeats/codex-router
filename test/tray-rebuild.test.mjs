@@ -990,6 +990,21 @@ test("Control Center fingerprints include renderer, build config, and shared ico
   }
 });
 
+test("desktop icon generation uses the native routing mark for every shell", () => {
+  const script = readFileSync(path.join(root, "scripts", "build-app-icon.sh"), "utf8");
+  assert.match(script, /ModelRouterTray\/Resources\/AppIcon\.svg/);
+  for (const asset of ["32x32.png", "128x128.png", "128x128@2x.png", "icon.png", "icon.ico"]) {
+    assert.match(script, new RegExp(`control_center_assets/${asset.replaceAll(".", "\\.")}`));
+  }
+  assert.match(script, /scripts\/build-ico\.mjs/);
+
+  const renderer = readFileSync(path.join(root, "apps", "control-center", "src", "App.tsx"), "utf8");
+  assert.match(renderer, /assets\/32x32\.png/);
+  const builder = readFileSync(path.join(root, "apps", "control-center", "electron-builder.yml"), "utf8");
+  assert.match(builder, /mac:[\s\S]*icon:\s*assets\/icon\.png/);
+  assert.match(builder, /win:[\s\S]*icon:\s*assets\/icon\.ico/);
+});
+
 test("Control Center fingerprints include JavaScript model helpers and build entrypoints", () => {
   for (const relative of [
     ["apps", "control-center", "src", "model-families.mjs"],
