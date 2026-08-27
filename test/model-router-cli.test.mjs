@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -42,6 +43,45 @@ test(
     });
     assert.equal(result.status, 2);
     assert.match(result.stderr, /Usage: skills-install\.mjs/);
+  },
+);
+
+test(
+  "model-router reports failed skill commands",
+  { skip: process.platform === "win32" },
+  () => {
+    const failedInstall = spawnSync(
+      path.join(root, "bin", "model-router"),
+      ["codex", "skills", "install"],
+      {
+        encoding: "utf8",
+        env: { ...process.env, CODEX_HOME: "/dev/null" },
+      },
+    );
+    assert.equal(failedInstall.status, 2, failedInstall.stderr);
+    assert.match(failedInstall.stderr, /skill install failed/);
+
+    const home = mkdtempSync(path.join(os.tmpdir(), "codex-skills-cli-"));
+    try {
+      const env = { ...process.env, CODEX_HOME: home };
+      const installed = spawnSync(
+        path.join(root, "bin", "model-router"),
+        ["codex", "skills", "install"],
+        { encoding: "utf8", env },
+      );
+      assert.equal(installed.status, 0, installed.stderr);
+      chmodSync(path.join(home, "skills"), 0o500);
+      const failedUninstall = spawnSync(
+        path.join(root, "bin", "model-router"),
+        ["codex", "skills", "uninstall"],
+        { encoding: "utf8", env },
+      );
+      assert.equal(failedUninstall.status, 2, failedUninstall.stderr);
+      assert.match(failedUninstall.stderr, /skill uninstall failed/);
+    } finally {
+      chmodSync(path.join(home, "skills"), 0o700);
+      rmSync(home, { recursive: true, force: true });
+    }
   },
 );
 

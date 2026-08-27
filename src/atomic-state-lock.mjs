@@ -29,6 +29,37 @@ function staleLock(pathname) {
   }
 }
 
+function lockOwnerPid(pathname) {
+  try {
+    const owner = `${pathname}/owner`;
+    const stat = lstatSync(owner);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size <= 0 || stat.size > 64) {
+      return undefined;
+    }
+    const value = readFileSync(owner, "utf8").trim();
+    if (!/^[1-9][0-9]*$/.test(value)) return undefined;
+    const pid = Number(value);
+    return Number.isSafeInteger(pid) ? pid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+function abandonedLock(pathname) {
+  const pid = lockOwnerPid(pathname);
+  if (pid) return !processIsAlive(pid);
+  return staleLock(pathname);
+}
+
 function acquire(target) {
   const pathname = lockPath(target);
   mkdirSync(path.dirname(pathname), { recursive: true, mode: 0o700 });
@@ -52,13 +83,12 @@ function acquire(target) {
         continue;
       }
       if (link) throw new Error(`Refusing to use a symbolic-link state lock: ${pathname}`);
-      if (staleLock(pathname)) {
+      if (abandonedLock(pathname)) {
         rmSync(pathname, { recursive: true, force: true });
         continue;
       }
       if (Date.now() - started >= MAX_WAIT_MS) {
-        let owner = "";
-        try { owner = readFileSync(`${pathname}/owner`, "utf8").trim(); } catch { /* lock holder may be creating it */ }
+        const owner = lockOwnerPid(pathname);
         throw new Error(`Timed out waiting for state lock${owner ? ` held by ${owner}` : ""}: ${pathname}`);
       }
       sleep(WAIT_MS);

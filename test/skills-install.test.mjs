@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
 import {
   chmodSync,
   existsSync,
@@ -8,6 +10,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  truncateSync,
   writeFileSync,
 } from "node:fs";
 import { mkdtempSync } from "node:fs";
@@ -39,6 +42,7 @@ const PACK = [
   "codex-computer-use",
 ];
 const SKILL_FRONTMATTER = /^---\r?\nname: (.+)\r?\ndescription: (.+)\r?\n---\r?\n/;
+const SKILLS_MODULE_URL = new URL("../src/skills-install.mjs", import.meta.url).href;
 
 function tempCodexHome() {
   return mkdtempSync(path.join(os.tmpdir(), "codex-skills-"));
@@ -52,6 +56,14 @@ function marker(home, name) {
   return JSON.parse(
     readFileSync(path.join(home, "skills", name, ".codex-router-managed"), "utf8"),
   );
+}
+
+async function waitForPath(target, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!existsSync(target)) {
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${target}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 test("install copies every pack skill with its SKILL.md and the marker", () => {
@@ -94,6 +106,49 @@ test("install is idempotent and refreshes managed skills", () => {
     assert.deepEqual(readdirSync(path.join(home, "skills")).sort(), first);
   } finally {
     rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("concurrent skill installs serialize ownership from recovery through publication", async () => {
+  const home = tempCodexHome();
+  const fakeSource = mkdtempSync(path.join(os.tmpdir(), "codex-skills-source-"));
+  const ready = path.join(home, "first-install-staged");
+  try {
+    for (const name of ["a-skill", "b-skill"]) {
+      mkdirSync(path.join(fakeSource, name), { recursive: true });
+      writeFileSync(path.join(fakeSource, name, "SKILL.md"), `# ${name}\n`);
+    }
+    const environment = { ...process.env, CODEX_ROUTER_SKILLS_DIR: fakeSource };
+    const first = spawn(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `import { writeFileSync } from "node:fs";\n` +
+          `import { installSkills } from ${JSON.stringify(SKILLS_MODULE_URL)};\n` +
+          `let held = false; installSkills(${JSON.stringify(home)}, { quiet: true, onStaged() { if (held) return; held = true; writeFileSync(${JSON.stringify(ready)}, "ready\\n"); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500); } });\n`,
+      ],
+      { encoding: "utf8", env: environment, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    await waitForPath(ready);
+    const second = spawn(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `import { installSkills } from ${JSON.stringify(SKILLS_MODULE_URL)}; installSkills(${JSON.stringify(home)}, { quiet: true });\n`,
+      ],
+      { encoding: "utf8", env: environment, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    const [firstClose, secondClose] = await Promise.all([once(first, "close"), once(second, "close")]);
+    assert.equal(firstClose[0], 0);
+    assert.equal(secondClose[0], 0);
+    assert.deepEqual(managedSkillNames(home), ["a-skill", "b-skill"]);
+    assert.deepEqual(Object.keys(ownership(home).skills).sort(), ["a-skill", "b-skill"]);
+    assert.ok(!existsSync(`${skillOwnershipPath(home)}.lock`));
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(fakeSource, { recursive: true, force: true });
   }
 });
 
@@ -192,6 +247,342 @@ test("overlapping managed and external state fails closed", () => {
     assert.equal(status.ownershipStateValid, false);
     assert.equal(uninstallSkills(home, { quiet: true }), 0);
     assert.ok(existsSync(path.join(home, "skills", name)), "ambiguous state cannot delete content");
+  } finally {
+    delete process.env.CODEX_ROUTER_SKILLS_DIR;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(fakeSource, { recursive: true, force: true });
+  }
+});
+
+test("uninstall deletes only the quarantined managed tree when a new target appears", () => {
+  const home = tempCodexHome();
+  try {
+    installSkills(home, { quiet: true });
+    const name = "codex-router";
+    const target = path.join(home, "skills", name);
+    const removed = uninstallSkills(home, {
+      quiet: true,
+      onQuarantined(event) {
+        if (event.name !== name) return;
+        mkdirSync(event.target, { recursive: true });
+        writeFileSync(path.join(event.target, "SKILL.md"), "# concurrent external replacement\n");
+      },
+    });
+    assert.equal(removed, PACK.length);
+    assert.equal(
+      readFileSync(path.join(target, "SKILL.md"), "utf8"),
+      "# concurrent external replacement\n",
+    );
+    assert.ok(!existsSync(path.join(target, ".codex-router-managed")));
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a hard exit after quarantine is recovered before the next skill mutation", () => {
+  const home = tempCodexHome();
+  const fakeSource = mkdtempSync(path.join(os.tmpdir(), "codex-skills-source-"));
+  const name = "codex-router";
+  const target = path.join(home, "skills", name);
+  try {
+    mkdirSync(path.join(fakeSource, name), { recursive: true });
+    writeFileSync(path.join(fakeSource, name, "SKILL.md"), "# managed before crash\n");
+    process.env.CODEX_ROUTER_SKILLS_DIR = fakeSource;
+    installSkills(home, { quiet: true });
+
+    const child = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `import { uninstallSkills } from ${JSON.stringify(SKILLS_MODULE_URL)};\n` +
+          `uninstallSkills(${JSON.stringify(home)}, { quiet: true, onQuarantined() { process.exit(91); } });\n`,
+      ],
+      {
+        encoding: "utf8",
+        env: { ...process.env, CODEX_ROUTER_SKILLS_DIR: fakeSource },
+      },
+    );
+    assert.equal(child.status, 91, child.stderr);
+    assert.ok(!existsSync(target), "the fixture exits inside the rename window");
+    assert.ok(
+      readdirSync(path.join(home, "skills")).some((entry) =>
+        entry.startsWith(".codex-router-retire-"),
+      ),
+    );
+
+    // The next install preserves the abandoned exact tree under a visible
+    // random sibling, then publishes a fresh managed copy without overwrite.
+    assert.deepEqual(installSkills(home, { quiet: true }), {
+      installed: 1,
+      skipped: 0,
+      external: 0,
+    });
+    assert.equal(readFileSync(path.join(target, "SKILL.md"), "utf8"), "# managed before crash\n");
+    assert.deepEqual(managedSkillNames(home), [name]);
+    const preserved = readdirSync(path.join(home, "skills")).find((entry) =>
+      entry.startsWith(`${name}.codex-router-preserved-`),
+    );
+    assert.ok(preserved);
+    assert.equal(
+      readFileSync(path.join(home, "skills", preserved, "SKILL.md"), "utf8"),
+      "# managed before crash\n",
+    );
+    assert.ok(
+      !readdirSync(path.join(home, "skills")).some((entry) =>
+        entry.startsWith(".codex-router-retire-"),
+      ),
+    );
+  } finally {
+    delete process.env.CODEX_ROUTER_SKILLS_DIR;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(fakeSource, { recursive: true, force: true });
+  }
+});
+
+test("a hard exit during publication rolls the partial target back to the old skill", () => {
+  const home = tempCodexHome();
+  const fakeSource = mkdtempSync(path.join(os.tmpdir(), "codex-skills-source-"));
+  const name = "codex-router";
+  const source = path.join(fakeSource, name, "SKILL.md");
+  const target = path.join(home, "skills", name);
+  try {
+    mkdirSync(path.dirname(source), { recursive: true });
+    writeFileSync(source, "# working v1\n");
+    process.env.CODEX_ROUTER_SKILLS_DIR = fakeSource;
+    installSkills(home, { quiet: true });
+    writeFileSync(source, "# replacement v2\n");
+
+    const child = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `import { installSkills } from ${JSON.stringify(SKILLS_MODULE_URL)};\n` +
+          `installSkills(${JSON.stringify(home)}, { quiet: true, onPublicationClaimed() { process.exit(92); } });\n`,
+      ],
+      {
+        encoding: "utf8",
+        env: { ...process.env, CODEX_ROUTER_SKILLS_DIR: fakeSource },
+      },
+    );
+    assert.equal(child.status, 92, child.stderr);
+    assert.ok(existsSync(path.join(target, ".codex-router-publishing")));
+    assert.ok(!existsSync(path.join(target, "SKILL.md")));
+
+    assert.deepEqual(installSkills(home, { quiet: true }), {
+      installed: 1,
+      skipped: 0,
+      external: 0,
+    });
+    assert.equal(readFileSync(path.join(target, "SKILL.md"), "utf8"), "# replacement v2\n");
+    assert.ok(!existsSync(path.join(target, ".codex-router-publishing")));
+    assert.deepEqual(managedSkillNames(home), [name]);
+    const preserved = readdirSync(path.join(home, "skills")).find((entry) =>
+      entry.startsWith(`${name}.codex-router-preserved-`),
+    );
+    assert.ok(preserved);
+    assert.equal(
+      readFileSync(path.join(home, "skills", preserved, "SKILL.md"), "utf8"),
+      "# working v1\n",
+    );
+    assert.ok(
+      !readdirSync(path.join(home, "skills")).some(
+        (entry) => entry.startsWith(".codex-router-retire-"),
+      ),
+    );
+  } finally {
+    delete process.env.CODEX_ROUTER_SKILLS_DIR;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(fakeSource, { recursive: true, force: true });
+  }
+});
+
+test("a hard exit during first publication removes only its journal-owned partial target", () => {
+  const home = tempCodexHome();
+  const fakeSource = mkdtempSync(path.join(os.tmpdir(), "codex-skills-source-"));
+  const name = "codex-router";
+  const target = path.join(home, "skills", name);
+  try {
+    mkdirSync(path.join(fakeSource, name), { recursive: true });
+    writeFileSync(path.join(fakeSource, name, "SKILL.md"), "# first install\n");
+    process.env.CODEX_ROUTER_SKILLS_DIR = fakeSource;
+    const child = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `import { installSkills } from ${JSON.stringify(SKILLS_MODULE_URL)};\n` +
+          `installSkills(${JSON.stringify(home)}, { quiet: true, onPublicationClaimed() { process.exit(93); } });\n`,
+      ],
+      {
+        encoding: "utf8",
+        env: { ...process.env, CODEX_ROUTER_SKILLS_DIR: fakeSource },
+      },
+    );
+    assert.equal(child.status, 93, child.stderr);
+    assert.ok(existsSync(path.join(target, ".codex-router-publishing")));
+
+    revokeExternalSkills(home, [name], { quiet: true });
+    assert.ok(!existsSync(target), "the abandoned partial publication is rolled back");
+    assert.ok(
+      !readdirSync(path.join(home, "skills")).some((entry) =>
+        entry.startsWith(".codex-router-retire-"),
+      ),
+    );
+    assert.deepEqual(installSkills(home, { quiet: true }), {
+      installed: 1,
+      skipped: 0,
+      external: 0,
+    });
+    assert.deepEqual(managedSkillNames(home), [name]);
+  } finally {
+    delete process.env.CODEX_ROUTER_SKILLS_DIR;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(fakeSource, { recursive: true, force: true });
+  }
+});
+
+test("replacement is fully staged before the old managed skill is retired", () => {
+  const home = tempCodexHome();
+  const fakeSource = mkdtempSync(path.join(os.tmpdir(), "codex-skills-source-"));
+  const name = "codex-router";
+  const source = path.join(fakeSource, name, "SKILL.md");
+  const target = path.join(home, "skills", name);
+  try {
+    mkdirSync(path.dirname(source), { recursive: true });
+    writeFileSync(source, "# working v1\n");
+    process.env.CODEX_ROUTER_SKILLS_DIR = fakeSource;
+    installSkills(home, { quiet: true });
+    const originalMarker = readFileSync(path.join(target, ".codex-router-managed"), "utf8");
+    writeFileSync(source, "# replacement v2\n");
+
+    assert.throws(
+      () =>
+        installSkills(home, {
+          quiet: true,
+          onStaged() {
+            throw new Error("simulated staging failure");
+          },
+        }),
+      /simulated staging failure/,
+    );
+    assert.equal(readFileSync(path.join(target, "SKILL.md"), "utf8"), "# working v1\n");
+    assert.equal(
+      readFileSync(path.join(target, ".codex-router-managed"), "utf8"),
+      originalMarker,
+    );
+  } finally {
+    delete process.env.CODEX_ROUTER_SKILLS_DIR;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(fakeSource, { recursive: true, force: true });
+  }
+});
+
+test("replacement never overwrites a target created after quarantine", () => {
+  const home = tempCodexHome();
+  const fakeSource = mkdtempSync(path.join(os.tmpdir(), "codex-skills-source-"));
+  const name = "codex-router";
+  const source = path.join(fakeSource, name, "SKILL.md");
+  const target = path.join(home, "skills", name);
+  try {
+    mkdirSync(path.dirname(source), { recursive: true });
+    writeFileSync(source, "# managed v1\n");
+    process.env.CODEX_ROUTER_SKILLS_DIR = fakeSource;
+    installSkills(home, { quiet: true });
+    writeFileSync(source, "# managed v2\n");
+
+    const result = installSkills(home, {
+      quiet: true,
+      onQuarantined() {
+        mkdirSync(target);
+        writeFileSync(path.join(target, "SKILL.md"), "# concurrent external\n");
+      },
+    });
+    assert.deepEqual(result, { installed: 0, skipped: 1, external: 0 });
+    assert.equal(readFileSync(path.join(target, "SKILL.md"), "utf8"), "# concurrent external\n");
+    const preserved = readdirSync(path.join(home, "skills")).find((entry) =>
+      entry.startsWith(`${name}.codex-router-preserved-`),
+    );
+    assert.ok(preserved, "the previous working managed tree remains visible");
+    assert.equal(
+      readFileSync(path.join(home, "skills", preserved, "SKILL.md"), "utf8"),
+      "# managed v1\n",
+    );
+    assert.equal(ownership(home).skills[name], undefined);
+  } finally {
+    delete process.env.CODEX_ROUTER_SKILLS_DIR;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(fakeSource, { recursive: true, force: true });
+  }
+});
+
+test("an invalid quarantined tree is restored or preserved, never deleted", () => {
+  const home = tempCodexHome();
+  const fakeSource = mkdtempSync(path.join(os.tmpdir(), "codex-skills-source-"));
+  const name = "codex-router";
+  const target = path.join(home, "skills", name);
+  try {
+    mkdirSync(path.join(fakeSource, name), { recursive: true });
+    writeFileSync(path.join(fakeSource, name, "SKILL.md"), "# managed\n");
+    process.env.CODEX_ROUTER_SKILLS_DIR = fakeSource;
+    installSkills(home, { quiet: true });
+
+    const removed = uninstallSkills(home, {
+      quiet: true,
+      onQuarantined({ staged }) {
+        writeFileSync(path.join(staged, ".codex-router-managed"), "invalid\n");
+        mkdirSync(target);
+        writeFileSync(path.join(target, "SKILL.md"), "# external winner\n");
+      },
+    });
+    assert.equal(removed, 0);
+    assert.equal(readFileSync(path.join(target, "SKILL.md"), "utf8"), "# external winner\n");
+    const preserved = readdirSync(path.join(home, "skills")).find((entry) =>
+      entry.startsWith(`${name}.codex-router-preserved-`),
+    );
+    assert.ok(preserved);
+    assert.equal(
+      readFileSync(path.join(home, "skills", preserved, "SKILL.md"), "utf8"),
+      "# managed\n",
+    );
+  } finally {
+    delete process.env.CODEX_ROUTER_SKILLS_DIR;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(fakeSource, { recursive: true, force: true });
+  }
+});
+
+test("restore never replaces an empty directory claimed at the no-replace boundary", () => {
+  const home = tempCodexHome();
+  const fakeSource = mkdtempSync(path.join(os.tmpdir(), "codex-skills-source-"));
+  const name = "codex-router";
+  const target = path.join(home, "skills", name);
+  try {
+    mkdirSync(path.join(fakeSource, name), { recursive: true });
+    writeFileSync(path.join(fakeSource, name, "SKILL.md"), "# managed\n");
+    process.env.CODEX_ROUTER_SKILLS_DIR = fakeSource;
+    installSkills(home, { quiet: true });
+
+    assert.equal(
+      uninstallSkills(home, {
+        quiet: true,
+        onQuarantined({ staged }) {
+          writeFileSync(path.join(staged, ".codex-router-managed"), "invalid\n");
+          mkdirSync(target);
+        },
+      }),
+      0,
+    );
+    assert.deepEqual(readdirSync(target), [], "the competing empty claim remains untouched");
+    const preserved = readdirSync(path.join(home, "skills")).find((entry) =>
+      entry.startsWith(`${name}.codex-router-preserved-`),
+    );
+    assert.ok(preserved);
+    assert.equal(
+      readFileSync(path.join(home, "skills", preserved, "SKILL.md"), "utf8"),
+      "# managed\n",
+    );
   } finally {
     delete process.env.CODEX_ROUTER_SKILLS_DIR;
     rmSync(home, { recursive: true, force: true });
@@ -313,6 +704,64 @@ test("external approval uses deterministic ordering and rejects over-deep trees"
     delete process.env.CODEX_ROUTER_SKILLS_DIR;
     rmSync(home, { recursive: true, force: true });
     rmSync(fakeSource, { recursive: true, force: true });
+  }
+});
+
+test("managed marker and freshness reads are bounded and fail closed", () => {
+  const home = tempCodexHome();
+  try {
+    installSkills(home, { quiet: true });
+    const name = "codex-router";
+    const target = path.join(home, "skills", name);
+    const markerPath = path.join(target, ".codex-router-managed");
+    truncateSync(markerPath, 64 * 1024 + 1);
+    let status = skillPackStatus(home);
+    assert.ok(status.staleOwnership.includes(name));
+    assert.equal(uninstallSkills(home, { quiet: true }), PACK.length - 1);
+    assert.ok(existsSync(target), "an oversized marker cannot authorize deletion");
+
+    rmSync(home, { recursive: true, force: true });
+    installSkills(home, { quiet: true });
+    const managed = path.join(home, "skills", name);
+    const large = path.join(managed, "large.bin");
+    writeFileSync(large, "");
+    truncateSync(large, 64 * 1024 * 1024 + 1);
+    status = skillPackStatus(home);
+    assert.ok(status.stale.includes(name), "oversized managed content is stale without allocation");
+    rmSync(large);
+    let nested = managed;
+    for (let index = 0; index < 65; index += 1) {
+      nested = path.join(nested, "d");
+      mkdirSync(nested);
+    }
+    status = skillPackStatus(home);
+    assert.ok(status.stale.includes(name), "over-deep managed content is stale without recursion");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("ownership state has byte and entry ceilings", () => {
+  const home = tempCodexHome();
+  try {
+    installSkills(home, { quiet: true });
+    const statePath = skillOwnershipPath(home);
+    const original = readFileSync(statePath, "utf8");
+    writeFileSync(statePath, `${original}${" ".repeat(1024 * 1024)}\n`);
+    assert.equal(skillPackStatus(home).ownershipStateValid, false);
+    assert.equal(uninstallSkills(home, { quiet: true }), 0);
+    for (const name of PACK) assert.ok(existsSync(path.join(home, "skills", name)));
+
+    const tooMany = { version: 1, skills: {} };
+    for (let index = 0; index < 4_097; index += 1) {
+      tooMany.skills[`skill-${index}`] = { token: "a".repeat(64) };
+    }
+    writeFileSync(statePath, `${JSON.stringify(tooMany)}\n`);
+    assert.equal(skillPackStatus(home).ownershipStateValid, false);
+    assert.equal(uninstallSkills(home, { quiet: true }), 0);
+    for (const name of PACK) assert.ok(existsSync(path.join(home, "skills", name)));
+  } finally {
+    rmSync(home, { recursive: true, force: true });
   }
 });
 
