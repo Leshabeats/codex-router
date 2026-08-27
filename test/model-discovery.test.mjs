@@ -402,7 +402,7 @@ test("OpenRouter metadata preserves exact context, modalities, tools, and effort
   });
 });
 
-test("Venice records its Ox Alpha advertisement separately from the proven effective ladder", () => {
+test("Venice preserves its Ox Alpha advertisement for operator curation", () => {
   const metadata = modelCatalogMetadata({ data: [{
     id: "stealth-ox-alpha",
     context_length: 1_048_576,
@@ -424,10 +424,10 @@ test("Venice records its Ox Alpha advertisement separately from the proven effec
   }] }, PROVIDERS.get("venice"))["stealth-ox-alpha"];
   assert.equal(metadata.contextWindow, 1_048_576);
   assert.equal(metadata.maxOutputTokens, 131_072);
-  assert.deepEqual(metadata.reasoning.supportedEfforts, ["low", "high", "max"]);
-  assert.deepEqual(metadata.reasoning.advertisedSupportedEfforts, ["none", "low", "medium", "high"]);
-  assert.equal(metadata.reasoning.advertisedDefaultEffort, "high");
-  assert.equal(metadata.reasoning.defaultEffort, undefined);
+  assert.deepEqual(metadata.reasoning.supportedEfforts, ["none", "low", "medium", "high"]);
+  assert.equal(metadata.reasoning.defaultEffort, "high");
+  assert.equal(metadata.reasoning.advertisedSupportedEfforts, undefined);
+  assert.equal(metadata.reasoning.effectiveMetadataSource, undefined);
 });
 
 test("documented supplements do not invent MiniMax or OpenCode effort controls", () => {

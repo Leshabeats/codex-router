@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type Ref } from "react";
 import {
   ArrowUpRight,
   BarChart3,
@@ -83,6 +83,7 @@ export function UsagePage({
   api,
   refreshing,
   onRefresh,
+  focusRequest,
 }: {
   target?: RouterTarget;
   account?: AccountUsage;
@@ -90,9 +91,15 @@ export function UsagePage({
   api?: RouterControlApi;
   refreshing: boolean;
   onRefresh: () => void;
+  focusRequest?: { id: number; sourceId?: string; allowance: boolean };
 }) {
   const [range, setRange] = useState<7 | 30 | 90>(30);
   const [selected, setSelected] = useState("");
+  const [allowanceFocused, setAllowanceFocused] = useState(false);
+  const pageRef = useRef<HTMLDivElement>(null);
+  const allowanceRef = useRef<HTMLElement>(null);
+  const allowanceTargetRef = useRef<HTMLElement>(null);
+  const handledFocusRequest = useRef<number | undefined>(undefined);
 
   const sources = useMemo(
     () => buildSources(target, account, providerUsage),
@@ -133,7 +140,10 @@ export function UsagePage({
 
   const allowances = useMemo<AllowanceRow[]>(() => {
     if (!source) return [];
-    const candidates = sources.filter((entry) => entry.kind !== "aggregate");
+    const candidates = [
+      ...sources.filter((entry) => entry.id === source.id && entry.kind !== "aggregate"),
+      ...sources.filter((entry) => entry.id !== source.id && entry.kind !== "aggregate"),
+    ];
     return candidates.flatMap((entry) =>
       entry.metrics.map((metric, index) => ({
         id: `${entry.id}-${metric.label || metric.kind}-${index}`,
@@ -142,6 +152,68 @@ export function UsagePage({
       })),
     );
   }, [source, sources]);
+
+  const targetAllowanceSourceId = focusRequest?.allowance
+    ? navigationSourceId(focusRequest.sourceId)
+    : undefined;
+  const targetAllowanceRows = targetAllowanceSourceId
+    ? allowances.filter((row) => row.source.id === targetAllowanceSourceId)
+    : [];
+  const targetAllowanceRowId = (
+    targetAllowanceRows
+      .filter((row) => metricResetAt(row.metric) !== undefined)
+      .sort((left, right) => metricResetAt(left.metric)! - metricResetAt(right.metric)!)[0]
+    ?? targetAllowanceRows[0]
+  )?.id;
+
+  useEffect(() => {
+    if (!focusRequest) return undefined;
+    const preferred = navigationSourceId(focusRequest.sourceId);
+    if (preferred && sources.some((entry) => entry.id === preferred)) setSelected(preferred);
+    if (handledFocusRequest.current === focusRequest.id) return undefined;
+    // A refresh can replace the usage rows. Let its committed data choose the
+    // final target before marking this navigation request as handled.
+    if (refreshing) return undefined;
+
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (!focusRequest.allowance) {
+      setAllowanceFocused(false);
+      const scrollTimer = window.setTimeout(() => {
+        pageRef.current?.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "start" });
+        pageRef.current?.focus({ preventScroll: true });
+        handledFocusRequest.current = focusRequest.id;
+      }, 80);
+      return () => window.clearTimeout(scrollTimer);
+    }
+
+    const preferredSource = preferred
+      ? sources.find((entry) => entry.id === preferred)
+      : undefined;
+    if (preferredSource?.metrics.length && !allowanceTargetRef.current) return undefined;
+    if (!allowanceTargetRef.current && !allowanceRef.current) return undefined;
+
+    const focusAllowance = () => {
+      const focusTarget = allowanceTargetRef.current ?? allowanceRef.current;
+      if (!focusTarget) return false;
+      focusTarget.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "center" });
+      focusTarget.focus({ preventScroll: true });
+      return true;
+    };
+
+    setAllowanceFocused(true);
+    const scrollTimer = window.setTimeout(() => {
+      // Selection and layout changes can replace a card between scheduling and
+      // execution. Resolve the ref again rather than focusing a detached node.
+      if (focusAllowance()) handledFocusRequest.current = focusRequest.id;
+    }, 80);
+    return () => window.clearTimeout(scrollTimer);
+  }, [allowances.length, focusRequest, refreshing, sources, targetAllowanceRowId]);
+
+  useEffect(() => {
+    if (!allowanceFocused) return undefined;
+    const clearTimer = window.setTimeout(() => setAllowanceFocused(false), 1_800);
+    return () => window.clearTimeout(clearTimer);
+  }, [allowanceFocused, focusRequest?.id]);
 
   const dashboardSources = useMemo(() => {
     const candidates = sources.filter((entry) => entry.kind !== "aggregate");
@@ -152,7 +224,7 @@ export function UsagePage({
   }, [source, sources]);
 
   return (
-    <div className="usage-status-page usage-page">
+    <div ref={pageRef} tabIndex={-1} aria-label="Usage overview" className="usage-status-page usage-page">
       <PageHeader
         eyebrow="Allowance and traffic"
         title="Usage"
@@ -238,7 +310,12 @@ export function UsagePage({
               ) : null}
             </section>
 
-            <section className="panel-section us-allowance-panel">
+            <section
+              ref={allowanceRef}
+              tabIndex={-1}
+              aria-label="Accounts and allowances"
+              className={`panel-section us-allowance-panel${allowanceFocused ? " is-navigation-focus" : ""}`}
+            >
               <SectionHeading
                 title="Accounts and allowances"
                 description="Official quota windows and balances for every connected account."
@@ -246,7 +323,13 @@ export function UsagePage({
               {allowances.length ? (
                 <div className="us-metric-stack">
                   {allowances.map((row) => (
-                    <MetricCard key={row.id} source={row.source.name} metric={row.metric} />
+                    <MetricCard
+                      key={row.id}
+                      source={row.source.name}
+                      metric={row.metric}
+                      cardRef={row.id === targetAllowanceRowId ? allowanceTargetRef : undefined}
+                      navigationFocused={allowanceFocused && row.id === targetAllowanceRowId}
+                    />
                   ))}
                 </div>
               ) : (
@@ -951,16 +1034,30 @@ function ChartTooltip({ bucket, parts, sourceKind }: {
   );
 }
 
-function MetricCard({ source, metric }: { source: string; metric: UsageMetric }) {
+function MetricCard({ source, metric, cardRef, navigationFocused = false }: {
+  source: string;
+  metric: UsageMetric;
+  cardRef?: Ref<HTMLElement>;
+  navigationFocused?: boolean;
+}) {
   const remaining = remainingPercent(metric);
   const tone = remaining !== null && remaining < 15
     ? "danger"
     : remaining !== null && remaining < 35
       ? "warning"
       : "neutral";
-  const reset = metric.resetAt || metric.resetsAt;
+  const reset = metricResetAt(metric);
+  const label = metric.label || (metric.kind === "balance" ? "Balance" : "Usage limit");
+  const resetLabel = reset !== undefined
+    ? `Resets ${formatDateTime(reset)} (${resetCountdown(reset)})`
+    : "No reset reported";
   return (
-    <article className="us-metric-card">
+    <article
+      ref={cardRef}
+      tabIndex={cardRef ? -1 : undefined}
+      aria-label={`${source}, ${label}, ${metricValue(metric)}. ${resetLabel}`}
+      className={`us-metric-card${navigationFocused ? " is-navigation-focus" : ""}`}
+    >
       <header>
         <span className="us-metric-source">{source}</span>
         <Badge tone={tone}>{metricValue(metric)}</Badge>
@@ -969,7 +1066,7 @@ function MetricCard({ source, metric }: { source: string; metric: UsageMetric })
         {metric.kind === "balance"
           ? <Coins aria-hidden size={15} strokeWidth={1.7} />
           : <Gauge aria-hidden size={15} strokeWidth={1.7} />}
-        <strong>{metric.label || (metric.kind === "balance" ? "Balance" : "Usage limit")}</strong>
+        <strong>{label}</strong>
       </div>
       {remaining !== null ? (
         <progress
@@ -988,14 +1085,27 @@ function MetricCard({ source, metric }: { source: string; metric: UsageMetric })
       ) : null}
       {metric.detail ? <p>{metric.detail}</p> : null}
       <footer>
-        {reset ? (
+        {reset !== undefined ? (
           <time dateTime={dateTimeValue(reset)}>
-            Resets {formatDateTime(reset)} ({resetCountdown(reset)})
+            {resetLabel}
           </time>
         ) : "No reset reported"}
       </footer>
     </article>
   );
+}
+
+function navigationSourceId(sourceId?: string): string | undefined {
+  if (!sourceId) return undefined;
+  // The menu-bar/widget Codex source is the account-reported stream used for
+  // its graph and reset windows, not the separate traffic ledger observed by
+  // this router.
+  return sourceId === "openai" ? "chatgpt-subscription" : `provider:${sourceId}`;
+}
+
+function metricResetAt(metric: UsageMetric): number | undefined {
+  const reset = metric.resetAt ?? metric.resetsAt;
+  return Number.isFinite(reset) ? reset : undefined;
 }
 
 function SourceRow({ source, selected, onSelect }: {

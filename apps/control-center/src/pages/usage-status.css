@@ -14,6 +14,12 @@
   gap: 24px;
 }
 
+.usage-page:focus-visible {
+  background-color: transparent;
+  box-shadow: none;
+  color: inherit;
+}
+
 .usage-status-page :where(button, select, input):focus-visible {
   background-color: color-mix(in srgb, var(--accent) 10%, var(--surface-0));
   color: var(--ink-strong);
@@ -605,6 +611,12 @@
 
 .usage-page .us-allowance-panel {
   min-height: 0;
+  transition: border-color 180ms ease, background-color 180ms ease;
+}
+
+.usage-page .us-allowance-panel.is-navigation-focus {
+  border-color: color-mix(in srgb, var(--accent) 62%, var(--line));
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface-0));
 }
 
 .usage-page .us-metric-stack {
@@ -618,6 +630,13 @@
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--surface-1);
+  transition: border-color 180ms ease, background-color 180ms ease;
+}
+
+.usage-page .us-metric-card.is-navigation-focus {
+  border-color: color-mix(in srgb, var(--accent) 72%, var(--line));
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface-1));
+  outline: none;
 }
 
 .usage-page .us-metric-card > header,

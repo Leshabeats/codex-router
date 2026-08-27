@@ -55,7 +55,8 @@ import {
   ZaiResponsesCompatTransform,
   zaiResponsesCompatTransform,
 } from "./zai-responses-compat.mjs";
-import { deepseekToolMessageCompatTransform } from "./deepseek-tool-message-compat.mjs";
+import { translatedToolMessageCompatTransform } from "./deepseek-tool-message-compat.mjs";
+import { exactRouteProbeRequested } from "./exact-route-probe.mjs";
 import {
   MERGED_CATALOG_PATH,
   NATIVE_CATALOG_PATH,
@@ -87,10 +88,19 @@ import {
   downgradeOriginalImageDetail,
   flattenNamespacedHistory,
   flattenNamespaceTools,
+  flattenToolChoice,
   flattenToolSearchHistory,
   repairToolSchemaRoots,
+  strictOpenCodeCompactionInput,
   stripSearchContentTypes,
+  ToolSearchHistoryCapacityError,
 } from "./namespace-relay.mjs";
+import {
+  chatProviderToolSurface,
+  GROQ_MAX_TOOLS,
+  GroqToolLimitError,
+  GROQ_TOOL_LIMIT_CODE,
+} from "./chat-tool-surface.mjs";
 import { collaborationToolAvailable, pendingInterruptTargets } from "./subagent-completion.mjs";
 import {
   FAILOVER_BUDGET_MS,
@@ -111,7 +121,6 @@ import {
 } from "./subagent-proofs.mjs";
 import { forgetChildSpawn, observeChildTurn } from "./subagent-turns.mjs";
 import { subagentEffort } from "./multi-agent-state.mjs";
-import { mergeCodexAppTools } from "./codex-app-tools.mjs";
 import {
   activityMetadataFromHeaders,
   threadIdFromHeaders,
@@ -637,6 +646,7 @@ const NATIVE_UNSUPPORTED_PARAMS = Object.freeze([
   "user",
   "truncation",
 ]);
+const NATIVE_STATELESS_REASONING_INCLUDE = "reasoning.encrypted_content";
 
 /**
  * Make a generic Responses request acceptable to the native endpoint.
@@ -646,9 +656,34 @@ const NATIVE_UNSUPPORTED_PARAMS = Object.freeze([
  * promise that its traffic is byte-identical is worth more than the tidiness of
  * one shared path.
  */
-function normalizeNativeForSubstitutedCaller(payload) {
-  // Not optional upstream: `store` must be false, and anything else is a 400.
-  payload.store = false;
+function normalizeNativeForSubstitutedCaller(payload, { compact = false } = {}) {
+  // Ordinary Responses turns on ChatGPT's backend are stateless: `store` must
+  // be false, and anything else is a 400. The dedicated compact endpoint has
+  // a narrower CompactionInput contract that does not define or send this field.
+  // Injecting `store: false` there also makes its referenced `rs_...` items
+  // look deliberately unpersisted, so omit the field rather than choosing a
+  // persistence policy the compact request never exposed.
+  if (compact) {
+    delete payload.store;
+    // `/responses/compact` has its own narrow request schema. `include` belongs
+    // to ordinary Responses creation and must not leak across this boundary if
+    // a generic caller reuses its normal request options for compaction.
+    delete payload.include;
+  } else {
+    payload.store = false;
+    // The encrypted reasoning payload is the continuation token for a
+    // stateless Responses conversation. A caller that expected storage may not
+    // have requested it; forcing store=false without also requesting this field
+    // leaves only rs_ ids for the next turn, which cannot be retrieved.
+    if (payload.include === undefined) {
+      payload.include = [NATIVE_STATELESS_REASONING_INCLUDE];
+    } else if (
+      Array.isArray(payload.include) &&
+      !payload.include.includes(NATIVE_STATELESS_REASONING_INCLUDE)
+    ) {
+      payload.include = [...payload.include, NATIVE_STATELESS_REASONING_INCLUDE];
+    }
+  }
   for (const key of NATIVE_UNSUPPORTED_PARAMS) delete payload[key];
   return payload;
 }
@@ -702,15 +737,39 @@ function needsZenFreeToolCompatibility(route) {
   );
 }
 
+// Console Go's Responses endpoint is Responses-shaped but implements only the
+// ordinary function-tool subset: namespace/custom/deferred-search controls are
+// rejected, as are function names over 64 characters. Keep this exact to the
+// Go Responses variant; paid Zen and other Responses providers retain their
+// native contract until their own upstream proves otherwise.
+function needsConsoleGoResponsesToolCompatibility(route) {
+  return providerForModel(route)?.id === "opencode-go-responses";
+}
+
+function needsStrictOpenCodeToolCompatibility(route) {
+  return (
+    needsZenFreeToolCompatibility(route) ||
+    needsConsoleGoResponsesToolCompatibility(route)
+  );
+}
+
 // Moonshot accepts only pure `$ref` pointers into `#/$defs/`, and rejects the
 // whole request -- not the one tool -- over any other pointer (issue #353) or a
 // definition reference carrying sibling keywords. The OAuth and platform-key
 // routes are separate products, but their first-party validators share this
-// schema flavor. Keep the rewrite off every non-Moonshot provider.
+// schema flavor. Console Go's Kimi K2.7 Code route has now returned the same
+// validator error (#488), so include that exact measured route without
+// projecting the behavior onto unrelated OpenCode Go models.
 const MOONSHOT_PROVIDER_IDS = new Set(["kimi-oauth", "kimi-api", "kimi-api-cn"]);
+const OPENCODE_GO_MOONSHOT_MODELS = new Set(["kimi-k2.7-code"]);
 
 function needsMoonshotSchemaCompatibility(route) {
-  return MOONSHOT_PROVIDER_IDS.has(providerForModel(route)?.id);
+  const providerId = providerForModel(route)?.id;
+  return (
+    MOONSHOT_PROVIDER_IDS.has(providerId) ||
+    (providerId === "opencode-go" &&
+      OPENCODE_GO_MOONSHOT_MODELS.has(route.upstreamModel))
+  );
 }
 
 function zenFreeCompatibleInput(input, route) {
@@ -1841,23 +1900,55 @@ async function bridgeVisionInput(input, route, request) {
   return result.input;
 }
 
-// OpenAI-issued reasoning `encrypted_content` is an opaque token (Fernet-style,
-// e.g. "gAAAAAB...") with no whitespace. Some local Responses providers (notably
-// Ollama) mimic the reasoning-item shape but fill `encrypted_content` with the
-// plain-text reasoning summary. Codex stores those items, and when the
-// conversation is later replayed to OpenAI's native Responses API, OpenAI
-// rejects the undecryptable blob with "Encrypted content could not be decrypted
-// or parsed." Strip the non-opaque value before sending to native; the item's
-// `summary` still carries the readable reasoning.
+// Credential-bearing callers keep the historical format repair below: they
+// can fall back to the native stored-item namespace after an unreadable
+// encrypted payload is removed. A substituted caller has no such namespace,
+// so its stateless repair must be stricter about provenance. In particular,
+// the wire contract calls `encrypted_content` opaque; a token's current shape
+// cannot prove which backend issued it.
 function isOpaqueEncryptedContent(value) {
+  // Preserve the historical direct-credential behavior. The field's wire
+  // contract is opaque, so a future valid format must not be discarded merely
+  // because it stops using today's Fernet-shaped prefix.
   return typeof value === "string" && value.length > 0 && !/\s/.test(value);
 }
 
-function sanitizeReasoningForNative(item) {
-  if (item?.encrypted_content === undefined) return item;
+function reasoningSummaryText(item) {
+  if (!Array.isArray(item?.summary) || item.summary.length === 0) return undefined;
+  const canonical = item.summary.every((part) => {
+    return (
+      part != null &&
+      typeof part === "object" &&
+      !Array.isArray(part) &&
+      Object.keys(part).every((key) => key === "type" || key === "text") &&
+      part.type === "summary_text" &&
+      typeof part.text === "string"
+    );
+  });
+  if (!canonical) return undefined;
+  const text = item.summary.map((part) => part.text).join("");
+  return text.length > 0 ? text : undefined;
+}
+
+function sanitizeReasoningForNative(item, { stateless = false } = {}) {
+  if (item?.encrypted_content === undefined) return stateless ? undefined : item;
+  if (stateless) {
+    // Translated Responses providers have been observed copying the visible
+    // reasoning summary into `encrypted_content`. Exact equality is evidence
+    // local to this item that the value is a plaintext echo, not a continuation
+    // token. Drop that foreign item rather than asking native storage to resolve
+    // its `rs_` id. Preserve every other non-empty opaque value byte-identical:
+    // its format is intentionally unspecified and may evolve.
+    if (
+      typeof item.encrypted_content !== "string" ||
+      item.encrypted_content.length === 0
+    ) return undefined;
+    const summary = reasoningSummaryText(item);
+    return summary !== undefined && item.encrypted_content === summary ? undefined : item;
+  }
   if (isOpaqueEncryptedContent(item.encrypted_content)) return item;
-  const { encrypted_content, ...rest } = item;
-  return rest;
+  const { encrypted_content: _encryptedContent, ...storedItem } = item;
+  return storedItem;
 }
 
 // The mirror of normalizeRoutedAgentInput. When the parent agent is routed, its
@@ -1915,14 +2006,33 @@ function sanitizeCollaborationForNative(item) {
   };
 }
 
-function normalizeNativeInput(input) {
+function normalizeNativeInput(
+  input,
+  { statelessReasoning = false, dropUnstoredReasoningReferences = false } = {},
+) {
   if (!Array.isArray(input)) return input;
-  return input.map((item) => {
-    if (item?.type === "reasoning") return sanitizeReasoningForNative(item);
-    if (item?.type !== "compaction") return sanitizeCollaborationForNative(item);
-    return isRouterCompactionValue(item.encrypted_content)
+  return input.flatMap((item) => {
+    if (item?.type === "reasoning") {
+      const reasoning = sanitizeReasoningForNative(item, {
+        stateless: statelessReasoning,
+      });
+      return reasoning === undefined ? [] : [reasoning];
+    }
+    if (
+      dropUnstoredReasoningReferences &&
+      item?.type === "item_reference" &&
+      typeof item.id === "string" &&
+      item.id.startsWith("rs_")
+    ) {
+      // A substituted caller has no native storage namespace to resolve an
+      // `rs_` reference against. Full reasoning items with encrypted content
+      // remain above; bare references cannot be made stateless and are dropped.
+      return [];
+    }
+    if (item?.type !== "compaction") return [sanitizeCollaborationForNative(item)];
+    return [isRouterCompactionValue(item.encrypted_content)
       ? messageItem(renderCompactionValue(item.encrypted_content))
-      : item;
+      : item];
   });
 }
 
@@ -2049,7 +2159,8 @@ function extractResponseText(payload) {
 // The models a compaction may be tried on, best first, without sending
 // anything. The conversation's own model leads unless it has already said it
 // is empty, in which case asking it again only buys the same rejection.
-function compactionAttempts(route, aged) {
+function compactionAttempts(route, aged, { allowFailover = true } = {}) {
+  if (!allowFailover) return [route];
   const settings = readFailoverSettings();
   if (!settings.enabled) return [route];
   const candidates = rankFailoverCandidates(
@@ -2077,9 +2188,17 @@ function compactionAttempts(route, aged) {
 // conversation cannot get under its context limit without one.
 async function summarizeWith(request, payload, route, aged, prepared, signal) {
   const compatibleInput = zenFreeCompatibleInput(aged.input, route);
-  const providerInput = needsZenFreeToolCompatibility(route)
-    ? bridgeCustomTools([], compatibleInput, new Map()).input
-    : compatibleInput;
+  const providerInput = needsConsoleGoResponsesToolCompatibility(route)
+    ? strictOpenCodeCompactionInput(compatibleInput, payload.tools, {
+        maxNameLength: 64,
+      })
+    : needsZenFreeToolCompatibility(route)
+      ? bridgeCustomTools(
+        [],
+        compatibleInput,
+        new Map(),
+      ).input
+      : compatibleInput;
   const bridged = await bridgeVisionInput(
     providerInput,
     route,
@@ -2099,6 +2218,7 @@ async function summarizeWith(request, payload, route, aged, prepared, signal) {
       messageItem(COMPACTION_PROMPT),
     ],
   };
+  delete body.tool_choice;
   normalizeAutoToolChoice(body, route);
   delete body.previous_response_id;
   delete body.client_metadata;
@@ -2115,7 +2235,7 @@ async function summarizeWith(request, payload, route, aged, prepared, signal) {
   return { upstream, bridged, bytes: Buffer.byteLength(serialized, "utf8") };
 }
 
-async function summarize(request, payload, route, signal) {
+async function summarize(request, payload, route, signal, { allowFailover = true } = {}) {
   const originalInput = Array.isArray(payload.input) ? payload.input : [];
   // Compaction replays the whole conversation, so any image still in it would
   // reach the text-only model unbridged and fail the compaction rather than
@@ -2144,7 +2264,7 @@ async function summarize(request, payload, route, signal) {
   // the conversation is on. A provider already known to be empty is dropped
   // rather than asked, exactly as on the turn path. Nothing is sent while this
   // list is built.
-  const attempts = compactionAttempts(route, aged);
+  const attempts = compactionAttempts(route, aged, { allowFailover });
   // Attempts that were sent and rejected, kept so the caller can meter each one.
   const failed = [];
   let last;
@@ -2226,6 +2346,7 @@ async function summarize(request, payload, route, signal) {
       bodyText: bytes.toString("utf8"),
       retryAfterSeconds: Number(sent.upstream.headers.get("retry-after")),
     });
+    if (!allowFailover) return { ...last, failed };
     if (!verdict.swap) return { ...last, failed };
     recordProviderCooldown(attemptRoute.provider, verdict);
     if (index + 1 < attempts.length) {
@@ -2300,8 +2421,16 @@ function writeCompactionSse(response, model, checkpoint) {
 
 // Returns what the request path needs to meter and log the compaction, so a
 // routed compaction leaves the same telemetry trail as any other routed turn.
-async function handleRoutedCompaction(request, response, payload, route, signal, v2) {
-  const result = await summarize(request, payload, route, signal);
+async function handleRoutedCompaction(
+  request,
+  response,
+  payload,
+  route,
+  signal,
+  v2,
+  { allowFailover = true } = {},
+) {
+  const result = await summarize(request, payload, route, signal, { allowFailover });
   // A compaction moved to another model is metered against the model that
   // actually produced the summary, the same as any other turn.
   const served = {
@@ -2491,8 +2620,42 @@ function observeSubagentOutcome(request, route, status, options = {}) {
 async function buildRoutedRequest({ request, payload, route, agedInput, tokenMaxxing = false }) {
   let namespacesFlattened = false;
   let flattenedNamespaces = new Map();
+  const provider = providerForModel(route);
+  const chatCompletionsProvider = provider?.protocol !== "openai-responses";
+  const consoleGoResponsesCompatibility = needsConsoleGoResponsesToolCompatibility(route);
+  const compatibleInput = zenFreeCompatibleInput(agedInput, route);
+  // Image substitution may spend another provider's quota. Every Groq tool
+  // limit that is already knowable from the client request and stored history
+  // must fail locally before that work starts; the normal post-bridge pass
+  // below runs again so any later transformation cannot bypass the invariant.
+  if (provider?.id === "groq" && chatCompletionsProvider) {
+    const preflight = chatProviderToolSurface(payload.tools, provider.id, {
+      input: compatibleInput,
+      toolChoice: payload.tool_choice,
+    });
+    try {
+      flattenToolSearchHistory(
+        compatibleInput,
+        preflight.tools,
+        preflight.namespaces,
+        {
+          maxTools: GROQ_MAX_TOOLS,
+          recoverWithoutRelay: true,
+          toolChoice: payload.tool_choice,
+        },
+      );
+    } catch (error) {
+      if (!(error instanceof ToolSearchHistoryCapacityError)) throw error;
+      throw new GroqToolLimitError({
+        clientToolCount: preflight.tools.length,
+        expandedToolCount: preflight.tools.length + error.required,
+        historyToolCapacity: error.available,
+        historyToolCount: error.required,
+      });
+    }
+  }
   const bridged = await bridgeVisionInput(
-    zenFreeCompatibleInput(agedInput, route),
+    compatibleInput,
     route,
     request,
   );
@@ -2506,8 +2669,6 @@ async function buildRoutedRequest({ request, payload, route, agedInput, tokenMax
   // -- a turn that still reaches the provider, and still reads as a 200,
   // having quietly replaced the prompt with its own letters.
   const input = Array.isArray(bridged) ? [...bridged] : bridged;
-  const provider = providerForModel(route);
-  const chatCompletionsProvider = provider?.protocol !== "openai-responses";
   // Thinking chat providers need the assistant's reasoning replayed, but
   // LiteLLM drops Responses `reasoning` input items. Generic providers keep
   // the established visible-content carry used for DeepSeek. GLM's native
@@ -2542,18 +2703,29 @@ async function buildRoutedRequest({ request, payload, route, agedInput, tokenMax
     // Relay the app's full native toolset (threads, automations, app
     // navigation) to the provider. The client registers these tools with
     // deferLoading and executes the calls natively, but only sends a reduced
-    // codex_app namespace on routed requests; merge the deferred definitions in
-    // so routed models see what native models see. The router never executes
-    // these calls -- the app owns thread, automation, and navigation state --
-    // it only relays definitions and results.
-    const merged = mergeCodexAppTools(tools);
-    if (merged.merged) tools = merged.tools;
-    const flattened = flattenNamespaceTools(tools);
+    // codex_app namespace on routed requests; normally merge the deferred
+    // definitions in so routed models see what native models see. A provider
+    // with a hard tool cap may omit unreferenced injected definitions and add
+    // back only those required by stored calls or a forced choice. The router
+    // never executes these calls -- the app owns thread, automation, and
+    // navigation state -- it only relays definitions and results.
+    const flattened = chatProviderToolSurface(tools, provider?.id, {
+      input,
+      toolChoice: payload.tool_choice,
+    });
     namespacesFlattened = flattened.flattened;
     flattenedNamespaces = flattened.namespaces;
     if (namespacesFlattened) {
       tools = flattened.tools;
     }
+  } else if (consoleGoResponsesCompatibility) {
+    // Console Go exposes a Responses endpoint but rejects the native tool
+    // discriminators Codex sends. Translate only its tool boundary; unlike the
+    // chat-completions branch, do not inject the deferred codex_app snapshot.
+    const flattened = flattenNamespaceTools(tools, { maxNameLength: 64 });
+    namespacesFlattened = flattened.flattened;
+    flattenedNamespaces = flattened.namespaces;
+    tools = flattened.tools;
   } else {
     // Responses-native providers keep the namespace tools untouched, so nothing
     // is flattened and the list is left alone. The inventory is still built,
@@ -2563,18 +2735,19 @@ async function buildRoutedRequest({ request, payload, route, agedInput, tokenMax
     flattenedNamespaces = flattenNamespaceTools(tools, {
       bridgeToolSearch: false,
     }).namespaces;
-    // Keeping the namespace shape is not the same as keeping a root the
-    // upstream rejects. `opencode-go-responses/gpt-5.6-luna` 400s a
-    // `type: ["object","null"]` parameter root while accepting the same request
-    // with a plain or union root -- so the strict-root repair has to run here
-    // too, on the tools alone, without flattening anything.
+    // Keeping the namespace shape is not the same as keeping a parameter root
+    // strict Responses providers may reject. Run the shared root repair on the
+    // tools alone without flattening their native representation.
     tools = repairToolSchemaRoots(tools);
   }
   if (needsZenFreeToolCompatibility(route)) {
-    // Ox reaches Chat Completions after namespace flattening while Muse reaches
-    // Responses with native namespaces. Run the same recursive-ref repair
-    // after both protocol branches so neither wire shape can bypass it.
+    // Zen Free's measured schema boundary rejects recursive definition edges.
+    // Console Go's evidence establishes different tool discriminators and
+    // fields only, so it must retain recursive refs until that endpoint proves
+    // otherwise.
     tools = repairToolSchemaRoots(tools, { nonRecursive: true });
+  }
+  if (needsStrictOpenCodeToolCompatibility(route)) {
     tools = stripSearchContentTypes(tools);
   }
   if (needsMoonshotSchemaCompatibility(route)) {
@@ -2584,30 +2757,72 @@ async function buildRoutedRequest({ request, payload, route, agedInput, tokenMax
   }
   let routedInput = input;
   let routedToolChoice = payload.tool_choice;
-  if (needsZenFreeToolCompatibility(route)) {
+  if (needsStrictOpenCodeToolCompatibility(route)) {
     const customTools = bridgeCustomTools(
       tools,
       routedInput,
       flattenedNamespaces,
       routedToolChoice,
+      undefined,
+      consoleGoResponsesCompatibility
+        ? { maxNameLength: 64, bridgeAll: true }
+        : undefined,
     );
     tools = customTools.tools;
     routedInput = customTools.input;
     routedToolChoice = customTools.toolChoice;
   }
-  if (chatCompletionsProvider) {
-    const searchHistory = flattenToolSearchHistory(
-      routedInput,
-      tools,
-      flattenedNamespaces,
-    );
+  if (chatCompletionsProvider || consoleGoResponsesCompatibility) {
+    let searchHistory;
+    try {
+      searchHistory = flattenToolSearchHistory(
+        routedInput,
+        tools,
+        flattenedNamespaces,
+        provider?.id === "groq"
+          ? {
+              maxTools: GROQ_MAX_TOOLS,
+              recoverWithoutRelay: true,
+              toolChoice: routedToolChoice,
+            }
+          : undefined,
+      );
+    } catch (error) {
+      if (provider?.id !== "groq" || !(error instanceof ToolSearchHistoryCapacityError)) {
+        throw error;
+      }
+      throw new GroqToolLimitError({
+        clientToolCount: tools.length,
+        expandedToolCount: tools.length + error.required,
+        historyToolCapacity: error.available,
+        historyToolCount: error.required,
+      });
+    }
     routedInput = searchHistory.input;
     tools = searchHistory.tools;
+    if (
+      provider?.id === "groq" &&
+      (searchHistory.flattened || flattenedNamespaces.size > 0)
+    ) {
+      namespacesFlattened = true;
+    }
+    if (needsZenFreeToolCompatibility(route)) {
+      tools = repairToolSchemaRoots(tools, { nonRecursive: true });
+    }
   }
   // The stored call history must use the same tool names as the tool list, or
   // the model copies the bare names out of its own transcript.
   if (namespacesFlattened) {
     routedInput = flattenNamespacedHistory(routedInput, flattenedNamespaces);
+    if (provider?.id === "groq") {
+      routedToolChoice = flattenToolChoice(
+        routedToolChoice,
+        flattenedNamespaces,
+      );
+    }
+  }
+  if (consoleGoResponsesCompatibility) {
+    routedToolChoice = flattenToolChoice(routedToolChoice, flattenedNamespaces);
   }
   const routed = {
     ...payload,
@@ -2909,6 +3124,7 @@ async function handleResponses(request, response, requestUrl) {
   });
   try {
     if (!requireCodexTransport(request, response)) return;
+    const exactRouteProbe = exactRouteProbeRequested(request.headers);
     const encoded = await readRequestBody(request, { signal: controller.signal });
     const body = decodeBody(encoded, request.headers["content-encoding"]);
     const payload = await parseBodyAsync(body);
@@ -2957,8 +3173,10 @@ async function handleResponses(request, response, requestUrl) {
       ...activityMetadataFromHeaders(request.headers),
     });
     const compactV1 = /\/responses\/compact$/.test(requestUrl.pathname);
+    // Codex remote compaction V2 uses the ordinary Responses endpoint with a
+    // terminal trigger. Detect the protocol shape before route dispatch so the
+    // native path can also preserve the full tool results being summarized.
     const compactV2 =
-      route &&
       Array.isArray(payload.input) &&
       payload.input.at(-1)?.type === "compaction_trigger";
 
@@ -2970,6 +3188,7 @@ async function handleResponses(request, response, requestUrl) {
         route,
         controller.signal,
         compactV2,
+        { allowFailover: !exactRouteProbe },
       );
       const compacted = compaction.route || route;
       recordCompactionUsage(compaction, route, startedAt);
@@ -3057,25 +3276,41 @@ async function handleResponses(request, response, requestUrl) {
       // less than the request it avoids. The cooldown expires by itself, so
       // the operator's chosen model comes back without anyone doing anything.
       const settings = readFailoverSettings();
-      const cooled = settings.enabled ? providerCooldown(route.provider) : undefined;
+      const cooled = !exactRouteProbe && settings.enabled
+        ? providerCooldown(route.provider)
+        : undefined;
       if (cooled) {
-        const [next] = failoverCandidates({
+        const candidates = failoverCandidates({
           route,
           agedInput,
           flattenedNamespaces,
           chain: settings.chain,
-        });
-        if (next) {
-          const candidate = await prepareRoutedRequest({
-            request,
-            payload,
-            route: next.model,
-            normalizedInput,
-            agingEnabled,
-          });
+        }).slice(0, MAX_FAILOVER_HOPS);
+        for (const next of candidates) {
+          let candidate;
+          try {
+            candidate = await prepareRoutedRequest({
+              request,
+              payload,
+              route: next.model,
+              normalizedInput,
+              agingEnabled,
+            });
+          } catch (error) {
+            if (error?.code !== GROQ_TOOL_LIMIT_CODE || error?.provider !== "groq") throw error;
+            logFailover(
+              route,
+              next.model,
+              `cooled_until_${cooled.until}`,
+              "not-sent",
+              `compatibility/${error.code}`,
+            );
+            continue;
+          }
           if (routedRequestFits(next.model, candidate.body)) {
             logFailover(route, next.model, `cooled_until_${cooled.until}`, "not-sent", "swapped");
             adoptRoute(next.model, candidate);
+            break;
           } else {
             logFailover(
               route,
@@ -3089,6 +3324,7 @@ async function handleResponses(request, response, requestUrl) {
       }
     } else {
       const native = { ...payload };
+      const substitutedCaller = callerBroughtNoUpstreamCredential(request);
       // An extended-window variant is the model it was derived from, published
       // under a second slug so the picker can offer a different context
       // window (`src/native-context-variants.mjs`). chatgpt.com has never
@@ -3100,13 +3336,19 @@ async function handleResponses(request, response, requestUrl) {
       if (variantBase) native.model = variantBase;
       normalizeNativePromptCacheCompatibility(native);
       if (Array.isArray(payload.input)) {
-        native.input = normalizeNativeInput(payload.input);
+        native.input = normalizeNativeInput(payload.input, {
+          // Every substituted caller needs provenance-safe full reasoning.
+          // V1 compaction alone has a stored-reference contract, so it keeps
+          // bare rs_ references while ordinary/V2 stateless replay drops them.
+          statelessReasoning: substitutedCaller,
+          dropUnstoredReasoningReferences: substitutedCaller && !compactV1,
+        });
         // Native turns leave here as stateless full conversations (the
         // previous_response_id below is stripped), so an old tool result costs
         // its full size on every turn of this path too. Compaction turns are
         // exempt: compactV1 keeps its chaining, and a summary should read the
         // true content rather than a receipt.
-        if (!compactV1) {
+        if (!compactV1 && !compactV2) {
           const aged = ageToolResults(native.input, {
             enabled: nativeToolResultAgingEnabled(),
           });
@@ -3124,8 +3366,8 @@ async function handleResponses(request, response, requestUrl) {
         namespaces: flattenedNamespaces,
       });
       if (!compactV1) delete native.previous_response_id;
-      if (callerBroughtNoUpstreamCredential(request)) {
-        normalizeNativeForSubstitutedCaller(native);
+      if (substitutedCaller) {
+        normalizeNativeForSubstitutedCaller(native, { compact: compactV1 });
       }
       target = nativeTarget(requestUrl.pathname);
       headers = nativeHeaders(request);
@@ -3181,7 +3423,7 @@ async function handleResponses(request, response, requestUrl) {
         bodyText: failedBodyText,
         retryAfterSeconds: Number(upstream.headers.get("retry-after")),
       });
-      if (verdict.swap) {
+      if (verdict.swap && !exactRouteProbe) {
         // Believe the provider about when it will be back before trying anyone
         // else, so the next turn skips it instead of paying for the same
         // rejection again.
@@ -3307,10 +3549,13 @@ async function handleResponses(request, response, requestUrl) {
         envelopeCompat = new ZaiResponsesCompatTransform();
       }
       if (envelopeCompat) transforms.push(envelopeCompat);
-      const deepseekToolMessageCompat = route
-        ? deepseekToolMessageCompatTransform(route.provider, contentType)
+      // LiteLLM can add blank assistant envelopes while translating either
+      // Chat Completions or Messages. The factory refuses native traffic and
+      // providers that already speak Responses, so those paths gain no stage.
+      const translatedToolMessageCompat = route
+        ? translatedToolMessageCompatTransform(providerForModel(route), contentType)
         : undefined;
-      if (deepseekToolMessageCompat) transforms.push(deepseekToolMessageCompat);
+      if (translatedToolMessageCompat) transforms.push(translatedToolMessageCompat);
       // Restore flattened namespace calls for routed chat-completions providers,
       // and inject missing finished-child interrupts for both routed and native
       // multi-agent parents (San Francisco uses native GPT).
@@ -3686,6 +3931,32 @@ async function handleResponses(request, response, requestUrl) {
           message: "The router canceled a request that exceeded its execution deadline.",
         });
       }
+      return;
+    }
+    if (
+      error?.code === GROQ_TOOL_LIMIT_CODE &&
+      error?.provider === "groq" &&
+      !response.headersSent
+    ) {
+      finalStatus = error.status;
+      activityStatus = error.status;
+      writeJson(response, error.status, {
+        error: {
+          type: "provider_compatibility_error",
+          code: error.code,
+          provider: error.provider,
+          limit: error.limit,
+          message: error.message,
+        },
+      });
+      recordUsageEvent({
+        model: route?.slug || requestedModel,
+        provider: route ? canonicalProviderId(route.provider) : "openai",
+        status: error.status,
+        durationMs: Date.now() - startedAt,
+        responseStartMs: upstreamLatencyMs,
+      });
+      usageRecorded = true;
       return;
     }
     if (retryEmptyCompletionGuard?.hasContent()) emptyCompletion = false;

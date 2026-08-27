@@ -26,6 +26,7 @@ case $(uname -s) in
     next_phase_file="$transaction_dir/phase.next"
     had_previous_file="$transaction_dir/had-previous"
     target_name_file="$transaction_dir/target-name"
+    artifact_set_file="$transaction_dir/artifact-set"
     embedded_app="$bundle_dir/Contents/Resources/Control Center.app"
     embedded_binary="$embedded_app/Contents/MacOS/Codex Router"
     transaction_committed=0
@@ -34,7 +35,7 @@ case $(uname -s) in
     legacy_user_bundle_is_managed() {
       candidate=$1
       [ -d "$candidate" ] && [ ! -L "$candidate" ] || return 1
-      node "$repo_dir/src/macos-tray-transaction.mjs" validate-bundle "$candidate" \
+      node "$repo_dir/src/macos-tray-transaction.mjs" validate-legacy-bundle "$candidate" \
         >/dev/null 2>&1 || return 1
       candidate_identifier=$(
         /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" \
@@ -300,6 +301,8 @@ RESTORE_MACOS_SUPERVISION
     mkdir -m 700 "$staging_dir"
     (umask 077; printf '%s\n' codex-router >"$target_name_file")
     chmod 600 "$target_name_file"
+    (umask 077; printf '%s\n' widget-v1 >"$artifact_set_file")
+    chmod 600 "$artifact_set_file"
     had_previous=0
     if [ -d "$bundle_dir" ] || [ "$legacy_user_bundle_present" -eq 1 ]; then
       had_previous=1

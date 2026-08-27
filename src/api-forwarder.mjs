@@ -124,9 +124,9 @@ function ollamaCloudEffort(value) {
 }
 
 // Some upstreams document reasoning_effort per model rather than per vendor:
-// GLM-5.2 answers to high/max, GLM-5.3 adds a low tier (low/high/max, max the
-// upstream default), and Ox Alpha publishes low/high/max on most routes but
-// low/medium/high on Venice. So the accepted rungs travel with the model, and
+// GLM-5.2 answers to high/max, while GLM-5.3 and the certified GLM-5.3-Flash
+// routes add a low tier (low/high/max, max the upstream default). So the
+// accepted rungs travel with the model, and
 // the requested effort is clamped onto the ladder its own registry entry
 // declares instead of onto a fixed map -- otherwise GLM-5.3's low tier could
 // never be reached. Codex's top rungs always mean "as deep as this model
@@ -622,10 +622,11 @@ function normalizeBody(buffer, contentType, route) {
   // which is the reverse of what this endpoint enforces, so Meta is running an
   // older fork of the schema rather than being the strict reader of it.
   // Stripping the field for every provider would take a documented parameter
-  // away from the responses-native providers that do follow the current spec
-  // (github-copilot, opencode-go-responses), and neither has been observed to
-  // refuse it. A caller that does send Meta a real `web_search_preview` tool
-  // keeps the field, because that is the one tool this endpoint accepts it on.
+  // away from responses-native providers that do follow the current spec, such
+  // as GitHub Copilot. Console Go Responses has its separately measured strict
+  // tool boundary applied in the router before this hop. A caller that does send
+  // Meta a real `web_search_preview` tool keeps the field, because that is the
+  // one tool this endpoint accepts it on.
   if (provider.id === "meta" && Array.isArray(payload.tools)) {
     payload.tools = stripSearchContentTypes(payload.tools);
   }
@@ -823,14 +824,12 @@ function normalizeBody(buffer, contentType, route) {
     payload.thinking = { type: "adaptive" };
     payload.reasoning_split = true;
   } else if (model.requestProfile === "ox-alpha") {
-    // Ox Alpha -- now published on OpenCode Go as GLM-5.3-Flash -- always
-    // thinks, and every measured route validates reasoning_effort
-    // against the rungs the model accepts -- an off-ladder value comes
+    // Ox Alpha's named GLM-5.3-Flash successor always thinks, and both
+    // checked-in routes using this legacy-named profile validate
+    // reasoning_effort against the rungs the model accepts -- an off-ladder value comes
     // back as HTTP 400 "This model always engages in thinking and cannot be
-    // disabled" rather than being ignored. Every route accepts low/high/max;
-    // Venice's generic catalog metadata is the documented exception because it
-    // advertises a `medium` rung the model rejects. Codex can send any rung it
-    // knows: an installation older than 0.143 has no `max` in its enum at all,
+    // disabled" rather than being ignored. Both accept low/high/max. Codex can
+    // send any rung it knows: an installation older than 0.143 has no `max` in its enum at all,
     // so the catalog clamps this model's default down to `xhigh` and that is
     // what arrives here. Clamping onto the entry's own declared ladder is what
     // keeps both of those cases off the 400.
