@@ -802,6 +802,80 @@ test("router preserves native auth and isolates every external route", async () 
   }
 });
 
+test("substituted native compaction omits the ordinary Responses store policy", async () => {
+  const nativeRequests = [];
+  const native = await mockServer(async (request, response) => {
+    nativeRequests.push({ url: request.url, headers: request.headers, body: await bodyJson(request) });
+    json(response, 200, { id: "native-ok", output: [] });
+  });
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "native-compact-store-"));
+  const authPath = path.join(testRoot, "auth.json");
+  writeFileSync(
+    authPath,
+    JSON.stringify({
+      auth_mode: "chatgpt",
+      tokens: {
+        access_token: "test-native-session-token",
+        account_id: "test-native-account",
+      },
+    }),
+    { mode: 0o600 },
+  );
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_NATIVE_BASE_URL: `http://127.0.0.1:${native.port}/backend-api/codex`,
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${native.port}/v1`,
+    CODEX_ROUTER_NATIVE_SESSION_FALLBACK: "1",
+    MODEL_ROUTER_CODEX_AUTH: authPath,
+    MODEL_ROUTER_STATE_DIR: path.join(testRoot, "state"),
+    CODEX_ROUTER_QUIET: "1",
+  });
+
+  const headers = {
+    Authorization: `Bearer ${CALLER_KEY}`,
+    "Content-Type": "application/json",
+  };
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const ordinary = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ model: "gpt-5.6-sol", input: "hello", store: true }),
+    });
+    assert.equal(ordinary.status, 200, await ordinary.text());
+
+    const compact = await fetch(`${routerBase(routerPort)}/responses/compact`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: "gpt-5.6-sol",
+        input: [{ type: "item_reference", id: "rs_not-persisted-by-prior-turn" }],
+        store: true,
+      }),
+    });
+    assert.equal(compact.status, 200, await compact.text());
+
+    assert.equal(nativeRequests.length, 2);
+    assert.equal(nativeRequests[0].url, "/backend-api/codex/responses");
+    assert.equal(nativeRequests[0].body.store, false);
+    assert.equal(nativeRequests[1].url, "/backend-api/codex/responses/compact");
+    assert.equal("store" in nativeRequests[1].body, false);
+    assert.deepEqual(nativeRequests[1].body.input, [
+      { type: "item_reference", id: "rs_not-persisted-by-prior-turn" },
+    ]);
+    for (const request of nativeRequests) {
+      assert.equal(request.headers.authorization, "Bearer test-native-session-token");
+      assert.equal(request.headers["chatgpt-account-id"], "test-native-account");
+      assert.equal(request.headers.authorization.includes(CALLER_KEY), false);
+    }
+  } finally {
+    await stopChild(router);
+    await closeServer(native.server);
+    rmSync(testRoot, { recursive: true, force: true });
+  }
+});
+
 test("router permits a compressed context larger than the encoded request limit", async () => {
   let receivedInputLength = 0;
   const native = await mockServer(async (request, response) => {
