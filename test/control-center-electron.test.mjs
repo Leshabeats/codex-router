@@ -42,6 +42,56 @@ import {
   shouldQuitOnLastWindowClosed,
   writeLifecycleState,
 } from "../apps/control-center/electron/lifecycle-state.mjs";
+import {
+  controlCenterDestination,
+  controlCenterNavigationURL,
+  NAVIGATION_ARGUMENT,
+  NAVIGATION_SOURCE_ARGUMENT,
+} from "../apps/control-center/electron/navigation.mjs";
+
+test("Control Center navigation accepts only one fixed widget destination", () => {
+  assert.deepEqual(controlCenterDestination(["electron", ".", NAVIGATION_ARGUMENT, "usage"]), {
+    destination: "usage",
+    sourceId: undefined,
+  });
+  assert.deepEqual(
+    controlCenterDestination(["electron", ".", NAVIGATION_ARGUMENT, "usage-resets"]),
+    { destination: "usage-resets", sourceId: undefined },
+  );
+  assert.deepEqual(
+    controlCenterDestination([
+      "electron", ".", NAVIGATION_ARGUMENT, "usage", NAVIGATION_SOURCE_ARGUMENT, "deepseek",
+    ]),
+    { destination: "usage", sourceId: "deepseek" },
+  );
+  assert.equal(controlCenterDestination(["electron", ".", NAVIGATION_ARGUMENT, "settings"]), undefined);
+  assert.equal(controlCenterDestination(["electron", ".", NAVIGATION_ARGUMENT]), undefined);
+  assert.equal(controlCenterDestination([
+    "electron", ".", NAVIGATION_ARGUMENT, "usage", NAVIGATION_SOURCE_ARGUMENT, "deep_seek",
+  ]), undefined);
+  assert.equal(controlCenterDestination([
+    "electron", ".", NAVIGATION_ARGUMENT, "usage", NAVIGATION_ARGUMENT, "usage-resets",
+  ]), undefined);
+});
+
+test("Control Center navigation URLs are exact and source bounded", () => {
+  assert.deepEqual(controlCenterNavigationURL(
+    "codex-router://control-center/usage-resets?source=openai",
+  ), { destination: "usage-resets", sourceId: "openai" });
+  assert.deepEqual(controlCenterNavigationURL(
+    "codex-router://control-center/usage",
+  ), { destination: "usage", sourceId: undefined });
+  for (const value of [
+    "https://control-center/usage",
+    "codex-router://other/usage",
+    "codex-router://control-center//usage",
+    "codex-router://control-center/settings",
+    "codex-router://control-center/usage?source=deep_seek",
+    "codex-router://control-center/usage?source=openai&source=deepseek",
+    "codex-router://control-center/usage?next=settings",
+    "codex-router://control-center/usage#reset",
+  ]) assert.equal(controlCenterNavigationURL(value), undefined, value);
+});
 
 test("Control Center groups provider routes under one model family", () => {
   const families = groupModelFamilies([

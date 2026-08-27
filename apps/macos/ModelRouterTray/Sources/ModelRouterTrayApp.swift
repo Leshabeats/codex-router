@@ -396,6 +396,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private var islandController: IslandWindowController?
   private var desktopPanelController: DesktopPanelWindowController?
   private var surfaceVisibility: AnyCancellable?
+  private var widgetSnapshotPublishing: AnyCancellable?
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApp.setActivationPolicy(.accessory)
@@ -413,12 +414,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
           self?.desktopPanelController?.setVisible(visible && mode == .desktop)
         }
       }
+    widgetSnapshotPublishing = store.objectWillChange
+      .debounce(for: .milliseconds(450), scheduler: RunLoop.main)
+      .sink { [weak store] _ in
+        Task { @MainActor in
+          // ObservableObject announces immediately before it mutates. Yield so
+          // the Widget snapshot reads the committed values, not the old turn.
+          await Task<Never, Never>.yield()
+          store?.publishWidgetSnapshot()
+        }
+      }
     store.retireLoginItem()
     store.startHostAppObservation()
     Task { await store.startPolling() }
     Task { await store.startActivityPolling() }
     Task { await store.startAccountUsagePolling() }
     Task { await store.startProviderPolling() }
+    store.publishWidgetSnapshot()
     if Self.launchedByUser {
       store.revealForUserLaunch()
       ControlCenterLauncher.open()
@@ -433,6 +445,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     store.revealForUserLaunch()
     ControlCenterLauncher.open()
     return true
+  }
+
+  func application(_ application: NSApplication, open urls: [URL]) {
+    guard let navigation = urls.compactMap(ControlCenterNavigationRequest.init(url:)).first else { return }
+    store.revealForUserLaunch()
+    ControlCenterLauncher.open(navigation: navigation)
   }
 
   // launchd passes --supervised (see src/tray-service-macos.mjs) so a login
@@ -453,6 +471,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   }
 }
 
+enum ControlCenterDestination: String, Equatable {
+  case usage
+  case usageResets = "usage-resets"
+
+}
+
+struct ControlCenterNavigationRequest: Equatable {
+  static let scheme = "codex-router"
+  static let host = "control-center"
+  static let sourcePattern = try! NSRegularExpression(pattern: "^[a-z0-9][a-z0-9-]{0,63}$")
+
+  let destination: ControlCenterDestination
+  let sourceID: String?
+
+  init?(url: URL) {
+    guard url.scheme == Self.scheme,
+          url.host == Self.host,
+          url.user == nil,
+          url.password == nil,
+          url.port == nil,
+          url.fragment == nil
+    else { return nil }
+    let rawDestination: String
+    switch url.path {
+    case "/usage": rawDestination = "usage"
+    case "/usage-resets": rawDestination = "usage-resets"
+    default: return nil
+    }
+    guard let destination = ControlCenterDestination(rawValue: rawDestination),
+          let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+    else { return nil }
+    let items = components.queryItems ?? []
+    guard items.allSatisfy({ $0.name == "source" }), items.count <= 1 else { return nil }
+    let sourceID = items.first?.value
+    if let sourceID {
+      let range = NSRange(sourceID.startIndex..<sourceID.endIndex, in: sourceID)
+      guard Self.sourcePattern.firstMatch(in: sourceID, range: range)?.range == range else { return nil }
+    }
+    self.destination = destination
+    self.sourceID = sourceID
+  }
+
+  var arguments: [String] {
+    var result = ["--router-destination", destination.rawValue]
+    if let sourceID { result += ["--router-source", sourceID] }
+    return result
+  }
+
+  var url: URL {
+    var components = URLComponents()
+    components.scheme = Self.scheme
+    components.host = Self.host
+    components.path = "/\(destination.rawValue)"
+    if let sourceID { components.queryItems = [URLQueryItem(name: "source", value: sourceID)] }
+    return components.url!
+  }
+}
+
 @MainActor
 enum ControlCenterLauncher {
   private static let bundleName = "Control Center.app"
@@ -464,7 +540,7 @@ enum ControlCenterLauncher {
     return FileManager.default.fileExists(atPath: candidate.path) ? candidate : nil
   }
 
-  static func open() {
+  static func open(navigation: ControlCenterNavigationRequest? = nil) {
     guard let application = bundledApplicationURL else {
       RouterStore.shared.reportControlCenterLaunchFailure(
         "The embedded Control Center is missing. Rebuild Codex Router."
@@ -474,7 +550,7 @@ enum ControlCenterLauncher {
     Task { @MainActor in
       do {
         try await retireSupersededControlCenters(except: application)
-        openBundledApplication(application)
+        openBundledApplication(application, navigation: navigation)
       } catch {
         RouterStore.shared.reportControlCenterLaunchFailure(error.localizedDescription)
       }
@@ -506,20 +582,41 @@ enum ControlCenterLauncher {
     )
   }
 
-  private static func openBundledApplication(_ application: URL) {
+  private static func openBundledApplication(
+    _ application: URL,
+    navigation: ControlCenterNavigationRequest?
+  ) {
     let configuration = NSWorkspace.OpenConfiguration()
     configuration.activates = true
-    configuration.environment = embeddedEnvironment(
-      processEnvironment: ProcessInfo.processInfo.environment
-    )
-    NSWorkspace.shared.openApplication(at: application, configuration: configuration) { _, error in
+    configuration.environment = embeddedEnvironment(processEnvironment: ProcessInfo.processInfo.environment)
+    let completion: @Sendable (NSRunningApplication?, (any Error)?) -> Void = { _, error in
       guard let error else { return }
+      let message = error.localizedDescription
       Task { @MainActor in
         RouterStore.shared.reportControlCenterLaunchFailure(
-          "Control Center could not open: \(error.localizedDescription)"
+          "Control Center could not open: \(message)"
         )
       }
     }
+    if let navigation {
+      // Launch arguments are deterministic for a cold Electron start, while
+      // LaunchServices drops them when it merely activates a running process.
+      // The URL Apple Event covers that warm path, so carry both forms of the
+      // same validated, idempotent navigation request.
+      configuration.arguments = navigation.arguments
+      NSWorkspace.shared.open(
+        [navigation.url],
+        withApplicationAt: application,
+        configuration: configuration,
+        completionHandler: completion
+      )
+      return
+    }
+    NSWorkspace.shared.openApplication(
+      at: application,
+      configuration: configuration,
+      completionHandler: completion
+    )
   }
 
   nonisolated static func embeddedEnvironment(
@@ -1968,20 +2065,24 @@ final class RouterStore: ObservableObject {
   }
 
   func dailyUsage(days: Int) -> [DailyUsagePoint] {
+    dailyUsage(for: selectedUsageProviderID, days: days)
+  }
+
+  func dailyUsage(for providerID: String, days: Int) -> [DailyUsagePoint] {
     let buckets: [DailyUsageCacheBucket]
-    if selectedUsageUsesChatGPT {
+    if providerID == "openai" {
       buckets = accountUsage?.dailyUsageBuckets.map {
         DailyUsageCacheBucket(startDate: $0.startDate, tokens: $0.tokens)
       } ?? []
     } else {
-      buckets = selectedProviderUsage?.dailyUsageBuckets.map {
+      buckets = providerUsage(for: providerID)?.dailyUsageBuckets.map {
         DailyUsageCacheBucket(startDate: $0.startDate, tokens: $0.tokens)
       } ?? []
     }
     let calendar = Calendar.current
     let today = calendar.startOfDay(for: .now)
     let cacheKey = DailyUsageCacheKey(
-      providerID: selectedUsageProviderID,
+      providerID: providerID,
       days: days,
       today: today,
       buckets: buckets

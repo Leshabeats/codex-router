@@ -22,6 +22,22 @@ test("unknown prerelease channels fail closed", () => {
   assert.throws(() => nextBetaVersion("main"), /Cannot automatically advance/);
 });
 
+test("the widget needs no broad filesystem exception", () => {
+  const entitlements = readFileSync(
+    path.join(
+      root,
+      "apps",
+      "macos",
+      "RouterUsageWidget",
+      "RouterUsageWidget",
+      "RouterUsageWidget.entitlements",
+    ),
+    "utf8",
+  );
+  assert.match(entitlements, /com\.apple\.security\.application-groups/);
+  assert.doesNotMatch(entitlements, /temporary-exception\.files/);
+});
+
 test("releases are tag-driven and validate every asset before publishing", () => {
   const ci = readFileSync(path.join(root, ".github", "workflows", "ci.yml"), "utf8");
   const release = readFileSync(
@@ -84,6 +100,12 @@ test("releases are tag-driven and validate every asset before publishing", () =>
   assert.match(ci, /CFBundleVersion/);
   assert.match(ci, /test "\$actual_build_version" = "\$GITHUB_RUN_NUMBER"/);
   assert.match(ci, /lipo "\$app\/Contents\/MacOS\/ModelRouterTray" -verify_arch x86_64 arm64/);
+  assert.match(
+    ci,
+    /lipo "\$widget\/Contents\/MacOS\/RouterUsageWidget" -verify_arch x86_64 arm64/,
+  );
+  assert.match(ci, /widget-entitlements\.plist/);
+  assert.match(ci, /com\.apple\.security\.application-groups:0/);
   assert.match(
     ci,
     /lipo "\$app\/Contents\/Resources\/Control Center\.app\/Contents\/MacOS\/Codex Router" -verify_arch x86_64 arm64/,
