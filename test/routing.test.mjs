@@ -623,15 +623,16 @@ test("native tool-result aging is opt-in and rewrites only consumed old results"
       output: `small result ${n}`,
     })),
   ];
-  const send = async (routerPort) =>
+  const sendInput = async (routerPort, input) =>
     fetch(`${routerBase(routerPort)}/responses`, {
       method: "POST",
       headers: {
         Authorization: "Bearer CODEX_CALLER_SECRET",
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ model: "gpt-5.6-sol", input: agableInput }),
+      body: JSON.stringify({ model: "gpt-5.6-sol", input }),
     });
+  const send = async (routerPort) => sendInput(routerPort, agableInput);
 
   // Default state: the native path forwards the blob untouched.
   const defaultPort = await openPort();
@@ -670,6 +671,15 @@ test("native tool-result aging is opt-in and rewrites only consumed old results"
     assert.match(forwarded[1].output, /^\[Older tool result compacted by Codex Router/);
     assert.match(forwarded[1].output, /sha256:[0-9a-f]{64}/);
     assert.equal(forwarded.at(-1).output, "small result 4");
+
+    // Remote compaction V2 arrives on the ordinary Responses endpoint. Even
+    // when the operator opted native turns into aging, the summary must read
+    // the original tool output rather than the router's compact receipt.
+    const compactInput = [...agableInput, { type: "compaction_trigger" }];
+    assert.equal((await sendInput(agingPort, compactInput)).status, 200);
+    const compactForwarded = nativeRequests.at(-1).body.input;
+    assert.equal(compactForwarded[1].output, bigOutput);
+    assert.deepEqual(compactForwarded.at(-1), { type: "compaction_trigger" });
     // The usage event is appended after the response is relayed; give the
     // router a moment to flush it rather than racing the write.
     const eventsPath = path.join(stateDir, "usage-events.jsonl");
@@ -2015,6 +2025,27 @@ test("router drops foreign reasoning items before stateless native replay", asyn
       summary: [],
       content: null,
     };
+    const invalidStatelessPayloads = [
+      { id: "rs_null_ciphertext", encrypted_content: null },
+      { id: "rs_empty_ciphertext", encrypted_content: "" },
+      { id: "rs_non_string_ciphertext", encrypted_content: 42 },
+    ].map(({ id, encrypted_content }) => ({
+      type: "reasoning",
+      id,
+      summary: [],
+      content: null,
+      encrypted_content,
+    }));
+    const mixedSummaryReasoning = {
+      type: "reasoning",
+      id: "rs_mixed_summary",
+      summary: [
+        { type: "summary_text", text: "draft" },
+        { type: "future_summary", text: "must not be ignored" },
+      ],
+      content: null,
+      encrypted_content: "draft",
+    };
     const futureOpaqueReasoning = {
       type: "reasoning",
       id: "rs_future_opaque",
@@ -2044,6 +2075,8 @@ test("router drops foreign reasoning items before stateless native replay", asyn
           bogusReasoning,
           unknownOpaqueReasoning,
           missingStatelessPayload,
+          ...invalidStatelessPayloads,
+          mixedSummaryReasoning,
           futureOpaqueReasoning,
           staleReasoningReference,
           nonReasoningReference,
@@ -2061,6 +2094,9 @@ test("router drops foreign reasoning items before stateless native replay", asyn
     // a broken reference.
     assert.equal(sent.some((item) => item?.id === "rs_518653"), false);
     assert.equal(sent.some((item) => item?.id === "rs_unstored_without_ciphertext"), false);
+    for (const item of invalidStatelessPayloads) {
+      assert.equal(sent.some((candidate) => candidate?.id === item.id), false);
+    }
     assert.equal(sent.some((item) => item?.id === "rs_external_reference"), false);
     assert.deepEqual(sent.find((item) => item?.id === "msg_native_reference"), nonReasoningReference);
     // Opaque means opaque: neither a current Fernet-like prefix nor its
@@ -2068,6 +2104,10 @@ test("router drops foreign reasoning items before stateless native replay", asyn
     // so a future native encoding is not destroyed by this compatibility path.
     assert.deepEqual(sentUnknown, unknownOpaqueReasoning);
     assert.deepEqual(sentFuture, futureOpaqueReasoning);
+    assert.deepEqual(
+      sent.find((item) => item?.id === mixedSummaryReasoning.id),
+      mixedSummaryReasoning,
+    );
     assert.deepEqual(sent.at(-1), userMessage);
     assert.deepEqual(nativeRequests[0].body.include, ["reasoning.encrypted_content"]);
 
@@ -2099,10 +2139,52 @@ test("router drops foreign reasoning items before stateless native replay", asyn
     );
     assert.deepEqual(nativeRequests[1].body.input.at(-1), { type: "compaction_trigger" });
 
+    // V1 compaction keeps its valid stored-reference contract, but a full
+    // foreign reasoning item still needs substituted-caller provenance cleanup
+    // before it can make native compaction fail by its rs_ id.
+    const compactV1 = await fetch(`${routerBase(routerPort)}/responses/compact`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: "gpt-5.6-sol",
+        input: [
+          bogusReasoning,
+          missingStatelessPayload,
+          ...invalidStatelessPayloads,
+          mixedSummaryReasoning,
+          staleReasoningReference,
+          userMessage,
+        ],
+        store: true,
+        include: ["reasoning.encrypted_content"],
+      }),
+    });
+    assert.equal(compactV1.status, 200);
+    const compactV1Body = nativeRequests[2].body;
+    assert.equal(nativeRequests[2].url, "/backend-api/codex/responses/compact");
+    assert.equal("store" in compactV1Body, false);
+    assert.equal("include" in compactV1Body, false);
+    assert.equal(compactV1Body.input.some((item) => item?.id === bogusReasoning.id), false);
+    assert.equal(
+      compactV1Body.input.some((item) => item?.id === missingStatelessPayload.id),
+      false,
+    );
+    for (const item of invalidStatelessPayloads) {
+      assert.equal(compactV1Body.input.some((candidate) => candidate?.id === item.id), false);
+    }
+    assert.deepEqual(
+      compactV1Body.input.find((item) => item?.id === mixedSummaryReasoning.id),
+      mixedSummaryReasoning,
+    );
+    assert.deepEqual(
+      compactV1Body.input.find((item) => item?.id === staleReasoningReference.id),
+      staleReasoningReference,
+    );
+
     // A caller that supplies its own native credential can still rely on the
     // backend's stored-item namespace. Preserve bare rs_ references and the
-    // reasoning item itself, stripping only ciphertext that the current native
-    // backend cannot parse as an issued continuation token.
+    // reasoning item itself. Preserve unknown non-whitespace opaque formats;
+    // only the historical whitespace-bearing plaintext repair is applied.
     const storedReplay = await fetch(`${routerBase(routerPort)}/responses`, {
       method: "POST",
       headers: {
@@ -2111,13 +2193,21 @@ test("router drops foreign reasoning items before stateless native replay", asyn
       },
       body: JSON.stringify({
         model: "gpt-5.6-sol",
-        input: [bogusReasoning, missingStatelessPayload, staleReasoningReference, userMessage],
+        input: [
+          bogusReasoning,
+          unknownOpaqueReasoning,
+          futureOpaqueReasoning,
+          mixedSummaryReasoning,
+          missingStatelessPayload,
+          staleReasoningReference,
+          userMessage,
+        ],
         store: true,
         include: ["web_search_call.action.sources"],
       }),
     });
     assert.equal(storedReplay.status, 200);
-    const stored = nativeRequests[2].body;
+    const stored = nativeRequests[3].body;
     assert.equal(stored.store, true);
     assert.deepEqual(stored.include, ["web_search_call.action.sources"]);
     assert.deepEqual(stored.input.find((item) => item?.id === "rs_518653"), {
@@ -2133,6 +2223,18 @@ test("router drops foreign reasoning items before stateless native replay", asyn
     assert.deepEqual(
       stored.input.find((item) => item?.id === "rs_external_reference"),
       staleReasoningReference,
+    );
+    assert.deepEqual(
+      stored.input.find((item) => item?.id === unknownOpaqueReasoning.id),
+      unknownOpaqueReasoning,
+    );
+    assert.deepEqual(
+      stored.input.find((item) => item?.id === futureOpaqueReasoning.id),
+      futureOpaqueReasoning,
+    );
+    assert.deepEqual(
+      stored.input.find((item) => item?.id === mixedSummaryReasoning.id),
+      mixedSummaryReasoning,
     );
   } finally {
     await stopChild(router);

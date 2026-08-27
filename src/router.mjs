@@ -1898,15 +1898,27 @@ async function bridgeVisionInput(input, route, request) {
 // the wire contract calls `encrypted_content` opaque; a token's current shape
 // cannot prove which backend issued it.
 function isOpaqueEncryptedContent(value) {
-  return isNativeEncryptedToken(value);
+  // Preserve the historical direct-credential behavior. The field's wire
+  // contract is opaque, so a future valid format must not be discarded merely
+  // because it stops using today's Fernet-shaped prefix.
+  return typeof value === "string" && value.length > 0 && !/\s/.test(value);
 }
 
 function reasoningSummaryText(item) {
-  if (!Array.isArray(item?.summary)) return undefined;
-  const parts = item.summary
-    .filter((part) => part?.type === "summary_text" && typeof part.text === "string")
-    .map((part) => part.text);
-  return parts.length > 0 ? parts.join("") : undefined;
+  if (!Array.isArray(item?.summary) || item.summary.length === 0) return undefined;
+  const canonical = item.summary.every((part) => {
+    return (
+      part != null &&
+      typeof part === "object" &&
+      !Array.isArray(part) &&
+      Object.keys(part).every((key) => key === "type" || key === "text") &&
+      part.type === "summary_text" &&
+      typeof part.text === "string"
+    );
+  });
+  if (!canonical) return undefined;
+  const text = item.summary.map((part) => part.text).join("");
+  return text.length > 0 ? text : undefined;
 }
 
 function sanitizeReasoningForNative(item, { stateless = false } = {}) {
@@ -1918,6 +1930,10 @@ function sanitizeReasoningForNative(item, { stateless = false } = {}) {
     // token. Drop that foreign item rather than asking native storage to resolve
     // its `rs_` id. Preserve every other non-empty opaque value byte-identical:
     // its format is intentionally unspecified and may evolve.
+    if (
+      typeof item.encrypted_content !== "string" ||
+      item.encrypted_content.length === 0
+    ) return undefined;
     const summary = reasoningSummaryText(item);
     return summary !== undefined && item.encrypted_content === summary ? undefined : item;
   }
@@ -1981,15 +1997,20 @@ function sanitizeCollaborationForNative(item) {
   };
 }
 
-function normalizeNativeInput(input, { stateless = false } = {}) {
+function normalizeNativeInput(
+  input,
+  { statelessReasoning = false, dropUnstoredReasoningReferences = false } = {},
+) {
   if (!Array.isArray(input)) return input;
   return input.flatMap((item) => {
     if (item?.type === "reasoning") {
-      const reasoning = sanitizeReasoningForNative(item, { stateless });
+      const reasoning = sanitizeReasoningForNative(item, {
+        stateless: statelessReasoning,
+      });
       return reasoning === undefined ? [] : [reasoning];
     }
     if (
-      stateless &&
+      dropUnstoredReasoningReferences &&
       item?.type === "item_reference" &&
       typeof item.id === "string" &&
       item.id.startsWith("rs_")
@@ -3132,8 +3153,10 @@ async function handleResponses(request, response, requestUrl) {
       ...activityMetadataFromHeaders(request.headers),
     });
     const compactV1 = /\/responses\/compact$/.test(requestUrl.pathname);
+    // Codex remote compaction V2 uses the ordinary Responses endpoint with a
+    // terminal trigger. Detect the protocol shape before route dispatch so the
+    // native path can also preserve the full tool results being summarized.
     const compactV2 =
-      route &&
       Array.isArray(payload.input) &&
       payload.input.at(-1)?.type === "compaction_trigger";
 
@@ -3291,17 +3314,18 @@ async function handleResponses(request, response, requestUrl) {
       normalizeNativePromptCacheCompatibility(native);
       if (Array.isArray(payload.input)) {
         native.input = normalizeNativeInput(payload.input, {
-          // V1 compaction has its own stored-reference contract. Remote
-          // compaction V2 is an ordinary Responses request and remains
-          // stateless, so only the dedicated endpoint is exempt here.
-          stateless: substitutedCaller && !compactV1,
+          // Every substituted caller needs provenance-safe full reasoning.
+          // V1 compaction alone has a stored-reference contract, so it keeps
+          // bare rs_ references while ordinary/V2 stateless replay drops them.
+          statelessReasoning: substitutedCaller,
+          dropUnstoredReasoningReferences: substitutedCaller && !compactV1,
         });
         // Native turns leave here as stateless full conversations (the
         // previous_response_id below is stripped), so an old tool result costs
         // its full size on every turn of this path too. Compaction turns are
         // exempt: compactV1 keeps its chaining, and a summary should read the
         // true content rather than a receipt.
-        if (!compactV1) {
+        if (!compactV1 && !compactV2) {
           const aged = ageToolResults(native.input, {
             enabled: nativeToolResultAgingEnabled(),
           });
