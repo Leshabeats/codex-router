@@ -127,7 +127,6 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "nousresearch/minimax-m3",
       "nousresearch/muse-spark-1.2-contributor",
       "nousresearch/nemotron-3-ultra",
-      "nousresearch/ox-alpha",
       "nousresearch/qwen3.7-max",
       "nousresearch/qwen3.8-max",
       "nousresearch/solar-pro4-free",
@@ -184,6 +183,7 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "zai-api/glm-5.3",
       "zai-coding/glm-5-turbo",
       "zai-coding/glm-5.2",
+      "zai-coding/glm-5.3-flash",
       "zai-coding/glm-5.3",
     ],
   );
@@ -1204,11 +1204,6 @@ test("Nous Research free models are tagged isFree, Hermes 4 is not", () => {
     assert.ok(model, `${slug} should exist in registry`);
     assert.notEqual(model.isFree, true, `${slug} should not be tagged isFree: true`);
   }
-
-  // ox-alpha should remain isFree: true (existing)
-  const oxAlpha = MODEL_BY_SLUG.get("nousresearch/ox-alpha");
-  assert.ok(oxAlpha);
-  assert.strictEqual(oxAlpha.isFree, true, "nousresearch/ox-alpha should remain isFree: true");
 });
 
 // A keyless provider skips the credential requirement, which is only safe
