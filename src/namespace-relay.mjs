@@ -61,6 +61,10 @@ const SPECIAL_FUNCTION_REFERENCES = new WeakSet();
 const TOOL_SEARCH_FUNCTION_NAME = "tool_search";
 const CUSTOM_TOOL_INPUT_PROPERTY = "input";
 
+export function toolSearchRelayAvailable(namespaces) {
+  return TOOL_SEARCH_RELAYS.has(namespaces);
+}
+
 function providerFunctionName(tool) {
   return tool?.name ?? tool?.function?.name;
 }
@@ -82,6 +86,7 @@ function boundedNameCandidate(wireName, identity, maxNameLength, attempt) {
     .digest("hex")
     .slice(0, 12);
   const suffix = `_${digest}`;
+  if (!Number.isFinite(maxNameLength)) return `${wireName}${suffix}`;
   return `${wireName.slice(0, maxNameLength - suffix.length)}${suffix}`;
 }
 
@@ -140,10 +145,11 @@ function initialFunctionIdentities(tools) {
   return identities;
 }
 
-function initializeNameAliases(namespaces, tools, maxNameLength) {
-  if (!Number.isInteger(maxNameLength) || maxNameLength < 16) return undefined;
+function initializeNameAliases(namespaces, tools, maxNameLength, aliasCollisions = false) {
+  const bounded = Number.isInteger(maxNameLength) && maxNameLength >= 16;
+  if (!bounded && !aliasCollisions) return undefined;
   const relay = {
-    maxNameLength,
+    maxNameLength: bounded ? maxNameLength : Infinity,
     nativeToProvider: new Map(),
     providerToNative: new Map(),
     providerOwners: new Map(),
@@ -165,7 +171,7 @@ function initializeNameAliases(namespaces, tools, maxNameLength) {
   for (const [identity, entry] of [...identities].sort(([left], [right]) =>
     left.localeCompare(right),
   )) {
-    if (entry.wireName.length <= maxNameLength && wireCounts.get(entry.wireName) === 1) {
+    if (entry.wireName.length <= relay.maxNameLength && wireCounts.get(entry.wireName) === 1) {
       assignProviderName(relay, identity, entry.wireName, entry.native);
     } else {
       pending.push([identity, entry]);
@@ -648,14 +654,14 @@ function flattenNamespaceChild(namespace, fn, providerName) {
 // (name -> tool names) so callers can rename history and restore calls.
 export function flattenNamespaceTools(
   tools,
-  { bridgeToolSearch = true, maxNameLength } = {},
+  { bridgeToolSearch = true, maxNameLength, aliasCollisions = false } = {},
 ) {
   if (!Array.isArray(tools)) return { tools, flattened: false, namespaces: new Map() };
   const flattened = [];
   const namespaces = new Map();
   const plainToolNames = new Set();
   PLAIN_TOOL_NAMES.set(namespaces, plainToolNames);
-  initializeNameAliases(namespaces, tools, maxNameLength);
+  initializeNameAliases(namespaces, tools, maxNameLength, aliasCollisions);
   const spawnAgentModels = new Set();
   const toolSearchName = bridgeToolSearch
     ? reserveSpecialProviderName(
@@ -777,6 +783,8 @@ function discoveredProviderTools(toolSpecs, namespaces) {
             providerNameForNative(namespaces, tool.name, fn.name),
           ),
           native: { namespace: tool.name, name: fn.name },
+          nativeName: fn.name,
+          identity: nativeToolKey(tool.name, fn.name),
         });
       }
       continue;
@@ -788,7 +796,11 @@ function discoveredProviderTools(toolSpecs, namespaces) {
     if (providerName !== nativeName) {
       providerTool = withProviderFunctionName(providerTool, providerName);
     }
-    discovered.push({ tool: providerTool });
+    discovered.push({
+      tool: providerTool,
+      nativeName,
+      identity: nativeToolKey(undefined, nativeName),
+    });
   }
   return discovered;
 }
@@ -803,16 +815,35 @@ function addDiscoveredNamespace(namespaces, native) {
   names.add(native.name);
 }
 
+export class ToolSearchHistoryCapacityError extends Error {
+  constructor({ available, required }) {
+    super(
+      `Stored tool_search history references ${required} discovered tools, but only ` +
+        `${available} provider tool slots remain.`,
+    );
+    this.name = "ToolSearchHistoryCapacityError";
+    this.available = available;
+    this.required = required;
+  }
+}
+
 // A native tool_search output changes what the model may call on the next
 // turn. The Responses API understands that special history item directly;
 // LiteLLM's chat-completions bridge does not. Translate matched call/output
 // pairs into ordinary function history and add the returned definitions to
-// this request's provider-facing tool list. Live top-level schemas win on a
+// this request's provider-facing tool list. A model switch may leave no live
+// search relay; in that explicitly enabled mode, preserve the definitions but
+// drop the now-unusable native control pair. Live top-level schemas win on a
 // name collision. Native items that do not form one unique, ordered,
 // well-formed pair are dropped: a chat-completions provider cannot consume
 // them, and forwarding one would make the transcript promise unavailable
 // tools.
-export function flattenToolSearchHistory(input, tools, namespaces) {
+export function flattenToolSearchHistory(
+  input,
+  tools,
+  namespaces,
+  { maxTools = Infinity, recoverWithoutRelay = false, toolChoice } = {},
+) {
   const relay = TOOL_SEARCH_RELAYS.get(namespaces);
   if (!Array.isArray(input)) {
     return { input, tools, flattened: false };
@@ -877,7 +908,7 @@ export function flattenToolSearchHistory(input, tools, namespaces) {
 
   const callsByIndex = new Map();
   const outputsByIndex = new Map();
-  if (relay) {
+  if (relay || recoverWithoutRelay) {
     for (const [id, record] of callsById) {
       if (!record.output || invalidIds.has(id)) continue;
       callsByIndex.set(record.callIndex, record);
@@ -885,13 +916,197 @@ export function flattenToolSearchHistory(input, tools, namespaces) {
     }
   }
 
+  const toolCapacity = Number.isInteger(maxTools) && maxTools >= 0 ? maxTools : Infinity;
+  const remainingToolCapacity = Math.max(0, toolCapacity - tools.length);
   const visibleNames = providerVisibleToolNames(tools);
+  const initialNameAliases = new Map(
+    NAME_ALIASES.get(namespaces)?.nativeToProvider || [],
+  );
+  const definitionOwnersByName = new Map();
+  const discoveries = [];
+  const discoveriesByOutputIndex = new Map();
+  for (let index = 0; index < input.length; index += 1) {
+    const item = input[index];
+    if (!outputsByIndex.has(index)) continue;
+    const records = [];
+    for (const candidate of discoveredProviderTools(item.tools, namespaces)) {
+      const name = providerFunctionName(candidate.tool);
+      if (!name) continue;
+      const priorOwner = definitionOwnersByName.get(name);
+      const shadowedByClient = visibleNames.has(name) && !priorOwner;
+      const record = {
+        ...candidate,
+        name,
+        outputIndex: index,
+        shadowed: shadowedByClient || priorOwner !== undefined,
+        definitionOwner: shadowedByClient ? undefined : priorOwner,
+      };
+      if (!visibleNames.has(name)) {
+        visibleNames.add(name);
+        definitionOwnersByName.set(name, record);
+        record.definitionOwner = record;
+      }
+      discoveries.push(record);
+      records.push(record);
+    }
+    discoveriesByOutputIndex.set(index, records);
+  }
+
+  // A bounded provider surface may omit only unused discoveries. Resolve each
+  // stored call against the definitions that existed at that point in the
+  // transcript, using the same precedence as flattenNamespacedHistory: an
+  // explicit namespace is exact, an exact plain native identity wins over a
+  // stale flattened namespace spelling, then provider aliases/raw namespace
+  // spellings, then a unique bare namespace name. Later discoveries must not
+  // retroactively make an earlier bare call ambiguous. A forced tool choice is
+  // evaluated after all stored discoveries and reserves its schema too.
+  const CURRENT_DEFINITION = Symbol("current-tool-definition");
+  const identityOwners = new Map();
+  const plainNativeOwners = new Map();
+  const providerOwners = new Map();
+  const wireNamespaceOwners = new Map();
+  const bareNamespaceOwners = new Map();
+  const addOwner = (owners, name, owner) => {
+    if (typeof name !== "string" || !name) return;
+    if (!owners.has(name)) owners.set(name, new Set());
+    owners.get(name).add(owner);
+  };
+  const uniqueOwner = (owners) => owners?.size === 1 ? [...owners][0] : undefined;
+  const rememberIdentity = ({ identity, native, nativeName, name, owner }) => {
+    if (!identityOwners.has(identity)) identityOwners.set(identity, owner);
+    addOwner(providerOwners, name, identity);
+    if (native) {
+      addOwner(
+        wireNamespaceOwners,
+        `${native.namespace}${NAMESPACE_DELIMITER}${native.name}`,
+        identity,
+      );
+      addOwner(bareNamespaceOwners, native.name, identity);
+    } else {
+      addOwner(plainNativeOwners, nativeName, identity);
+    }
+  };
+
+  for (const [namespace, names] of namespaces) {
+    for (const name of names) {
+      rememberIdentity({
+        identity: nativeToolKey(namespace, name),
+        native: { namespace, name },
+        name: providerNameForNative(namespaces, namespace, name),
+        owner: CURRENT_DEFINITION,
+      });
+    }
+  }
+  if (initialNameAliases.size) {
+    for (const [identity, providerName] of initialNameAliases) {
+      let decoded;
+      try {
+        decoded = JSON.parse(identity);
+      } catch {
+        continue;
+      }
+      if (!Array.isArray(decoded) || decoded.length !== 2 || decoded[0] !== null) continue;
+      rememberIdentity({
+        identity,
+        nativeName: decoded[1],
+        name: providerName,
+        owner: CURRENT_DEFINITION,
+      });
+    }
+  } else {
+    for (const name of PLAIN_TOOL_NAMES.get(namespaces) || []) {
+      rememberIdentity({
+        identity: nativeToolKey(undefined, name),
+        nativeName: name,
+        name,
+        owner: CURRENT_DEFINITION,
+      });
+    }
+  }
+  // Custom/tool-search relays are provider-visible but are never ordinary
+  // discovered definitions. Reserve their spellings as current identities so
+  // a matching model-visible name cannot be attributed to a discovery.
+  for (const name of CUSTOM_TOOL_RELAYS.get(namespaces)?.keys() || []) {
+    const identity = `special:custom:${name}`;
+    identityOwners.set(identity, CURRENT_DEFINITION);
+    addOwner(providerOwners, name, identity);
+  }
+  const toolSearch = TOOL_SEARCH_RELAYS.get(namespaces);
+  if (toolSearch) {
+    const identity = "special:tool-search";
+    identityOwners.set(identity, CURRENT_DEFINITION);
+    addOwner(providerOwners, toolSearch.providerName, identity);
+  }
+
+  const referencedDefinitions = new Set();
+  const referencedIdentities = new Set();
+  const markReference = (reference) => {
+    if (!reference || typeof reference !== "object" || Array.isArray(reference)) return;
+    const nestedName = reference.function?.name;
+    const name = typeof nestedName === "string" ? nestedName : reference.name;
+    if (typeof name !== "string" || !name) return;
+    const namespace =
+      typeof reference.namespace === "string" && reference.namespace
+        ? reference.namespace
+        : undefined;
+    let identity;
+    if (namespace) {
+      const exact = nativeToolKey(namespace, name);
+      if (identityOwners.has(exact)) identity = exact;
+    } else if (!SPECIAL_FUNCTION_REFERENCES.has(reference)) {
+      identity = uniqueOwner(plainNativeOwners.get(name));
+      identity ??= uniqueOwner(providerOwners.get(name));
+      identity ??= uniqueOwner(wireNamespaceOwners.get(name));
+      identity ??= uniqueOwner(bareNamespaceOwners.get(name));
+    }
+    if (!identity) return;
+    referencedIdentities.add(identity);
+    const owner = identityOwners.get(identity);
+    if (owner && owner !== CURRENT_DEFINITION) referencedDefinitions.add(owner);
+  };
+  const discoveriesByIndex = new Map();
+  for (const discovery of discoveries) {
+    if (!discoveriesByIndex.has(discovery.outputIndex)) {
+      discoveriesByIndex.set(discovery.outputIndex, []);
+    }
+    discoveriesByIndex.get(discovery.outputIndex).push(discovery);
+  }
+  for (let index = 0; index < input.length; index += 1) {
+    for (const discovery of discoveriesByIndex.get(index) || []) {
+      const owner = discovery.definitionOwner || CURRENT_DEFINITION;
+      rememberIdentity({ ...discovery, owner });
+    }
+    const item = input[index];
+    if (item?.type === "function_call") markReference(item);
+  }
+  if (toolChoice?.type === "allowed_tools" && Array.isArray(toolChoice.tools)) {
+    for (const choice of toolChoice.tools) {
+      if (choice?.type === "function") markReference(choice);
+    }
+  } else if (toolChoice?.type === "function") {
+    markReference(toolChoice);
+  }
+  const requiredDefinitions = [...referencedDefinitions];
+  if (requiredDefinitions.length > remainingToolCapacity) {
+    throw new ToolSearchHistoryCapacityError({
+      available: remainingToolCapacity,
+      required: requiredDefinitions.length,
+    });
+  }
+  const acceptedDiscoveries = new Set(requiredDefinitions);
+  for (const discovery of discoveries) {
+    if (acceptedDiscoveries.size >= remainingToolCapacity) break;
+    if (discovery.shadowed) continue;
+    acceptedDiscoveries.add(discovery);
+  }
+
   let routedTools = tools;
   const routedInput = [];
   for (let index = 0; index < input.length; index += 1) {
     const item = input[index];
     if (item?.type === "tool_search_call") {
       if (!callsByIndex.has(index)) continue;
+      if (!relay) continue;
       const {
         type: _type,
         execution: _execution,
@@ -917,13 +1132,21 @@ export function flattenToolSearchHistory(input, tools, namespaces) {
     if (!outputsByIndex.has(index)) continue;
 
     const accepted = [];
-    for (const candidate of discoveredProviderTools(item.tools, namespaces)) {
-      const name = providerFunctionName(candidate.tool);
-      if (!name || visibleNames.has(name)) continue;
-      visibleNames.add(name);
-      accepted.push(candidate.tool);
-      addDiscoveredNamespace(namespaces, candidate.native);
-      if (!candidate.native) PLAIN_TOOL_NAMES.get(namespaces)?.add(name);
+    for (const discovery of discoveriesByOutputIndex.get(index) || []) {
+      if (acceptedDiscoveries.has(discovery)) {
+        accepted.push(discovery.tool);
+        addDiscoveredNamespace(namespaces, discovery.native);
+        if (!discovery.native) PLAIN_TOOL_NAMES.get(namespaces)?.add(discovery.name);
+      } else if (
+        recoverWithoutRelay &&
+        discovery.shadowed &&
+        referencedIdentities.has(discovery.identity)
+      ) {
+        // A current client definition owns the provider-visible name and its
+        // schema must win. The stored native identity is still needed to
+        // flatten the later historical call and restore any repeated call.
+        addDiscoveredNamespace(namespaces, discovery.native);
+      }
     }
     // Keep the live-name set across outputs. The first valid discovery wins;
     // later outputs omit a duplicate from both their result and the request's
@@ -932,6 +1155,11 @@ export function flattenToolSearchHistory(input, tools, namespaces) {
       if (routedTools === tools) routedTools = [...tools];
       routedTools.push(...accepted);
     }
+
+    // The current provider cannot execute a fresh native tool_search call.
+    // Preserve the discovered definitions above, but remove the now-unusable
+    // call/output control pair from the chat-completions transcript.
+    if (!relay) continue;
 
     const {
       type: _type,
@@ -1250,6 +1478,7 @@ export function buildNamespaceLookups(namespaces) {
       ...(PLAIN_TOOL_NAMES.get(namespaces) || []),
       ...(nameAliases?.plainProviderNames || []),
     ]),
+    identityAliases: Boolean(nameAliases),
     spawnAgentModels: SPAWN_AGENT_MODELS.get(namespaces),
     toolSearch: TOOL_SEARCH_RELAYS.get(namespaces),
     customTools: CUSTOM_TOOL_RELAYS.get(namespaces),
@@ -1375,6 +1604,10 @@ function rewriteNamespaceFunctionCallItem(
   { allowIncompleteToolSearch = false } = {},
 ) {
   if (!item || item.type !== "function_call") return undefined;
+  const exactPlainProviderIdentity =
+    lookups.identityAliases &&
+    item.namespace === undefined &&
+    lookups.plainToolNames?.has(item.name);
   const customTool = rewriteCustomToolFunctionCallItem(
     item,
     lookups,
@@ -1410,7 +1643,13 @@ function rewriteNamespaceFunctionCallItem(
     }
   }
   rewritten = sanitizeSpawnAgentModel(rewritten, lookups);
-  rewritten = injectSessionModelForSpawnCalls(rewritten, sessionModel);
+  // A client may declare an ordinary function whose literal name is
+  // `codex_app__create_thread`. Its request-local alias resolves back to that
+  // exact plain identity, not the app namespace. Do not infer app semantics
+  // from the restored spelling after the lookup has already proved otherwise.
+  if (!exactPlainProviderIdentity) {
+    rewritten = injectSessionModelForSpawnCalls(rewritten, sessionModel);
+  }
   rewritten = rewriteFunctionCallArguments(rewritten);
   return rewritten === item ? undefined : rewritten;
 }

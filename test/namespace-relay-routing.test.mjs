@@ -22,6 +22,9 @@ import { callerBaseUrl } from "../src/caller-auth.mjs";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CALLER_KEY = "test-router-caller-capability-with-sufficient-length";
 const INTERNAL_KEY = "test-internal-service-key-with-sufficient-length";
+const IMAGE =
+  "data:image/png;base64," +
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
 function routerBase(port) {
   return callerBaseUrl(port, CALLER_KEY);
@@ -284,6 +287,302 @@ function routedToolSearchHistoryPayload(
   return payload;
 }
 
+function groqToolSurfacePayload(
+  stream,
+  model,
+  {
+    plainTools = 111,
+    discoveredTools = 0,
+    toolSearch = false,
+    input = [{ type: "message", role: "user", content: "hi" }],
+    toolChoice,
+  } = {},
+) {
+  const payload = {
+    model,
+    stream,
+    input,
+    tools: [
+      ...(toolSearch ? [{
+        type: "tool_search",
+        execution: "client",
+        description: "Search deferred tools.",
+        parameters: {
+          type: "object",
+          properties: { query: { type: "string" } },
+          required: ["query"],
+        },
+      }] : []),
+      ...Array.from({ length: plainTools }, (_, index) => ({
+        type: "function",
+        name: `core_tool_${index}`,
+        parameters: { type: "object" },
+      })),
+      {
+        type: "namespace",
+        name: "codex_app",
+        tools: [
+          { type: "function", name: "load_workspace_dependencies" },
+          { type: "function", name: "navigate_to_codex_page" },
+          { type: "function", name: "read_thread_terminal" },
+        ],
+      },
+    ],
+    ...(toolChoice === undefined ? {} : { tool_choice: toolChoice }),
+  };
+  if (discoveredTools > 0) {
+    payload.input.push(
+      {
+        type: "tool_search_call",
+        call_id: "groq-history-search",
+        execution: "client",
+        arguments: { query: "deferred" },
+      },
+      {
+        type: "tool_search_output",
+        call_id: "groq-history-search",
+        status: "completed",
+        execution: "client",
+        tools: Array.from({ length: discoveredTools }, (_, index) => ({
+          type: "function",
+          name: `discovered_tool_${index}`,
+          parameters: { type: "object" },
+        })),
+      },
+    );
+  }
+  return payload;
+}
+
+function groqReferencedHistoryOverflowPayload(stream, model) {
+  const payload = groqToolSurfacePayload(stream, model, { discoveredTools: 0 });
+  const tools = Array.from({ length: 15 }, (_, index) => ({
+    type: "function",
+    name: `referenced_discovery_${index}`,
+    parameters: { type: "object" },
+  }));
+  payload.input.push(
+    {
+      type: "tool_search_call",
+      call_id: "referenced-overflow-search",
+      execution: "client",
+      arguments: { query: "referenced" },
+    },
+    {
+      type: "tool_search_output",
+      call_id: "referenced-overflow-search",
+      status: "completed",
+      execution: "client",
+      tools,
+    },
+    ...tools.map((tool, index) => ({
+      type: "function_call",
+      name: tool.name,
+      call_id: `referenced-call-${index}`,
+      arguments: "{}",
+    })),
+  );
+  return payload;
+}
+
+function groqForcedDiscoveryPayload(stream, model, { plainTools = 124 } = {}) {
+  return groqToolSurfacePayload(stream, model, {
+    plainTools,
+    input: [
+      { type: "message", role: "user", content: "hi" },
+      {
+        type: "tool_search_call",
+        call_id: "forced-discovery-search",
+        execution: "client",
+        arguments: { query: "forced" },
+      },
+      {
+        type: "tool_search_output",
+        call_id: "forced-discovery-search",
+        status: "completed",
+        execution: "client",
+        tools: [{
+          type: "namespace",
+          name: "mcp__forced",
+          tools: [
+            { type: "function", name: "unused", parameters: { type: "object" } },
+            { type: "function", name: "required", parameters: { type: "object" } },
+          ],
+        }],
+      },
+    ],
+    toolChoice: {
+      type: "function",
+      namespace: "mcp__forced",
+      function: { name: "required" },
+    },
+  });
+}
+
+function groqInjectedAppHistoryPayload(stream, model) {
+  return groqToolSurfacePayload(stream, model, {
+    input: [
+      { type: "message", role: "user", content: "hi" },
+      {
+        type: "function_call",
+        name: "create_thread",
+        namespace: "codex_app",
+        call_id: "prior-create-thread",
+        arguments: "{}",
+      },
+      {
+        type: "function_call_output",
+        call_id: "prior-create-thread",
+        output: "{}",
+      },
+    ],
+  });
+}
+
+function groqForcedAppChoicePayload(stream, model) {
+  return groqToolSurfacePayload(stream, model, {
+    toolChoice: {
+      type: "function",
+      name: "codex_app__send_message_to_thread",
+    },
+  });
+}
+
+function groqNestedForcedAppChoicePayload(stream, model, { plainTools = 111 } = {}) {
+  return groqToolSurfacePayload(stream, model, {
+    plainTools,
+    toolChoice: {
+      type: "function",
+      namespace: "codex_app",
+      function: { name: "create_thread" },
+    },
+  });
+}
+
+function groqAllowedAppChoicePayload(stream, model) {
+  return groqToolSurfacePayload(stream, model, {
+    toolSearch: true,
+    toolChoice: {
+      type: "allowed_tools",
+      mode: "required",
+      tools: [
+        { type: "function", namespace: "codex_app", name: "send_message_to_thread" },
+        { type: "function", function: { name: "codex_app__read_thread" } },
+        { type: "custom", name: "apply_patch" },
+        { type: "tool_search", execution: "client" },
+      ],
+    },
+  });
+}
+
+function groqResponseCollisionPayload(stream, model) {
+  const payload = groqToolSurfacePayload(stream, model, {
+    plainTools: 110,
+    input: [
+      { type: "message", role: "user", content: "hi" },
+      {
+        type: "function_call",
+        name: "codex_app__create_thread",
+        call_id: "plain-collision",
+        arguments: "{}",
+      },
+      {
+        type: "function_call",
+        namespace: "codex_app",
+        name: "create_thread",
+        call_id: "app-collision",
+        arguments: '{"model":"fixed"}',
+      },
+    ],
+  });
+  payload.tools.push({
+    type: "function",
+    name: "codex_app__create_thread",
+    parameters: { type: "object" },
+  });
+  return payload;
+}
+
+function groqReferencedAppOverflowPayload(stream, model) {
+  return groqToolSurfacePayload(stream, model, {
+    plainTools: 125,
+    input: [{
+      type: "function_call",
+      name: "create_thread",
+      namespace: "codex_app",
+      call_id: "overflow-create-thread",
+      arguments: "{}",
+    }],
+  });
+}
+
+function groqModelSwitchHistoryPayload(stream, model, { referencedTools = 1 } = {}) {
+  const discovered = Array.from({ length: 15 }, (_, index) => ({
+    type: "function",
+    name: `switched_tool_${index}`,
+    parameters: { type: "object" },
+  }));
+  const payload = groqToolSurfacePayload(stream, model);
+  payload.input.push(
+    {
+      type: "tool_search_call",
+      call_id: "prior-model-search",
+      execution: "client",
+      arguments: { query: "switched" },
+    },
+    {
+      type: "tool_search_output",
+      call_id: "prior-model-search",
+      status: "completed",
+      execution: "client",
+      tools: [{
+        type: "namespace",
+        name: "mcp__switched",
+        tools: discovered,
+      }],
+    },
+    ...discovered.slice(15 - referencedTools).map((tool, index) => ({
+      type: "function_call",
+      name: tool.name,
+      namespace: "mcp__switched",
+      call_id: `switched-call-${index}`,
+      arguments: "{}",
+    })),
+  );
+  return payload;
+}
+
+function groqModelFixture() {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "groq-tool-surface-"));
+  const userModels = path.join(directory, "user-models.json");
+  writeFileSync(
+    userModels,
+    JSON.stringify({
+      version: 1,
+      models: [
+        {
+          slug: "groq/tool-limit-fixture",
+          gatewayModel: "groq-tool-limit-fixture",
+          upstreamModel: "openai/gpt-oss-120b",
+          provider: "groq",
+          listed: true,
+          displayName: "Groq tool-limit fixture",
+          description: "Local routing test fixture.",
+          priority: 500,
+          defaultEffort: "high",
+          reasoningLevels: [{ effort: "high", description: "Adaptive reasoning" }],
+          contextWindow: 131072,
+          autoCompact: 111411,
+          inputModalities: ["text"],
+          compHash: "groq-tool-limit-fixture-user-v1",
+        },
+      ],
+    }),
+    "utf8",
+  );
+  return { directory, userModels, model: "groq/tool-limit-fixture" };
+}
+
 function sseEvent(event) {
   return `data: ${JSON.stringify(event)}\n\n`;
 }
@@ -499,10 +798,25 @@ async function scenario(
     sseBody = gatewaySseBody,
     jsonBody = gatewayJsonBody,
     requestPayload = routedRequestPayload,
+    routerEnv = {},
+    prepareRouterEnv,
+    visionJsonBody,
+    expectedStatus = 200,
   } = {},
 ) {
   const gatewayBodies = [];
+  const visionBodies = [];
   const gateway = await mockServer(async (request, response) => {
+    if (request.url === "/vision/v1/chat/completions" && visionJsonBody) {
+      const visionBody = await bodyJson(request);
+      visionBodies.push(visionBody);
+      json(
+        response,
+        200,
+        typeof visionJsonBody === "function" ? visionJsonBody(visionBody) : visionJsonBody,
+      );
+      return;
+    }
     if (request.url === "/v1/responses") {
       const gatewayBody = await bodyJson(request);
       gatewayBodies.push(gatewayBody);
@@ -521,10 +835,15 @@ async function scenario(
     json(response, 404, { error: { message: `unexpected ${request.url}` } });
   });
   const routerPort = await openPort();
+  const preparedRouterEnv = prepareRouterEnv
+    ? prepareRouterEnv({ gatewayPort: gateway.port })
+    : {};
   const router = run("router.mjs", {
     CODEX_ROUTER_PORT: String(routerPort),
     CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
     CODEX_ROUTER_QUIET: "1",
+    ...routerEnv,
+    ...preparedRouterEnv,
   });
   try {
     await waitFor(`${routerBase(routerPort)}/models`, router);
@@ -536,14 +855,449 @@ async function scenario(
       },
       body: JSON.stringify(requestPayload(stream, model)),
     });
-    assert.equal(response.status, 200, `router status ${response.status}`);
+    assert.equal(response.status, expectedStatus, `router status ${response.status}`);
     const clientBody = await response.text();
-    return { gatewayBodies, clientBody, router };
+    return { gatewayBodies, visionBodies, clientBody, router, status: response.status };
   } finally {
     await stopChild(router);
     await closeServer(gateway.server);
   }
 }
+
+test("a curated no-search Groq model routes a 129-tool expansion safely", async () => {
+  const fixture = groqModelFixture();
+  try {
+    const result = await scenario(false, {
+      model: fixture.model,
+      requestPayload: (stream, model) => groqToolSurfacePayload(stream, model),
+      jsonBody: () => ({ id: "groq-safe", output: [] }),
+      routerEnv: { MODEL_ROUTER_USER_MODELS: fixture.userModels },
+    });
+    assert.equal(result.gatewayBodies.length, 1);
+    const outgoing = result.gatewayBodies[0];
+    assert.equal(outgoing.model, "groq-tool-limit-fixture");
+    assert.ok(outgoing.tools.length <= 128);
+    assert.equal(outgoing.tools.length, 114);
+    const names = new Set(outgoing.tools.map((tool) => tool.name));
+    for (let index = 0; index < 111; index += 1) {
+      assert.ok(names.has(`core_tool_${index}`), `core_tool_${index} survives`);
+    }
+    for (const name of [
+      "codex_app__load_workspace_dependencies",
+      "codex_app__navigate_to_codex_page",
+      "codex_app__read_thread_terminal",
+    ]) {
+      assert.ok(names.has(name), `${name} survives`);
+    }
+    assert.equal(names.has("tool_search"), false);
+    assert.equal(names.has("codex_app__create_thread"), false);
+    assert.equal(names.has("plugin_management__uninstall_plugin"), false);
+  } finally {
+    rmSync(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("Groq refuses more than 128 client tools before contacting the gateway", async () => {
+  const fixture = groqModelFixture();
+  try {
+    const result = await scenario(false, {
+      model: fixture.model,
+      requestPayload: (stream, model) =>
+        groqToolSurfacePayload(stream, model, { plainTools: 126 }),
+      routerEnv: { MODEL_ROUTER_USER_MODELS: fixture.userModels },
+      expectedStatus: 400,
+    });
+    assert.equal(result.gatewayBodies.length, 0);
+    const error = JSON.parse(result.clientBody).error;
+    assert.deepEqual(
+      {
+        type: error.type,
+        code: error.code,
+        provider: error.provider,
+        limit: error.limit,
+      },
+      {
+        type: "provider_compatibility_error",
+        code: "groq_tool_limit_exceeded",
+        provider: "groq",
+        limit: 128,
+      },
+    );
+  } finally {
+    rmSync(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("Groq re-adds a deferred app definition used by prior native history", async () => {
+  const fixture = groqModelFixture();
+  try {
+    const result = await scenario(false, {
+      model: fixture.model,
+      requestPayload: groqInjectedAppHistoryPayload,
+      jsonBody: () => ({ id: "groq-prior-app-history", output: [] }),
+      routerEnv: { MODEL_ROUTER_USER_MODELS: fixture.userModels },
+    });
+    assert.equal(result.gatewayBodies.length, 1);
+    const outgoing = result.gatewayBodies[0];
+    assert.ok(outgoing.tools.some((tool) => tool.name === "codex_app__create_thread"));
+    const call = outgoing.input.find((item) => item.call_id === "prior-create-thread");
+    assert.equal(call.name, "codex_app__create_thread");
+    assert.equal(call.namespace, undefined);
+  } finally {
+    rmSync(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("Groq re-adds and flattens a forced deferred app choice", async () => {
+  const fixture = groqModelFixture();
+  try {
+    const result = await scenario(false, {
+      model: fixture.model,
+      requestPayload: groqForcedAppChoicePayload,
+      jsonBody: () => ({ id: "groq-forced-app-choice", output: [] }),
+      routerEnv: { MODEL_ROUTER_USER_MODELS: fixture.userModels },
+    });
+    assert.equal(result.gatewayBodies.length, 1);
+    const outgoing = result.gatewayBodies[0];
+    assert.ok(
+      outgoing.tools.some((tool) => tool.name === "codex_app__send_message_to_thread"),
+    );
+    assert.deepEqual(outgoing.tool_choice, {
+      type: "function",
+      name: "codex_app__send_message_to_thread",
+    });
+  } finally {
+    rmSync(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("Groq admits nested and mixed allowed-tools choices through the same identity map", async () => {
+  const fixture = groqModelFixture();
+  try {
+    const nested = await scenario(false, {
+      model: fixture.model,
+      requestPayload: groqNestedForcedAppChoicePayload,
+      jsonBody: () => ({ id: "groq-nested-choice", output: [] }),
+      routerEnv: { MODEL_ROUTER_USER_MODELS: fixture.userModels },
+    });
+    assert.equal(nested.gatewayBodies.length, 1);
+    assert.ok(
+      nested.gatewayBodies[0].tools.some((tool) => tool.name === "codex_app__create_thread"),
+    );
+    assert.deepEqual(nested.gatewayBodies[0].tool_choice, {
+      type: "function",
+      function: { name: "codex_app__create_thread" },
+    });
+
+    const allowed = await scenario(false, {
+      model: fixture.model,
+      requestPayload: groqAllowedAppChoicePayload,
+      jsonBody: () => ({ id: "groq-allowed-choice", output: [] }),
+      routerEnv: { MODEL_ROUTER_USER_MODELS: fixture.userModels },
+    });
+    assert.equal(allowed.gatewayBodies.length, 1);
+    const outgoing = allowed.gatewayBodies[0];
+    assert.ok(
+      outgoing.tools.some((tool) => tool.name === "codex_app__send_message_to_thread"),
+    );
+    assert.ok(outgoing.tools.some((tool) => tool.name === "codex_app__read_thread"));
+    assert.deepEqual(outgoing.tool_choice, {
+      type: "allowed_tools",
+      mode: "required",
+      tools: [
+        { type: "function", name: "codex_app__send_message_to_thread" },
+        { type: "function", function: { name: "codex_app__read_thread" } },
+        { type: "custom", name: "apply_patch" },
+        { type: "function", name: "tool_search" },
+      ],
+    });
+  } finally {
+    rmSync(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("Groq refuses a nested absent forced app at exactly 128 before upstream", async () => {
+  const fixture = groqModelFixture();
+  try {
+    const result = await scenario(false, {
+      model: fixture.model,
+      requestPayload: (stream, model) =>
+        groqNestedForcedAppChoicePayload(stream, model, { plainTools: 125 }),
+      routerEnv: { MODEL_ROUTER_USER_MODELS: fixture.userModels },
+      expectedStatus: 400,
+    });
+    assert.equal(result.gatewayBodies.length, 0);
+    const error = JSON.parse(result.clientBody).error;
+    assert.equal(error.code, "groq_tool_limit_exceeded");
+    assert.match(error.message, /request references 1 deferred app tools/);
+    assert.match(error.message, /only 0 slots remain/);
+  } finally {
+    rmSync(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("Groq response aliases distinguish a plain flattened spelling from the app tool", async () => {
+  const fixture = groqModelFixture();
+  try {
+    const result = await scenario(false, {
+      model: fixture.model,
+      requestPayload: groqResponseCollisionPayload,
+      jsonBody: (outgoing) => {
+        const plain = outgoing.input.find((item) => item.call_id === "plain-collision");
+        const app = outgoing.input.find((item) => item.call_id === "app-collision");
+        assert.notEqual(plain.name, app.name);
+        assert.equal(plain.namespace, undefined);
+        assert.equal(app.namespace, undefined);
+        return {
+          id: "groq-response-collision",
+          output: [
+            { type: "function_call", name: plain.name, call_id: "plain-result", arguments: "{}" },
+            {
+              type: "function_call",
+              name: app.name,
+              call_id: "app-result",
+              arguments: '{"model":"fixed"}',
+            },
+          ],
+        };
+      },
+      routerEnv: { MODEL_ROUTER_USER_MODELS: fixture.userModels },
+    });
+    assert.equal(result.gatewayBodies.length, 1);
+    const response = JSON.parse(result.clientBody);
+    assert.deepEqual(response.output, [
+      {
+        type: "function_call",
+        name: "codex_app__create_thread",
+        call_id: "plain-result",
+        arguments: "{}",
+      },
+      {
+        type: "function_call",
+        name: "create_thread",
+        namespace: "codex_app",
+        call_id: "app-result",
+        arguments: '{"model":"fixed"}',
+      },
+    ]);
+  } finally {
+    rmSync(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("Groq refuses referenced app overflow before contacting the gateway", async () => {
+  const fixture = groqModelFixture();
+  try {
+    const result = await scenario(false, {
+      model: fixture.model,
+      requestPayload: groqReferencedAppOverflowPayload,
+      routerEnv: { MODEL_ROUTER_USER_MODELS: fixture.userModels },
+      expectedStatus: 400,
+    });
+    assert.equal(result.gatewayBodies.length, 0);
+    const error = JSON.parse(result.clientBody).error;
+    assert.equal(error.type, "provider_compatibility_error");
+    assert.equal(error.code, "groq_tool_limit_exceeded");
+    assert.equal(error.provider, "groq");
+    assert.equal(error.limit, 128);
+    assert.match(error.message, /request references 1 deferred app tools/);
+    assert.match(error.message, /only 0 slots remain/);
+  } finally {
+    rmSync(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("Groq preserves model-switch discoveries while dropping stale search controls", async () => {
+  const fixture = groqModelFixture();
+  try {
+    const result = await scenario(false, {
+      model: fixture.model,
+      requestPayload: groqModelSwitchHistoryPayload,
+      jsonBody: () => ({
+        id: "groq-model-switch-history",
+        output: [{
+          type: "function_call",
+          name: "mcp__switched__switched_tool_14",
+          call_id: "switched-again",
+          arguments: "{}",
+        }],
+      }),
+      routerEnv: { MODEL_ROUTER_USER_MODELS: fixture.userModels },
+    });
+    assert.equal(result.gatewayBodies.length, 1);
+    const outgoing = result.gatewayBodies[0];
+    assert.equal(outgoing.tools.length, 128);
+    assert.ok(
+      outgoing.tools.some((tool) => tool.name === "mcp__switched__switched_tool_14"),
+      "the later referenced discovery survives capacity selection",
+    );
+    assert.equal(
+      outgoing.input.some(
+        (item) => item.type === "tool_search_call" || item.type === "tool_search_output",
+      ),
+      false,
+    );
+    const storedCall = outgoing.input.find((item) => item.call_id === "switched-call-0");
+    assert.equal(storedCall.name, "mcp__switched__switched_tool_14");
+    assert.equal(storedCall.namespace, undefined);
+    assert.equal(
+      outgoing.input.some(
+        (item) => item.type === "function_call" && item.namespace !== undefined,
+      ),
+      false,
+      "no native namespace field reaches the chat bridge",
+    );
+    const response = JSON.parse(result.clientBody);
+    assert.deepEqual(response.output[0], {
+      type: "function_call",
+      name: "switched_tool_14",
+      namespace: "mcp__switched",
+      call_id: "switched-again",
+      arguments: "{}",
+    });
+  } finally {
+    rmSync(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("Groq reserves a forced model-switch discovery and refuses it when no slot remains", async () => {
+  const fixture = groqModelFixture();
+  try {
+    const admitted = await scenario(false, {
+      model: fixture.model,
+      requestPayload: groqForcedDiscoveryPayload,
+      jsonBody: () => ({ id: "groq-forced-discovery", output: [] }),
+      routerEnv: { MODEL_ROUTER_USER_MODELS: fixture.userModels },
+    });
+    assert.equal(admitted.gatewayBodies.length, 1);
+    const outgoing = admitted.gatewayBodies[0];
+    assert.equal(outgoing.tools.length, 128);
+    assert.ok(outgoing.tools.some((tool) => tool.name === "mcp__forced__required"));
+    assert.equal(outgoing.tools.some((tool) => tool.name === "mcp__forced__unused"), false);
+    assert.deepEqual(outgoing.tool_choice, {
+      type: "function",
+      function: { name: "mcp__forced__required" },
+    });
+    assert.equal(
+      outgoing.input.some(
+        (item) => item.type === "tool_search_call" || item.type === "tool_search_output",
+      ),
+      false,
+    );
+
+    const refused = await scenario(false, {
+      model: fixture.model,
+      requestPayload: (stream, model) =>
+        groqForcedDiscoveryPayload(stream, model, { plainTools: 125 }),
+      routerEnv: { MODEL_ROUTER_USER_MODELS: fixture.userModels },
+      expectedStatus: 400,
+    });
+    assert.equal(refused.gatewayBodies.length, 0);
+    const error = JSON.parse(refused.clientBody).error;
+    assert.equal(error.code, "groq_tool_limit_exceeded");
+    assert.match(error.message, /stored history references 1 discovered tools/);
+    assert.match(error.message, /only 0 slots remain/);
+  } finally {
+    rmSync(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("Groq refuses referenced discovery overflow before contacting the gateway", async () => {
+  const fixture = groqModelFixture();
+  try {
+    const result = await scenario(false, {
+      model: fixture.model,
+      requestPayload: groqReferencedHistoryOverflowPayload,
+      routerEnv: { MODEL_ROUTER_USER_MODELS: fixture.userModels },
+      expectedStatus: 400,
+    });
+    assert.equal(result.gatewayBodies.length, 0);
+    const error = JSON.parse(result.clientBody).error;
+    assert.equal(error.type, "provider_compatibility_error");
+    assert.equal(error.code, "groq_tool_limit_exceeded");
+    assert.equal(error.provider, "groq");
+    assert.equal(error.limit, 128);
+    assert.match(error.message, /stored history references 15 discovered tools/);
+    assert.match(error.message, /only 14 slots remain/);
+  } finally {
+    rmSync(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("Groq rejects a known history overflow before spending a vision or gateway call", async () => {
+  const fixture = groqModelFixture();
+  const stateDirectory = mkdtempSync(path.join(os.tmpdir(), "groq-preflight-vision-state-"));
+  try {
+    const result = await scenario(false, {
+      model: fixture.model,
+      requestPayload: (stream, model) => {
+        const payload = groqReferencedHistoryOverflowPayload(stream, model);
+        payload.input[0] = {
+          type: "message",
+          role: "user",
+          content: [
+            { type: "input_text", text: "read this" },
+            { type: "input_image", image_url: IMAGE },
+          ],
+        };
+        return payload;
+      },
+      routerEnv: { MODEL_ROUTER_USER_MODELS: fixture.userModels },
+      prepareRouterEnv: ({ gatewayPort }) => {
+        writeFileSync(
+          path.join(stateDirectory, "vision-bridge.json"),
+          JSON.stringify({
+            version: 1,
+            enabled: true,
+            engine: "local",
+            effort: null,
+            local: {
+              model: "mock-vision-1b",
+              baseUrl: `http://127.0.0.1:${gatewayPort}/vision/v1`,
+            },
+          }),
+          { encoding: "utf8", mode: 0o600 },
+        );
+        return { MODEL_ROUTER_STATE_DIR: stateDirectory };
+      },
+      visionJsonBody: {
+        choices: [{ message: { role: "assistant", content: "an image" } }],
+      },
+      expectedStatus: 400,
+    });
+    assert.equal(result.visionBodies.length, 0);
+    assert.equal(result.gatewayBodies.length, 0);
+    const error = JSON.parse(result.clientBody).error;
+    assert.equal(error.code, "groq_tool_limit_exceeded");
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+    rmSync(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("non-Groq routes preserve the full expanded and discovered tool surface", async () => {
+  const result = await scenario(false, {
+    requestPayload: (stream, model) => groqToolSurfacePayload(stream, model, {
+      plainTools: 110,
+      discoveredTools: 20,
+      toolSearch: true,
+    }),
+    jsonBody: () => ({ id: "non-groq-unchanged", output: [] }),
+  });
+  assert.equal(result.gatewayBodies.length, 1);
+  const outgoing = result.gatewayBodies[0];
+  assert.equal(outgoing.tools.length, 149);
+  const names = new Set(outgoing.tools.map((tool) => tool.name));
+  assert.ok(names.has("codex_app__create_thread"));
+  assert.ok(names.has("plugin_management__uninstall_plugin"));
+  for (let index = 0; index < 20; index += 1) {
+    assert.ok(names.has(`discovered_tool_${index}`));
+  }
+  const searchOutput = outgoing.input.find(
+    (item) => item.call_id === "groq-history-search" && item.type === "function_call_output",
+  );
+  assert.equal(JSON.parse(searchOutput.output).tools.length, 20);
+});
 
 test("routed request flattens every namespace to the gateway and restores calls to the client", async () => {
   const first = await scenario();
