@@ -147,6 +147,30 @@ function encryptedRelayBody(encrypted = "gAAAAA-shared-payload=") {
   };
 }
 
+function rawPipelinedExchange(port, payload) {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection({ host: "127.0.0.1", port });
+    let settled = false;
+    let output = "";
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      callback(value);
+    };
+    socket.setEncoding("utf8");
+    socket.setTimeout(3_000, () => {
+      socket.destroy();
+      finish(reject, new Error("Timed out waiting for pipelined router responses."));
+    });
+    socket.on("data", (chunk) => {
+      output += chunk;
+    });
+    socket.once("error", (error) => finish(reject, error));
+    socket.once("end", () => finish(resolve, output));
+    socket.once("connect", () => socket.end(payload));
+  });
+}
+
 // Read the routed turn with the raw client so a socket reset stays
 // distinguishable from a complete message. A reset mid-chunked-body leaves
 // `response.complete` false, which is the transport failure a reqwest client
@@ -413,7 +437,7 @@ test("same encrypted payload shares one relay and expiry removes the retained pl
   const routerPort = await openPort();
   const router = run({
     CODEX_ROUTER_PORT: String(routerPort),
-    CODEX_ROUTER_AGENT_PAYLOAD_CACHE_TTL_MS: "50",
+    CODEX_ROUTER_AGENT_PAYLOAD_CACHE_TTL_MS: "2000",
     CODEX_NATIVE_BASE_URL: `http://127.0.0.1:${native.port}/backend-api/codex`,
     CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
     CODEX_ROUTER_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
@@ -463,8 +487,13 @@ test("same encrypted payload shares one relay and expiry removes the retained pl
     assert.equal(retained.resources.maxDecodedBodyBytes, 256 * 1024 * 1024);
     assert.equal(retained.resources.agentPayloadCache.entries, 1);
     assert.ok(retained.resources.agentPayloadCache.coalesced >= 1);
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    const expired = await fetch(`${callerBaseUrl(routerPort, CALLER_KEY)}/health`).then((r) => r.json());
+    const expiryDeadline = Date.now() + 4_000;
+    let expired;
+    do {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expired = await fetch(`${callerBaseUrl(routerPort, CALLER_KEY)}/health`).then((r) => r.json());
+      if (expired.resources.agentPayloadCache.entries === 0) break;
+    } while (Date.now() < expiryDeadline);
     assert.equal(expired.resources.agentPayloadCache.entries, 0);
     assert.equal(expired.resources.agentPayloadCache.bytes, 0);
     assert.ok(expired.resources.agentPayloadCache.expirations >= 1);
@@ -618,6 +647,102 @@ test("canceling one coalesced relay waiter does not abort another", async () => 
   }
 });
 
+test("canceling every coalesced relay waiter aborts the one shared native request", async () => {
+  let nativeRequests = 0;
+  let markNativeAborted;
+  const nativeAborted = new Promise((resolve) => {
+    markNativeAborted = resolve;
+  });
+  let relayStarted;
+  const started = new Promise((resolve) => {
+    relayStarted = resolve;
+  });
+  const native = await mockServer((request, response) => {
+    nativeRequests += 1;
+    let marked = false;
+    const mark = () => {
+      if (marked) return;
+      marked = true;
+      markNativeAborted();
+    };
+    request.once("aborted", mark);
+    response.once("close", mark);
+    relayStarted();
+  });
+  let gatewayRequests = 0;
+  const gateway = await mockServer((request, response) => {
+    if (request.method === "GET" && request.url === "/health") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    gatewayRequests += 1;
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ id: "unexpected", output: [] }));
+  });
+  const routerPort = await openPort();
+  const router = run({
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_NATIVE_BASE_URL: `http://127.0.0.1:${native.port}/backend-api/codex`,
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_API_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_GROK_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_GATEWAY_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+  });
+  const firstController = new AbortController();
+  const secondController = new AbortController();
+  const headers = {
+    Authorization: "Bearer shared-session",
+    "ChatGPT-Account-Id": "shared-account",
+    "Content-Type": "application/json",
+  };
+  const body = JSON.stringify(encryptedRelayBody("gAAAAA-all-canceled="));
+  try {
+    await waitFor(`http://127.0.0.1:${routerPort}/health`, router);
+    const first = fetch(`${callerBaseUrl(routerPort, CALLER_KEY)}/responses`, {
+      method: "POST",
+      headers,
+      body,
+      signal: firstController.signal,
+    }).catch((error) => error);
+    await started;
+    const second = fetch(`${callerBaseUrl(routerPort, CALLER_KEY)}/responses`, {
+      method: "POST",
+      headers,
+      body,
+      signal: secondController.signal,
+    }).catch((error) => error);
+
+    const coalescingDeadline = Date.now() + 1_000;
+    let health;
+    do {
+      health = await fetch(`${callerBaseUrl(routerPort, CALLER_KEY)}/health`).then((r) => r.json());
+      if (health.resources.agentPayloadCache.coalesced >= 1) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    } while (Date.now() < coalescingDeadline);
+    assert.ok(health.resources.agentPayloadCache.coalesced >= 1);
+
+    firstController.abort();
+    secondController.abort();
+    assert.ok((await first) instanceof Error);
+    assert.ok((await second) instanceof Error);
+    await Promise.race([
+      nativeAborted,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("shared native relay was not aborted")), 1_000),
+      ),
+    ]);
+    assert.equal(nativeRequests, 1);
+    assert.equal(gatewayRequests, 0);
+  } finally {
+    firstController.abort();
+    secondController.abort();
+    await stopChild(router);
+    await Promise.all([closeServer(native.server), closeServer(gateway.server)]);
+  }
+});
+
 test("active request admission is bounded and rejects later bodies after draining them", async () => {
   let gatewayRequests = 0;
   let firstRequestSeen;
@@ -672,6 +797,35 @@ test("active request admission is bounded and rejects later bodies after drainin
     assert.equal(rejected.status, 429, JSON.stringify(rejectedBody));
     assert.equal(rejectedBody.error.code, "ERR_ROUTER_ACTIVE_REQUEST_LIMIT");
     assert.equal(gatewayRequests, 1);
+
+    const rejectedUrl = new URL(`${callerBaseUrl(routerPort, CALLER_KEY)}/responses`);
+    const healthUrl = new URL(`${callerBaseUrl(routerPort, CALLER_KEY)}/health`);
+    const pipelinedBody = JSON.stringify({
+      model: "deepseek/deepseek-v4-pro",
+      // Keep the following request beyond Node's 64 KiB stream buffer. Without
+      // request.resume(), the negative control stalls before parsing the GET.
+      input: "x".repeat(256 * 1024),
+    });
+    const pipelined = await rawPipelinedExchange(
+      routerPort,
+      [
+        `POST ${rejectedUrl.pathname} HTTP/1.1\r\n`,
+        `Host: 127.0.0.1:${routerPort}\r\n`,
+        "Authorization: Bearer codex-caller-auth\r\n",
+        "Content-Type: application/json\r\n",
+        `Content-Length: ${Buffer.byteLength(pipelinedBody)}\r\n`,
+        "Connection: keep-alive\r\n\r\n",
+        pipelinedBody,
+        `GET ${healthUrl.pathname} HTTP/1.1\r\n`,
+        `Host: 127.0.0.1:${routerPort}\r\n`,
+        "Connection: close\r\n\r\n",
+      ].join(""),
+    );
+    const statuses = [...pipelined.matchAll(/HTTP\/1\.1 (\d{3})/g)].map((match) =>
+      Number(match[1]),
+    );
+    assert.deepEqual(statuses, [429, 200], pipelined);
+    assert.equal(gatewayRequests, 1, "the rejected pipeline never reaches upstream");
 
     firstAbort.abort();
     const firstResult = await first;
