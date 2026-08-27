@@ -328,10 +328,15 @@ test("the production renderer exposes model discovery and picker actions", { tim
       await page.evaluate(() => window.routerControlTest.navigate({ destination: "usage-resets", sourceId: "deepseek" })),
       true,
     );
-    const resetCard = page.locator(".us-metric-card.is-navigation-focus");
-    await resetCard.waitFor();
-    await page.waitForFunction(() => document.activeElement?.classList.contains("us-metric-card"));
-    assert.match(await resetCard.getAttribute("aria-label"), /DeepSeek, Rolling window.*Resets/);
+    await page.waitForFunction(() => {
+      const active = document.activeElement;
+      return active?.classList.contains("us-metric-card")
+        && active.getAttribute("aria-label")?.startsWith("DeepSeek, Rolling window");
+    });
+    assert.match(
+      await page.evaluate(() => document.activeElement?.getAttribute("aria-label")),
+      /DeepSeek, Rolling window.*Resets/,
+    );
     assert.equal(
       await page.evaluate(() => window.routerControlTest.navigate({ destination: "usage", sourceId: "openai" })),
       true,
