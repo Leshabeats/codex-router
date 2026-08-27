@@ -60,7 +60,10 @@ function abandonedLock(pathname) {
   return staleLock(pathname);
 }
 
-function acquire(target) {
+function acquire(target, { waitMs = MAX_WAIT_MS } = {}) {
+  if (!Number.isFinite(waitMs) || waitMs < 0) {
+    throw new TypeError("State lock wait must be a non-negative number of milliseconds.");
+  }
   const pathname = lockPath(target);
   mkdirSync(path.dirname(pathname), { recursive: true, mode: 0o700 });
   const started = Date.now();
@@ -87,7 +90,7 @@ function acquire(target) {
         rmSync(pathname, { recursive: true, force: true });
         continue;
       }
-      if (Date.now() - started >= MAX_WAIT_MS) {
+      if (Date.now() - started >= waitMs) {
         const owner = lockOwnerPid(pathname);
         throw new Error(`Timed out waiting for state lock${owner ? ` held by ${owner}` : ""}: ${pathname}`);
       }
@@ -96,9 +99,9 @@ function acquire(target) {
   }
 }
 
-export function withAtomicStateLock(target, operation) {
+export function withAtomicStateLock(target, operation, options) {
   if (typeof operation !== "function") throw new TypeError("State lock operation must be a function.");
-  const release = acquire(target);
+  const release = acquire(target, options);
   try {
     return operation();
   } finally {

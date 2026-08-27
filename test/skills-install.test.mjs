@@ -126,7 +126,7 @@ test("concurrent skill installs serialize ownership from recovery through public
         "--eval",
         `import { writeFileSync } from "node:fs";\n` +
           `import { installSkills } from ${JSON.stringify(SKILLS_MODULE_URL)};\n` +
-          `let held = false; installSkills(${JSON.stringify(home)}, { quiet: true, onStaged() { if (held) return; held = true; writeFileSync(${JSON.stringify(ready)}, "ready\\n"); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500); } });\n`,
+          `let held = false; installSkills(${JSON.stringify(home)}, { quiet: true, onStaged() { if (held) return; held = true; writeFileSync(${JSON.stringify(ready)}, "ready\\n"); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2500); } });\n`,
       ],
       { encoding: "utf8", env: environment, stdio: ["ignore", "pipe", "pipe"] },
     );

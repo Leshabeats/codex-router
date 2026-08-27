@@ -59,6 +59,7 @@ const RETIRE_PUBLICATION = "publication";
 const RETIRE_JOURNAL_MAX_BYTES = 16 * 1024;
 const ACTIVE_RETIREMENT_MAX_AGE_MS = 5 * 60 * 1000;
 const PUBLISH_MARKER = ".codex-router-publishing";
+const SKILL_OPERATION_LOCK_WAIT_MS = 30_000;
 
 // The pack source directory. Overridable for tests via the environment.
 function skillsSource() {
@@ -1318,26 +1319,34 @@ function uninstallSkillsUnlocked(
 }
 
 export function approveExternalSkills(codexHome, names, options) {
-  return withAtomicStateLock(skillOwnershipPath(codexHome), () =>
-    approveExternalSkillsUnlocked(codexHome, names, options),
+  return withAtomicStateLock(
+    skillOwnershipPath(codexHome),
+    () => approveExternalSkillsUnlocked(codexHome, names, options),
+    { waitMs: SKILL_OPERATION_LOCK_WAIT_MS },
   );
 }
 
 export function revokeExternalSkills(codexHome, names, options) {
-  return withAtomicStateLock(skillOwnershipPath(codexHome), () =>
-    revokeExternalSkillsUnlocked(codexHome, names, options),
+  return withAtomicStateLock(
+    skillOwnershipPath(codexHome),
+    () => revokeExternalSkillsUnlocked(codexHome, names, options),
+    { waitMs: SKILL_OPERATION_LOCK_WAIT_MS },
   );
 }
 
 export function installSkills(codexHome, options) {
-  return withAtomicStateLock(skillOwnershipPath(codexHome), () =>
-    installSkillsUnlocked(codexHome, options),
+  return withAtomicStateLock(
+    skillOwnershipPath(codexHome),
+    () => installSkillsUnlocked(codexHome, options),
+    { waitMs: SKILL_OPERATION_LOCK_WAIT_MS },
   );
 }
 
 export function uninstallSkills(codexHome, options) {
-  return withAtomicStateLock(skillOwnershipPath(codexHome), () =>
-    uninstallSkillsUnlocked(codexHome, options),
+  return withAtomicStateLock(
+    skillOwnershipPath(codexHome),
+    () => uninstallSkillsUnlocked(codexHome, options),
+    { waitMs: SKILL_OPERATION_LOCK_WAIT_MS },
   );
 }
 
