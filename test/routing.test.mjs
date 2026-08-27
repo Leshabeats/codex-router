@@ -7335,7 +7335,7 @@ test("router removes DeepSeek's confirmed blank message before a tool call", asy
         item_id: blankMessage.id,
         output_index: 0,
         content_index: 0,
-        part: { type: "reasoning_text", reasoning: "private reasoning" },
+        part: { type: "output_text", text: "", annotations: [] },
       },
       { type: "response.output_item.done", output_index: 0, item: blankMessage },
       {
@@ -7374,7 +7374,6 @@ test("router removes DeepSeek's confirmed blank message before a tool call", asy
       .filter((line) => line.startsWith("data: {"))
       .map((line) => JSON.parse(line.slice(5).trim()));
     assert.equal(text.includes(blankMessage.id), false);
-    assert.equal(text.includes("private reasoning"), false);
     const toolEvents = events.filter(
       (event) => (event.item_id ?? event.item?.id) === functionCall.id,
     );
@@ -7390,7 +7389,7 @@ test("router removes DeepSeek's confirmed blank message before a tool call", asy
   }
 });
 
-test("router does not compact the same blank-message shape on non-DeepSeek routes", async () => {
+test("router compacts translated OpenCode routes but leaves Responses-native routes unchanged", async () => {
   const blank = {
     id: "msg_blank",
     type: "message",
@@ -7398,14 +7397,33 @@ test("router does not compact the same blank-message shape on non-DeepSeek route
     role: "assistant",
     content: [{ type: "output_text", text: "", annotations: [] }],
   };
+  const terminalBlank = {
+    ...blank,
+    id: "chatcmpl_tool_only",
+    content: [{ type: "output_text", annotations: [] }],
+  };
   const tool = {
     id: "call_list",
     type: "function_call",
     call_id: "call_id",
-    name: "exec_command",
+    name: "collaboration__spawn_agent",
     arguments: "{}",
     status: "completed",
   };
+  const restoredTool = {
+    ...tool,
+    name: "spawn_agent",
+    namespace: "collaboration",
+  };
+  const tools = [{
+    type: "namespace",
+    name: "collaboration",
+    tools: [{
+      type: "function",
+      name: "spawn_agent",
+      inputSchema: { type: "object", properties: {} },
+    }],
+  }];
   const source = [
     { type: "response.output_item.added", output_index: 0, item: { ...blank, status: "in_progress", content: [] } },
     { type: "response.output_item.added", output_index: 1, item: { ...tool, status: "in_progress" } },
@@ -7415,7 +7433,7 @@ test("router does not compact the same blank-message shape on non-DeepSeek route
       response: {
         id: "resp_tool_only",
         status: "completed",
-        output: [blank, tool],
+        output: [terminalBlank, tool],
         usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
       },
     },
@@ -7434,28 +7452,63 @@ test("router does not compact the same blank-message shape on non-DeepSeek route
 
   try {
     await waitFor(`${routerBase(routerPort)}/models`, router);
-    const response = await fetch(`${routerBase(routerPort)}/responses`, {
+    const translatedResponse = await fetch(`${routerBase(routerPort)}/responses`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         model: "opencode-go/deepseek-v4-flash",
         input: "list files",
         stream: true,
+        tools,
       }),
     });
-    const text = await response.text();
-    assert.equal(response.status, 200, text);
-    const events = text.split(/\r?\n/)
+    const translatedText = await translatedResponse.text();
+    assert.equal(translatedResponse.status, 200, translatedText);
+    const translatedEvents = translatedText.split(/\r?\n/)
       .filter((line) => line.startsWith("data: {"))
       .map((line) => JSON.parse(line.slice(5).trim()));
-    assert.ok(text.includes(blank.id));
+    assert.equal(translatedText.includes(blank.id), false);
+    assert.equal(translatedText.includes(terminalBlank.id), false);
+    const translatedToolEvent = translatedEvents.find(
+      (event) => event.item?.id === tool.id,
+    );
+    assert.equal(translatedToolEvent.output_index, 0);
+    assert.deepEqual(
+      {
+        id: translatedToolEvent.item.id,
+        name: translatedToolEvent.item.name,
+        namespace: translatedToolEvent.item.namespace,
+      },
+      { id: tool.id, name: "spawn_agent", namespace: "collaboration" },
+    );
+    assert.deepEqual(
+      translatedEvents.find((event) => event.type === "response.completed").response.output,
+      [restoredTool],
+    );
+
+    const nativeResponse = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "opencode-go-responses/gpt-5.6-luna",
+        input: "list files",
+        stream: true,
+        tools,
+      }),
+    });
+    const nativeText = await nativeResponse.text();
+    assert.equal(nativeResponse.status, 200, nativeText);
+    const nativeEvents = nativeText.split(/\r?\n/)
+      .filter((line) => line.startsWith("data: {"))
+      .map((line) => JSON.parse(line.slice(5).trim()));
+    assert.ok(nativeText.includes(blank.id));
     assert.equal(
-      events.find((event) => event.item?.id === tool.id).output_index,
+      nativeEvents.find((event) => event.item?.id === tool.id).output_index,
       1,
     );
     assert.deepEqual(
-      events.find((event) => event.type === "response.completed").response.output,
-      [blank, tool],
+      nativeEvents.find((event) => event.type === "response.completed").response.output,
+      [terminalBlank, restoredTool],
     );
   } finally {
     await stopChild(router);
@@ -7613,6 +7666,76 @@ test("router response pipelines preserve ambiguous provider bytes exactly", asyn
     assert.match(lifecycleFailureText, /event: error/u);
     assert.match(lifecycleFailureText, /local_router_stream_failed/u);
     assert.doesNotMatch(lifecycleFailureText, new RegExp(lifecycleMarker, "u"));
+  } finally {
+    await stopChild(router);
+    await closeServer(gateway.server);
+  }
+});
+
+test("router applies the translated empty-message repair to bounded JSON responses", async () => {
+  const blank = {
+    id: "msg_blank_json",
+    type: "message",
+    status: "completed",
+    role: "assistant",
+    content: [{ type: "output_text", text: null, annotations: [] }],
+    phase: null,
+  };
+  const tool = {
+    id: "call_json",
+    type: "function_call",
+    call_id: "call_json",
+    name: "exec_command",
+    arguments: "{}",
+    status: "completed",
+  };
+  const payload = {
+    id: "resp_json_tool",
+    object: "response",
+    error: null,
+    status: "completed",
+    output: [blank, tool],
+    usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
+  };
+  const gateway = await mockServer(async (request, response) => {
+    await bodyJson(request);
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify(payload));
+  });
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_QUIET: "1",
+  });
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const translatedResponse = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "opencode-go/deepseek-v4-flash",
+        input: "list files",
+        stream: false,
+      }),
+    });
+    const translated = await translatedResponse.json();
+    assert.equal(translatedResponse.status, 200, JSON.stringify(translated));
+    assert.deepEqual(translated.output, [tool]);
+
+    const nativeResponse = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "opencode-go-responses/gpt-5.6-luna",
+        input: "list files",
+        stream: false,
+      }),
+    });
+    const native = await nativeResponse.json();
+    assert.equal(nativeResponse.status, 200, JSON.stringify(native));
+    assert.deepEqual(native.output, [blank, tool]);
   } finally {
     await stopChild(router);
     await closeServer(gateway.server);
