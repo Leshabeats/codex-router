@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Translated tool streams no longer expose bridge-only assistant turns.**
+  Bounded, fail-open normalization removes only empty assistant envelopes that
+  LiteLLM's Chat Completions and Anthropic Messages bridges corroborate with a
+  completed tool lifecycle, then compacts the affected output indexes. Real
+  text, reasoning, refusals, malformed or ambiguous streams, and native
+  Responses routes remain untouched. Non-streaming bodies receive equivalent
+  bounded, fail-open handling under an exact terminal-output proof.
+
 - **Live model certification now proves the requested route.** Compatibility
   and smoke probes disable router failover, so a healthy alternate can no
   longer certify a broken preset. Direct probes retained GLM-5.3-Flash on

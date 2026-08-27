@@ -7701,6 +7701,151 @@ test("router response pipelines preserve ambiguous provider bytes exactly", asyn
   }
 });
 
+test("router enables the terminal-only bridge repair only for Messages routes", async () => {
+  const model = "opencode-go-messages-minimax-m3";
+  const blank = {
+    id: "chatcmpl_terminal_only",
+    type: "message",
+    status: "completed",
+    role: "assistant",
+    content: [{ type: "output_text", text: "", annotations: [] }],
+  };
+  const tool = {
+    id: "call_terminal_only",
+    type: "function_call",
+    call_id: "call_terminal_only",
+    name: "exec_command",
+    arguments: "{}",
+    status: "completed",
+  };
+  const inProgress = {
+    id: "resp_terminal_only_open",
+    model,
+    object: "response",
+    status: "in_progress",
+    error: null,
+    output: [],
+  };
+  const source = [
+    { type: "response.created", response: { ...inProgress }, model },
+    { type: "response.in_progress", response: { ...inProgress }, model },
+    {
+      type: "response.output_item.added",
+      output_index: 1,
+      item: { ...tool, arguments: "", status: "in_progress" },
+      model,
+    },
+    {
+      type: "response.function_call_arguments.done",
+      item_id: tool.id,
+      output_index: 1,
+      arguments: "{}",
+      model,
+    },
+    {
+      type: "response.output_item.done",
+      output_index: 1,
+      sequence_number: 8,
+      item: tool,
+      model,
+    },
+    {
+      type: "response.output_text.done",
+      item_id: blank.id,
+      output_index: 0,
+      content_index: 0,
+      text: "",
+      model,
+    },
+    {
+      type: "response.content_part.done",
+      item_id: blank.id,
+      output_index: 0,
+      content_index: 0,
+      part: { type: "output_text", text: "", annotations: [] },
+      model,
+    },
+    {
+      type: "response.output_item.done",
+      output_index: 0,
+      sequence_number: 1,
+      item: blank,
+      model,
+    },
+    {
+      type: "response.completed",
+      response: {
+        id: "resp_terminal_only_closed",
+        model,
+        object: "response",
+        status: "completed",
+        error: null,
+        output: [blank, tool],
+      },
+      model,
+    },
+  ].map((event) => `data: ${JSON.stringify(event)}\n\n`).join("");
+  const gateway = await mockServer(async (request, response) => {
+    await bodyJson(request);
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    response.end(source);
+  });
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_QUIET: "1",
+  });
+
+  const route = async (routeModel) => {
+    const response = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: routeModel,
+        input: "list files",
+        stream: true,
+      }),
+    });
+    const text = await response.text();
+    assert.equal(response.status, 200, text);
+    return {
+      text,
+      events: text.split(/\r?\n/)
+        .filter((line) => line.startsWith("data: {"))
+        .map((line) => JSON.parse(line.slice(5).trim())),
+    };
+  };
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const messages = await route("opencode-go-messages/minimax-m3");
+    assert.equal(messages.text.includes(blank.id), false);
+    assert.equal(
+      messages.events.find((event) => event.item?.id === tool.id).output_index,
+      0,
+    );
+    assert.deepEqual(
+      messages.events.find((event) => event.type === "response.completed").response.output,
+      [tool],
+    );
+
+    const openai = await route("opencode-go/deepseek-v4-flash");
+    assert.ok(openai.text.includes(blank.id));
+    assert.equal(
+      openai.events.find((event) => event.item?.id === tool.id).output_index,
+      1,
+    );
+    assert.deepEqual(
+      openai.events.find((event) => event.type === "response.completed").response.output,
+      [blank, tool],
+    );
+  } finally {
+    await stopChild(router);
+    await closeServer(gateway.server);
+  }
+});
+
 test("router applies the translated empty-message repair to bounded JSON responses", async () => {
   const blank = {
     id: "msg_blank_json",

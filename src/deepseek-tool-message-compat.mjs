@@ -13,6 +13,7 @@ const MAX_FRAME_JSON_KEY_CODE_UNITS = 128 * 1024;
 const MAX_BODY_JSON_KEY_CODE_UNITS = 1024 * 1024;
 const LF_FRAME_SEPARATOR = Buffer.from("\n\n");
 const CRLF_FRAME_SEPARATOR = Buffer.from("\r\n\r\n");
+const TERMINAL_ONLY_CANDIDATE_SLOT = Symbol("terminal-only-candidate");
 const RESPONSE_EVENT_KEYS = new Set(["type", "sequence_number", "response"]);
 const OUTPUT_ITEM_EVENT_KEYS = new Set([
   "type",
@@ -191,7 +192,10 @@ function validObfuscation(event) {
 
 function exactEventKeys(event) {
   const allowed = EVENT_KEYS.get(event?.type);
-  return allowed !== undefined && exactKeys(event, allowed) && validSequenceNumber(event);
+  const object = plainObject(event);
+  return allowed !== undefined && object !== undefined &&
+    Object.keys(object).every((key) => allowed.has(key) || key === "model") &&
+    validSequenceNumber(event);
 }
 
 function fatalUtf8(buffer) {
@@ -829,6 +833,12 @@ export class TranslatedToolMessageCompatTransform extends Transform {
   #indexItems = new Map();
   #lastSequence = -1;
   #usedTerminalCandidateSequenceReset = false;
+  #modelProvenanceInitialized = false;
+  #eventModelPresent = false;
+  #eventModel;
+  #responseModelPresent = false;
+  #responseModel;
+  #allowTerminalOnlyCandidate;
   #preludeBytes = 0;
   #maxCandidateBytes;
   #maxCandidateMs;
@@ -843,6 +853,7 @@ export class TranslatedToolMessageCompatTransform extends Transform {
     maxJsonDepth,
     maxJsonMembers,
     maxJsonKeyCodeUnits,
+    allowTerminalOnlyCandidate = false,
   } = {}) {
     super();
     this.#maxCandidateBytes = finiteLimit(
@@ -862,6 +873,7 @@ export class TranslatedToolMessageCompatTransform extends Transform {
         maxKeyCodeUnits: MAX_FRAME_JSON_KEY_CODE_UNITS,
       },
     );
+    this.#allowTerminalOnlyCandidate = allowTerminalOnlyCandidate === true;
   }
 
   _transform(chunk, _encoding, callback) {
@@ -965,6 +977,7 @@ export class TranslatedToolMessageCompatTransform extends Transform {
     if (
       !exactEventKeys(event) ||
       eventItemReference(event).conflict ||
+      !this.#acceptModelProvenance(event) ||
       !this.#acceptSequence(event)
     ) {
       this.#failOpen(frame);
@@ -1036,6 +1049,7 @@ export class TranslatedToolMessageCompatTransform extends Transform {
     const record = id ? this.#items.get(id) : undefined;
     if (
       this.#usedTerminalCandidateSequenceReset ||
+      this.#lastSequence <= 1 ||
       event.sequence_number !== 1 ||
       event.type !== "response.output_item.done" ||
       !this.#capture ||
@@ -1051,9 +1065,51 @@ export class TranslatedToolMessageCompatTransform extends Transform {
     return true;
   }
 
+  #acceptModelProvenance(event) {
+    const eventModelPresent = Object.prototype.hasOwnProperty.call(event, "model");
+    const eventModel = event.model;
+    const responseEvent = plainObject(event.response);
+    const responseModelPresent = responseEvent !== undefined &&
+      Object.prototype.hasOwnProperty.call(responseEvent, "model");
+    const responseModel = responseEvent?.model;
+    if (
+      (eventModelPresent && (typeof eventModel !== "string" || !eventModel)) ||
+      (responseModelPresent && (typeof responseModel !== "string" || !responseModel)) ||
+      (eventModelPresent && responseModelPresent && eventModel !== responseModel)
+    ) return false;
+
+    if (!this.#modelProvenanceInitialized) {
+      if (event.type !== "response.created") return false;
+      this.#eventModelPresent = eventModelPresent;
+      this.#eventModel = eventModel;
+      this.#responseModelPresent = responseModelPresent;
+      this.#responseModel = responseModel;
+      this.#modelProvenanceInitialized = true;
+      return true;
+    }
+
+    if (
+      eventModelPresent !== this.#eventModelPresent ||
+      (eventModelPresent && eventModel !== this.#eventModel)
+    ) return false;
+    if (responseEvent !== undefined && (
+      responseModelPresent !== this.#responseModelPresent ||
+      (responseModelPresent && responseModel !== this.#responseModel)
+    )) return false;
+    return true;
+  }
+
   #handleAdded(frame, event) {
     const id = itemId(event.item?.id);
     const outputIndex = event.output_index;
+    if (this.#capture?.candidates.some(
+      (candidate) => candidate.terminalOnly && candidate.id !== undefined,
+    )) {
+      this.#failOpen(frame);
+      return;
+    }
+    const terminalOnlyStart = this.#canStartTerminalOnlyCandidate(event);
+    if (terminalOnlyStart) this.#startTerminalOnlyCandidate();
     if (
       !id ||
       !Number.isInteger(outputIndex) ||
@@ -1143,9 +1199,46 @@ export class TranslatedToolMessageCompatTransform extends Transform {
     this.#pushOrHold(frame);
   }
 
+  #canStartTerminalOnlyCandidate(event) {
+    return Boolean(
+      this.#allowTerminalOnlyCandidate &&
+      !this.#capture &&
+      this.#items.size === 0 &&
+      this.#indexItems.size === 0 &&
+      this.#sawInProgress &&
+      this.#eventModelPresent &&
+      this.#responseModelPresent &&
+      this.#responseId?.startsWith("resp_") &&
+      event.output_index === 1 &&
+      exactToolCall(event.item)
+    );
+  }
+
+  #startTerminalOnlyCandidate() {
+    const candidate = {
+      id: undefined,
+      outputIndex: 0,
+      kind: "candidate",
+      done: false,
+      sawTool: false,
+      contentStarted: true,
+      textDone: false,
+      partDone: false,
+      terminalOnly: true,
+    };
+    this.#capture = {
+      frames: [],
+      bytes: 0,
+      candidates: [candidate],
+    };
+    this.#indexItems.set(0, TERMINAL_ONLY_CANDIDATE_SLOT);
+    this.#startTimer();
+  }
+
   #handleItemLifecycle(frame, event) {
     const id = eventItemId(event);
-    const record = id ? this.#items.get(id) : undefined;
+    let record = id ? this.#items.get(id) : undefined;
+    if (!record) record = this.#bindTerminalOnlyCandidate(event, id);
     if (!record || !eventIndexMatches(event, record)) {
       this.#failOpen(frame);
       return;
@@ -1165,6 +1258,30 @@ export class TranslatedToolMessageCompatTransform extends Transform {
       return;
     }
     this.#pushOrHold(frame);
+  }
+
+  #bindTerminalOnlyCandidate(event, id) {
+    const candidate = this.#capture?.candidates.at(-1);
+    const observed = [...this.#items.values()];
+    if (
+      !id ||
+      !candidate?.terminalOnly ||
+      candidate.id !== undefined ||
+      event.type !== "response.output_text.done" ||
+      event.output_index !== 0 ||
+      event.content_index !== 0 ||
+      event.text !== "" ||
+      !(event.logprobs === undefined || event.logprobs === null ||
+        (Array.isArray(event.logprobs) && event.logprobs.length === 0)) ||
+      observed.length === 0 ||
+      observed.some((record) => record.kind === "candidate" || !record.done) ||
+      this.#items.has(id) ||
+      this.#indexItems.get(0) !== TERMINAL_ONLY_CANDIDATE_SLOT
+    ) return undefined;
+    candidate.id = id;
+    this.#items.set(id, candidate);
+    this.#indexItems.set(0, id);
+    return candidate;
   }
 
   #trackPrelude(frame) {
@@ -1387,8 +1504,10 @@ export class TranslatedToolMessageCompatTransform extends Transform {
   }
 
   #handleCompleted(frame, event) {
+    const terminalResponseId = itemId(event.response?.id);
     if (
-      !successfulResponseEnvelope(event.response, "completed", this.#responseId)
+      !successfulResponseEnvelope(event.response, "completed") ||
+      !this.#acceptTerminalResponseId(terminalResponseId)
     ) {
       this.#failOpen(frame);
       return;
@@ -1398,12 +1517,45 @@ export class TranslatedToolMessageCompatTransform extends Transform {
       this.#finished = true;
       return;
     }
-    if (!this.#terminalMatchesCapture(event.response.output)) {
+    if (!this.#terminalMatchesCapture(event.response.output, terminalResponseId)) {
       this.#failOpen(frame);
       return;
     }
     this.#hold(frame);
     if (this.#capture) this.#suppress();
+  }
+
+  #acceptTerminalResponseId(terminalResponseId) {
+    const terminalOnly = this.#capture?.candidates.some(
+      (candidate) => candidate.terminalOnly,
+    );
+    if (terminalOnly) {
+      return Boolean(
+        terminalResponseId !== this.#responseId &&
+        this.#sawInProgress &&
+        this.#usedTerminalCandidateSequenceReset &&
+        this.#eventModelPresent &&
+        this.#responseModelPresent &&
+        this.#responseId?.startsWith("resp_") &&
+        terminalResponseId?.startsWith("resp_")
+      );
+    }
+    if (terminalResponseId === this.#responseId) return true;
+    // The same pinned LiteLLM bridge that resets the empty message's terminal
+    // sequence also rebuilds response.completed under a new resp_* id. Permit
+    // that identity change only after the whole distinctive wire contract has
+    // been observed: in-progress envelope, consistent explicit model fields,
+    // an active captured candidate, and the one admitted terminal reset. The
+    // completed output still has to corroborate every streamed item below.
+    return Boolean(
+      this.#capture &&
+      this.#sawInProgress &&
+      this.#usedTerminalCandidateSequenceReset &&
+      this.#eventModelPresent &&
+      this.#responseModelPresent &&
+      this.#responseId?.startsWith("resp_") &&
+      terminalResponseId?.startsWith("resp_")
+    );
   }
 
   #pushOrHold(frame) {
@@ -1422,9 +1574,9 @@ export class TranslatedToolMessageCompatTransform extends Transform {
     this.#capture.bytes += bytes;
   }
 
-  #terminalMatchesCapture(output) {
+  #terminalMatchesCapture(output, terminalResponseId = this.#responseId) {
     if (output.length !== this.#items.size) return false;
-    const ids = new Set([this.#responseId]);
+    const ids = new Set([this.#responseId, terminalResponseId]);
     for (let index = 0; index < output.length; index += 1) {
       const recordId = this.#indexItems.get(index);
       const record = recordId ? this.#items.get(recordId) : undefined;
@@ -1435,6 +1587,7 @@ export class TranslatedToolMessageCompatTransform extends Transform {
       ids.add(id);
       if (record.kind === "candidate") {
         if (!record.sawTool || !exactCompletedEmptyMessage(item)) return false;
+        if (record.terminalOnly && id !== record.id) return false;
         // The pinned LiteLLM bridge uses a generated msg_* ID for streaming,
         // but the originating chat-completion ID for this exact terminal
         // empty item. Permit only that candidate slot to change identity; a
@@ -1686,7 +1839,13 @@ export function translatedToolMessageCompatTransform(provider, contentType = "")
   if (!translatedProtocol(provider)) return undefined;
   const mediaType = String(contentType).split(";", 1)[0].trim().toLowerCase();
   if (mediaType === "text/event-stream") {
-    return new TranslatedToolMessageCompatTransform();
+    return new TranslatedToolMessageCompatTransform({
+      // LiteLLM's Anthropic bridge can omit the empty message's opening events
+      // and reveal its index-zero slot only after the first tool has closed.
+      // The stream transform admits that exact terminal-only lifecycle only on
+      // providers whose upstream protocol is Messages.
+      allowTerminalOnlyCandidate: provider.protocol === "anthropic",
+    });
   }
   if (mediaType === "application/json" || mediaType.endsWith("+json")) {
     return new TranslatedToolMessageJsonCompatTransform();

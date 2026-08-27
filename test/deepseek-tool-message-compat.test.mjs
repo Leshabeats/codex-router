@@ -28,6 +28,10 @@ function events(text) {
 
 async function transformed(input, options = {}, chunkSize = 0) {
   const stream = new TranslatedToolMessageCompatTransform(options);
+  return transformedBy(stream, input, chunkSize);
+}
+
+async function transformedBy(stream, input, chunkSize = 0) {
   let output = "";
   stream.setEncoding("utf8");
   stream.on("data", (chunk) => { output += chunk; });
@@ -225,28 +229,27 @@ function phantomToolStream(
 // message item is hard-coded to sequence_number=1 after higher-numbered tool
 // events, while its output_text/content_part closes are unnumbered.
 function pinnedLiteLlmPhantomEvents() {
+  const model = "opencode-go-deepseek-v4-flash";
   const inProgressResponse = {
     id: "resp_pinned_litellm",
+    model,
     object: "response",
     status: "in_progress",
     error: null,
     output: [],
   };
-  return [
+  const wireEvents = [
     {
       type: "response.created",
-      sequence_number: 1,
       response: { ...inProgressResponse },
     },
     {
       type: "response.in_progress",
-      sequence_number: 2,
       response: { ...inProgressResponse },
     },
     {
       type: "response.output_item.added",
       output_index: 0,
-      sequence_number: 3,
       item: { ...blankMessage, status: "in_progress", content: [] },
     },
     {
@@ -254,26 +257,29 @@ function pinnedLiteLlmPhantomEvents() {
       item_id: blankMessage.id,
       output_index: 0,
       content_index: 0,
-      sequence_number: 4,
       part: { type: "output_text", text: "", annotations: [] },
     },
     {
       type: "response.output_item.added",
       output_index: 1,
-      sequence_number: 5,
       item: { ...functionCall, status: "in_progress", arguments: "" },
     },
     {
       type: "response.function_call_arguments.delta",
       item_id: functionCall.id,
       output_index: 1,
-      sequence_number: 6,
       delta: "{}",
+    },
+    {
+      type: "response.function_call_arguments.done",
+      item_id: functionCall.id,
+      output_index: 1,
+      arguments: "{}",
     },
     {
       type: "response.output_item.done",
       output_index: 1,
-      sequence_number: 7,
+      sequence_number: 9,
       item: { ...functionCall },
     },
     {
@@ -299,18 +305,42 @@ function pinnedLiteLlmPhantomEvents() {
     {
       type: "response.completed",
       response: {
-        id: inProgressResponse.id,
+        id: "resp_pinned_litellm_terminal",
+        model,
         object: "response",
         status: "completed",
         error: null,
-        output: [{ ...blankMessage }, { ...functionCall }],
+        output: [
+          { ...blankMessage, id: "chatcmpl-pinned-terminal" },
+          { ...functionCall },
+        ],
       },
     },
   ];
+  return wireEvents.map((event) => ({ ...event, model }));
 }
 
 function pinnedLiteLlmPhantomToolStream(mutate) {
   const wireEvents = pinnedLiteLlmPhantomEvents();
+  if (mutate) mutate(wireEvents);
+  return `${wireEvents.map((event) => block(event)).join("")}data: [DONE]\n\n`;
+}
+
+// LiteLLM's Anthropic -> Responses bridge omits the empty message's opening
+// item/content events. Its first visible output item is therefore the tool at
+// index one; the bridge reveals the index-zero phantom only while closing it.
+function pinnedAnthropicTerminalOnlyEvents() {
+  const wireEvents = pinnedLiteLlmPhantomEvents().filter((event) => !(
+    (event.type === "response.output_item.added" && event.output_index === 0) ||
+    (event.type === "response.content_part.added" && event.output_index === 0)
+  ));
+  const terminal = wireEvents.find((event) => event.type === "response.completed");
+  terminal.response.output[0].id = blankMessage.id;
+  return wireEvents;
+}
+
+function pinnedAnthropicTerminalOnlyStream(mutate) {
+  const wireEvents = pinnedAnthropicTerminalOnlyEvents();
   if (mutate) mutate(wireEvents);
   return `${wireEvents.map((event) => block(event)).join("")}data: [DONE]\n\n`;
 }
@@ -325,9 +355,10 @@ test("repairs LiteLLM 1.96.0's pinned terminal sequence reset", async () => {
     seen.filter((event) => eventItem(event) === functionCall.id)
       .map((event) => [event.type, event.output_index, event.sequence_number]),
     [
-      ["response.output_item.added", 0, 5],
-      ["response.function_call_arguments.delta", 0, 6],
-      ["response.output_item.done", 0, 7],
+      ["response.output_item.added", 0, undefined],
+      ["response.function_call_arguments.delta", 0, undefined],
+      ["response.function_call_arguments.done", 0, undefined],
+      ["response.output_item.done", 0, 9],
     ],
   );
   assert.deepEqual(
@@ -336,44 +367,285 @@ test("repairs LiteLLM 1.96.0's pinned terminal sequence reset", async () => {
   );
 });
 
+test("repairs the Anthropic bridge's terminal-only phantom slot", async () => {
+  const source = pinnedAnthropicTerminalOnlyStream();
+  assert.equal(await transformed(source), source);
+
+  const output = await transformed(source, { allowTerminalOnlyCandidate: true }, 3);
+  const seen = events(output);
+  assert.equal(output.includes(blankMessage.id), false);
+  assert.deepEqual(
+    seen.filter((event) => eventItem(event) === functionCall.id)
+      .map((event) => [event.type, event.output_index]),
+    [
+      ["response.output_item.added", 0],
+      ["response.function_call_arguments.delta", 0],
+      ["response.function_call_arguments.done", 0],
+      ["response.output_item.done", 0],
+    ],
+  );
+  assert.deepEqual(
+    seen.find((event) => event.type === "response.completed").response.output,
+    [functionCall],
+  );
+});
+
+test("only the Anthropic factory path admits a terminal-only phantom slot", async () => {
+  const source = pinnedAnthropicTerminalOnlyStream();
+  const anthropic = translatedToolMessageCompatTransform(
+    { id: "opencode-go-messages", protocol: "anthropic" },
+    "text/event-stream; charset=utf-8",
+  );
+  const openai = translatedToolMessageCompatTransform(
+    { id: "opencode-go", protocol: "openai" },
+    "text/event-stream; charset=utf-8",
+  );
+  const repaired = await transformedBy(anthropic, source, 2);
+  assert.equal(repaired.includes(blankMessage.id), false);
+  assert.equal(await transformedBy(openai, source, 2), source);
+});
+
+test("the terminal-only slot compacts multiple corroborated tool calls", async () => {
+  const secondTool = {
+    ...functionCall,
+    id: "call_second",
+    call_id: "call_second",
+    name: "second_tool",
+  };
+  const source = pinnedAnthropicTerminalOnlyStream((wireEvents) => {
+    const model = wireEvents[0].model;
+    const firstCandidateClose = wireEvents.findIndex(
+      (event) => event.type === "response.output_text.done",
+    );
+    wireEvents.splice(firstCandidateClose, 0,
+      {
+        type: "response.output_item.added",
+        output_index: 2,
+        item: { ...secondTool, status: "in_progress", arguments: "" },
+        model,
+      },
+      {
+        type: "response.function_call_arguments.delta",
+        item_id: secondTool.id,
+        output_index: 2,
+        delta: "{}",
+        model,
+      },
+      {
+        type: "response.function_call_arguments.done",
+        item_id: secondTool.id,
+        output_index: 2,
+        arguments: "{}",
+        model,
+      },
+      {
+        type: "response.output_item.done",
+        output_index: 2,
+        sequence_number: 10,
+        item: secondTool,
+        model,
+      },
+    );
+    const terminal = wireEvents.find((event) => event.type === "response.completed");
+    terminal.response.output.push(secondTool);
+  });
+  const output = await transformed(source, { allowTerminalOnlyCandidate: true }, 5);
+  const seen = events(output);
+  assert.deepEqual(
+    seen.filter((event) => event.type === "response.output_item.done")
+      .map((event) => [event.item.id, event.output_index]),
+    [[functionCall.id, 0], [secondTool.id, 1]],
+  );
+  assert.deepEqual(
+    seen.find((event) => event.type === "response.completed").response.output,
+    [functionCall, secondTool],
+  );
+});
+
+test("the terminal-only candidate exception fails open on adjacent shapes", async () => {
+  const cases = [
+    ["visible text close", (wireEvents) => {
+      wireEvents.find((event) => event.type === "response.output_text.done").text = "visible";
+    }],
+    ["visible part close", (wireEvents) => {
+      wireEvents.find((event) => event.type === "response.content_part.done").part.text = "visible";
+    }],
+    ["mismatched close id", (wireEvents) => {
+      wireEvents.find((event) => event.type === "response.content_part.done").item_id = "msg_other";
+    }],
+    ["mismatched close index", (wireEvents) => {
+      wireEvents.find((event) => event.type === "response.output_text.done").output_index = 1;
+    }],
+    ["changed terminal candidate id", (wireEvents) => {
+      const terminal = wireEvents.find((event) => event.type === "response.completed");
+      terminal.response.output[0].id = "chatcmpl-other";
+    }],
+    ["missing in-progress proof", (wireEvents) => {
+      wireEvents.splice(wireEvents.findIndex((event) => event.type === "response.in_progress"), 1);
+    }],
+    ["missing response model proof", (wireEvents) => {
+      for (const event of wireEvents) {
+        if (event.response) delete event.response.model;
+      }
+    }],
+    ["tool starts at index zero", (wireEvents) => {
+      for (const event of wireEvents) {
+        if (event.output_index === 1) event.output_index = 0;
+      }
+      const terminal = wireEvents.find((event) => event.type === "response.completed");
+      terminal.response.output = [terminal.response.output[1], terminal.response.output[0]];
+    }],
+    ["candidate closes before the tool", (wireEvents) => {
+      wireEvents.find(
+        (event) => event.type === "response.function_call_arguments.done",
+      ).sequence_number = 8;
+      const firstClose = wireEvents.findIndex(
+        (event) => event.type === "response.output_text.done",
+      );
+      const candidate = wireEvents.splice(firstClose, 3);
+      const toolDone = wireEvents.findIndex(
+        (event) => event.type === "response.output_item.done" && event.output_index === 1,
+      );
+      wireEvents.splice(toolDone, 0, ...candidate);
+    }],
+    ["a tool starts after the candidate suffix", (wireEvents) => {
+      const model = wireEvents[0].model;
+      const secondTool = {
+        ...functionCall,
+        id: "call_late",
+        call_id: "call_late",
+        name: "late_tool",
+      };
+      const afterTextDone = wireEvents.findIndex(
+        (event) => event.type === "response.output_text.done",
+      ) + 1;
+      wireEvents.splice(afterTextDone, 0,
+        {
+          type: "response.output_item.added",
+          output_index: 2,
+          item: { ...secondTool, status: "in_progress", arguments: "" },
+          model,
+        },
+        {
+          type: "response.function_call_arguments.done",
+          item_id: secondTool.id,
+          output_index: 2,
+          arguments: "{}",
+          model,
+        },
+        {
+          type: "response.output_item.done",
+          output_index: 2,
+          sequence_number: 10,
+          item: secondTool,
+          model,
+        },
+      );
+      const terminal = wireEvents.find((event) => event.type === "response.completed");
+      terminal.response.output.push(secondTool);
+    }],
+    ["candidate terminal does not reset", (wireEvents) => {
+      wireEvents.find(
+        (event) => event.type === "response.output_item.done" && event.output_index === 0,
+      ).sequence_number = 10;
+    }],
+    ["no higher sequence precedes the reset", (wireEvents) => {
+      wireEvents.find(
+        (event) => event.type === "response.output_item.done" && event.output_index === 1,
+      ).sequence_number = 1;
+    }],
+    ["terminal response id does not change", (wireEvents) => {
+      const created = wireEvents.find((event) => event.type === "response.created");
+      const terminal = wireEvents.find((event) => event.type === "response.completed");
+      terminal.response.id = created.response.id;
+    }],
+  ];
+  for (const [name, mutate] of cases) {
+    const source = pinnedAnthropicTerminalOnlyStream(mutate);
+    assert.equal(
+      await transformed(source, { allowTerminalOnlyCandidate: true }, 7),
+      source,
+      name,
+    );
+  }
+});
+
 test("the pinned sequence exception fails open for every adjacent ambiguity", async () => {
   const cases = [
     ["a different reset value", (wireEvents) => {
-      wireEvents[9].sequence_number = 2;
+      wireEvents[10].sequence_number = 2;
     }],
     ["a reset before tool evidence", (wireEvents) => {
-      const [terminal] = wireEvents.splice(9, 1);
+      const [terminal] = wireEvents.splice(10, 1);
       wireEvents.splice(4, 0, terminal);
     }],
     ["a mismatched output index", (wireEvents) => {
-      wireEvents[9].output_index = 1;
+      wireEvents[10].output_index = 1;
     }],
     ["a mismatched item id", (wireEvents) => {
-      wireEvents[9].item = { ...wireEvents[9].item, id: "msg_other" };
+      wireEvents[10].item = { ...wireEvents[10].item, id: "msg_other" };
     }],
     ["visible terminal content", (wireEvents) => {
-      wireEvents[9].item = {
-        ...wireEvents[9].item,
+      wireEvents[10].item = {
+        ...wireEvents[10].item,
         content: [{ type: "output_text", text: "visible", annotations: [] }],
       };
     }],
     ["a reset on a tool item", (wireEvents) => {
-      wireEvents[6].sequence_number = 1;
+      wireEvents[6].sequence_number = 8;
+      wireEvents[7].sequence_number = 1;
     }],
     ["a second terminal reset", (wireEvents) => {
-      wireEvents.splice(10, 0, {
-        ...wireEvents[9],
-        item: { ...wireEvents[9].item },
+      wireEvents.splice(11, 0, {
+        ...wireEvents[10],
+        item: { ...wireEvents[10].item },
       });
     }],
     ["a later event below the retained high-water mark", (wireEvents) => {
-      wireEvents[10].sequence_number = 7;
+      wireEvents[11].sequence_number = 9;
+    }],
+    ["a changed response id without the pinned reset", (wireEvents) => {
+      wireEvents[10].sequence_number = 10;
+    }],
+    ["a changed response id outside the Responses namespace", (wireEvents) => {
+      wireEvents[11].response.id = "chatcmpl-terminal";
+    }],
+    ["a changed response id without an in-progress envelope", (wireEvents) => {
+      wireEvents.splice(1, 1);
     }],
   ];
 
   for (const [name, mutate] of cases) {
     const source = pinnedLiteLlmPhantomToolStream(mutate);
     assert.equal(await transformed(source, {}, 3), source, name);
+  }
+});
+
+test("the pinned LiteLLM model field is consistent across the whole lifecycle", async () => {
+  const cases = [
+    ["a missing event model", (wireEvents) => {
+      delete wireEvents[4].model;
+    }],
+    ["a changed event model", (wireEvents) => {
+      wireEvents[5].model = "another-model";
+    }],
+    ["a non-string event model", (wireEvents) => {
+      wireEvents[3].model = 7;
+    }],
+    ["a mismatched created response model", (wireEvents) => {
+      wireEvents[0].response.model = "another-model";
+    }],
+    ["a missing completed response model", (wireEvents) => {
+      delete wireEvents[11].response.model;
+    }],
+    ["a changed completed response model", (wireEvents) => {
+      wireEvents[11].response.model = "another-model";
+    }],
+  ];
+
+  for (const [name, mutate] of cases) {
+    const source = pinnedLiteLlmPhantomToolStream(mutate);
+    assert.equal(await transformed(source, {}, 4), source, name);
   }
 });
 
