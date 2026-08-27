@@ -580,7 +580,6 @@ CLI session.
 
 | Picker label | Model ID |
 | --- | --- |
-| Ox Alpha (Command Code) | `commandcode/ox-alpha` |
 | DeepSeek V4 Flash (Command Code) | `commandcode/deepseek-v4-flash` |
 | DeepSeek V4 Pro (Command Code) | `commandcode/deepseek-v4-pro` |
 | GLM-5.2 (Command Code) | `commandcode/glm-5.2` |
@@ -618,26 +617,31 @@ that route is unavailable.
 
 Ox Alpha is a stealth reasoning model for coding and long-horizon agentic work:
 a 1,048,576-token context window, 131,072 tokens of output, text and image
-input, and tool calling. **The free preview was withdrawn from OpenCode Zen,
-OpenCode Go, OpenRouter, and Nous Research as of 2026-08-26.** It remains
-available under the Ox Alpha name on Command Code and Venice. On OpenCode Go,
-the preview graduated to the named, metered `glm-5.3-flash` model.
+input, and tool calling. No checked-in Ox Alpha route remains. OpenCode Go
+graduated the preview to the named, metered `glm-5.3-flash` model; direct
+exact-route probes also certified that named model on OpenRouter and Z.ai
+Coding.
 
 | Picker label | Model ID | Needs a key | Status |
 | --- | --- | --- | --- |
-| Ox Alpha (Command Code) | `commandcode/ox-alpha` | Command Code | Available |
-| Ox Alpha (Venice) | `venice/ox-alpha` | Venice | Available |
+| ~~Ox Alpha (Command Code)~~ | `commandcode/ox-alpha` | ~~Command Code~~ | Not shipped — upstream reported model unavailable |
+| ~~Ox Alpha (Venice)~~ | `venice/ox-alpha` | ~~Venice~~ | Not shipped — wire verification was billing-blocked |
 | ~~Ox Alpha (OpenCode Free)~~ | `opencode-free/ox-alpha` | ~~no~~ | Withdrawn |
 | GLM-5.3-Flash (opencode Go) | `opencode-go/glm-5.3-flash` | opencode | Named replacement |
+| GLM-5.3-Flash (OpenRouter) | `openrouter/glm-5.3-flash` | OpenRouter | Available |
+| GLM-5.3-Flash (Z.ai Coding) | `zai-coding/glm-5.3-flash` | Z.ai Coding | Available |
 | ~~Ox Alpha (OpenRouter)~~ | `openrouter/ox-alpha` | ~~OpenRouter~~ | Withdrawn |
 | ~~Ox Alpha (Nous Research)~~ | `nousresearch/ox-alpha` | ~~Nous Portal~~ | Withdrawn |
 
-The checked-in OpenCode Free pin (`opencode-free/ox-alpha`, upstream
-`x-preview-f-free`) is stale versus the live `/models` catalog; the endpoint may
-still answer or start failing without notice.
+The exact-route certification run sent basic, streaming, forced-tool,
+stateless tool-result, and compact requests without failover. Command Code's
+`stealth/ox-alpha` rejected every surface as unavailable. The available Venice
+account stopped at its API billing gate before `stealth-ox-alpha` could be
+wire-certified. Publishing either preset would therefore claim more than the
+evidence supports.
 
-Reasoning effort is **low · high · max** on the remaining routes and the named
-OpenCode Go replacement, defaulting to `max`. Only three rungs exist because
+Reasoning effort is **low · high · max** on the certified named Flash routes,
+defaulting to `max`. Only three rungs exist because
 the model always thinks and its upstream says so outright — anything else comes
 back as `400 — This model always engages in thinking and cannot be disabled;
 please use low, high, or max`. Codex has more rungs than that, and a Codex older
@@ -653,18 +657,19 @@ threshold avoids presenting those blank turns as usable context. OpenCode Go's
 content moderation still applies to the compaction request itself, so a
 sensitive transcript may be rejected even when the ordinary task turn worked.
 
-For the remaining routes, store the key and enable the provider:
+Command Code and Venice still expose their live catalogs to explicit curation.
+An operator with an entitled account can inspect and select whatever those
+catalogs currently publish:
 
 ```sh
-./bin/model-router codex provider-key venice set
-./bin/model-router codex providers enable venice
+./bin/curate-models commandcode
+./bin/curate-models venice
 ```
 
-> **The free preview is a preview.** No lab has claimed this model, the routes
-> that serve it can narrow or withdraw it without notice, and the retention
-> terms differ per provider — OpenCode advertised zero data retention, Venice
-> anonymizes, and other resellers say less. Treat it as a way to try a model,
-> not as something to depend on.
+That creates a per-machine route from provider catalog metadata; it does not
+turn the repository's failed or blocked compatibility result into a guarantee.
+The withdrawn OpenCode Free pin is likewise no longer published, although an
+older local curation may still contain its stale upstream id.
 
 ### Meta Model API
 
@@ -711,10 +716,9 @@ login`, the Control Center and `./bin/curate-models devin-cli` read the model
 configuration available to that account through the installed Devin CLI; the
 provider still ships no preselected models.
 
-Three more providers work the same way but arrive with the single checked-in
-[Ox Alpha](#ox-alpha) entry (which is currently available on Command Code and
-Venice but has been withdrawn from OpenCode, OpenRouter, and Nous), so their
-picker is not empty once a key is stored:
+OpenRouter, Venice, and Nous Research are ordinary API-key providers with
+live-reviewed checked-in routes in the model table. Use `bin/curate-models` for
+anything else their current account catalogs expose:
 
 | Provider | Provider ID | Base URL | Key from |
 | --- | --- | --- | --- |

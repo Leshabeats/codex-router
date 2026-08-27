@@ -478,7 +478,7 @@ function endpointProblem(model, provider) {
 // an opaque id off a provider's catalog and has nothing better to show. A
 // checked-in fragment always knows, and more than one route can carry the same
 // upstream id, so the table must not overwrite a name the repository chose:
-// `opencode-free/ox-alpha` says which Ox Alpha route it is, and the
+// `openrouter/glm-5.3-flash` says which reseller route it is, and the
 // table would flatten that back to the curated label.
 function normalizedModel(model, provider, { curated = false } = {}) {
   const officialDisplayName = curated

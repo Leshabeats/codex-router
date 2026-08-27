@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import os from "node:os";
-import path from "path";
+import path from "node:path";
 import test from "node:test";
 
 // These assertions describe the checked-in registry and synthetic account
@@ -13,21 +13,18 @@ process.env.MODEL_ROUTER_STATE_DIR = path.join(testRoot, "state");
 
 const { MODEL_BY_SLUG } = await import("../src/model-registry.mjs");
 
-// GLM-5.3-Flash is published on multiple providers after the withdrawn Ox Alpha
-// preview routes were removed. Each route uses the same upstream model id
-// (except Venice which has a different id format), the same 1M context window,
-// and the same low/high/max reasoning ladder that the model itself enforces.
+// Only routes whose own wire contract has been proved ship checked in. A
+// provider catalog id is not enough: the removed Command Code preset rejected
+// forced tools, Nous returned 404, and the available Venice account could not
+// get past its plan balance check.
 const ROUTES = [
-  ["commandcode/glm-5.3-flash", "z-ai/glm-5.3-flash"],
-  ["nousresearch/glm-5.3-flash", "z-ai/glm-5.3-flash"],
-  ["opencode-go/glm-5.3-flash", "glm-5.3-flash"],
-  ["openrouter/glm-5.3-flash", "z-ai/glm-5.3-flash"],
-  ["venice/glm-5.3-flash", "z-ai-glm-5-3-flash"],
-  ["zai-coding/glm-5.3-flash", "glm-5.3-flash"],
+  ["opencode-go/glm-5.3-flash", "glm-5.3-flash", "ox-alpha"],
+  ["openrouter/glm-5.3-flash", "z-ai/glm-5.3-flash", "ox-alpha"],
+  ["zai-coding/glm-5.3-flash", "glm-5.3-flash", "glm-thinking"],
 ];
 
 test("every GLM-5.3-Flash route records the upstream id, window and ladder", () => {
-  for (const [slug, upstreamModel] of ROUTES) {
+  for (const [slug, upstreamModel, requestProfile] of ROUTES) {
     const model = MODEL_BY_SLUG.get(slug);
     assert.ok(model, `${slug} is missing from the registry`);
     assert.equal(model.upstreamModel, upstreamModel);
@@ -35,14 +32,13 @@ test("every GLM-5.3-Flash route records the upstream id, window and ladder", () 
     assert.deepEqual(model.reasoningLevels.map((level) => level.effort), ["low", "high", "max"]);
     assert.equal(model.defaultEffort, "max");
     assert.equal(model.contextWindow, 1_000_000);
-    // autoCompact varies: Z.AI Coding uses 400K (proven conservative), opencode
-    // Go and others inherited the same.
-    assert.ok(model.autoCompact >= 400_000 && model.autoCompact <= 900_000);
+    assert.equal(model.autoCompact, 400_000);
     assert.deepEqual(model.inputModalities, slug === "opencode-go/glm-5.3-flash" ? ["text", "image"] : ["text"]);
+    assert.equal(model.requestProfile, requestProfile);
   }
 });
 
-test("withdrawn Ox Alpha routes are absent, replaced by GLM-5.3-Flash", () => {
+test("uncertified Ox Alpha routes stay absent while direct-proven Flash routes remain", () => {
   for (const slug of [
     "commandcode/ox-alpha",
     "nousresearch/ox-alpha",
@@ -52,11 +48,14 @@ test("withdrawn Ox Alpha routes are absent, replaced by GLM-5.3-Flash", () => {
   ]) {
     assert.equal(MODEL_BY_SLUG.has(slug), false, `${slug} should not exist`);
   }
-  // GLM-5.3-Flash replaces ox-alpha on these providers
-  assert.equal(MODEL_BY_SLUG.has("commandcode/glm-5.3-flash"), true);
-  assert.equal(MODEL_BY_SLUG.has("nousresearch/glm-5.3-flash"), true);
+  for (const slug of [
+    "commandcode/glm-5.3-flash",
+    "nousresearch/glm-5.3-flash",
+    "venice/glm-5.3-flash",
+  ]) {
+    assert.equal(MODEL_BY_SLUG.has(slug), false, `${slug} is not route-certified`);
+  }
   assert.equal(MODEL_BY_SLUG.has("openrouter/glm-5.3-flash"), true);
-  assert.equal(MODEL_BY_SLUG.has("venice/glm-5.3-flash"), true);
   assert.equal(MODEL_BY_SLUG.has("zai-coding/glm-5.3-flash"), true);
   assert.equal(MODEL_BY_SLUG.has("opencode-go/glm-5.3-flash"), true);
 });
