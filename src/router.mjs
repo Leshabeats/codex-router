@@ -55,7 +55,7 @@ import {
   ZaiResponsesCompatTransform,
   zaiResponsesCompatTransform,
 } from "./zai-responses-compat.mjs";
-import { deepseekToolMessageCompatTransform } from "./deepseek-tool-message-compat.mjs";
+import { translatedToolMessageCompatTransform } from "./deepseek-tool-message-compat.mjs";
 import { exactRouteProbeRequested } from "./exact-route-probe.mjs";
 import {
   MERGED_CATALOG_PATH,
@@ -3541,10 +3541,13 @@ async function handleResponses(request, response, requestUrl) {
         envelopeCompat = new ZaiResponsesCompatTransform();
       }
       if (envelopeCompat) transforms.push(envelopeCompat);
-      const deepseekToolMessageCompat = route
-        ? deepseekToolMessageCompatTransform(route.provider, contentType)
+      // LiteLLM can add blank assistant envelopes while translating either
+      // Chat Completions or Messages. The factory refuses native traffic and
+      // providers that already speak Responses, so those paths gain no stage.
+      const translatedToolMessageCompat = route
+        ? translatedToolMessageCompatTransform(providerForModel(route), contentType)
         : undefined;
-      if (deepseekToolMessageCompat) transforms.push(deepseekToolMessageCompat);
+      if (translatedToolMessageCompat) transforms.push(translatedToolMessageCompat);
       // Restore flattened namespace calls for routed chat-completions providers,
       // and inject missing finished-child interrupts for both routed and native
       // multi-agent parents (San Francisco uses native GPT).
