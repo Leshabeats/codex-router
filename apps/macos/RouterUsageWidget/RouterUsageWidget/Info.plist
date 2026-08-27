@@ -2,38 +2,32 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
   <key>CFBundleDisplayName</key>
   <string>Codex Router</string>
   <key>CFBundleExecutable</key>
-  <string>ModelRouterTray</string>
-  <key>CFBundleIconFile</key>
-  <string>AppIcon</string>
+  <string>$(EXECUTABLE_NAME)</string>
   <key>CFBundleIdentifier</key>
-  <string>io.github.codex-router.tray</string>
+  <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
   <key>CFBundleName</key>
-  <string>Codex Router</string>
+  <string>$(PRODUCT_NAME)</string>
   <key>CFBundlePackageType</key>
-  <string>APPL</string>
+  <string>XPC!</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1</string>
-  <key>CFBundleURLTypes</key>
-  <array>
-    <dict>
-      <key>CFBundleURLName</key>
-      <string>io.github.codex-router.widget-navigation</string>
-      <key>CFBundleURLSchemes</key>
-      <array>
-        <string>codex-router</string>
-      </array>
-    </dict>
-  </array>
-  <key>LSUIElement</key>
-  <true/>
-  <key>NSHighResolutionCapable</key>
-  <true/>
+  <string>$(MARKETING_VERSION)</string>
+  <key>CFBundleVersion</key>
+  <string>$(CURRENT_PROJECT_VERSION)</string>
   <key>ModelRouterWidgetAppGroup</key>
   <string>group.io.github.codex-router</string>
   <key>ModelRouterWidgetStorageMode</key>
   <string>app-group</string>
+  <key>NSExtension</key>
+  <dict>
+    <key>NSExtensionPointIdentifier</key>
+    <string>com.apple.widgetkit-extension</string>
+  </dict>
 </dict>
 </plist>

@@ -13,6 +13,8 @@ const dist = path.join(appRoot, "dist");
 const bridgeSource = String.raw`
 (() => {
   const calls = [];
+  let navigationListener;
+  let usageDelayMs = 0;
   const subagents = { mode: "all", enabled: [], disabled: [], efforts: {}, proofs: {} };
   const selectedModel = {
     slug: "deepseek/deepseek-chat",
@@ -144,8 +146,54 @@ const bridgeSource = String.raw`
     getProviders: async () => providers,
     getPresence: async () => ({ mode: "always" }),
     getHealth: async () => ({ ok: true, activity: { state: "idle", active: [], activeCount: 0 } }),
-    getAccountUsage: async () => ({}),
-    getProviderUsage: async () => ({ providers: [] }),
+    getAccountUsage: async () => {
+      await new Promise((resolve) => setTimeout(resolve, usageDelayMs));
+      return {
+        fetchedAt: "2026-08-27T08:00:00.000Z",
+        planType: "pro",
+        primary: {
+          usedPercent: 34,
+          remainingPercent: 66,
+          windowDurationMins: 300,
+          resetsAt: 1800000000,
+        },
+        dailyUsageBuckets: [{ startDate: "2026-08-27", tokens: 24000 }],
+        summary: { lifetimeTokens: 24000, peakDailyTokens: 24000, currentStreakDays: 1 },
+      };
+    },
+    getProviderUsage: async () => {
+      await new Promise((resolve) => setTimeout(resolve, usageDelayMs));
+      return {
+        fetchedAt: "2026-08-27T08:00:00.000Z",
+        providers: [{
+          id: "deepseek",
+          displayName: "DeepSeek",
+          credentialType: "api",
+          totalTokens: 12000,
+          requests: 8,
+          dailyUsageBuckets: [{ startDate: "2026-08-27", tokens: 12000, requests: 8 }],
+          account: {
+            status: "available",
+            metrics: [
+              {
+                kind: "quota",
+                label: "Monthly credits",
+                usedPercent: 25,
+                remainingPercent: 75,
+                resetAt: 1800000000,
+              },
+              {
+                kind: "quota",
+                label: "Rolling window",
+                usedPercent: 40,
+                remainingPercent: 60,
+                resetAt: 1790000000,
+              },
+            ],
+          },
+        }],
+      };
+    },
     discoverProviderModels: async (providerId) => catalog(providerId),
     addProviderModels: async (providerId, modelIds) => {
       record("addProviderModels", providerId, [...modelIds]);
@@ -159,10 +207,21 @@ const bridgeSource = String.raw`
     setProviderEnabled: async () => ({ ok: true }),
     setSubagentModel: async () => ({ ok: true }),
     setSubagentEffort: async () => ({ ok: true }),
+    onNavigation: (listener) => {
+      navigationListener = listener;
+      return () => { if (navigationListener === listener) navigationListener = undefined; };
+    },
     onOperation: () => () => {},
   });
   window.routerControlTest = Object.freeze({
     calls: () => calls.map((call) => ({ name: call.name, args: call.args })),
+    navigationReady: () => Boolean(navigationListener),
+    navigate: (destination) => {
+      if (!navigationListener) return false;
+      navigationListener(destination);
+      return true;
+    },
+    setUsageDelay: (milliseconds) => { usageDelayMs = milliseconds; },
   });
 })();
 `;
@@ -231,7 +290,7 @@ const chromiumPath = [
   process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, "Google", "Chrome", "Application", "chrome.exe"),
 ].find((candidate) => candidate && existsSync(candidate));
 
-test("the production renderer exposes model discovery and picker actions", { timeout: 60_000 }, async () => {
+test("the production renderer exposes model discovery and picker actions", { timeout: 120_000 }, async () => {
   assert.equal(existsSync(path.join(dist, "index.html")), true, "npm test must build the renderer first");
   assert.ok(chromiumPath, "No Chromium executable is available for the Control Center renderer test.");
 
@@ -244,6 +303,10 @@ test("the production renderer exposes model discovery and picker actions", { tim
   const pageErrors = [];
   try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 840 } });
+    // Windows hosted runners routinely spend about 30 seconds starting the
+    // browser. Keep UI waits short and diagnostic without letting that startup
+    // consume the whole integration-test deadline.
+    page.setDefaultTimeout(10_000);
     page.on("pageerror", (error) => pageErrors.push(error.message));
     page.on("console", (message) => {
       if (message.type() === "error") pageErrors.push(message.text());
@@ -251,6 +314,35 @@ test("the production renderer exposes model discovery and picker actions", { tim
 
     await page.goto(url, { waitUntil: "domcontentloaded" });
     await page.getByRole("navigation", { name: "Control center sections" }).waitFor();
+    const wordmark = page.locator(".router-wordmark");
+    assert.equal((await wordmark.locator("strong").innerText()).trim(), "Codex Router");
+    assert.equal(await wordmark.locator("img").count(), 0);
+    await page.waitForFunction(() => window.routerControlTest.navigationReady());
+    await page.evaluate(() => window.routerControlTest.setUsageDelay(600));
+    assert.equal(
+      await page.evaluate(() => window.routerControlTest.navigate({ destination: "usage", sourceId: "deepseek" })),
+      true,
+    );
+    await page.getByRole("heading", { name: "Usage", exact: true }).waitFor();
+    assert.equal(
+      await page.evaluate(() => window.routerControlTest.navigate({ destination: "usage-resets", sourceId: "deepseek" })),
+      true,
+    );
+    await page.waitForFunction(() => {
+      const active = document.activeElement;
+      return active?.classList.contains("us-metric-card")
+        && active.getAttribute("aria-label")?.startsWith("DeepSeek, Rolling window");
+    });
+    assert.match(
+      await page.evaluate(() => document.activeElement?.getAttribute("aria-label")),
+      /DeepSeek, Rolling window.*Resets/,
+    );
+    assert.equal(
+      await page.evaluate(() => window.routerControlTest.navigate({ destination: "usage", sourceId: "openai" })),
+      true,
+    );
+    await page.waitForFunction(() => document.activeElement?.getAttribute("aria-label") === "Usage overview");
+    assert.equal(await page.getByLabel("Usage source").inputValue(), "chatgpt-subscription");
     await page.getByRole("button", { name: "Models", exact: true }).click();
 
     // The connections strip carries every account: connected providers as
