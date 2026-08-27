@@ -18,6 +18,7 @@ import {
   API_MODELS,
   MODEL_BY_GATEWAY_ID,
   PROVIDERS,
+  RUNTIME_PROVIDERS,
   providerForModel,
   endpointForModel,
   resolveProviderBaseUrl,
@@ -50,6 +51,9 @@ import {
   createResponsesStreamTransform,
   normalizeOpenAIRequest,
 } from "./openai-adapters.mjs";
+import { stripCodexEncryptedSchemaAnnotation } from "./tool-schema-root.mjs";
+import { requestGenericProvider } from "./generic-providers.mjs";
+import { genericProviderConfigured } from "./generic-provider-readiness.mjs";
 
 installStableFetchTransport();
 
@@ -304,6 +308,7 @@ function ensureToolResultsForCalls(messages) {
 const GEMINI_THOUGHT_SIGNATURE_SENTINEL = "skip_thought_signature_validator";
 
 function isGeminiProvider(provider, model) {
+  if (provider?.generic === true) return false;
   if (provider?.id === "gemini-api" || provider?.ownedBy?.toLowerCase?.() === "google") {
     return true;
   }
@@ -316,6 +321,29 @@ function isGeminiProvider(provider, model) {
     model?.gatewayModel,
     model?.model,
   ].some((value) => typeof value === "string" && value.toLowerCase().includes("gemini"));
+}
+
+function stripEncryptedToolSchemaAnnotations(payload, protocol) {
+  if (!Array.isArray(payload.tools)) return;
+  let changed = false;
+  const tools = payload.tools.map((tool) => {
+    if (!tool || typeof tool !== "object" || Array.isArray(tool) || tool.type !== "function") {
+      return tool;
+    }
+    if (protocol === "openai-responses") {
+      const repaired = stripCodexEncryptedSchemaAnnotation(tool.parameters);
+      if (repaired === tool.parameters) return tool;
+      changed = true;
+      return { ...tool, parameters: repaired };
+    }
+    const fn = tool.function;
+    if (!fn || typeof fn !== "object" || Array.isArray(fn)) return tool;
+    const repaired = stripCodexEncryptedSchemaAnnotation(fn.parameters);
+    if (repaired === fn.parameters) return tool;
+    changed = true;
+    return { ...tool, function: { ...fn, parameters: repaired } };
+  });
+  if (changed) payload.tools = tools;
 }
 
 // A trailing model turn is a destructive rewrite: it discards part of the
@@ -668,6 +696,9 @@ function normalizeBody(buffer, contentType, route) {
       );
     }
   }
+  if (model.requestProfile === "codex-encrypted-schema") {
+    stripEncryptedToolSchemaAnnotations(payload, provider.protocol);
+  }
   if (model.requestProfile === "clinepass") {
     delete payload.reasoning_effort;
     delete payload.thinking;
@@ -905,10 +936,11 @@ function upstreamHeaders(requestHeaders, body, apiKey, provider, extraHeaders = 
     }
     if (value !== undefined) headers[name] = Array.isArray(value) ? value.join(", ") : value;
   }
-  if (endpoint.authMode === "anonymous") {
+  if (provider.generic === true || endpoint.authMode === "anonymous") {
     // The upstream explicitly permits anonymous access -- for a reseller's
-    // free-model subset, or for a single allowlisted community endpoint.
-    // Never forward the gateway's internal bearer token to either.
+    // free-model subset, a single allowlisted community endpoint, or the
+    // generic-provider boundary which injects its own confined credential.
+    // Never forward the gateway's internal bearer token to any of them.
   } else if (provider.protocol === "anthropic") {
     headers["x-api-key"] = apiKey;
     headers["anthropic-version"] ||= "2023-06-01";
@@ -922,6 +954,31 @@ function upstreamHeaders(requestHeaders, body, apiKey, provider, extraHeaders = 
   // redundant, and the HTTP/1.1 dispatcher rejects the request outright
   // (UND_ERR_INVALID_ARG) when a caller-supplied value accompanies a body.
   return headers;
+}
+
+async function relayUpstreamResponse(normalized, upstream, response, startedAt) {
+  const upstreamContentType = upstream.headers.get("content-type") || "";
+  const responsesStream = normalized.responseAdapter === "responses" &&
+    upstream.ok && upstreamContentType.toLowerCase().includes("text/event-stream");
+  const responsesJson = normalized.responseAdapter === "responses" &&
+    upstream.ok && upstreamContentType.toLowerCase().includes("application/json");
+  const transform = [
+    responsesStream ? createResponsesStreamTransform() : undefined,
+    responsesJson ? createResponsesJsonTransform() : undefined,
+    zaiCacheUsageTransform(normalized.provider.id, upstreamContentType),
+  ].filter(Boolean);
+  const denylist = transform.length
+    ? new Set([...HOP_BY_HOP_HEADERS, "content-type"])
+    : undefined;
+  if (responsesStream) response.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  if (responsesJson) response.setHeader("Content-Type", "application/json; charset=utf-8");
+  await pipeResponse(upstream, response, denylist, transform);
+  recordUpstreamLimits(normalized, upstream);
+  if (!QUIET) {
+    console.error(
+      `[api-forwarder] provider=${normalized.provider.id} model=${normalized.model.upstreamModel} status=${upstream.status} duration_ms=${Date.now() - startedAt}`,
+    );
+  }
 }
 
 async function upstreamSession(provider, credential, payload, options = {}, endpoint = provider) {
@@ -967,8 +1024,18 @@ function recordUpstreamLimits(normalized, upstream) {
 function healthPayload() {
   const providers = {};
   const enabled = new Set(readProviderSelection());
-  for (const provider of PROVIDERS.values()) {
-    if (provider.kind !== "openai-compatible" || !enabled.has(provider.id)) continue;
+  for (const provider of RUNTIME_PROVIDERS.values()) {
+    if (provider.kind !== "openai-compatible") continue;
+    if (provider.generic === true) {
+      const configured = genericProviderConfigured(provider.id);
+      providers[provider.id] = {
+        generic: true,
+        credential_present: configured,
+        credential_source: provider.credentialRef ? "bound credential reference" : "not required",
+      };
+      continue;
+    }
+    if (!enabled.has(provider.id)) continue;
     const status = credentialStatus(provider);
     providers[provider.id] = {
       credential_present: status.configured,
@@ -1020,6 +1087,44 @@ async function handleRequest(request, response) {
 
   const original = await readRequestBody(request);
   const normalized = normalizeBody(original, request.headers["content-type"], route);
+  const controller = new AbortController();
+  request.once("aborted", () => controller.abort());
+  response.once("close", () => {
+    if (!response.writableEnded) controller.abort();
+  });
+
+  // Generic providers own a stricter request boundary than checked-in routes:
+  // it re-reads the operator descriptor, revalidates DNS, rejects redirects,
+  // and injects only the credential reference bound to that provider. Do not
+  // resolve it through the built-in credential path or construct its URL here;
+  // either would bypass the confinement #404 established.
+  if (normalized.provider.generic === true) {
+    const { response: upstream, dispatcher } = await requestGenericProvider(
+      normalized.provider.id,
+      `${route}${requestUrl.search}`,
+      {
+        method: request.method,
+        headers: upstreamHeaders(
+          request.headers,
+          normalized.body,
+          undefined,
+          normalized.provider,
+        ),
+        body: normalized.body,
+        signal: controller.signal,
+        // A model generation lives as long as its caller. Discovery and the
+        // explicit provider test remain separately bounded.
+        timeoutMs: 0,
+      },
+    );
+    try {
+      await relayUpstreamResponse(normalized, upstream, response, startedAt);
+    } finally {
+      await dispatcher?.close().catch(() => undefined);
+    }
+    return;
+  }
+
   // Resolved against the endpoint, not the provider: a per-model endpoint keeps
   // its credential under its own slug, so two custom models on two hosts never
   // share a key and one missing key never blocks the other model.
@@ -1046,11 +1151,6 @@ async function handleRequest(request, response) {
     return;
   }
 
-  const controller = new AbortController();
-  request.once("aborted", () => controller.abort());
-  response.once("close", () => {
-    if (!response.writableEnded) controller.abort();
-  });
   // Command Code's documented API is an entitlement, not a credential: the
   // same key that runs its CLI is refused by /provider/v1 on the plans most of
   // its customers buy. The CLI's own route serves those plans, so an account
@@ -1177,28 +1277,7 @@ async function handleRequest(request, response) {
   if (commandCode?.recheck && upstream.ok) {
     recordCommandCodeRoute(commandCode.id, credential.value, { providerApi: true });
   }
-  const upstreamContentType = upstream.headers.get("content-type") || "";
-  const responsesStream = normalized.responseAdapter === "responses" &&
-    upstream.ok && upstreamContentType.toLowerCase().includes("text/event-stream");
-  const responsesJson = normalized.responseAdapter === "responses" &&
-    upstream.ok && upstreamContentType.toLowerCase().includes("application/json");
-  const transform = [
-    responsesStream ? createResponsesStreamTransform() : undefined,
-    responsesJson ? createResponsesJsonTransform() : undefined,
-    zaiCacheUsageTransform(normalized.provider.id, upstreamContentType),
-  ].filter(Boolean);
-  const denylist = transform.length
-    ? new Set([...HOP_BY_HOP_HEADERS, "content-type"])
-    : undefined;
-  if (responsesStream) response.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-  if (responsesJson) response.setHeader("Content-Type", "application/json; charset=utf-8");
-  await pipeResponse(upstream, response, denylist, transform);
-  recordUpstreamLimits(normalized, upstream);
-  if (!QUIET) {
-    console.error(
-      `[api-forwarder] provider=${normalized.provider.id} model=${normalized.model.upstreamModel} status=${upstream.status} duration_ms=${Date.now() - startedAt}`,
-    );
-  }
+  await relayUpstreamResponse(normalized, upstream, response, startedAt);
 }
 
 const server = http.createServer((request, response) => {

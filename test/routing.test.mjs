@@ -3680,6 +3680,8 @@ function curatedOpenRouterModels() {
       models: [
         entry("openrouter", "qwen/qwen3.8-max", "openrouter-qwen-qwen3-8-max", "auto-tool-choice"),
         entry("openrouter", "openai/gpt-5.3", "openrouter-openai-gpt-5-3"),
+        entry("openrouter", "vendor/strict-schema", "openrouter-vendor-strict-schema", "codex-encrypted-schema"),
+        entry("openrouter", "vendor/ordinary-schema", "openrouter-vendor-ordinary-schema"),
         entry("chutes", "moonshotai/Kimi-K3-TEE", "chutes-moonshotai-kimi-k3-tee"),
       ],
     }),
@@ -3690,6 +3692,8 @@ function curatedOpenRouterModels() {
     file,
     restricted: "openrouter-qwen-qwen3-8-max",
     unrestricted: "openrouter-openai-gpt-5-3",
+    strictSchema: "openrouter-vendor-strict-schema",
+    ordinarySchema: "openrouter-vendor-ordinary-schema",
     chutes: "chutes-moonshotai-kimi-k3-tee",
   };
 }
@@ -3794,6 +3798,70 @@ test("API forwarder downgrades forced tool choices only for models that declare 
     assert.equal(chutes.body.model, "moonshotai/Kimi-K3-TEE");
     assert.equal(chutes.body.tool_choice, "required");
     assert.equal(chutes.body.reasoning_effort, "high");
+  } finally {
+    await stopChild(forwarder);
+    await closeServer(upstream.server);
+    rmSync(curated.dir, { recursive: true, force: true });
+  }
+});
+
+test("API forwarder strips Codex schema annotations only for an explicitly profiled model", async () => {
+  const upstreamRequests = [];
+  const upstream = await mockServer(async (request, response) => {
+    upstreamRequests.push({ headers: request.headers, body: await bodyJson(request) });
+    json(response, 200, { choices: [] });
+  });
+  const curated = curatedOpenRouterModels();
+  const forwarderPort = await openPort();
+  const forwarder = run("api-forwarder.mjs", {
+    CODEX_ROUTER_API_PORT: String(forwarderPort),
+    MODEL_ROUTER_USER_MODELS: curated.file,
+    OPENROUTER_API_BASE_URL: `http://127.0.0.1:${upstream.port}`,
+    OPENROUTER_API_KEY: "TEST_OPENROUTER_API_KEY",
+    CODEX_ROUTER_QUIET: "1",
+  });
+  const parameters = {
+    type: "object",
+    properties: {
+      value: { type: "string", encrypted: true },
+      encrypted: { type: "string", description: "A real argument name." },
+    },
+    default: { encrypted: true },
+  };
+
+  async function forward(model) {
+    const response = await fetch(`http://127.0.0.1:${forwarderPort}/v1/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${INTERNAL_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: "user", content: "test" }],
+        tools: [{
+          type: "function",
+          function: { name: "save", description: "Save a value.", parameters },
+        }],
+      }),
+    });
+    assert.equal(response.status, 200);
+    return upstreamRequests.at(-1).body.tools[0].function.parameters;
+  }
+
+  try {
+    await waitFor(`http://127.0.0.1:${forwarderPort}/health`, forwarder, {
+      Authorization: `Bearer ${INTERNAL_KEY}`,
+    });
+    assert.deepEqual(await forward(curated.ordinarySchema), parameters);
+    assert.deepEqual(await forward(curated.strictSchema), {
+      type: "object",
+      properties: {
+        value: { type: "string" },
+        encrypted: { type: "string", description: "A real argument name." },
+      },
+      default: { encrypted: true },
+    });
   } finally {
     await stopChild(forwarder);
     await closeServer(upstream.server);
