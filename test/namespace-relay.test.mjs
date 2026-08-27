@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { Readable } from "node:stream";
+import { spawnSync } from "node:child_process";
+import { Readable, Writable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import test from "node:test";
 
 import {
@@ -29,6 +31,36 @@ function collect(stream) {
     stream.on("end", () => resolve(output));
     stream.on("error", reject);
   });
+}
+
+function collectBuffer(stream) {
+  return new Promise((resolve, reject) => {
+    const output = [];
+    stream.on("data", (chunk) => output.push(Buffer.from(chunk)));
+    stream.on("end", () => resolve(Buffer.concat(output)));
+    stream.on("error", reject);
+  });
+}
+
+async function collectUntilPipelineError(chunks, transform) {
+  const output = [];
+  let error;
+  try {
+    await pipeline(
+      Readable.from(chunks),
+      transform,
+      new Writable({
+        write(chunk, _encoding, callback) {
+          output.push(Buffer.from(chunk));
+          callback();
+        },
+      }),
+    );
+  } catch (caught) {
+    error = caught;
+  }
+  assert.ok(error, "the transform should fail after committing semantic output");
+  return { output: Buffer.concat(output), error };
 }
 
 // The reduced codex_app namespace the client actually sends on routed requests
@@ -1812,13 +1844,14 @@ test("response transform restores flattened calls to the native namespace shape"
   assert.doesNotMatch(output, /collaboration__spawn_agent|codex_app__create_thread|mcp__node_repl__js/);
 });
 
-test("tool_search response bridge covers SSE added, delta, done, and completed", async () => {
+test("tool_search response bridge suppresses function argument events across its lifecycle", async () => {
   const { namespaces } = flattenNamespaceTools([clientToolSearchControl()]);
   const events = [
     {
       type: "response.output_item.added",
       item: {
         type: "function_call",
+        id: "fc_search_1",
         name: "tool_search",
         call_id: "search-1",
         arguments: "",
@@ -1831,9 +1864,16 @@ test("tool_search response bridge covers SSE added, delta, done, and completed",
       delta: '{"query":"cal',
     },
     {
+      type: "response.function_call_arguments.done",
+      item_id: "fc_search_1",
+      call_id: "search-1",
+      arguments: '{"query":"calendar","limit":2}',
+    },
+    {
       type: "response.output_item.done",
       item: {
         type: "function_call",
+        id: "fc_search_1",
         name: "tool_search",
         call_id: "search-1",
         arguments: '{"query":"calendar","limit":2.0}',
@@ -1846,6 +1886,7 @@ test("tool_search response bridge covers SSE added, delta, done, and completed",
         output: [
           {
             type: "function_call",
+            id: "fc_search_1",
             name: "tool_search",
             call_id: "search-1",
             arguments: '{"query":"calendar","limit":2}',
@@ -1866,28 +1907,26 @@ test("tool_search response bridge covers SSE added, delta, done, and completed",
 
   assert.deepEqual(parsed[0].item, {
     type: "tool_search_call",
+    id: "fc_search_1",
     call_id: "search-1",
     execution: "client",
     arguments: {},
   });
-  assert.deepEqual(parsed[1], {
-    type: "response.function_call_arguments.delta",
-    item_id: "fc_search_1",
-    call_id: "search-1",
-    delta: '{"query":"cal',
-  });
-  assert.deepEqual(parsed[2].item, {
+  assert.deepEqual(parsed[1].item, {
     type: "tool_search_call",
+    id: "fc_search_1",
     call_id: "search-1",
     execution: "client",
     arguments: { query: "calendar", limit: 2 },
   });
-  assert.deepEqual(parsed[3].response.output[0], {
+  assert.deepEqual(parsed[2].response.output[0], {
     type: "tool_search_call",
+    id: "fc_search_1",
     call_id: "search-1",
     execution: "client",
     arguments: { query: "calendar", limit: 2 },
   });
+  assert.doesNotMatch(output, /response\.function_call_arguments/u);
 });
 
 test("tool_search response bridge fails closed without native control or valid arguments", () => {
@@ -2103,6 +2142,944 @@ test("non-streaming rewrite covers nested output and leaves malformed JSON untou
   const malformed = "{not valid json\n";
   const transform = new NamespaceToolCallTransform(namespaces, "application/json");
   assert.equal(await collect(Readable.from([malformed]).pipe(transform)), malformed);
+});
+
+test("response transform preserves no-op SSE and JSON bytes exactly", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "spawn_agent" }],
+    },
+  ]);
+  const sse = Buffer.from(
+    'event: response.created\r\n' +
+      'id: provider-spelling\r\n' +
+      'data: { "type" : "response.created", "ratio": 1.00e+2, "nested": { "ok": true } }\r\n' +
+      "\r\n",
+    "utf8",
+  );
+  const streamed = await collectBuffer(
+    Readable.from([...sse].map((byte) => Buffer.from([byte]))).pipe(
+      new NamespaceToolCallTransform(namespaces, "text/event-stream"),
+    ),
+  );
+  assert.deepEqual(streamed, sse);
+
+  const jsonBody = Buffer.from(
+    '\r\n { "id" : "resp-noop", "ratio" : 1.00e+2, "output" : [ { "type" : "message", "content" : [] } ] } \t',
+    "utf8",
+  );
+  const jsonOutput = await collectBuffer(
+    Readable.from([jsonBody.subarray(0, 7), jsonBody.subarray(7)]).pipe(
+      new NamespaceToolCallTransform(namespaces, "application/json"),
+    ),
+  );
+  assert.deepEqual(jsonOutput, jsonBody);
+});
+
+test("ambiguous SSE frames fail closed before namespace rewriting", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "spawn_agent" }],
+    },
+  ]);
+  const later = Buffer.from(
+    'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}}\r\n\r\n',
+    "utf8",
+  );
+  const duplicate = Buffer.from(
+    'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"ordinary","\\u006eame":"collaboration__spawn_agent","arguments":"{}"}}\r\n\r\n',
+    "utf8",
+  );
+  const malformed = Buffer.from('data: {"type":\r\n\r\n', "utf8");
+  const invalidUtf8 = Buffer.concat([
+    Buffer.from("data: ", "ascii"),
+    Buffer.from([0xff, 0xfe]),
+    Buffer.from("\r\n\r\n", "ascii"),
+  ]);
+
+  for (const ambiguous of [duplicate, malformed, invalidUtf8]) {
+    const source = Buffer.concat([ambiguous, later]);
+    const output = await collectBuffer(
+      Readable.from([...source].map((byte) => Buffer.from([byte]))).pipe(
+        new NamespaceToolCallTransform(namespaces, "text/event-stream"),
+      ),
+    );
+    assert.deepEqual(output, source);
+  }
+});
+
+test("repeated SSE data or event fields disable rewriting without normalizing CRLF", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "spawn_agent" }],
+    },
+  ]);
+  const later =
+    'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}}\r\n\r\n';
+  const repeatedData =
+    'event: response.output_item.done\r\n' +
+    'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}}\r\n' +
+    'data: {"second":"competing EventSource payload"}\r\n\r\n';
+  const repeatedEvent =
+    'event: response.output_item.done\r\n' +
+    'event: response.completed\r\n' +
+    'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}}\r\n\r\n';
+  for (const ambiguous of [repeatedData, repeatedEvent]) {
+    const source = Buffer.from(ambiguous + later, "utf8");
+    const fragments = [...source].map((byte) => Buffer.from([byte]));
+    const output = await collectBuffer(
+      Readable.from(fragments).pipe(
+        new NamespaceToolCallTransform(namespaces, "text/event-stream"),
+      ),
+    );
+    assert.deepEqual(output, source);
+  }
+});
+
+test("raw SSE framing honors downstream backpressure and aborts cleanly", async () => {
+  const source = Buffer.from(
+    'event: response.created\r\ndata: { "type": "response.created", "value": 1.00e+2 }\r\n\r\n',
+    "utf8",
+  );
+  const output = [];
+  await pipeline(
+    Readable.from([...source].map((byte) => Buffer.from([byte]))),
+    new NamespaceToolCallTransform(new Map(), "text/event-stream"),
+    new Writable({
+      highWaterMark: 1,
+      write(chunk, _encoding, callback) {
+        output.push(Buffer.from(chunk));
+        setImmediate(callback);
+      },
+    }),
+  );
+  assert.deepEqual(Buffer.concat(output), source);
+
+  const controller = new AbortController();
+  const transform = new NamespaceToolCallTransform(new Map(), "");
+  let prefixSent = false;
+  const stalledSource = new Readable({
+    read() {
+      if (prefixSent) return;
+      prefixSent = true;
+      this.push(Buffer.from("da", "ascii"));
+    },
+  });
+  const aborted = pipeline(
+    stalledSource,
+    transform,
+    new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
+    { signal: controller.signal },
+  );
+  setImmediate(() => controller.abort());
+  await assert.rejects(aborted, { name: "AbortError" });
+  assert.equal(transform.destroyed, true);
+  stalledSource.destroy();
+});
+
+test("ambiguous non-streaming JSON is preserved byte for byte", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "spawn_agent" }],
+    },
+  ]);
+  const duplicate = Buffer.from(
+    '{"output":[{"type":"function_call","name":"ordinary","\\u006eame":"collaboration__spawn_agent","arguments":"{}"}]}',
+    "utf8",
+  );
+  const malformed = Buffer.from('{"output":[', "utf8");
+  const invalidUtf8 = Buffer.concat([
+    Buffer.from(
+      '{"output":[{"type":"function_call","name":"collaboration__spawn_agent","note":"',
+      "utf8",
+    ),
+    Buffer.from([0xff]),
+    Buffer.from('","arguments":"{}"}]}', "utf8"),
+  ]);
+  for (const body of [duplicate, malformed, invalidUtf8]) {
+    const output = await collectBuffer(
+      Readable.from([body.subarray(0, 3), body.subarray(3)]).pipe(
+        new NamespaceToolCallTransform(namespaces, "application/json"),
+      ),
+    );
+    assert.deepEqual(output, body);
+  }
+});
+
+test("chunked JSON capture releases byte-exactly at its configured bound", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "spawn_agent" }],
+    },
+  ]);
+  const source = Buffer.from(
+    '{"output":[{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}]}',
+    "utf8",
+  );
+  const chunks = [];
+  for (let offset = 0; offset < source.length; offset += 3) {
+    chunks.push(source.subarray(offset, offset + 3));
+  }
+  const output = await collectBuffer(
+    Readable.from(chunks).pipe(
+      new NamespaceToolCallTransform(namespaces, "application/json", undefined, {
+        maxJsonCaptureBytes: 31,
+      }),
+    ),
+  );
+  assert.deepEqual(output, source);
+  assert.match(output.toString("utf8"), /collaboration__spawn_agent/u);
+  assert.doesNotMatch(output.toString("utf8"), /"namespace":"collaboration"/u);
+});
+
+test("lossy JSON numbers fail closed before SSE or JSON namespace rewrites", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "spawn_agent" }],
+    },
+  ]);
+  const call =
+    '"item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}';
+  const output =
+    '"output":[{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}]';
+  const later =
+    'event: response.output_item.done\r\n' +
+    `data: {"type":"response.output_item.done",${call}}\r\n\r\n`;
+
+  for (const numberText of [
+    "9007199254740993",
+    "1e999",
+    "-0",
+    "1e-324",
+    "0.100000000000000005",
+  ]) {
+    const sse = Buffer.from(
+      'event: response.output_item.done\r\n' +
+        `data: {"type":"response.output_item.done","provider_number":${numberText},${call}}\r\n\r\n` +
+        later,
+      "utf8",
+    );
+    const streamed = await collectBuffer(
+      Readable.from([...sse].map((byte) => Buffer.from([byte]))).pipe(
+        new NamespaceToolCallTransform(namespaces, "text/event-stream"),
+      ),
+    );
+    assert.deepEqual(streamed, sse, numberText);
+
+    const json = Buffer.from(`{"provider_number":${numberText},${output}}`, "utf8");
+    const jsonOutput = await collectBuffer(
+      Readable.from([json.subarray(0, 5), json.subarray(5)]).pipe(
+        new NamespaceToolCallTransform(namespaces, "application/json"),
+      ),
+    );
+    assert.deepEqual(jsonOutput, json, numberText);
+
+    const argumentsLiteral = JSON.stringify(`{"provider_number":${numberText}}`);
+    const nestedItem =
+      '"item":{"type":"function_call","name":"collaboration__spawn_agent",' +
+      `"arguments":${argumentsLiteral}}`;
+    const nestedSse = Buffer.from(
+      'event: response.output_item.done\r\n' +
+        `data: {"type":"response.output_item.done",${nestedItem}}\r\n\r\n` +
+        later,
+      "utf8",
+    );
+    const nestedStreamed = await collectBuffer(
+      Readable.from([nestedSse]).pipe(
+        new NamespaceToolCallTransform(namespaces, "text/event-stream"),
+      ),
+    );
+    assert.deepEqual(nestedStreamed, nestedSse, `nested ${numberText}`);
+
+    const nestedJson = Buffer.from(
+      '{"output":[{"type":"function_call","name":"collaboration__spawn_agent",' +
+        `"arguments":${argumentsLiteral}}]}`,
+      "utf8",
+    );
+    const nestedJsonOutput = await collectBuffer(
+      Readable.from([nestedJson]).pipe(
+        new NamespaceToolCallTransform(namespaces, "application/json"),
+      ),
+    );
+    assert.deepEqual(nestedJsonOutput, nestedJson, `nested ${numberText}`);
+  }
+});
+
+test("exactly equivalent decimal spellings remain eligible for namespace rewrites", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "spawn_agent" }],
+    },
+  ]);
+  for (const [numberText, expected] of [["1.0", 1], ["1e3", 1000]]) {
+    const item =
+      '"item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}';
+    const sse = Buffer.from(
+      'event: response.output_item.done\r\n' +
+        `data: {"type":"response.output_item.done","provider_number":${numberText},${item}}\r\n\r\n`,
+      "utf8",
+    );
+    const streamed = await collect(
+      Readable.from([sse]).pipe(
+        new NamespaceToolCallTransform(namespaces, "text/event-stream"),
+      ),
+    );
+    const event = JSON.parse(
+      streamed.split(/\r?\n/u).find((line) => line.startsWith("data: ")).slice(6),
+    );
+    assert.equal(event.provider_number, expected);
+    assert.equal(event.item.name, "spawn_agent");
+    assert.equal(event.item.namespace, "collaboration");
+
+    const json = Buffer.from(
+      `{"provider_number":${numberText},"output":[{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}]}`,
+      "utf8",
+    );
+    const payload = JSON.parse(
+      await collect(
+        Readable.from([json]).pipe(
+          new NamespaceToolCallTransform(namespaces, "application/json"),
+        ),
+      ),
+    );
+    assert.equal(payload.provider_number, expected);
+    assert.equal(payload.output[0].name, "spawn_agent");
+    assert.equal(payload.output[0].namespace, "collaboration");
+  }
+});
+
+test(
+  "dense JSON number arrays are scanned within a linear-time bound",
+  { timeout: 3000 },
+  async () => {
+    const source = Buffer.from(`[${"1,".repeat(128 * 1024 - 1)}1]`, "utf8");
+    const output = await collectBuffer(
+      Readable.from([source]).pipe(
+        new NamespaceToolCallTransform(new Map(), "application/json"),
+      ),
+    );
+    assert.deepEqual(output, source);
+  },
+);
+
+test("inject-only responses preserve lossy decimal payloads without injecting", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "interrupt_agent" }],
+    },
+  ]);
+  for (const numberText of ["1e-324", "0.100000000000000005"]) {
+    const sse = Buffer.from(
+      'event: response.completed\r\n' +
+        `data: {"type":"response.completed","provider_number":${numberText},"response":{"output":[]}}\r\n\r\n`,
+      "utf8",
+    );
+    const streamed = await collectBuffer(
+      Readable.from([sse]).pipe(
+        new NamespaceToolCallTransform(namespaces, "text/event-stream", undefined, {
+          injectOnly: true,
+          pendingInterrupts: ["/root/finished"],
+        }),
+      ),
+    );
+    assert.deepEqual(streamed, sse, numberText);
+
+    const json = Buffer.from(
+      `{"provider_number":${numberText},"output":[]}`,
+      "utf8",
+    );
+    const jsonOutput = await collectBuffer(
+      Readable.from([json]).pipe(
+        new NamespaceToolCallTransform(namespaces, "application/json", undefined, {
+          injectOnly: true,
+          pendingInterrupts: ["/root/finished"],
+        }),
+      ),
+    );
+    assert.deepEqual(jsonOutput, json, numberText);
+  }
+});
+
+test("conflicting SSE event and payload types disable terminal decisions", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [
+        { type: "function", name: "spawn_agent" },
+        { type: "function", name: "interrupt_agent" },
+      ],
+    },
+  ]);
+  const mismatchByEvent =
+    'event: response.completed\r\n' +
+    'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}}\r\n\r\n';
+  const mismatchByPayload =
+    'event: response.output_item.done\r\n' +
+    'data: {"type":"response.completed","response":{"output":[]}}\r\n\r\n';
+  const missingPayloadType =
+    'event: response.completed\r\n' +
+    'data: {"response":{"output":[]}}\r\n\r\n';
+  const nullPayloadType =
+    'event: response.completed\r\n' +
+    'data: {"type":null,"response":{"output":[]}}\r\n\r\n';
+  const tabIsPartOfEventValue =
+    'event:\tresponse.output_item.done\r\n' +
+    'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}}\r\n\r\n';
+  const secondSpaceIsPartOfEventValue =
+    'event:  response.output_item.done\r\n' +
+    'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}}\r\n\r\n';
+  const later =
+    'event: response.output_item.done\r\n' +
+    'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}}\r\n\r\n';
+
+  for (const mismatch of [
+    mismatchByEvent,
+    mismatchByPayload,
+    missingPayloadType,
+    nullPayloadType,
+    tabIsPartOfEventValue,
+    secondSpaceIsPartOfEventValue,
+  ]) {
+    const source = Buffer.from(mismatch + later, "utf8");
+    const transformed = await collectBuffer(
+      Readable.from([...source].map((byte) => Buffer.from([byte]))).pipe(
+        new NamespaceToolCallTransform(namespaces, "text/event-stream", undefined, {
+          pendingInterrupts: ["/root/finished"],
+        }),
+      ),
+    );
+    assert.deepEqual(transformed, source);
+  }
+});
+
+test("raw SSE framing handles CR, LF, and CRLF across one-byte chunks", async () => {
+  const source = Buffer.from(
+    'event: response.created\rdata: { "type": "response.created", "kind": "cr" }\r\r' +
+      'event: response.created\ndata: { "type": "response.created", "kind": "lf" }\n\n' +
+      'event: response.created\r\ndata: { "type": "response.created", "kind": "crlf" }\r\n\r\n',
+    "utf8",
+  );
+  const output = await collectBuffer(
+    Readable.from([...source].map((byte) => Buffer.from([byte]))).pipe(
+      new NamespaceToolCallTransform(new Map(), "text/event-stream"),
+    ),
+  );
+  assert.deepEqual(output, source);
+});
+
+test("headerless bare-CR streams rewrite and generated interrupts adopt CR", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [
+        { type: "function", name: "spawn_agent" },
+        { type: "function", name: "interrupt_agent" },
+      ],
+    },
+  ]);
+  const source = Buffer.from(
+    '\r: provider prelude\r' +
+      'event: response.output_item.done\r' +
+      'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}}\r\r',
+    "utf8",
+  );
+  const output = await collectBuffer(
+    Readable.from([...source].map((byte) => Buffer.from([byte]))).pipe(
+      new NamespaceToolCallTransform(namespaces, ""),
+    ),
+  );
+  assert.match(output.toString("utf8"), /"namespace":"collaboration"/u);
+  assert.equal(output.includes(0x0a), false);
+
+  const terminal = Buffer.from(
+    'event: response.completed\r' +
+      'data: {"type":"response.completed","response":{"output":[]}}\r\r',
+    "utf8",
+  );
+  const injected = await collectBuffer(
+    Readable.from([...terminal].map((byte) => Buffer.from([byte]))).pipe(
+      new NamespaceToolCallTransform(namespaces, "text/event-stream", undefined, {
+        pendingInterrupts: ["/root/finished"],
+      }),
+    ),
+  );
+  assert.match(injected.toString("utf8"), /"name":"interrupt_agent"/u);
+  assert.equal(injected.includes(0x0a), false);
+});
+
+test("an initial SSE BOM is ignored for parsing and preserved in output", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [
+        { type: "function", name: "spawn_agent" },
+        { type: "function", name: "interrupt_agent" },
+      ],
+    },
+  ]);
+  const bom = Buffer.from([0xef, 0xbb, 0xbf]);
+  const matching = Buffer.concat([
+    bom,
+    Buffer.from(
+      'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}}\r\n\r\n',
+      "utf8",
+    ),
+  ]);
+  const rewritten = await collectBuffer(
+    Readable.from([...matching].map((byte) => Buffer.from([byte]))).pipe(
+      new NamespaceToolCallTransform(namespaces, "text/event-stream"),
+    ),
+  );
+  assert.deepEqual(rewritten.subarray(0, bom.length), bom);
+  assert.match(rewritten.toString("utf8"), /"namespace":"collaboration"/u);
+
+  const disagreement = Buffer.concat([
+    bom,
+    Buffer.from(
+      'event: response.completed\r\n' +
+        'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}}\r\n\r\n' +
+        'event: response.output_item.done\r\n' +
+        'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}}\r\n\r\n',
+      "utf8",
+    ),
+  ]);
+  const preserved = await collectBuffer(
+    Readable.from([...disagreement].map((byte) => Buffer.from([byte]))).pipe(
+      new NamespaceToolCallTransform(namespaces, "text/event-stream", undefined, {
+        pendingInterrupts: ["/root/finished"],
+      }),
+    ),
+  );
+  assert.deepEqual(preserved, disagreement);
+});
+
+test("colonless event and data fields participate in repeated-field ambiguity", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "spawn_agent" }],
+    },
+  ]);
+  const data =
+    'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}}\r\n';
+  const later = `${data}\r\n`;
+  for (const ambiguous of [
+    `data\r\n${data}\r\n`,
+    `event\r\nevent: response.output_item.done\r\n${data}\r\n`,
+  ]) {
+    const source = Buffer.from(ambiguous + later, "utf8");
+    const output = await collectBuffer(
+      Readable.from([...source].map((byte) => Buffer.from([byte]))).pipe(
+        new NamespaceToolCallTransform(namespaces, "text/event-stream"),
+      ),
+    );
+    assert.deepEqual(output, source);
+  }
+});
+
+test("duplicate embedded interrupt arguments cannot steer terminal injection state", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "interrupt_agent" }],
+    },
+  ]);
+  const ambiguousArguments =
+    '{"target":"/root/first","\\u0074arget":"/root/second"}';
+  const ambiguousCall = {
+    type: "function_call",
+    name: "interrupt_agent",
+    namespace: "collaboration",
+    call_id: "call_ambiguous",
+    arguments: ambiguousArguments,
+  };
+  const pendingInterrupts = ["/root/first", "/root/second"];
+
+  const events = [
+    {
+      type: "response.output_item.done",
+      sequence_number: 1,
+      item: ambiguousCall,
+    },
+    {
+      type: "response.completed",
+      sequence_number: 2,
+      response: { output: [ambiguousCall] },
+    },
+  ];
+  const sse = Buffer.from(
+    events
+      .map((event) => `event: ${event.type}\r\ndata: ${JSON.stringify(event)}\r\n\r\n`)
+      .join(""),
+    "utf8",
+  );
+  const streamed = await collectBuffer(
+    Readable.from([...sse].map((byte) => Buffer.from([byte]))).pipe(
+      new NamespaceToolCallTransform(namespaces, "text/event-stream", undefined, {
+        pendingInterrupts,
+      }),
+    ),
+  );
+  assert.deepEqual(streamed, sse);
+
+  const jsonBody = Buffer.from(
+    JSON.stringify({ id: "resp_ambiguous", output: [ambiguousCall] }),
+    "utf8",
+  );
+  const jsonOutput = await collectBuffer(
+    Readable.from([jsonBody]).pipe(
+      new NamespaceToolCallTransform(namespaces, "application/json", undefined, {
+        pendingInterrupts,
+      }),
+    ),
+  );
+  assert.deepEqual(jsonOutput, jsonBody);
+});
+
+test("changed SSE retains provider CRLF framing", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "spawn_agent" }],
+    },
+  ]);
+  const source = Buffer.from(
+    'event: response.output_item.done\r\n' +
+      'id: provider-id\r\n' +
+      'data: { "type": "response.output_item.done", "item": { "type": "function_call", "name": "collaboration__spawn_agent", "arguments": "{}" } }\r\n' +
+      "\r\n",
+    "utf8",
+  );
+  const output = await collectBuffer(
+    Readable.from([source.subarray(0, 13), source.subarray(13)]).pipe(
+      new NamespaceToolCallTransform(namespaces, "text/event-stream"),
+    ),
+  );
+  const text = output.toString("utf8");
+  assert.match(text, /"name":"spawn_agent"/);
+  assert.match(text, /"namespace":"collaboration"/);
+  assert.ok(text.startsWith("event: response.output_item.done\r\nid: provider-id\r\n"));
+  for (let index = 0; index < output.length; index += 1) {
+    if (output[index] === 0x0a) assert.equal(output[index - 1], 0x0d);
+  }
+});
+
+test("interrupt injection adopts the provider's CRLF framing", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "interrupt_agent" }],
+    },
+  ]);
+  const source = Buffer.from(
+    'event: response.completed\r\n' +
+      'data: {"type":"response.completed","sequence_number":7,"response":{"output":[]}}\r\n' +
+      "\r\n",
+    "utf8",
+  );
+  const output = await collectBuffer(
+    Readable.from([source]).pipe(
+      new NamespaceToolCallTransform(namespaces, "text/event-stream", undefined, {
+        pendingInterrupts: ["/root/finished"],
+      }),
+    ),
+  );
+  assert.match(output.toString("utf8"), /"name":"interrupt_agent"/);
+  for (let index = 0; index < output.length; index += 1) {
+    if (output[index] === 0x0a) assert.equal(output[index - 1], 0x0d);
+  }
+});
+
+test("EOF interrupt injection separates an unterminated final SSE frame", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "interrupt_agent" }],
+    },
+  ]);
+  for (const lineEnding of ["", "\n", "\r", "\r\n"]) {
+    const source = Buffer.from(
+      `data: {"type":"response.created","sequence_number":1}${lineEnding}`,
+      "utf8",
+    );
+    const output = await collectBuffer(
+      Readable.from([source]).pipe(
+        new NamespaceToolCallTransform(namespaces, "text/event-stream", undefined, {
+          pendingInterrupts: ["/root/finished"],
+        }),
+      ),
+    );
+    const separator = lineEnding || "\n\n";
+    assert.deepEqual(output.subarray(0, source.length), source, JSON.stringify(lineEnding));
+    assert.ok(
+      output
+        .subarray(source.length)
+        .toString("utf8")
+        .startsWith(`${separator}event: response.output_item.added${lineEnding || "\n"}`),
+      JSON.stringify(lineEnding),
+    );
+    assert.match(output.toString("utf8"), /"name":"interrupt_agent"/u);
+  }
+});
+
+test(
+  "dense LF-only SSE frames are scanned within a linear-time bound",
+  { timeout: 3000 },
+  async () => {
+    const source = Buffer.from(`:x\n`.repeat(Math.floor((512 * 1024) / 3) - 1) + "\n");
+    const output = await collectBuffer(
+      Readable.from([source]).pipe(
+        new NamespaceToolCallTransform(new Map(), "text/event-stream", undefined, {
+          maxSseFrameBytes: source.length + 1,
+        }),
+      ),
+    );
+    assert.deepEqual(output, source);
+  },
+);
+
+test("oversized SSE framing releases bytes and disables later rewrites", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "spawn_agent" }],
+    },
+  ]);
+  const source = Buffer.from(
+    `data: ${"x".repeat(40)}\n\n` +
+      'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}}\n\n',
+    "utf8",
+  );
+  const output = await collectBuffer(
+    Readable.from([source]).pipe(
+      new NamespaceToolCallTransform(namespaces, "text/event-stream", undefined, {
+        maxSseFrameBytes: 32,
+      }),
+    ),
+  );
+  assert.deepEqual(output, source);
+});
+
+test("large terminal SSE frames remain valid after a namespace rewrite", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "spawn_agent" }],
+    },
+  ]);
+  const call = {
+    type: "function_call",
+    id: "fc_large_terminal",
+    call_id: "call_large_terminal",
+    name: "collaboration__spawn_agent",
+    arguments: "{}",
+  };
+  const events = [
+    { type: "response.output_item.done", item: call },
+    {
+      type: "response.completed",
+      response: {
+        output: [
+          call,
+          {
+            type: "message",
+            id: "msg_large_terminal",
+            content: [{ type: "output_text", text: "x".repeat(320 * 1024) }],
+          },
+        ],
+      },
+    },
+  ];
+  const frames = events.map((event) =>
+    Buffer.from(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`, "utf8"),
+  );
+  assert.ok(frames[1].length > 256 * 1024);
+
+  const output = await collect(
+    Readable.from(frames).pipe(
+      new NamespaceToolCallTransform(namespaces, "text/event-stream"),
+    ),
+  );
+  const payloads = output
+    .split("\n")
+    .filter((line) => line.startsWith("data: "))
+    .map((line) => JSON.parse(line.slice(6)));
+  assert.equal(payloads.length, 2);
+  assert.equal(payloads[0].item.namespace, "collaboration");
+  assert.equal(payloads[1].response.output[0].namespace, "collaboration");
+  assert.equal(payloads[1].response.output[1].content[0].text.length, 320 * 1024);
+});
+
+test("unterminated oversized SSE frames release or fail at a fixed byte bound", async () => {
+  const limit = 64 * 1024;
+  const marker = "unterminated-oversized-frame-must-not-leak";
+  const oversized = Buffer.from(
+    `data: {"marker":"${marker}","padding":"${"x".repeat(limit * 2)}`,
+    "utf8",
+  );
+  const precommit = await collectBuffer(
+    Readable.from([oversized]).pipe(
+      new NamespaceToolCallTransform(new Map(), "text/event-stream", undefined, {
+        maxSseFrameBytes: limit,
+      }),
+    ),
+  );
+  assert.deepEqual(precommit, oversized);
+
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "spawn_agent" }],
+    },
+  ]);
+  const committed = Buffer.from(
+    'event: response.output_item.done\n' +
+      'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}}\n\n',
+    "utf8",
+  );
+  const { output, error } = await collectUntilPipelineError(
+    [committed, oversized],
+    new NamespaceToolCallTransform(namespaces, "text/event-stream", undefined, {
+      maxSseFrameBytes: limit,
+    }),
+  );
+  assert.equal(error.code, "ERR_NAMESPACE_RELAY_COMMITTED_STREAM");
+  assert.match(output.toString("utf8"), /"namespace":"collaboration"/u);
+  assert.doesNotMatch(output.toString("utf8"), new RegExp(marker, "u"));
+});
+
+test("post-rewrite ambiguity errors without leaking raw custom lifecycle bytes", async () => {
+  const namespaces = new Map();
+  bridgeCustomTools([{ type: "custom", name: "apply_patch" }], [], namespaces);
+  const committed = Buffer.from(
+    'event: response.output_item.added\n' +
+      'data: {"type":"response.output_item.added","item":{"type":"function_call","id":"fc_guard","call_id":"call_guard","name":"apply_patch","arguments":""}}\n\n',
+    "utf8",
+  );
+  const marker = "flattened-done-must-not-leak";
+  const ambiguousFrames = [
+    Buffer.from(
+      'event: response.output_item.done\n' +
+        `data: {"type":"response.output_item.done","raw_marker":"${marker}","item":{"type":"function_call","name":"apply_patch"\n\n`,
+      "utf8",
+    ),
+    Buffer.from(
+      'event: response.output_item.done\n' +
+        `data: {"type":"response.output_item.done","raw_marker":"${marker}","item":{"type":"function_call","name":"ordinary","\\u006eame":"apply_patch","arguments":"{}"}}\n\n`,
+      "utf8",
+    ),
+    Buffer.concat([
+      Buffer.from(
+        'event: response.output_item.done\n' +
+          `data: {"type":"response.output_item.done","raw_marker":"${marker}","item":{"type":"function_call","name":"apply_patch","note":"`,
+        "utf8",
+      ),
+      Buffer.from([0xff]),
+      Buffer.from('","arguments":"{}"}}\n\n', "utf8"),
+    ]),
+    Buffer.from(
+      'event: response.output_item.done\n' +
+        `data: {"type":"response.output_item.done","raw_marker":"${marker}","item":{"type":"function_call","name":"apply_patch","arguments":"{}"}}\n` +
+        'data: {"competing":true}\n\n',
+      "utf8",
+    ),
+    Buffer.from(
+      `data: {"type":"response.output_item.done","raw_marker":"${marker}"`,
+      "utf8",
+    ),
+    Buffer.from(
+      'event: response.output_item.done\n' +
+        `data: {"type":"response.output_item.done","raw_marker":"${marker}","item":{"type":"function_call","name":"apply_patch","arguments":"{}"},"padding":"${"x".repeat(1024)}"}\n\n`,
+      "utf8",
+    ),
+  ];
+
+  for (const ambiguous of ambiguousFrames) {
+    const source = Buffer.concat([committed, ambiguous]);
+    const { output, error } = await collectUntilPipelineError(
+      [...source].map((byte) => Buffer.from([byte])),
+      new NamespaceToolCallTransform(namespaces, "text/event-stream", undefined, {
+        maxSseFrameBytes: 512,
+      }),
+    );
+    assert.equal(error.code, "ERR_NAMESPACE_RELAY_COMMITTED_STREAM");
+    const text = output.toString("utf8");
+    assert.match(text, /"type":"custom_tool_call"/u);
+    assert.doesNotMatch(text, new RegExp(marker, "u"));
+    assert.doesNotMatch(text, /response\.output_item\.done/u);
+  }
+});
+
+test("suppression and injection also commit the SSE safety boundary", async () => {
+  const marker = "post-commit-ambiguity-must-not-leak";
+  const ambiguous = Buffer.from(
+    'event: response.output_item.done\n' +
+      `data: {"type":"response.output_item.done","raw_marker":"${marker}"\n\n`,
+    "utf8",
+  );
+
+  const suppressionPrefix = Buffer.from(
+    'event: response.output_item.added\n' +
+      'data: {"type":"response.output_item.added","item":{"type":"custom_tool_call","id":"fc_native","call_id":"call_native","name":"apply_patch","input":""}}\n\n' +
+      'event: response.function_call_arguments.delta\n' +
+      'data: {"type":"response.function_call_arguments.delta","item_id":"fc_native","delta":"{\\"input\\":\\""}\n\n',
+    "utf8",
+  );
+  const suppressed = await collectUntilPipelineError(
+    [suppressionPrefix, ambiguous],
+    new NamespaceToolCallTransform(new Map(), "text/event-stream"),
+  );
+  assert.equal(suppressed.error.code, "ERR_NAMESPACE_RELAY_COMMITTED_STREAM");
+  assert.match(suppressed.output.toString("utf8"), /"type":"custom_tool_call"/u);
+  assert.doesNotMatch(suppressed.output.toString("utf8"), new RegExp(marker, "u"));
+  assert.doesNotMatch(
+    suppressed.output.toString("utf8"),
+    /response\.function_call_arguments\.delta/u,
+  );
+
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "interrupt_agent" }],
+    },
+  ]);
+  const injected = await collectUntilPipelineError(
+    [Buffer.from("data: [DONE]\n\n", "utf8"), ambiguous],
+    new NamespaceToolCallTransform(namespaces, "text/event-stream", undefined, {
+      pendingInterrupts: ["/root/finished"],
+    }),
+  );
+  assert.equal(injected.error.code, "ERR_NAMESPACE_RELAY_COMMITTED_STREAM");
+  assert.match(injected.output.toString("utf8"), /"name":"interrupt_agent"/u);
+  assert.doesNotMatch(injected.output.toString("utf8"), new RegExp(marker, "u"));
 });
 
 test("response transform leaves ambiguous and ordinary calls alone", async () => {
@@ -2779,15 +3756,7 @@ test("a bridged custom tool keeps its description above the grammar", () => {
   assert.match(description, /`input` string is freeform text, not JSON/);
 });
 
-// Known gap, pinned rather than repaired: a model that ignores the bridged
-// `{ input: "..." }` schema opens as a custom_tool_call and closes as a
-// function_call, because the close events only convert when the accumulated
-// arguments actually parse. Codex is left with a mismatched pair and no input
-// events at all. Choosing the recovery semantics -- surface the raw text as
-// the patch and let apply_patch reject it, or refuse to convert the open --
-// is a behavior decision, not a cleanup; this test exists so that decision
-// cannot be made by accident.
-test("malformed bridged arguments close a custom_tool_call as a function_call", async () => {
+test("malformed bridged arguments fail closed after a custom_tool_call opens", async () => {
   const namespaces = new Map();
   bridgeCustomTools([{ type: "custom", name: "apply_patch" }], [], namespaces);
   const argumentsText = JSON.stringify({ patch: "*** Begin Patch\n*** End Patch" });
@@ -2818,27 +3787,1047 @@ test("malformed bridged arguments close a custom_tool_call as a function_call", 
   const source = events
     .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
     .join("");
-  const transform = new NamespaceToolCallTransform(namespaces, "text/event-stream");
-  const output = await collect(Readable.from([Buffer.from(source, "utf8")]).pipe(transform));
-  const payloads = output
-    .split(/\n\n/)
-    .filter(Boolean)
-    .map((block) => JSON.parse(block.split("\n").find((line) => line.startsWith("data: ")).slice(6)));
+  const { output, error } = await collectUntilPipelineError(
+    [Buffer.from(source, "utf8")],
+    new NamespaceToolCallTransform(namespaces, "text/event-stream"),
+  );
+  assert.equal(error.code, "ERR_NAMESPACE_RELAY_COMMITTED_STREAM");
+  assert.equal(error.status, 502);
+  assert.match(output.toString("utf8"), /"type":"custom_tool_call"/u);
+  assert.doesNotMatch(output.toString("utf8"), /function_call_arguments\.done/u);
+  assert.doesNotMatch(output.toString("utf8"), /response\.output_item\.done/u);
+});
 
-  assert.deepEqual(
-    payloads.map((event) => event.type),
+test("special relay identities cannot be reused or changed after conversion", async () => {
+  const namespaces = new Map();
+  bridgeCustomTools([{ type: "custom", name: "apply_patch" }], [], namespaces);
+  const argumentsText = JSON.stringify({ input: "*** Begin Patch\n*** End Patch" });
+  const open = {
+    type: "response.output_item.added",
+    item: {
+      type: "function_call",
+      id: "fc_identity",
+      call_id: "call_identity",
+      name: "apply_patch",
+      arguments: "",
+    },
+  };
+  const close = {
+    type: "response.output_item.done",
+    item: {
+      type: "function_call",
+      id: "fc_identity",
+      call_id: "call_identity",
+      name: "apply_patch",
+      arguments: argumentsText,
+    },
+  };
+  const cases = [
+    {
+      name: "duplicate-item-id",
+      events: [
+        open,
+        {
+          type: "response.output_item.added",
+          marker: "duplicate-item-id",
+          item: {
+            type: "function_call",
+            id: "fc_identity",
+            call_id: "call_ordinary",
+            name: "exec_command",
+            arguments: "",
+          },
+        },
+      ],
+    },
+    {
+      name: "duplicate-call-id",
+      events: [
+        open,
+        {
+          type: "response.output_item.added",
+          marker: "duplicate-call-id",
+          item: {
+            type: "function_call",
+            id: "fc_ordinary",
+            call_id: "call_identity",
+            name: "exec_command",
+            arguments: "",
+          },
+        },
+      ],
+    },
+    {
+      name: "mismatched-close",
+      events: [
+        open,
+        {
+          ...close,
+          marker: "mismatched-close",
+          item: { ...close.item, call_id: "call_other" },
+        },
+      ],
+    },
+    {
+      name: "mismatched-arguments",
+      events: [
+        open,
+        {
+          type: "response.function_call_arguments.done",
+          marker: "mismatched-arguments",
+          item_id: "fc_other",
+          call_id: "call_identity",
+          arguments: argumentsText,
+        },
+      ],
+    },
+    {
+      name: "mismatched-delta-content",
+      events: [
+        open,
+        {
+          type: "response.function_call_arguments.delta",
+          item_id: "fc_identity",
+          call_id: "call_identity",
+          delta: JSON.stringify({ input: "first" }),
+        },
+        {
+          type: "response.function_call_arguments.done",
+          marker: "mismatched-delta-content",
+          item_id: "fc_identity",
+          call_id: "call_identity",
+          arguments: JSON.stringify({ input: "second" }),
+        },
+      ],
+    },
+    {
+      name: "mixed-native-delta",
+      events: [
+        open,
+        {
+          type: "response.custom_tool_call_input.delta",
+          marker: "mixed-native-delta",
+          item_id: "fc_identity",
+          call_id: "call_identity",
+          delta: "patch",
+        },
+      ],
+    },
+    {
+      name: "duplicate-close",
+      events: [open, close, { ...close, marker: "duplicate-close" }],
+    },
+    {
+      name: "mismatched-completed-summary",
+      events: [
+        open,
+        close,
+        {
+          type: "response.completed",
+          marker: "mismatched-completed-summary",
+          response: {
+            output: [
+              {
+                type: "function_call",
+                id: "fc_identity",
+                call_id: "call_identity",
+                name: "exec_command",
+                arguments: "{}",
+              },
+            ],
+          },
+        },
+      ],
+    },
+  ];
+
+  for (const fixture of cases) {
+    const source = fixture.events
+      .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+      .join("");
+    const { output, error } = await collectUntilPipelineError(
+      [Buffer.from(source, "utf8")],
+      new NamespaceToolCallTransform(namespaces, "text/event-stream"),
+    );
+    assert.equal(error.code, "ERR_NAMESPACE_RELAY_COMMITTED_STREAM", fixture.name);
+    assert.match(output.toString("utf8"), /"type":"custom_tool_call"/u);
+    assert.doesNotMatch(output.toString("utf8"), new RegExp(fixture.name, "u"));
+  }
+
+  const ordinaryFirst = [
+    {
+      type: "response.output_item.added",
+      item: {
+        type: "function_call",
+        id: "fc_shared",
+        call_id: "call_ordinary_first",
+        name: "exec_command",
+        arguments: "",
+      },
+    },
+    {
+      type: "response.output_item.added",
+      item: {
+        type: "function_call",
+        id: "fc_shared",
+        call_id: "call_custom_second",
+        name: "apply_patch",
+        arguments: "",
+      },
+    },
+  ];
+  const ordinaryFirstSource = Buffer.from(
+    ordinaryFirst
+      .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+      .join(""),
+    "utf8",
+  );
+  const ordinaryFirstOutput = await collectBuffer(
+    Readable.from([ordinaryFirstSource]).pipe(
+      new NamespaceToolCallTransform(namespaces, "text/event-stream"),
+    ),
+  );
+  assert.deepEqual(ordinaryFirstOutput, ordinaryFirstSource);
+
+  const boundedOrdinary = [
+    {
+      type: "response.output_item.added",
+      item: { type: "message", id: "msg_1" },
+    },
+    {
+      type: "response.output_item.added",
+      item: { type: "message", id: "msg_2" },
+    },
+  ];
+  const boundedOrdinarySource = Buffer.from(
+    boundedOrdinary
+      .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+      .join(""),
+    "utf8",
+  );
+  const boundedOrdinaryOutput = await collectBuffer(
+    Readable.from([boundedOrdinarySource]).pipe(
+      new NamespaceToolCallTransform(namespaces, "text/event-stream", undefined, {
+        maxTrackedOutputItems: 1,
+      }),
+    ),
+  );
+  assert.deepEqual(boundedOrdinaryOutput, boundedOrdinarySource);
+
+  const overLimit = {
+    type: "response.output_item.added",
+    marker: "post-commit-identity-limit",
+    item: { type: "message", id: "msg_after_custom" },
+  };
+  const overLimitSource = [open, overLimit]
+    .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+    .join("");
+  const boundedCommitted = await collectUntilPipelineError(
+    [Buffer.from(overLimitSource, "utf8")],
+    new NamespaceToolCallTransform(namespaces, "text/event-stream", undefined, {
+      maxTrackedOutputItems: 1,
+    }),
+  );
+  assert.equal(boundedCommitted.error.code, "ERR_NAMESPACE_RELAY_COMMITTED_STREAM");
+  assert.doesNotMatch(boundedCommitted.output.toString("utf8"), /post-commit-identity-limit/u);
+
+  const stateBounded = await collectUntilPipelineError(
+    [Buffer.from(overLimitSource, "utf8")],
+    new NamespaceToolCallTransform(namespaces, "text/event-stream", undefined, {
+      maxTrackedStateBytes: 1024,
+    }),
+  );
+  assert.equal(stateBounded.error.code, "ERR_NAMESPACE_RELAY_COMMITTED_STREAM");
+  assert.doesNotMatch(stateBounded.output.toString("utf8"), /post-commit-identity-limit/u);
+});
+
+test(
+  "closed special-call tracking retains fingerprints instead of payload-scale strings",
+  { timeout: 30_000 },
+  () => {
+    const moduleUrl = new URL("../src/namespace-relay.mjs", import.meta.url).href;
+    const script = String.raw`
+      import { once } from "node:events";
+      import { bridgeCustomTools, NamespaceToolCallTransform } from ${JSON.stringify(moduleUrl)};
+      const namespaces = new Map();
+      bridgeCustomTools([{ type: "custom", name: "apply_patch" }], [], namespaces);
+      const transform = new NamespaceToolCallTransform(namespaces, "text/event-stream");
+      transform.on("data", () => {});
+      global.gc();
+      const before = process.memoryUsage();
+      let payloadCharacters = 0;
+      const calls = 4096;
+      for (let index = 0; index < calls; index += 1) {
+        const input = String(index) + ":" +
+          String.fromCharCode(65 + (index % 26)).repeat(12_000);
+        payloadCharacters += input.length;
+        const event = {
+          type: "response.output_item.done",
+          item: {
+            type: "function_call",
+            id: "fc_" + index,
+            call_id: "call_" + index,
+            name: "apply_patch",
+            arguments: JSON.stringify({ input }),
+          },
+        };
+        const frame = Buffer.from("data: " + JSON.stringify(event) + "\n\n");
+        if (!transform.write(frame)) await once(transform, "drain");
+      }
+      global.gc();
+      const after = process.memoryUsage();
+      process.stdout.write(JSON.stringify({
+        calls,
+        payloadCharacters,
+        heapDelta: after.heapUsed - before.heapUsed,
+      }));
+      transform.destroy();
+    `;
+    const child = spawnSync(
+      process.execPath,
+      ["--expose-gc", "--input-type=module", "--eval", script],
+      { encoding: "utf8", timeout: 25_000, maxBuffer: 1024 * 1024 },
+    );
+    assert.equal(child.status, 0, child.stderr || child.stdout);
+    const measurement = JSON.parse(child.stdout);
+    assert.equal(measurement.calls, 4096);
+    assert.ok(measurement.payloadCharacters > 40 * 1024 * 1024);
+    assert.ok(
+      measurement.heapDelta < 12 * 1024 * 1024,
+      `retained heap grew by ${measurement.heapDelta} bytes for ` +
+        `${measurement.payloadCharacters} payload characters`,
+    );
+  },
+);
+
+test("complete special closes and terminal summaries establish atomic lifecycles", async () => {
+  const collaboration = {
+    type: "namespace",
+    name: "collaboration",
+    tools: [{ type: "function", name: "spawn_agent" }],
+  };
+  const custom = flattenNamespaceTools([collaboration]);
+  bridgeCustomTools([{ type: "custom", name: "apply_patch" }], [], custom.namespaces);
+  const search = flattenNamespaceTools([collaboration, clientToolSearchControl()]);
+  const specials = [
+    {
+      name: "custom",
+      namespaces: custom.namespaces,
+      item: {
+        type: "function_call",
+        id: "fc_done_only_custom",
+        call_id: "call_done_only_custom",
+        name: "apply_patch",
+        arguments: JSON.stringify({ input: "patch" }),
+      },
+      expected: {
+        type: "custom_tool_call",
+        id: "fc_done_only_custom",
+        call_id: "call_done_only_custom",
+        name: "apply_patch",
+        input: "patch",
+      },
+    },
+    {
+      name: "tool-search",
+      namespaces: search.namespaces,
+      item: {
+        type: "function_call",
+        call_id: "call_done_only_search",
+        name: "tool_search",
+        arguments: JSON.stringify({ query: "calendar" }),
+      },
+      expected: {
+        type: "tool_search_call",
+        call_id: "call_done_only_search",
+        execution: "client",
+        arguments: { query: "calendar" },
+      },
+    },
+  ];
+
+  for (const special of specials) {
+    for (const shape of ["done", "summary"]) {
+      const event =
+        shape === "done"
+          ? { type: "response.output_item.done", item: special.item }
+          : {
+              type: "response.completed",
+              response: { output: [special.item] },
+            };
+      const output = await collect(
+        Readable.from([
+          `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+        ]).pipe(
+          new NamespaceToolCallTransform(special.namespaces, "text/event-stream"),
+        ),
+      );
+      const parsed = JSON.parse(
+        output.split("\n").find((line) => line.startsWith("data:")).slice(5).trimStart(),
+      );
+      assert.deepEqual(
+        shape === "done" ? parsed.item : parsed.response.output[0],
+        special.expected,
+        `${special.name}-${shape}`,
+      );
+    }
+
+    const done = { type: "response.output_item.done", item: special.item };
+    const summary = {
+      type: "response.completed",
+      response: { output: [special.item] },
+    };
+    const output = await collect(
+      Readable.from(
+        [done, summary].map(
+          (event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+        ),
+      ).pipe(
+        new NamespaceToolCallTransform(special.namespaces, "text/event-stream"),
+      ),
+    );
+    const parsed = output
+      .split("\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => JSON.parse(line.slice(5).trimStart()));
+    assert.deepEqual(parsed[0].item, special.expected, `${special.name}-atomic-done`);
+    assert.deepEqual(
+      parsed[1].response.output[0],
+      special.expected,
+      `${special.name}-matching-summary`,
+    );
+  }
+});
+
+test("malformed, contradictory, or reused atomic special lifecycles fail safely", async () => {
+  const collaboration = {
+    type: "namespace",
+    name: "collaboration",
+    tools: [{ type: "function", name: "spawn_agent" }],
+  };
+  const custom = flattenNamespaceTools([collaboration]);
+  bridgeCustomTools([{ type: "custom", name: "apply_patch" }], [], custom.namespaces);
+  const search = flattenNamespaceTools([collaboration, clientToolSearchControl()]);
+  const malformed = [
+    {
+      name: "custom-incomplete-arguments",
+      namespaces: custom.namespaces,
+      item: {
+        type: "function_call",
+        id: "fc_bad_custom_arguments",
+        call_id: "call_bad_custom_arguments",
+        name: "apply_patch",
+        arguments: "{}",
+      },
+    },
+    {
+      name: "custom-missing-call-id",
+      namespaces: custom.namespaces,
+      item: {
+        type: "function_call",
+        id: "fc_bad_custom_identity",
+        name: "apply_patch",
+        arguments: JSON.stringify({ input: "patch" }),
+      },
+    },
+    {
+      name: "custom-empty-item-id",
+      namespaces: custom.namespaces,
+      item: {
+        type: "function_call",
+        id: "",
+        call_id: "call_bad_custom_item_id",
+        name: "apply_patch",
+        arguments: JSON.stringify({ input: "patch" }),
+      },
+    },
+    {
+      name: "custom-provider-namespace",
+      namespaces: custom.namespaces,
+      item: {
+        type: "function_call",
+        namespace: "unexpected",
+        call_id: "call_bad_custom_namespace",
+        name: "apply_patch",
+        arguments: JSON.stringify({ input: "patch" }),
+      },
+    },
+    {
+      name: "tool-search-incomplete-arguments",
+      namespaces: search.namespaces,
+      item: {
+        type: "function_call",
+        call_id: "call_bad_search_arguments",
+        name: "tool_search",
+        arguments: "[]",
+      },
+    },
+    {
+      name: "tool-search-missing-call-id",
+      namespaces: search.namespaces,
+      item: {
+        type: "function_call",
+        name: "tool_search",
+        arguments: JSON.stringify({ query: "calendar" }),
+      },
+    },
+  ];
+  const prefix = {
+    type: "response.output_item.done",
+    item: {
+      type: "function_call",
+      name: "collaboration__spawn_agent",
+      arguments: "{}",
+    },
+  };
+
+  for (const fixture of malformed) {
+    for (const shape of ["done", "summary"]) {
+      const marker = `${fixture.name}-${shape}`;
+      const event = shape === "done"
+        ? { type: "response.output_item.done", marker, item: fixture.item }
+        : {
+            type: "response.completed",
+            marker,
+            response: { output: [fixture.item] },
+          };
+      const frame = Buffer.from(
+        `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+        "utf8",
+      );
+      const preserved = await collectBuffer(
+        Readable.from([frame]).pipe(
+          new NamespaceToolCallTransform(fixture.namespaces, "text/event-stream"),
+        ),
+      );
+      assert.deepEqual(preserved, frame, `${marker}-precommit`);
+
+      const committedPrefix = Buffer.from(
+        `event: ${prefix.type}\ndata: ${JSON.stringify(prefix)}\n\n`,
+        "utf8",
+      );
+      const { output, error } = await collectUntilPipelineError(
+        [committedPrefix, frame],
+        new NamespaceToolCallTransform(fixture.namespaces, "text/event-stream"),
+      );
+      assert.equal(error.code, "ERR_NAMESPACE_RELAY_COMMITTED_STREAM", marker);
+      assert.match(output.toString("utf8"), /"namespace":"collaboration"/u);
+      assert.doesNotMatch(output.toString("utf8"), new RegExp(marker, "u"));
+    }
+  }
+
+  const nonterminalSummary = {
+    type: "response.in_progress",
+    marker: "nonterminal-atomic-summary",
+    response: {
+      output: [
+        {
+          type: "function_call",
+          id: "fc_nonterminal_summary",
+          call_id: "call_nonterminal_summary",
+          name: "apply_patch",
+          arguments: JSON.stringify({ input: "patch" }),
+        },
+      ],
+    },
+  };
+  const nonterminalFrame = Buffer.from(
+    `event: ${nonterminalSummary.type}\ndata: ${JSON.stringify(nonterminalSummary)}\n\n`,
+    "utf8",
+  );
+  const nonterminalPreserved = await collectBuffer(
+    Readable.from([nonterminalFrame]).pipe(
+      new NamespaceToolCallTransform(custom.namespaces, "text/event-stream"),
+    ),
+  );
+  assert.deepEqual(nonterminalPreserved, nonterminalFrame);
+
+  const atomicCustom = (id, callId, marker) => ({
+    type: "response.output_item.done",
+    marker,
+    item: {
+      type: "function_call",
+      id,
+      call_id: callId,
+      name: "apply_patch",
+      arguments: JSON.stringify({ input: "patch" }),
+    },
+  });
+  const atomicOrdinary = (id, callId, marker) => ({
+    type: "response.output_item.done",
+    marker,
+    item: {
+      type: "function_call",
+      id,
+      call_id: callId,
+      name: "exec_command",
+      arguments: "{}",
+    },
+  });
+  const first = atomicCustom("fc_atomic_first", "call_atomic_first");
+  const second = atomicCustom("fc_atomic_second", "call_atomic_second");
+  const crossWired = atomicCustom(
+    "fc_atomic_first",
+    "call_atomic_second",
+    "cross-wired-atomic-identity",
+  );
+  const crossWiredSource = [first, second, crossWired]
+    .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+    .join("");
+  const crossWiredResult = await collectUntilPipelineError(
+    [Buffer.from(crossWiredSource, "utf8")],
+    new NamespaceToolCallTransform(custom.namespaces, "text/event-stream"),
+  );
+  assert.equal(crossWiredResult.error.code, "ERR_NAMESPACE_RELAY_COMMITTED_STREAM");
+  assert.doesNotMatch(
+    crossWiredResult.output.toString("utf8"),
+    /cross-wired-atomic-identity/u,
+  );
+
+  const summaryOnly = {
+    type: "response.completed",
+    response: {
+      output: [atomicCustom("fc_summary_once", "call_summary_once").item],
+    },
+  };
+  const duplicateSummary = {
+    ...summaryOnly,
+    marker: "duplicate-atomic-summary",
+  };
+  const duplicateSummarySource = [summaryOnly, duplicateSummary]
+    .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+    .join("");
+  const duplicateSummaryResult = await collectUntilPipelineError(
+    [Buffer.from(duplicateSummarySource, "utf8")],
+    new NamespaceToolCallTransform(custom.namespaces, "text/event-stream"),
+  );
+  assert.equal(duplicateSummaryResult.error.code, "ERR_NAMESPACE_RELAY_COMMITTED_STREAM");
+  assert.doesNotMatch(
+    duplicateSummaryResult.output.toString("utf8"),
+    /duplicate-atomic-summary/u,
+  );
+
+  const ordinaryThenSpecial = [
+    atomicOrdinary("fc_shared_done", "call_shared_done"),
+    atomicCustom(
+      "fc_shared_done",
+      "call_shared_done",
+      "ordinary-then-special-done-reuse",
+    ),
+  ];
+  const ordinaryThenSpecialSource = Buffer.from(
+    ordinaryThenSpecial
+      .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+      .join(""),
+    "utf8",
+  );
+  const ordinaryThenSpecialOutput = await collectBuffer(
+    Readable.from([ordinaryThenSpecialSource]).pipe(
+      new NamespaceToolCallTransform(custom.namespaces, "text/event-stream"),
+    ),
+  );
+  assert.deepEqual(ordinaryThenSpecialOutput, ordinaryThenSpecialSource);
+
+  const specialThenOrdinary = [
+    atomicCustom("fc_special_first", "call_special_first"),
+    atomicOrdinary(
+      "fc_special_first",
+      "call_special_first",
+      "special-then-ordinary-done-reuse",
+    ),
+  ];
+  const specialThenOrdinarySource = specialThenOrdinary
+    .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+    .join("");
+  const specialThenOrdinaryResult = await collectUntilPipelineError(
+    [Buffer.from(specialThenOrdinarySource, "utf8")],
+    new NamespaceToolCallTransform(custom.namespaces, "text/event-stream"),
+  );
+  assert.equal(specialThenOrdinaryResult.error.code, "ERR_NAMESPACE_RELAY_COMMITTED_STREAM");
+  assert.doesNotMatch(
+    specialThenOrdinaryResult.output.toString("utf8"),
+    /special-then-ordinary-done-reuse/u,
+  );
+
+  for (const [name, items] of [
     [
-      "response.output_item.added",
-      "response.function_call_arguments.done",
-      "response.output_item.done",
+      "ordinary-then-special-summary-reuse",
+      [
+        atomicOrdinary("fc_shared_summary", "call_shared_summary").item,
+        atomicCustom("fc_shared_summary", "call_shared_summary").item,
+      ],
     ],
+    [
+      "special-then-ordinary-summary-reuse",
+      [
+        atomicCustom("fc_shared_summary", "call_shared_summary").item,
+        atomicOrdinary("fc_shared_summary", "call_shared_summary").item,
+      ],
+    ],
+  ]) {
+    const event = {
+      type: "response.completed",
+      marker: name,
+      response: { output: items },
+    };
+    const frame = Buffer.from(
+      `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+      "utf8",
+    );
+    const preserved = await collectBuffer(
+      Readable.from([frame]).pipe(
+        new NamespaceToolCallTransform(custom.namespaces, "text/event-stream"),
+      ),
+    );
+    assert.deepEqual(preserved, frame, `${name}-precommit`);
+
+    const committedPrefix = Buffer.from(
+      `event: ${prefix.type}\ndata: ${JSON.stringify(prefix)}\n\n`,
+      "utf8",
+    );
+    const result = await collectUntilPipelineError(
+      [committedPrefix, frame],
+      new NamespaceToolCallTransform(custom.namespaces, "text/event-stream"),
+    );
+    assert.equal(result.error.code, "ERR_NAMESPACE_RELAY_COMMITTED_STREAM", name);
+    assert.doesNotMatch(result.output.toString("utf8"), new RegExp(name, "u"));
+  }
+
+  const ordinary = {
+    type: "response.output_item.added",
+    item: {
+      type: "function_call",
+      id: "fc_prior_ordinary",
+      call_id: "call_prior_owner",
+      name: "exec_command",
+      arguments: "",
+    },
+  };
+  const contradictory = atomicCustom(
+    "fc_later_special",
+    "call_prior_owner",
+    "contradictory-atomic-owner",
   );
-  assert.equal(payloads[0].item.type, "custom_tool_call");
-  assert.equal(payloads[2].item.type, "function_call");
-  assert.equal(
-    payloads.some((event) => event.type.startsWith("response.custom_tool_call_input.")),
-    false,
+  const contradictorySource = Buffer.from(
+    [ordinary, contradictory]
+      .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+      .join(""),
+    "utf8",
   );
+  const contradictoryOutput = await collectBuffer(
+    Readable.from([contradictorySource]).pipe(
+      new NamespaceToolCallTransform(custom.namespaces, "text/event-stream"),
+    ),
+  );
+  assert.deepEqual(contradictoryOutput, contradictorySource);
+});
+
+test("ordinary nonterminal snapshots reserve identities across compatible repeats", async () => {
+  const flattened = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "spawn_agent" }],
+    },
+  ]);
+  bridgeCustomTools(
+    [{ type: "custom", name: "apply_patch" }],
+    [],
+    flattened.namespaces,
+  );
+  const ordinary = {
+    type: "function_call",
+    id: "fc_progress_shared",
+    call_id: "call_progress_shared",
+    name: "collaboration__spawn_agent",
+    arguments: "{}",
+  };
+  const progress = {
+    type: "response.in_progress",
+    response: { id: "resp_progress", object: "response", output: [ordinary] },
+  };
+  const progressFrame = Buffer.from(
+    `event: ${progress.type}\ndata: ${JSON.stringify(progress)}\n\n`,
+    "utf8",
+  );
+  const done = { type: "response.output_item.done", item: ordinary };
+  const doneFrame = Buffer.from(
+    `event: ${done.type}\ndata: ${JSON.stringify(done)}\n\n`,
+    "utf8",
+  );
+  const completed = {
+    type: "response.completed",
+    response: { id: "resp_progress", object: "response", output: [ordinary] },
+  };
+  const completedFrame = Buffer.from(
+    `event: ${completed.type}\ndata: ${JSON.stringify(completed)}\n\n`,
+    "utf8",
+  );
+  const compatible = await collect(
+    Readable.from([progressFrame, progressFrame, doneFrame, completedFrame]).pipe(
+      new NamespaceToolCallTransform(flattened.namespaces, "text/event-stream"),
+    ),
+  );
+  const compatiblePayloads = compatible
+    .split("\n")
+    .filter((line) => line.startsWith("data: "))
+    .map((line) => JSON.parse(line.slice(6)));
+  assert.equal(compatiblePayloads.length, 4);
+  const compatibleItems = [
+    compatiblePayloads[0].response.output[0],
+    compatiblePayloads[1].response.output[0],
+    compatiblePayloads[2].item,
+    compatiblePayloads[3].response.output[0],
+  ];
+  for (const item of compatibleItems) {
+    assert.equal(item.id, "fc_progress_shared");
+    assert.equal(item.call_id, "call_progress_shared");
+    assert.equal(item.name, "spawn_agent");
+    assert.equal(item.namespace, "collaboration");
+  }
+
+  const reused = {
+    type: "response.output_item.done",
+    marker: "ordinary-progress-to-special-reuse",
+    item: {
+      type: "function_call",
+      id: "fc_progress_shared",
+      call_id: "call_progress_shared",
+      name: "apply_patch",
+      arguments: JSON.stringify({ input: "patch" }),
+    },
+  };
+  const reusedFrame = Buffer.from(
+    `event: ${reused.type}\ndata: ${JSON.stringify(reused)}\n\n`,
+    "utf8",
+  );
+  const { output, error } = await collectUntilPipelineError(
+    [progressFrame, progressFrame, reusedFrame],
+    new NamespaceToolCallTransform(flattened.namespaces, "text/event-stream"),
+  );
+  assert.equal(error.code, "ERR_NAMESPACE_RELAY_COMMITTED_STREAM");
+  assert.equal((output.toString("utf8").match(/"namespace":"collaboration"/gu) || []).length, 2);
+  assert.doesNotMatch(output.toString("utf8"), /ordinary-progress-to-special-reuse/u);
+  assert.doesNotMatch(output.toString("utf8"), /"type":"custom_tool_call"/u);
+});
+
+test("invalid or inconsistent tool_search arguments fail closed after conversion", async () => {
+  const { namespaces } = flattenNamespaceTools([clientToolSearchControl()]);
+  const open = {
+    type: "response.output_item.added",
+    item: {
+      type: "function_call",
+      id: "fc_search_bad",
+      call_id: "call_search_bad",
+      name: "tool_search",
+      arguments: "",
+    },
+  };
+  const fixtures = [
+    [
+      {
+        type: "response.function_call_arguments.done",
+        item_id: "fc_search_bad",
+        call_id: "call_search_bad",
+        arguments: "[]",
+      },
+    ],
+    [
+      {
+        type: "response.function_call_arguments.done",
+        item_id: "fc_search_bad",
+        call_id: "call_search_bad",
+        arguments: JSON.stringify({ query: "calendar" }),
+      },
+      {
+        type: "response.output_item.done",
+        item: {
+          ...open.item,
+          arguments: JSON.stringify({ query: "mail" }),
+        },
+      },
+    ],
+  ];
+  for (const tail of fixtures) {
+    const source = [open, ...tail]
+      .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+      .join("");
+    const { output, error } = await collectUntilPipelineError(
+      [Buffer.from(source, "utf8")],
+      new NamespaceToolCallTransform(namespaces, "text/event-stream"),
+    );
+    assert.equal(error.code, "ERR_NAMESPACE_RELAY_COMMITTED_STREAM");
+    assert.match(output.toString("utf8"), /"type":"tool_search_call"/u);
+    assert.doesNotMatch(output.toString("utf8"), /function_call_arguments\.done/u);
+    assert.doesNotMatch(output.toString("utf8"), /response\.output_item\.done/u);
+  }
+});
+
+test("tool_search lifecycle fingerprints ignore object key order", async () => {
+  const { namespaces } = flattenNamespaceTools([clientToolSearchControl()]);
+  const open = {
+    type: "response.output_item.added",
+    item: {
+      type: "function_call",
+      id: "fc_search_canonical",
+      call_id: "call_search_canonical",
+      name: "tool_search",
+      arguments: "",
+    },
+  };
+  const argumentsDone = {
+    type: "response.function_call_arguments.done",
+    item_id: "fc_search_canonical",
+    call_id: "call_search_canonical",
+    arguments: JSON.stringify({ query: "calendar", limit: 4 }),
+  };
+  const closeItem = {
+    ...open.item,
+    arguments: JSON.stringify({ limit: 4, query: "calendar" }),
+  };
+  const events = [
+    open,
+    argumentsDone,
+    { type: "response.output_item.done", item: closeItem },
+    { type: "response.completed", response: { output: [closeItem] } },
+  ];
+  const output = await collect(
+    Readable.from(
+      events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`),
+    ).pipe(new NamespaceToolCallTransform(namespaces, "text/event-stream")),
+  );
+  const payloads = output
+    .split("\n")
+    .filter((line) => line.startsWith("data: "))
+    .map((line) => JSON.parse(line.slice(6)));
+  assert.deepEqual(payloads.at(-2).item.arguments, { limit: 4, query: "calendar" });
+  assert.deepEqual(payloads.at(-1).response.output[0].arguments, {
+    limit: 4,
+    query: "calendar",
+  });
+});
+
+test("converted custom and tool_search calls must close before terminal or EOF", async () => {
+  const customNamespaces = new Map();
+  bridgeCustomTools([{ type: "custom", name: "apply_patch" }], [], customNamespaces);
+  const { namespaces: searchNamespaces } = flattenNamespaceTools([clientToolSearchControl()]);
+  const fixtures = [
+    {
+      name: "custom-eof",
+      namespaces: customNamespaces,
+      item: {
+        type: "function_call",
+        id: "fc_custom_eof",
+        call_id: "call_custom_eof",
+        name: "apply_patch",
+        arguments: "",
+      },
+      terminal: "",
+    },
+    {
+      name: "custom-done",
+      namespaces: customNamespaces,
+      item: {
+        type: "function_call",
+        id: "fc_custom_done",
+        call_id: "call_custom_done",
+        name: "apply_patch",
+        arguments: "",
+      },
+      terminal: "data: [DONE]\n\n",
+    },
+    {
+      name: "custom-completed",
+      namespaces: customNamespaces,
+      item: {
+        type: "function_call",
+        id: "fc_custom_completed",
+        call_id: "call_custom_completed",
+        name: "apply_patch",
+        arguments: "",
+      },
+      terminal:
+        'event: response.completed\ndata: {"type":"response.completed","response":{"output":[]}}\n\n',
+    },
+    {
+      name: "tool-search-eof",
+      namespaces: searchNamespaces,
+      item: {
+        type: "function_call",
+        id: "fc_search_eof",
+        call_id: "call_search_eof",
+        name: "tool_search",
+        arguments: "",
+      },
+      terminal: "",
+    },
+  ];
+
+  for (const fixture of fixtures) {
+    const added = {
+      type: "response.output_item.added",
+      item: fixture.item,
+    };
+    const source =
+      `event: ${added.type}\ndata: ${JSON.stringify(added)}\n\n` + fixture.terminal;
+    const { output, error } = await collectUntilPipelineError(
+      [Buffer.from(source, "utf8")],
+      new NamespaceToolCallTransform(fixture.namespaces, "text/event-stream"),
+    );
+    assert.equal(error.code, "ERR_NAMESPACE_RELAY_COMMITTED_STREAM", fixture.name);
+    assert.match(output.toString("utf8"), /"type":"(?:custom_tool_call|tool_search_call)"/u);
+    assert.doesNotMatch(output.toString("utf8"), /\[DONE\]|response\.completed/u);
+  }
+});
+
+test("special openings without stable identities fail open before byte mutation", async () => {
+  const customNamespaces = new Map();
+  bridgeCustomTools([{ type: "custom", name: "apply_patch" }], [], customNamespaces);
+  const { namespaces: searchNamespaces } = flattenNamespaceTools([clientToolSearchControl()]);
+  const fixtures = [
+    {
+      namespaces: customNamespaces,
+      item: {
+        type: "function_call",
+        call_id: "call_missing_item",
+        name: "apply_patch",
+        arguments: "",
+      },
+    },
+    {
+      namespaces: customNamespaces,
+      item: {
+        type: "function_call",
+        id: "fc_missing_call",
+        name: "apply_patch",
+        arguments: "",
+      },
+    },
+    {
+      namespaces: searchNamespaces,
+      item: {
+        type: "function_call",
+        id: "",
+        call_id: "call_search_missing_item",
+        name: "tool_search",
+        arguments: "",
+      },
+    },
+  ];
+
+  for (const fixture of fixtures) {
+    const event = { type: "response.output_item.added", item: fixture.item };
+    const source = Buffer.from(
+      `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+      "utf8",
+    );
+    const output = await collectBuffer(
+      Readable.from([source]).pipe(
+        new NamespaceToolCallTransform(fixture.namespaces, "text/event-stream"),
+      ),
+    );
+    assert.deepEqual(output, source);
+  }
 });
 
 test("a well-formed bridged call closes as the custom_tool_call it opened", async () => {

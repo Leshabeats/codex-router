@@ -1,6 +1,7 @@
+import { isUtf8 } from "node:buffer";
 import { createHash } from "node:crypto";
 import { Transform } from "node:stream";
-import { StringDecoder } from "node:string_decoder";
+import { isDeepStrictEqual } from "node:util";
 
 import { HeaderlessSseDetector } from "./sse-prefix.mjs";
 import { coerceFunctionCallArguments } from "./tool-arguments.mjs";
@@ -12,7 +13,6 @@ import {
 import {
   buildInterruptAgentCall,
   filterAlreadyInterrupted,
-  formatSseBlock,
   interruptTargetFromCall,
 } from "./subagent-completion.mjs";
 
@@ -485,6 +485,7 @@ export function injectSessionModelForSpawnCalls(item, model) {
   if (!isSpawnModelCall(item)) return item;
   if (typeof model !== "string" || !model) return item;
   if (typeof item.arguments !== "string") return item;
+  if (!jsonArgumentsAreUnambiguous(item.arguments, { allowEmpty: true })) return item;
   let args;
   try {
     args = JSON.parse(item.arguments);
@@ -498,6 +499,339 @@ export function injectSessionModelForSpawnCalls(item, model) {
 }
 
 const MAX_JSON_CAPTURE_BYTES = 64 * 1024 * 1024;
+const CAPTURE_PART_BYTES = 64 * 1024;
+const INITIAL_SSE_CAPTURE_PART_BYTES = 1024;
+const MAX_TRACKED_OUTPUT_ITEMS = 4096;
+const MAX_TRACKED_STATE_BYTES = 8 * 1024 * 1024;
+const TRACKED_STATE_FIXED_BYTES = 512;
+// Before any semantic output, stop staging an undecided SSE frame before
+// downstream response guards lose sight of their own byte ceilings. Once a
+// namespace rewrite, suppression, or injection has committed the wire shape,
+// a later terminal event may carry the complete response and therefore shares
+// the non-streaming JSON capture bound. Crossing either phase's bound releases
+// raw bytes before a commit and terminates the stream after one.
+const MAX_SSE_FRAME_BYTES = 256 * 1024;
+const MAX_COMMITTED_SSE_FRAME_BYTES = MAX_JSON_CAPTURE_BYTES;
+const MAX_EXACT_JSON_NUMBER_LENGTH = 4096;
+const LINE_FEED = 0x0a;
+const CARRIAGE_RETURN = 0x0d;
+const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]);
+const SSE_EVENT_FIELD = Buffer.from("event", "ascii");
+const SSE_DATA_FIELD = Buffer.from("data", "ascii");
+const JSON_NUMBER_AT_OFFSET = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
+const JSON_NUMBER_PARTS =
+  /^(-?)(0|[1-9]\d*)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/;
+
+function sseFieldValue(line, prefixLength) {
+  const value = line.slice(prefixLength);
+  // The SSE grammar removes one optional U+0020 after the colon. Tabs,
+  // repeated spaces, and trailing spaces are event data, not formatting.
+  return value.startsWith(" ") ? value.slice(1) : value;
+}
+
+function sseLineFieldValue(line, name) {
+  return line === name ? "" : sseFieldValue(line, name.length + 1);
+}
+
+function stringFingerprint(value) {
+  return {
+    length: value.length,
+    digest: createHash("sha256").update(value, "utf16le").digest(),
+  };
+}
+
+function canonicalJsonFingerprint(value) {
+  const hash = createHash("sha256");
+  let length = 0;
+  const update = (part, encoding = "utf8") => {
+    hash.update(part, encoding);
+    length += Buffer.byteLength(part, encoding);
+  };
+  const updateString = (marker, text) => {
+    update(`${marker}${text.length}:`, "ascii");
+    update(text, "utf16le");
+  };
+  const stack = [{ kind: "value", value }];
+  while (stack.length) {
+    const frame = stack.pop();
+    if (frame.kind === "array") {
+      if (frame.index >= frame.value.length) {
+        update("]", "ascii");
+        continue;
+      }
+      stack.push({ ...frame, index: frame.index + 1 });
+      stack.push({ kind: "value", value: frame.value[frame.index] });
+      continue;
+    }
+    if (frame.kind === "object") {
+      if (frame.index >= frame.keys.length) {
+        update("}", "ascii");
+        continue;
+      }
+      const key = frame.keys[frame.index];
+      stack.push({ ...frame, index: frame.index + 1 });
+      stack.push({ kind: "value", value: frame.value[key] });
+      stack.push({ kind: "key", value: key });
+      continue;
+    }
+    if (frame.kind === "key") {
+      updateString("k", frame.value);
+      continue;
+    }
+
+    const current = frame.value;
+    if (current === null) {
+      update("n", "ascii");
+    } else if (typeof current === "string") {
+      updateString("s", current);
+    } else if (typeof current === "number") {
+      const number = Number.isNaN(current)
+        ? "NaN"
+        : Object.is(current, -0)
+          ? "-0"
+          : String(current);
+      updateString("d", number);
+    } else if (typeof current === "boolean") {
+      update(current ? "t" : "f", "ascii");
+    } else if (Array.isArray(current)) {
+      update(`a${current.length}:[`, "ascii");
+      stack.push({ kind: "array", value: current, index: 0 });
+    } else if (typeof current === "object") {
+      const keys = Object.keys(current).sort();
+      update(`o${keys.length}:{`, "ascii");
+      stack.push({ kind: "object", value: current, keys, index: 0 });
+    } else {
+      throw new TypeError("Tool-search arguments contain a non-JSON value.");
+    }
+  }
+  return { length, digest: hash.digest() };
+}
+
+function fingerprintMatches(fingerprint, length, digest) {
+  return (
+    fingerprint.length === length &&
+    Buffer.isBuffer(digest) &&
+    fingerprint.digest.equals(digest)
+  );
+}
+
+function trackedStateBytes(state) {
+  let bytes = TRACKED_STATE_FIXED_BYTES;
+  for (const field of [
+    "itemId",
+    "callId",
+    "sourceType",
+    "sourceName",
+    "sourceNamespace",
+    "outputType",
+    "outputName",
+    "outputNamespace",
+  ]) {
+    if (typeof state[field] === "string") bytes += Buffer.byteLength(state[field], "utf8");
+  }
+  return bytes;
+}
+
+// Normalize a bounded JSON number as exact decimal coefficient + power. This
+// compares mathematical decimal values rather than spellings, so 1.0 and 1e3
+// can survive a rewrite when JSON.stringify emits 1 and 1000 respectively,
+// while underflow and rounded high-precision tokens cannot.
+function canonicalDecimalToken(token) {
+  if (typeof token !== "string" || token.length > MAX_EXACT_JSON_NUMBER_LENGTH) {
+    return undefined;
+  }
+  const match = JSON_NUMBER_PARTS.exec(token);
+  if (!match) return undefined;
+  const [, sign, integer, fraction = "", exponentText = "0"] = match;
+  let digits = integer + fraction;
+  if (/^0+$/u.test(digits)) return sign === "-" ? "-0" : "0";
+
+  const exponentSign = exponentText.startsWith("-") ? -1 : 1;
+  const unsignedExponent = exponentText.replace(/^[+-]/u, "");
+  const significantExponent = unsignedExponent.replace(/^0+/u, "") || "0";
+  // A non-zero finite Number cannot retain an exponent remotely this large;
+  // bounding it also prevents attacker-controlled giant integer arithmetic.
+  if (significantExponent.length > 6) return undefined;
+  let exponent = exponentSign * Number(significantExponent) - fraction.length;
+
+  digits = digits.replace(/^0+/u, "");
+  const trailingZeros = /0+$/u.exec(digits)?.[0].length || 0;
+  if (trailingZeros) {
+    digits = digits.slice(0, -trailingZeros);
+    exponent += trailingZeros;
+  }
+  return `${sign}${digits}e${exponent}`;
+}
+
+function jsonNumberIsStableForRewrite(token) {
+  if (token.length > MAX_EXACT_JSON_NUMBER_LENGTH) return false;
+  const parsed = Number(token);
+  if (
+    !Number.isFinite(parsed) ||
+    Object.is(parsed, -0) ||
+    (Number.isInteger(parsed) && !Number.isSafeInteger(parsed))
+  ) {
+    return false;
+  }
+  const original = canonicalDecimalToken(token);
+  const serialized = canonicalDecimalToken(JSON.stringify(parsed));
+  return original !== undefined && original === serialized;
+}
+
+// JSON.parse deliberately accepts duplicate object members and keeps the last
+// one. That is useful for ordinary application input, but unsafe at a rewrite
+// boundary: the bytes can name one tool first and another tool last, while a
+// downstream parser is free to make the opposite choice. Parsing also rounds
+// unsafe integers and accepts overflowing exponents that stringify as null.
+// Audit the complete JSON grammar before parsing, compare decoded key values
+// so spellings such as `"name"` and `"\u006eame"` collide, and reject numeric
+// values whose parse/stringify semantics are known to be lossy.
+function jsonIsUnambiguousForRewrite(text) {
+  if (typeof text !== "string") return false;
+  let offset = 0;
+
+  const skipWhitespace = () => {
+    while (
+      offset < text.length &&
+      (text[offset] === " " ||
+        text[offset] === "\t" ||
+        text[offset] === "\r" ||
+        text[offset] === "\n")
+    ) {
+      offset += 1;
+    }
+  };
+
+  const stringToken = () => {
+    if (text[offset] !== '"') return undefined;
+    const start = offset;
+    offset += 1;
+    while (offset < text.length) {
+      const code = text.charCodeAt(offset);
+      const character = text[offset];
+      if (character === '"') {
+        offset += 1;
+        return text.slice(start, offset);
+      }
+      if (code < 0x20) return undefined;
+      if (character !== "\\") {
+        offset += 1;
+        continue;
+      }
+      offset += 1;
+      const escape = text[offset];
+      if (escape === "u") {
+        const digits = text.slice(offset + 1, offset + 5);
+        if (digits.length !== 4 || !/^[0-9a-fA-F]{4}$/.test(digits)) return undefined;
+        offset += 5;
+        continue;
+      }
+      if (!['"', "\\", "/", "b", "f", "n", "r", "t"].includes(escape)) {
+        return undefined;
+      }
+      offset += 1;
+    }
+    return undefined;
+  };
+
+  const literal = (value) => {
+    if (!text.startsWith(value, offset)) return false;
+    offset += value.length;
+    return true;
+  };
+
+  const number = () => {
+    JSON_NUMBER_AT_OFFSET.lastIndex = offset;
+    const match = JSON_NUMBER_AT_OFFSET.exec(text);
+    if (!match) return false;
+    if (!jsonNumberIsStableForRewrite(match[0])) return false;
+    offset = JSON_NUMBER_AT_OFFSET.lastIndex;
+    return true;
+  };
+
+  const value = () => {
+    skipWhitespace();
+    const character = text[offset];
+    if (character === "{") return object();
+    if (character === "[") return array();
+    if (character === '"') return stringToken() !== undefined;
+    if (character === "t") return literal("true");
+    if (character === "f") return literal("false");
+    if (character === "n") return literal("null");
+    return number();
+  };
+
+  const object = () => {
+    offset += 1;
+    skipWhitespace();
+    if (text[offset] === "}") {
+      offset += 1;
+      return true;
+    }
+    const keys = new Set();
+    while (offset < text.length) {
+      skipWhitespace();
+      const token = stringToken();
+      if (token === undefined) return false;
+      let key;
+      try {
+        key = JSON.parse(token);
+      } catch {
+        return false;
+      }
+      if (keys.has(key)) return false;
+      keys.add(key);
+      skipWhitespace();
+      if (text[offset] !== ":") return false;
+      offset += 1;
+      if (!value()) return false;
+      skipWhitespace();
+      if (text[offset] === "}") {
+        offset += 1;
+        return true;
+      }
+      if (text[offset] !== ",") return false;
+      offset += 1;
+    }
+    return false;
+  };
+
+  const array = () => {
+    offset += 1;
+    skipWhitespace();
+    if (text[offset] === "]") {
+      offset += 1;
+      return true;
+    }
+    while (offset < text.length) {
+      if (!value()) return false;
+      skipWhitespace();
+      if (text[offset] === "]") {
+        offset += 1;
+        return true;
+      }
+      if (text[offset] !== ",") return false;
+      offset += 1;
+    }
+    return false;
+  };
+
+  try {
+    if (!value()) return false;
+    skipWhitespace();
+    return offset === text.length;
+  } catch {
+    // Excessive nesting and any other scanner failure are ambiguity, not
+    // permission to fall back to JSON.parse's lossy interpretation.
+    return false;
+  }
+}
+
+function jsonArgumentsAreUnambiguous(value, { allowEmpty = false } = {}) {
+  if (typeof value !== "string") return true;
+  if (allowEmpty && value.trim() === "") return true;
+  return jsonIsUnambiguousForRewrite(value);
+}
 
 // Repair one tool's parameter root, or return it untouched. Providers reject a
 // union or nullable-object root by name -- xAI, DeepSeek V4, and the
@@ -1491,6 +1825,7 @@ function sanitizeSpawnAgentModel(item, lookups) {
   if (!(allowed instanceof Set) || allowed.size === 0 || typeof item.arguments !== "string") {
     return item;
   }
+  if (!jsonArgumentsAreUnambiguous(item.arguments)) return item;
   let args;
   try {
     args = JSON.parse(item.arguments);
@@ -1510,6 +1845,7 @@ function sanitizeSpawnAgentModel(item, lookups) {
 // rather than guessing which runtime owns it.
 function rewriteFunctionCallArguments(item) {
   if (!item || typeof item !== "object") return item;
+  if (!jsonArgumentsAreUnambiguous(item.arguments, { allowEmpty: true })) return item;
   const argumentsText = coerceFunctionCallArguments(item.arguments);
   if (argumentsText === item.arguments) return item;
   return { ...item, arguments: argumentsText };
@@ -1519,6 +1855,7 @@ function toolSearchArguments(value, allowPlaceholder) {
   if (plainObject(value)) return value;
   if (typeof value !== "string") return undefined;
   if (allowPlaceholder && value.trim() === "") return {};
+  if (!jsonArgumentsAreUnambiguous(value)) return undefined;
   try {
     return plainObject(JSON.parse(value));
   } catch {
@@ -1560,6 +1897,7 @@ function customToolInput(value, allowPlaceholder = false) {
   if (allowPlaceholder && (value === undefined || value === "")) return "";
   const argumentsText = coerceFunctionCallArguments(value);
   if (typeof argumentsText !== "string") return undefined;
+  if (!jsonArgumentsAreUnambiguous(argumentsText)) return undefined;
   try {
     const parsed = JSON.parse(argumentsText);
     return typeof parsed?.[CUSTOM_TOOL_INPUT_PROPERTY] === "string"
@@ -1604,6 +1942,7 @@ function rewriteNamespaceFunctionCallItem(
   { allowIncompleteToolSearch = false } = {},
 ) {
   if (!item || item.type !== "function_call") return undefined;
+  if (!jsonArgumentsAreUnambiguous(item.arguments, { allowEmpty: true })) return undefined;
   const exactPlainProviderIdentity =
     lookups.identityAliases &&
     item.namespace === undefined &&
@@ -1673,6 +2012,24 @@ function rewriteOutputItems(output, lookups, sessionModel) {
   return changed ? rewritten : undefined;
 }
 
+function embeddedFunctionArgumentsAreUnambiguous(payload) {
+  const safeItem = (item) =>
+    item?.type !== "function_call" ||
+    jsonArgumentsAreUnambiguous(item.arguments, { allowEmpty: true });
+  if (!safeItem(payload?.item)) return false;
+  if (
+    payload?.type === "response.function_call_arguments.done" &&
+    !jsonArgumentsAreUnambiguous(payload.arguments, { allowEmpty: true })
+  ) {
+    return false;
+  }
+  for (const output of [payload?.output, payload?.response?.output]) {
+    if (!Array.isArray(output)) continue;
+    if (!output.every(safeItem)) return false;
+  }
+  return true;
+}
+
 // Non-streaming Responses return completed function calls in an `output`
 // array instead of SSE `item` events. Restore both shapes through the same
 // exact request-local lookup so stream mode cannot change dispatch semantics.
@@ -1683,7 +2040,11 @@ export function rewriteNamespaceResponsePayload(payload, lookups, sessionModel) 
   let changed = rewritten !== payload;
 
   if (payload.type === "response.function_call_arguments.done") {
-    const argumentsText = coerceFunctionCallArguments(rewritten.arguments);
+    const argumentsText = jsonArgumentsAreUnambiguous(rewritten.arguments, {
+      allowEmpty: true,
+    })
+      ? coerceFunctionCallArguments(rewritten.arguments)
+      : rewritten.arguments;
     if (argumentsText !== rewritten.arguments) {
       rewritten = { ...rewritten, arguments: argumentsText };
       changed = true;
@@ -1821,15 +2182,43 @@ function customToolInputDelta(state, fragment) {
   return decoded.length ? decoded.join("") : undefined;
 }
 
+class NamespaceRelayCommittedStreamError extends Error {
+  constructor(reason) {
+    super(
+      `The provider response became unsafe to relay after namespace output was committed (${reason}).`,
+    );
+    this.name = "NamespaceRelayCommittedStreamError";
+    this.code = "ERR_NAMESPACE_RELAY_COMMITTED_STREAM";
+    this.status = 502;
+  }
+}
+
 // Rewrites LiteLLM's flattened `<namespace>__<tool>` function calls back to
 // the namespace + name shape Codex dispatches through its app runtime.
 export class NamespaceToolCallTransform extends Transform {
   #eventStream;
-  #decoder = new StringDecoder("utf8");
-  #buffer = "";
-  #pending = Buffer.alloc(0);
+  #pendingParts = [];
+  #pendingBytes = 0;
+  #pendingTailBytes = 0;
   #released = false;
   #headerlessDetector;
+  #sseParts = [];
+  #sseBytes = 0;
+  #sseTailBytes = 0;
+  #sseNextPartBytes = INITIAL_SSE_CAPTURE_PART_BYTES;
+  #sseLineBytes = 0;
+  #ssePendingCr = false;
+  #ssePendingLineWasBlank = false;
+  #sseAtStreamStart = true;
+  #sseLineEnding = "\n";
+  #sseLineEndingObserved = false;
+  #maxJsonCaptureBytes;
+  #maxSseFrameBytes;
+  #maxCommittedSseFrameBytes;
+  #maxTrackedOutputItems;
+  #maxTrackedStateBytes;
+  #rewriteDisabled = false;
+  #semanticMutationCommitted = false;
   #lookups;
   #sessionModel;
   #pendingInterrupts;
@@ -1840,8 +2229,14 @@ export class NamespaceToolCallTransform extends Transform {
   #injectQueue = [];
   #injectionsDone = false;
   #lastInjectedCalls = [];
-  #customItemIds = new Set();
-  #customDeltaStates = new Map();
+  // Every observed output-item identity reserves both ids. Special relays keep
+  // their source and native shapes here until terminal validation so a stream
+  // cannot change owners or fall back to raw function-call events after its
+  // opening was rewritten.
+  #callsByItemId = new Map();
+  #callsByCallId = new Map();
+  #trackedCallCount = 0;
+  #trackedStateBytes = 0;
 
   constructor(namespaces, contentType = "", sessionModel, options = {}) {
     super();
@@ -1855,6 +2250,29 @@ export class NamespaceToolCallTransform extends Transform {
     // must not run the namespace rewrites (they exist for routed providers)
     // or re-serialize model-authored events it did not change.
     this.#injectOnly = Boolean(options.injectOnly);
+    this.#maxJsonCaptureBytes =
+      Number.isInteger(options.maxJsonCaptureBytes) && options.maxJsonCaptureBytes > 0
+        ? options.maxJsonCaptureBytes
+        : MAX_JSON_CAPTURE_BYTES;
+    const configuredSseFrameBytes =
+      Number.isInteger(options.maxSseFrameBytes) && options.maxSseFrameBytes > 0
+        ? options.maxSseFrameBytes
+        : undefined;
+    this.#maxSseFrameBytes = configuredSseFrameBytes ?? MAX_SSE_FRAME_BYTES;
+    this.#maxCommittedSseFrameBytes =
+      Number.isInteger(options.maxCommittedSseFrameBytes) &&
+      options.maxCommittedSseFrameBytes > 0
+        ? options.maxCommittedSseFrameBytes
+        : configuredSseFrameBytes ??
+          Math.min(this.#maxJsonCaptureBytes, MAX_COMMITTED_SSE_FRAME_BYTES);
+    this.#maxTrackedOutputItems =
+      Number.isInteger(options.maxTrackedOutputItems) && options.maxTrackedOutputItems > 0
+        ? options.maxTrackedOutputItems
+        : MAX_TRACKED_OUTPUT_ITEMS;
+    this.#maxTrackedStateBytes =
+      Number.isInteger(options.maxTrackedStateBytes) && options.maxTrackedStateBytes > 0
+        ? options.maxTrackedStateBytes
+        : MAX_TRACKED_STATE_BYTES;
     const declared = String(contentType).toLowerCase();
     this.#eventStream = declared.includes("text/event-stream");
     this.#headerlessDetector =
@@ -1864,41 +2282,52 @@ export class NamespaceToolCallTransform extends Transform {
   }
 
   _transform(chunk, _encoding, callback) {
-    if (this.#headerlessDetector) {
-      const detected = this.#headerlessDetector.write(chunk);
-      if (detected.decision === "pending") {
-        callback();
-        return;
+    let error;
+    try {
+      if (this.#headerlessDetector) {
+        const detected = this.#headerlessDetector.write(chunk);
+        if (detected.decision !== "pending") {
+          this.#headerlessDetector = undefined;
+          this.#eventStream = detected.decision === "event-stream";
+          for (const buffered of detected.chunks) this.#transformChunk(buffered);
+        }
+      } else {
+        this.#transformChunk(chunk);
       }
-      this.#headerlessDetector = undefined;
-      this.#eventStream = detected.decision === "event-stream";
-      for (const buffered of detected.chunks) this.#transformChunk(buffered);
-      callback();
-      return;
+    } catch (caught) {
+      error = caught;
     }
-    this.#transformChunk(chunk);
-    callback();
+    callback(error);
   }
 
   #transformChunk(chunk) {
+    const bytes = Buffer.from(chunk);
     if (!this.#eventStream) {
       if (this.#released) {
-        this.push(chunk);
+        this.push(bytes);
         return;
       }
-      this.#pending = this.#pending.length ? Buffer.concat([this.#pending, chunk]) : chunk;
-      if (this.#pending.length > MAX_JSON_CAPTURE_BYTES) {
-        this.push(this.#pending);
-        this.#pending = Buffer.alloc(0);
-        this.#released = true;
-      }
+      this.#captureJsonBytes(bytes);
       return;
     }
-    this.#buffer += this.#decoder.write(chunk);
-    this.#emitCompleteEvents();
+    if (this.#rewriteDisabled) {
+      this.push(bytes);
+      return;
+    }
+    this.#consumeSseChunk(bytes);
   }
 
   _flush(callback) {
+    let error;
+    try {
+      this.#flushTransform();
+    } catch (caught) {
+      error = caught;
+    }
+    callback(error);
+  }
+
+  #flushTransform() {
     if (this.#headerlessDetector) {
       const detected = this.#headerlessDetector.end();
       this.#headerlessDetector = undefined;
@@ -1906,174 +2335,1153 @@ export class NamespaceToolCallTransform extends Transform {
       for (const buffered of detected.chunks) this.#transformChunk(buffered);
     }
     if (!this.#eventStream) {
-      const body = this.#pending;
-      this.#pending = Buffer.alloc(0);
+      const body = this.#takeJsonCapture();
       if (this.#released || !body.length) {
         if (body.length) this.push(body);
-        callback();
         return;
       }
+      if (!isUtf8(body)) {
+        this.push(body);
+        return;
+      }
+      const text = body.toString("utf8");
+      if (!jsonIsUnambiguousForRewrite(text)) {
+        this.push(body);
+        return;
+      }
+      let original;
       try {
-        const original = JSON.parse(body.toString("utf8"));
-        let payload = original;
-        if (!this.#injectOnly) {
-          const rewritten = rewriteNamespaceResponsePayload(
-            payload,
-            this.#lookups,
-            this.#sessionModel,
-          );
-          if (rewritten) payload = rewritten;
-        }
-        payload = this.#injectJsonInterrupts(payload);
-        // An inject-only relay that injected nothing returns the exact bytes
-        // it was handed rather than a re-serialization of them.
-        if (this.#injectOnly && payload === original) {
-          this.push(body);
-        } else {
-          this.push(Buffer.from(JSON.stringify(payload), "utf8"));
-        }
+        original = JSON.parse(text);
       } catch {
         this.push(body);
+        return;
       }
-      callback();
+      if (!embeddedFunctionArgumentsAreUnambiguous(original)) {
+        this.push(body);
+        return;
+      }
+      let payload = original;
+      if (!this.#injectOnly) {
+        const rewritten = rewriteNamespaceResponsePayload(
+          payload,
+          this.#lookups,
+          this.#sessionModel,
+        );
+        if (rewritten) payload = rewritten;
+      }
+      payload = this.#injectJsonInterrupts(payload);
+      // Parsing is only permission to inspect. A response the transform did
+      // not semantically change retains its exact original representation.
+      if (payload !== original) this.#commitSemanticMutation();
+      this.push(payload === original ? body : Buffer.from(JSON.stringify(payload), "utf8"));
       return;
     }
-    this.#buffer += this.#decoder.end();
-    this.#emitCompleteEvents(true);
-    // Streams that omit response.completed / [DONE] still need the closes.
-    for (const piece of this.#drainInterruptBlocks()) {
-      this.push(Buffer.from(piece));
-      if (!piece.endsWith("\n\n")) this.push(Buffer.from("\n\n"));
+    if (this.#ssePendingCr && !this.#rewriteDisabled) {
+      const blankLine = this.#ssePendingLineWasBlank;
+      this.#ssePendingCr = false;
+      this.#ssePendingLineWasBlank = false;
+      this.#completeSseLine(blankLine);
     }
-    callback();
+    let tailSeparator;
+    if (!this.#rewriteDisabled && this.#sseBytes) {
+      const tail = this.#takeSseFrame();
+      this.#emitSseFrame(tail);
+      tailSeparator = this.#separatorAfterSseTail(tail);
+    }
+    if (!this.#rewriteDisabled && this.#hasOpenSpecialCalls()) {
+      if (this.#semanticMutationCommitted) {
+        throw new NamespaceRelayCommittedStreamError("unterminated special tool call");
+      }
+      this.#disableSseRewriting();
+    }
+    // Streams that omit response.completed / [DONE] still need the closes,
+    // unless an ambiguous frame made observing prior calls unsafe.
+    if (!this.#rewriteDisabled) {
+      const blocks = this.#drainInterruptBlocks();
+      if (blocks.length && tailSeparator?.length) this.push(tailSeparator);
+      for (const piece of blocks) this.push(piece);
+    }
   }
 
-  #emitCompleteEvents(flush = false) {
-    const blocks = this.#buffer.split(/\r?\n\r?\n/);
-    this.#buffer = flush ? "" : blocks.pop() || "";
-    for (const block of blocks) {
-      const pieces = this.#rewriteBlock(block);
-      for (const piece of pieces) {
-        this.push(Buffer.from(piece));
-        if (!piece.endsWith("\n\n")) this.push(Buffer.from("\n\n"));
+  #captureJsonBytes(bytes) {
+    // Fixed-size parts keep both copies and metadata bounded even when an
+    // upstream fragments a body into one-byte chunks. Each byte is copied once
+    // while capturing and at most once more for the final JSON parse.
+    let offset = 0;
+    while (offset < bytes.length && !this.#released) {
+      let tail = this.#pendingParts.at(-1);
+      if (!tail || this.#pendingTailBytes === tail.length) {
+        const remainingUntilRelease =
+          this.#maxJsonCaptureBytes + 1 - this.#pendingBytes;
+        tail = Buffer.allocUnsafe(
+          Math.min(CAPTURE_PART_BYTES, remainingUntilRelease),
+        );
+        this.#pendingParts.push(tail);
+        this.#pendingTailBytes = 0;
+      }
+      const copied = Math.min(tail.length - this.#pendingTailBytes, bytes.length - offset);
+      bytes.copy(
+        tail,
+        this.#pendingTailBytes,
+        offset,
+        offset + copied,
+      );
+      this.#pendingTailBytes += copied;
+      this.#pendingBytes += copied;
+      offset += copied;
+      if (this.#pendingBytes > this.#maxJsonCaptureBytes) {
+        for (let index = 0; index < this.#pendingParts.length; index += 1) {
+          const part = this.#pendingParts[index];
+          this.push(
+            index === this.#pendingParts.length - 1
+              ? part.subarray(0, this.#pendingTailBytes)
+              : part,
+          );
+        }
+        this.#pendingParts = [];
+        this.#pendingBytes = 0;
+        this.#pendingTailBytes = 0;
+        this.#released = true;
+      }
+    }
+    if (offset < bytes.length) this.push(bytes.subarray(offset));
+  }
+
+  #takeJsonCapture() {
+    if (!this.#pendingParts.length) return Buffer.alloc(0);
+    const lastIndex = this.#pendingParts.length - 1;
+    const parts = this.#pendingParts.map((part, index) =>
+      index === lastIndex ? part.subarray(0, this.#pendingTailBytes) : part,
+    );
+    const body =
+      parts.length === 1 ? parts[0] : Buffer.concat(parts, this.#pendingBytes);
+    this.#pendingParts = [];
+    this.#pendingBytes = 0;
+    this.#pendingTailBytes = 0;
+    return body;
+  }
+
+  #separatorAfterSseTail(frame) {
+    if (!frame.length) return Buffer.alloc(0);
+    const last = frame[frame.length - 1];
+    const missingLineEndings = last === CARRIAGE_RETURN || last === LINE_FEED ? 1 : 2;
+    return Buffer.from(this.#sseLineEnding.repeat(missingLineEndings), "utf8");
+  }
+
+  #consumeSseChunk(chunk) {
+    let offset = 0;
+    if (this.#ssePendingCr) {
+      const followedByLf = chunk[0] === LINE_FEED;
+      if (followedByLf) {
+        if (!this.#appendSsePiece(chunk.subarray(0, 1))) {
+          if (chunk.length > 1) this.push(chunk.subarray(1));
+          return;
+        }
+        offset = 1;
+      }
+      const blankLine = this.#ssePendingLineWasBlank;
+      this.#ssePendingCr = false;
+      this.#ssePendingLineWasBlank = false;
+      this.#completeSseLine(blankLine);
+      if (this.#rewriteDisabled) {
+        if (offset < chunk.length) this.push(chunk.subarray(offset));
+        return;
+      }
+    }
+
+    while (offset < chunk.length) {
+      let lineEnd = offset;
+      while (
+        lineEnd < chunk.length &&
+        chunk[lineEnd] !== CARRIAGE_RETURN &&
+        chunk[lineEnd] !== LINE_FEED
+      ) {
+        lineEnd += 1;
+      }
+
+      if (lineEnd === chunk.length) {
+        const content = chunk.subarray(offset);
+        this.#sseLineBytes += content.length;
+        this.#appendSsePiece(content);
+        return;
+      }
+      if (lineEnd > offset) {
+        const content = chunk.subarray(offset, lineEnd);
+        this.#sseLineBytes += content.length;
+        if (!this.#appendSsePiece(content)) {
+          this.push(chunk.subarray(lineEnd));
+          return;
+        }
+      }
+
+      const blankLine = this.#sseLineBytes === 0;
+      if (chunk[lineEnd] === CARRIAGE_RETURN) {
+        if (!this.#appendSsePiece(chunk.subarray(lineEnd, lineEnd + 1))) {
+          if (lineEnd + 1 < chunk.length) this.push(chunk.subarray(lineEnd + 1));
+          return;
+        }
+        if (lineEnd + 1 === chunk.length) {
+          this.#ssePendingCr = true;
+          this.#ssePendingLineWasBlank = blankLine;
+          this.#sseLineBytes = 0;
+          return;
+        }
+        if (chunk[lineEnd + 1] === LINE_FEED) {
+          if (!this.#appendSsePiece(chunk.subarray(lineEnd + 1, lineEnd + 2))) {
+            if (lineEnd + 2 < chunk.length) this.push(chunk.subarray(lineEnd + 2));
+            return;
+          }
+          offset = lineEnd + 2;
+        } else {
+          offset = lineEnd + 1;
+        }
+      } else {
+        if (!this.#appendSsePiece(chunk.subarray(lineEnd, lineEnd + 1))) {
+          if (lineEnd + 1 < chunk.length) this.push(chunk.subarray(lineEnd + 1));
+          return;
+        }
+        offset = lineEnd + 1;
+      }
+      this.#completeSseLine(blankLine);
+      if (this.#rewriteDisabled) {
+        if (offset < chunk.length) this.push(chunk.subarray(offset));
+        return;
       }
     }
   }
 
-  #rewriteBlock(block) {
-    const lines = block.split(/\r?\n/);
-    const eventName = lines
-      .find((line) => line.startsWith("event:"))
-      ?.slice(6)
-      .trim();
-    let dataLineIndex = -1;
-    let dataText = "";
-    for (let index = 0; index < lines.length; index += 1) {
-      const line = lines[index];
-      if (!line.startsWith("data:")) continue;
-      dataLineIndex = index;
-      dataText = line.slice(5).trimStart();
-      break;
+  #appendSsePiece(piece) {
+    if (!piece.length) return true;
+    // Copy into fixed-size parts exactly as the non-streaming capture does.
+    // Retaining one view per upstream chunk would let a one-byte-fragmented
+    // frame allocate millions of Buffer objects before reaching its byte cap.
+    let offset = 0;
+    const frameByteLimit = this.#semanticMutationCommitted
+      ? this.#maxCommittedSseFrameBytes
+      : this.#maxSseFrameBytes;
+    while (offset < piece.length && this.#sseBytes <= frameByteLimit) {
+      let tail = this.#sseParts.at(-1);
+      if (!tail || this.#sseTailBytes === tail.length) {
+        const remainingUntilRelease =
+          frameByteLimit + 1 - this.#sseBytes;
+        const remainingPieceBytes = piece.length - offset;
+        const partBytes = Math.min(
+          CAPTURE_PART_BYTES,
+          Math.max(this.#sseNextPartBytes, Math.min(CAPTURE_PART_BYTES, remainingPieceBytes)),
+          remainingUntilRelease,
+        );
+        tail = Buffer.allocUnsafe(partBytes);
+        this.#sseParts.push(tail);
+        this.#sseTailBytes = 0;
+        this.#sseNextPartBytes = Math.min(CAPTURE_PART_BYTES, partBytes * 2);
+      }
+      const copied = Math.min(tail.length - this.#sseTailBytes, piece.length - offset);
+      piece.copy(tail, this.#sseTailBytes, offset, offset + copied);
+      this.#sseTailBytes += copied;
+      this.#sseBytes += copied;
+      offset += copied;
     }
-    if (dataLineIndex === -1) return [block];
+    if (this.#sseBytes <= frameByteLimit) return true;
+    const buffered = this.#takeSseFrame();
+    if (this.#semanticMutationCommitted) {
+      throw new NamespaceRelayCommittedStreamError("SSE frame byte limit");
+    }
+    this.#disableSseRewriting();
+    this.push(buffered);
+    if (offset < piece.length) this.push(piece.subarray(offset));
+    return false;
+  }
+
+  #completeSseLine(blankLine) {
+    this.#sseLineBytes = 0;
+    if (blankLine) this.#emitSseFrame(this.#takeSseFrame());
+  }
+
+  #takeSseFrame() {
+    if (!this.#sseParts.length) return Buffer.alloc(0);
+    const lastIndex = this.#sseParts.length - 1;
+    const parts = this.#sseParts.map((part, index) =>
+      index === lastIndex ? part.subarray(0, this.#sseTailBytes) : part,
+    );
+    const frame = parts.length === 1 ? parts[0] : Buffer.concat(parts, this.#sseBytes);
+    this.#sseParts = [];
+    this.#sseBytes = 0;
+    this.#sseTailBytes = 0;
+    this.#sseNextPartBytes = INITIAL_SSE_CAPTURE_PART_BYTES;
+    this.#sseLineBytes = 0;
+    this.#ssePendingCr = false;
+    this.#ssePendingLineWasBlank = false;
+    return frame;
+  }
+
+  #sseFields(frame, atStreamStart) {
+    let eventLine;
+    let dataLine;
+    let lineEndingLine;
+    let repeated = false;
+    let start = 0;
+    let firstLine = true;
+    while (start < frame.length) {
+      let contentEnd = start;
+      while (
+        contentEnd < frame.length &&
+        frame[contentEnd] !== CARRIAGE_RETURN &&
+        frame[contentEnd] !== LINE_FEED
+      ) {
+        contentEnd += 1;
+      }
+      const end = contentEnd === frame.length
+        ? frame.length
+        : frame[contentEnd] === CARRIAGE_RETURN && frame[contentEnd + 1] === LINE_FEED
+          ? contentEnd + 2
+          : contentEnd + 1;
+      let parseStart = start;
+      if (
+        firstLine &&
+        atStreamStart &&
+        frame.subarray(start, start + UTF8_BOM.length).equals(UTF8_BOM)
+      ) {
+        parseStart += UTF8_BOM.length;
+      }
+      firstLine = false;
+      const line = { start, parseStart, contentEnd, end };
+      if (!lineEndingLine && end > contentEnd) lineEndingLine = line;
+      const lineLength = contentEnd - parseStart;
+      const fieldLine = (name) =>
+        lineLength >= name.length &&
+        frame.subarray(parseStart, parseStart + name.length).equals(name) &&
+        (lineLength === name.length || frame[parseStart + name.length] === 0x3a);
+      if (fieldLine(SSE_EVENT_FIELD)) {
+        if (eventLine) repeated = true;
+        else eventLine = line;
+      }
+      if (fieldLine(SSE_DATA_FIELD)) {
+        if (dataLine) repeated = true;
+        else dataLine = line;
+      }
+      if (repeated || contentEnd === frame.length) break;
+      start = end;
+    }
+    return { eventLine, dataLine, lineEndingLine, repeated };
+  }
+
+  #rememberSseLineEnding(frame, line) {
+    if (this.#sseLineEndingObserved || !line || line.end === line.contentEnd) return;
+    const terminator = frame.subarray(line.contentEnd, line.end);
+    if (terminator.equals(Buffer.from("\r\n"))) this.#sseLineEnding = "\r\n";
+    else if (terminator.equals(Buffer.from("\n"))) this.#sseLineEnding = "\n";
+    else if (terminator.equals(Buffer.from("\r"))) this.#sseLineEnding = "\r";
+    else return;
+    this.#sseLineEndingObserved = true;
+  }
+
+  #emitSseFrame(frame) {
+    for (const piece of this.#rewriteSseFrame(frame)) this.push(piece);
+  }
+
+  #commitSemanticMutation() {
+    this.#semanticMutationCommitted = true;
+  }
+
+  #unsafeSseFrame(frame, reason) {
+    if (this.#semanticMutationCommitted) {
+      throw new NamespaceRelayCommittedStreamError(reason);
+    }
+    this.#disableSseRewriting();
+    return [frame];
+  }
+
+  #disableSseRewriting() {
+    this.#rewriteDisabled = true;
+    this.#injectionsDone = true;
+    this.#lastInjectedCalls = [];
+    this.#callsByItemId.clear();
+    this.#callsByCallId.clear();
+    this.#trackedCallCount = 0;
+    this.#trackedStateBytes = 0;
+  }
+
+  #specialCallKind(item) {
+    if (item?.type === "custom_tool_call") return "custom";
+    if (item?.type === "tool_search_call") return "tool_search";
+    return undefined;
+  }
+
+  #sourceSpecialCallKind(item) {
+    const nativeKind = this.#specialCallKind(item);
+    if (nativeKind) return nativeKind;
+    if (item?.type !== "function_call") return undefined;
+    if (this.#lookups.customTools instanceof Map && this.#lookups.customTools.has(item.name)) {
+      return "custom";
+    }
+    if (item.name === this.#lookups.toolSearch?.providerName) return "tool_search";
+    return undefined;
+  }
+
+  #hasOpenSpecialCalls() {
+    for (const state of this.#callsByItemId.values()) {
+      if (state.kind && !state.closed) return true;
+    }
+    return false;
+  }
+
+  #openingIdentityConflict(item) {
+    const byItemId =
+      typeof item?.id === "string" ? this.#callsByItemId.get(item.id) : undefined;
+    const byCallId =
+      typeof item?.call_id === "string"
+        ? this.#callsByCallId.get(item.call_id)
+        : undefined;
+    if (byItemId || byCallId) return "duplicate output item identity";
+    return undefined;
+  }
+
+  #storeCallState(state) {
+    if (this.#trackedCallCount >= this.#maxTrackedOutputItems) {
+      return "output item identity limit";
+    }
+    const retainedBytes = trackedStateBytes(state);
+    if (retainedBytes > this.#maxTrackedStateBytes - this.#trackedStateBytes) {
+      return "output item state byte limit";
+    }
+    if (state.itemId) this.#callsByItemId.set(state.itemId, state);
+    if (state.callId) this.#callsByCallId.set(state.callId, state);
+    this.#trackedCallCount += 1;
+    this.#trackedStateBytes += retainedBytes;
+    return undefined;
+  }
+
+  #registerCall(sourceItem, item) {
+    const kind = this.#specialCallKind(item);
+    const sourceKind = this.#sourceSpecialCallKind(sourceItem);
+    if ((sourceKind || kind) && sourceKind !== kind) {
+      return "special tool call opening was not restored consistently";
+    }
+    if (
+      (kind === "custom" &&
+        (typeof item.name !== "string" || !item.name || item.namespace !== undefined)) ||
+      (kind === "tool_search" &&
+        (item.name !== undefined ||
+          item.namespace !== undefined ||
+          item.execution !== "client" ||
+          !plainObject(item.arguments)))
+    ) {
+      return "special tool call opening is incomplete";
+    }
+    const itemId = typeof item?.id === "string" && item.id ? item.id : undefined;
+    const callId =
+      typeof item?.call_id === "string" && item.call_id ? item.call_id : undefined;
+    if (
+      kind &&
+      (!itemId ||
+        !callId ||
+        sourceItem?.id !== itemId ||
+        sourceItem?.call_id !== callId)
+    ) {
+      return "special tool call opening lacks stable identity";
+    }
+    if (!itemId && !callId) return undefined;
+    const conflict = this.#openingIdentityConflict(item);
+    if (conflict) return conflict;
+    const state = {
+      kind,
+      itemId,
+      callId,
+      sourceType: sourceItem?.type,
+      sourceName: sourceItem?.name,
+      sourceNamespace: sourceItem?.namespace,
+      outputType: item.type,
+      outputName: item.name,
+      outputNamespace: item.namespace,
+      argumentsDone: false,
+      finalInputLength: undefined,
+      finalInputDigest: undefined,
+      finalArgumentsLength: undefined,
+      finalArgumentsDigest: undefined,
+      sawArgumentDelta: false,
+      deltaCharacters: 0,
+      deltaHash: kind === "custom" ? createHash("sha256") : undefined,
+      closed: false,
+      summarySeen: false,
+      deltaState:
+        kind === "custom"
+          ? {
+              opening: "",
+              opened: false,
+              escape: "",
+              closed: false,
+              invalid: false,
+            }
+          : undefined,
+    };
+    return this.#storeCallState(state);
+  }
+
+  // Some Responses bridges omit output_item.added and emit only one complete
+  // done item or a terminal output summary. Treat that self-contained item as
+  // a closed lifecycle, but reserve its identities exactly like a streamed
+  // opening so later events cannot change owners or replay it.
+  #registerAtomicSpecialCall(sourceItem, item, { summarySeen = false } = {}) {
+    const sourceKind = this.#sourceSpecialCallKind(sourceItem);
+    const kind = this.#specialCallKind(item);
+    if (!sourceKind || sourceKind !== kind) {
+      return "atomic special tool call was incomplete or restored inconsistently";
+    }
+
+    const callId = typeof item?.call_id === "string" && item.call_id
+      ? item.call_id
+      : undefined;
+    if (!callId || sourceItem?.call_id !== callId) {
+      return "atomic special tool call lacks stable identity";
+    }
+    const sourceHasItemId = Object.hasOwn(sourceItem, "id");
+    const outputHasItemId = Object.hasOwn(item, "id");
+    if (
+      sourceHasItemId !== outputHasItemId ||
+      (sourceHasItemId &&
+        (typeof item.id !== "string" || !item.id || sourceItem.id !== item.id))
+    ) {
+      return "atomic special tool call lacks stable identity";
+    }
+    const itemId = outputHasItemId ? item.id : undefined;
+
+    if (kind === "custom") {
+      if (
+        typeof item.name !== "string" ||
+        !item.name ||
+        item.namespace !== undefined ||
+        typeof item.input !== "string"
+      ) {
+        return "incomplete atomic custom tool call";
+      }
+      if (sourceItem.type === "function_call") {
+        const expectedName = this.#lookups.customTools?.get(sourceItem.name);
+        if (
+          expectedName !== item.name ||
+          customToolInput(sourceItem.arguments) !== item.input
+        ) {
+          return "atomic custom tool call was not restored consistently";
+        }
+      } else if (
+        sourceItem.name !== item.name ||
+        sourceItem.input !== item.input
+      ) {
+        return "atomic custom tool call changed native content";
+      }
+    } else {
+      if (
+        item.name !== undefined ||
+        item.namespace !== undefined ||
+        item.execution !== "client" ||
+        !plainObject(item.arguments)
+      ) {
+        return "incomplete atomic tool search call";
+      }
+      if (sourceItem.type === "function_call") {
+        const sourceArguments = toolSearchArguments(sourceItem.arguments, false);
+        if (
+          sourceItem.name !== this.#lookups.toolSearch?.providerName ||
+          !sourceArguments ||
+          !isDeepStrictEqual(sourceArguments, item.arguments)
+        ) {
+          return "atomic tool search call was not restored consistently";
+        }
+      } else if (
+        sourceItem.execution !== item.execution ||
+        !isDeepStrictEqual(sourceItem.arguments, item.arguments)
+      ) {
+        return "atomic tool search call changed native content";
+      }
+    }
+
+    const conflict = this.#openingIdentityConflict(item);
+    if (conflict) return conflict;
+    const finalInputFingerprint = kind === "custom"
+      ? stringFingerprint(item.input)
+      : undefined;
+    const finalArgumentsFingerprint = kind === "tool_search"
+      ? canonicalJsonFingerprint(item.arguments)
+      : undefined;
+    const state = {
+      kind,
+      itemId,
+      callId,
+      sourceType: sourceItem.type,
+      sourceName: sourceItem.name,
+      sourceNamespace: sourceItem.namespace,
+      outputType: item.type,
+      outputName: item.name,
+      outputNamespace: item.namespace,
+      argumentsDone: true,
+      finalInputLength: finalInputFingerprint?.length,
+      finalInputDigest: finalInputFingerprint?.digest,
+      finalArgumentsLength: finalArgumentsFingerprint?.length,
+      finalArgumentsDigest: finalArgumentsFingerprint?.digest,
+      sawArgumentDelta: false,
+      deltaCharacters: 0,
+      deltaHash: undefined,
+      closed: true,
+      summarySeen,
+      deltaState: undefined,
+    };
+    return this.#storeCallState(state);
+  }
+
+  #registerOrdinaryOutputItem(
+    sourceItem,
+    item,
+    { closed = true, summarySeen = false } = {},
+  ) {
+    // Ordinary items reserve the same id domains as special relays. This also
+    // covers nonterminal response snapshots, which can precede an explicit
+    // output_item.done event and therefore must not be marked closed yet.
+    const itemId = typeof item?.id === "string" && item.id ? item.id : undefined;
+    const callId = typeof item?.call_id === "string" && item.call_id
+      ? item.call_id
+      : undefined;
+    const sourceItemId = typeof sourceItem?.id === "string" && sourceItem.id
+      ? sourceItem.id
+      : undefined;
+    const sourceCallId = typeof sourceItem?.call_id === "string" && sourceItem.call_id
+      ? sourceItem.call_id
+      : undefined;
+    const sourceHasItemId = Boolean(
+      sourceItem && typeof sourceItem === "object" && Object.hasOwn(sourceItem, "id"),
+    );
+    const outputHasItemId = Boolean(
+      item && typeof item === "object" && Object.hasOwn(item, "id"),
+    );
+    const sourceHasCallId = Boolean(
+      sourceItem && typeof sourceItem === "object" && Object.hasOwn(sourceItem, "call_id"),
+    );
+    const outputHasCallId = Boolean(
+      item && typeof item === "object" && Object.hasOwn(item, "call_id"),
+    );
+    if (
+      sourceItemId !== itemId ||
+      sourceCallId !== callId ||
+      sourceHasItemId !== outputHasItemId ||
+      sourceHasCallId !== outputHasCallId ||
+      (sourceHasItemId && !itemId) ||
+      (sourceHasCallId && !callId)
+    ) {
+      return "output item lacks stable identity";
+    }
+    if (!itemId && !callId) return undefined;
+    const conflict = this.#openingIdentityConflict(item);
+    if (conflict) return conflict;
+    const state = {
+      kind: undefined,
+      itemId,
+      callId,
+      sourceType: sourceItem?.type,
+      sourceName: sourceItem?.name,
+      sourceNamespace: sourceItem?.namespace,
+      outputType: item?.type,
+      outputName: item?.name,
+      outputNamespace: item?.namespace,
+      argumentsDone: true,
+      finalInputLength: undefined,
+      finalInputDigest: undefined,
+      finalArgumentsLength: undefined,
+      finalArgumentsDigest: undefined,
+      sawArgumentDelta: false,
+      deltaCharacters: 0,
+      deltaHash: undefined,
+      closed,
+      summarySeen,
+      deltaState: undefined,
+    };
+    return this.#storeCallState(state);
+  }
+
+  #registerAtomicOutputItem(sourceItem, item, { summarySeen = false } = {}) {
+    const sourceKind = this.#sourceSpecialCallKind(sourceItem);
+    const outputKind = this.#specialCallKind(item);
+    if (sourceKind || outputKind) {
+      return this.#registerAtomicSpecialCall(sourceItem, item, { summarySeen });
+    }
+    return this.#registerOrdinaryOutputItem(sourceItem, item, {
+      closed: true,
+      summarySeen,
+    });
+  }
+
+  #outputItemMatchesState(sourceItem, item, state) {
+    return (
+      sourceItem?.id === state.itemId &&
+      sourceItem?.call_id === state.callId &&
+      sourceItem?.type === state.sourceType &&
+      sourceItem?.name === state.sourceName &&
+      sourceItem?.namespace === state.sourceNamespace &&
+      item?.id === state.itemId &&
+      item?.call_id === state.callId &&
+      item?.type === state.outputType &&
+      item?.name === state.outputName &&
+      item?.namespace === state.outputNamespace
+    );
+  }
+
+  #specialCallForArgumentsEvent(event) {
+    const byItemId =
+      typeof event?.item_id === "string"
+        ? this.#callsByItemId.get(event.item_id)
+        : undefined;
+    const byCallId =
+      typeof event?.call_id === "string"
+        ? this.#callsByCallId.get(event.call_id)
+        : undefined;
+    if (byItemId && byCallId && byItemId !== byCallId) {
+      return { reason: "conflicting special tool call identity" };
+    }
+    const state = byItemId || byCallId;
+    if (!state || !state.kind) return {};
+    if (event.item_id !== state.itemId) {
+      return { reason: "mismatched special tool call item id" };
+    }
+    if (event.call_id !== undefined && event.call_id !== state.callId) {
+      return { reason: "mismatched special tool call call id" };
+    }
+    if (state.closed) return { reason: "special tool call event after close" };
+    return { state };
+  }
+
+  #customDeltaMismatch(state, inputFingerprint) {
+    if (!state.sawArgumentDelta) return undefined;
+    if (
+      state.deltaState.invalid ||
+      !state.deltaState.opened ||
+      !state.deltaState.closed ||
+      state.deltaState.escape
+    ) {
+      return "incomplete custom tool argument delta sequence";
+    }
+    if (state.deltaCharacters !== inputFingerprint.length) {
+      return "custom tool argument deltas disagree with completed input";
+    }
+    const streamed = state.deltaHash.copy().digest();
+    return streamed.equals(inputFingerprint.digest)
+      ? undefined
+      : "custom tool argument deltas disagree with completed input";
+  }
+
+  #closeOutputItem(sourceItem, item) {
+    const byItemId =
+      typeof sourceItem?.id === "string"
+        ? this.#callsByItemId.get(sourceItem.id)
+        : undefined;
+    const byCallId =
+      typeof sourceItem?.call_id === "string"
+        ? this.#callsByCallId.get(sourceItem.call_id)
+        : undefined;
+    if (byItemId && byCallId && byItemId !== byCallId) {
+      return "conflicting special tool call close identity";
+    }
+    const state = byItemId || byCallId;
+    const sourceKind = this.#sourceSpecialCallKind(sourceItem);
+    const outputKind = this.#specialCallKind(item);
+    if (!state) {
+      return this.#registerAtomicOutputItem(sourceItem, item);
+    }
+    if (state.closed) return "duplicate output item close";
+    if (!this.#outputItemMatchesState(sourceItem, item, state)) {
+      return state.kind || sourceKind || outputKind
+        ? "mismatched special tool call close identity"
+        : "mismatched output item close identity";
+    }
+    if (!state.kind) {
+      state.closed = true;
+      return undefined;
+    }
+    if (state.kind === "custom") {
+      if (typeof item.input !== "string") {
+        return "custom tool call input changed before close";
+      }
+      const inputFingerprint = stringFingerprint(item.input);
+      if (
+        state.argumentsDone &&
+        !fingerprintMatches(
+          inputFingerprint,
+          state.finalInputLength,
+          state.finalInputDigest,
+        )
+      ) {
+        return "custom tool call input changed before close";
+      }
+      if (!state.argumentsDone) {
+        const reason = this.#customDeltaMismatch(state, inputFingerprint);
+        if (reason) return reason;
+        state.finalInputLength = inputFingerprint.length;
+        state.finalInputDigest = inputFingerprint.digest;
+      }
+      state.argumentsDone = true;
+      state.deltaHash = undefined;
+      state.deltaState = undefined;
+    }
+    if (state.kind === "tool_search") {
+      const argumentsFingerprint = canonicalJsonFingerprint(item.arguments);
+      if (
+        state.argumentsDone &&
+        !fingerprintMatches(
+          argumentsFingerprint,
+          state.finalArgumentsLength,
+          state.finalArgumentsDigest,
+        )
+      ) {
+        return "tool search arguments changed before close";
+      }
+      state.finalArgumentsLength = argumentsFingerprint.length;
+      state.finalArgumentsDigest = argumentsFingerprint.digest;
+      state.argumentsDone = true;
+    }
+    state.closed = true;
+    return undefined;
+  }
+
+  #validateOutputSummaryItem(sourceItem, item, { allowAtomic = false } = {}) {
+    const byItemId =
+      typeof sourceItem?.id === "string"
+        ? this.#callsByItemId.get(sourceItem.id)
+        : undefined;
+    const byCallId =
+      typeof sourceItem?.call_id === "string"
+        ? this.#callsByCallId.get(sourceItem.call_id)
+        : undefined;
+    if (byItemId && byCallId && byItemId !== byCallId) {
+      return "conflicting special tool call summary identity";
+    }
+    const state = byItemId || byCallId;
+    const sourceKind = this.#sourceSpecialCallKind(sourceItem);
+    const outputKind = this.#specialCallKind(item);
+    if (!state) {
+      if (!allowAtomic) {
+        if (sourceKind || outputKind) {
+          return "special tool call summary without a matching opening";
+        }
+        return this.#registerOrdinaryOutputItem(sourceItem, item, {
+          closed: false,
+          summarySeen: false,
+        });
+      }
+      return this.#registerAtomicOutputItem(sourceItem, item, { summarySeen: true });
+    }
+    if (!state.closed && state.kind) return "special tool call summary before close";
+    if (state.summarySeen) return "duplicate output item summary";
+    if (!this.#outputItemMatchesState(sourceItem, item, state)) {
+      return state.kind || sourceKind || outputKind
+        ? "mismatched special tool call summary identity"
+        : "mismatched output item summary identity";
+    }
+    if (!state.kind) {
+      // Progress snapshots may repeat the same ordinary item while its content
+      // grows. They reserve and validate ownership, but only a terminal output
+      // summary closes and consumes the one allowed summary transition.
+      if (allowAtomic) {
+        state.closed = true;
+        state.summarySeen = true;
+      }
+      return undefined;
+    }
+    if (state.kind === "custom") {
+      if (typeof item.input !== "string") {
+        return "custom tool call summary input changed after close";
+      }
+      const inputFingerprint = stringFingerprint(item.input);
+      if (
+        !fingerprintMatches(
+          inputFingerprint,
+          state.finalInputLength,
+          state.finalInputDigest,
+        )
+      ) {
+        return "custom tool call summary input changed after close";
+      }
+    }
+    if (state.kind === "tool_search") {
+      const argumentsFingerprint = canonicalJsonFingerprint(item.arguments);
+      if (
+        !fingerprintMatches(
+          argumentsFingerprint,
+          state.finalArgumentsLength,
+          state.finalArgumentsDigest,
+        )
+      ) {
+        return "tool search arguments changed after close";
+      }
+    }
+    if (allowAtomic) state.summarySeen = true;
+    return undefined;
+  }
+
+  #validateOutputItems(sourceEvent, event, { allowAtomic = false } = {}) {
+    for (const [sourceOutput, output] of [
+      [sourceEvent?.output, event?.output],
+      [sourceEvent?.response?.output, event?.response?.output],
+    ]) {
+      if (!Array.isArray(sourceOutput) || !Array.isArray(output)) continue;
+      for (let index = 0; index < sourceOutput.length; index += 1) {
+        const reason = this.#validateOutputSummaryItem(sourceOutput[index], output[index], {
+          allowAtomic,
+        });
+        if (reason) return reason;
+      }
+    }
+    return undefined;
+  }
+
+  #rewrittenSseFrame(frame, replacements) {
+    const pieces = [];
+    let cursor = 0;
+    for (const [line, replacement] of [...replacements].sort(
+      ([left], [right]) => left.start - right.start,
+    )) {
+      if (!line) continue;
+      if (line.start > cursor) pieces.push(frame.subarray(cursor, line.start));
+      if (line.parseStart > line.start) {
+        pieces.push(frame.subarray(line.start, line.parseStart));
+      }
+      pieces.push(Buffer.from(replacement, "utf8"));
+      cursor = line.contentEnd;
+    }
+    if (cursor < frame.length) pieces.push(frame.subarray(cursor));
+    return Buffer.concat(pieces);
+  }
+
+  #rewriteSseFrame(frame) {
+    const atStreamStart = this.#sseAtStreamStart;
+    this.#sseAtStreamStart = false;
+    // No decoder is allowed to see an undecided frame. Its replacement
+    // character would make fail-open lossy before we knew whether to rewrite.
+    if (!isUtf8(frame)) {
+      return this.#unsafeSseFrame(frame, "invalid UTF-8");
+    }
+    const { eventLine, dataLine, lineEndingLine, repeated } = this.#sseFields(
+      frame,
+      atStreamStart,
+    );
+    this.#rememberSseLineEnding(frame, lineEndingLine);
+    // SSE formally concatenates multiple data fields and gives repeated event
+    // fields ordering semantics. Rewriting just one field would create bytes
+    // whose EventSource meaning differs from the JSON we inspected. The
+    // Responses wire uses exactly one of each, so anything else is preserved
+    // and disables stateful rewriting for the remainder of this response.
+    if (repeated) {
+      return this.#unsafeSseFrame(frame, "repeated SSE event or data field");
+    }
+    const eventText = eventLine
+      ? frame.subarray(eventLine.parseStart, eventLine.contentEnd).toString("utf8")
+      : undefined;
+    const eventName = eventText === undefined
+      ? undefined
+      : sseLineFieldValue(eventText, "event");
+    const dataTextLine = dataLine
+      ? frame.subarray(dataLine.parseStart, dataLine.contentEnd).toString("utf8")
+      : undefined;
+    const dataText = dataTextLine === undefined
+      ? ""
+      : sseLineFieldValue(dataTextLine, "data");
+    if (!dataLine) return [frame];
     if (!dataText || dataText === "[DONE]") {
-      // Inject before the stream terminator so Codex still executes the calls.
-      if (dataText === "[DONE]" || eventName === "response.done") {
-        return [...this.#drainInterruptBlocks(), block];
+      if (eventName && eventName !== "message") {
+        return this.#unsafeSseFrame(
+          frame,
+          "non-generic SSE event without a matching JSON type",
+        );
       }
-      return [block];
+      // Inject before the stream terminator so Codex still executes the calls.
+      if (dataText === "[DONE]") {
+        if (this.#hasOpenSpecialCalls()) {
+          return this.#unsafeSseFrame(frame, "stream ended before special tool call close");
+        }
+        return [...this.#drainInterruptBlocks(), frame];
+      }
+      return [frame];
+    }
+    if (!jsonIsUnambiguousForRewrite(dataText)) {
+      return this.#unsafeSseFrame(frame, "ambiguous or malformed JSON event");
     }
     try {
       let event = JSON.parse(dataText);
+      const payloadType = event?.type;
+      const genericEventName = !eventName || eventName === "message";
+      if (!genericEventName && payloadType !== eventName) {
+        // The event field and JSON body are two claims about the same Responses
+        // event. Do not choose whichever terminal/rewrite behavior is more
+        // convenient when both claims are present and disagree.
+        return this.#unsafeSseFrame(frame, "conflicting SSE event and JSON type");
+      }
+      if (!embeddedFunctionArgumentsAreUnambiguous(event)) {
+        return this.#unsafeSseFrame(frame, "ambiguous function arguments");
+      }
+      const sourceEvent = event;
       const originalEventType = event?.type;
-      if (
-        !this.#injectOnly &&
-        event?.type === "response.function_call_arguments.delta" &&
-        this.#customItemIds.has(event.item_id)
-      ) {
-        const state = this.#customDeltaStates.get(event.item_id);
-        const delta = state ? customToolInputDelta(state, event.delta) : undefined;
-        if (delta === undefined) return [];
-        event = {
-          ...event,
-          type: "response.custom_tool_call_input.delta",
-          delta,
-        };
+      let changed = false;
+      if (sourceEvent?.type === "response.output_item.added") {
+        const conflict = this.#openingIdentityConflict(sourceEvent.item);
+        if (conflict) return this.#unsafeSseFrame(frame, conflict);
       }
       if (
         !this.#injectOnly &&
-        event?.type === "response.function_call_arguments.done" &&
-        this.#customItemIds.has(event.item_id)
+        (sourceEvent?.type === "response.custom_tool_call_input.delta" ||
+          sourceEvent?.type === "response.custom_tool_call_input.done")
       ) {
-        const input = customToolInput(event.arguments);
-        if (input !== undefined) {
+        const matched = this.#specialCallForArgumentsEvent(sourceEvent);
+        if (matched.reason) return this.#unsafeSseFrame(frame, matched.reason);
+        if (matched.state?.sourceType === "function_call") {
+          return this.#unsafeSseFrame(
+            frame,
+            "native custom input event inside a bridged function lifecycle",
+          );
+        }
+      }
+      if (
+        !this.#injectOnly &&
+        event?.type === "response.function_call_arguments.delta"
+      ) {
+        const matched = this.#specialCallForArgumentsEvent(event);
+        if (matched.reason) return this.#unsafeSseFrame(frame, matched.reason);
+        if (matched.state) {
+          if (matched.state.argumentsDone) {
+            return this.#unsafeSseFrame(frame, "special tool call delta after arguments done");
+          }
+          if (matched.state.kind === "tool_search") {
+            this.#commitSemanticMutation();
+            return [];
+          }
+          matched.state.sawArgumentDelta = true;
+          const delta = customToolInputDelta(matched.state.deltaState, event.delta);
+          if (delta === undefined) {
+            this.#commitSemanticMutation();
+            return [];
+          }
+          matched.state.deltaHash.update(Buffer.from(delta, "utf16le"));
+          matched.state.deltaCharacters += delta.length;
+          event = {
+            ...event,
+            type: "response.custom_tool_call_input.delta",
+            delta,
+          };
+          changed = true;
+        }
+      }
+      if (
+        !this.#injectOnly &&
+        event?.type === "response.function_call_arguments.done"
+      ) {
+        const matched = this.#specialCallForArgumentsEvent(event);
+        if (matched.reason) return this.#unsafeSseFrame(frame, matched.reason);
+        if (matched.state) {
+          if (matched.state.argumentsDone) {
+            return this.#unsafeSseFrame(frame, "duplicate special tool call arguments done");
+          }
+          if (matched.state.kind === "tool_search") {
+            const argumentsObject = toolSearchArguments(event.arguments, false);
+            if (!argumentsObject) {
+              return this.#unsafeSseFrame(frame, "invalid tool search arguments done");
+            }
+            const argumentsFingerprint = canonicalJsonFingerprint(argumentsObject);
+            matched.state.argumentsDone = true;
+            matched.state.finalArgumentsLength = argumentsFingerprint.length;
+            matched.state.finalArgumentsDigest = argumentsFingerprint.digest;
+            this.#commitSemanticMutation();
+            return [];
+          }
+          const input = customToolInput(event.arguments);
+          if (input === undefined) {
+            return this.#unsafeSseFrame(frame, "invalid custom tool arguments done");
+          }
+          const inputFingerprint = stringFingerprint(input);
+          const deltaReason = this.#customDeltaMismatch(
+            matched.state,
+            inputFingerprint,
+          );
+          if (deltaReason) return this.#unsafeSseFrame(frame, deltaReason);
           const { arguments: _arguments, ...rest } = event;
           event = {
             ...rest,
             type: "response.custom_tool_call_input.done",
             input,
           };
+          matched.state.argumentsDone = true;
+          matched.state.finalInputLength = inputFingerprint.length;
+          matched.state.finalInputDigest = inputFingerprint.digest;
+          matched.state.deltaHash = undefined;
+          matched.state.deltaState = undefined;
+          changed = true;
         }
       }
       if (!this.#injectOnly) {
         const next = rewriteNamespaceResponsePayload(event, this.#lookups, this.#sessionModel);
-        if (next) event = next;
+        if (next) {
+          event = next;
+          changed = true;
+        }
       }
-      if (
-        event?.type === "response.output_item.added" &&
-        event.item?.type === "custom_tool_call" &&
-        typeof event.item.id === "string"
-      ) {
-        this.#customItemIds.add(event.item.id);
-        this.#customDeltaStates.set(event.item.id, {
-          opening: "",
-          opened: false,
-          escape: "",
-          closed: false,
-          invalid: false,
-        });
+      if (sourceEvent?.type === "response.output_item.added") {
+        const reason = this.#registerCall(sourceEvent.item, event.item);
+        if (reason) return this.#unsafeSseFrame(frame, reason);
       }
-      if (
-        event?.type === "response.output_item.done" &&
-        event.item?.type === "custom_tool_call" &&
-        typeof event.item.id === "string"
-      ) {
-        this.#customItemIds.delete(event.item.id);
-        this.#customDeltaStates.delete(event.item.id);
+      if (sourceEvent?.type === "response.output_item.done") {
+        const reason = this.#closeOutputItem(sourceEvent.item, event.item);
+        if (reason) return this.#unsafeSseFrame(frame, reason);
+      }
+      const terminalEvent =
+        event?.type === "response.completed" ||
+        event?.type === "response.done" ||
+        eventName === "response.completed" ||
+        eventName === "response.done";
+      const summaryReason = this.#validateOutputItems(sourceEvent, event, {
+        allowAtomic: terminalEvent,
+      });
+      if (summaryReason) return this.#unsafeSseFrame(frame, summaryReason);
+      if (terminalEvent) {
+        if (this.#hasOpenSpecialCalls()) {
+          return this.#unsafeSseFrame(frame, "terminal event before special tool call close");
+        }
       }
       this.#observeEvent(event);
-      const rebuilt = [...lines];
-      const eventLineIndex = rebuilt.findIndex((line) => line.startsWith("event:"));
+      const replacements = [];
       if (
-        eventLineIndex !== -1 &&
+        eventLine &&
         typeof event?.type === "string" &&
         event.type !== originalEventType
       ) {
-        rebuilt[eventLineIndex] = `event: ${event.type}`;
+        replacements.push([eventLine, `event: ${event.type}`]);
       }
-      rebuilt[dataLineIndex] = `data: ${JSON.stringify(event)}`;
       // Inject finished-child interrupts before the response closes so Codex
       // still executes them as ordinary tool calls in this turn.
       if (event?.type === "response.completed" || eventName === "response.completed") {
         const interruptBlocks = this.#drainInterruptBlocks();
         const withOutput = this.#mergeInjectedIntoCompleted(event);
-        // Nothing injected and nothing rewritten: the event goes out as it
-        // came in, not as a JSON round-trip of itself.
-        if (this.#injectOnly && !interruptBlocks.length && withOutput === event) {
-          return [block];
+        if (withOutput !== event) {
+          event = withOutput;
+          changed = true;
         }
-        rebuilt[dataLineIndex] = `data: ${JSON.stringify(withOutput)}`;
-        return [...interruptBlocks, rebuilt.join("\n")];
+        if (!changed) return [...interruptBlocks, frame];
+        this.#commitSemanticMutation();
+        replacements.push([dataLine, `data: ${JSON.stringify(event)}`]);
+        return [
+          ...interruptBlocks,
+          this.#rewrittenSseFrame(frame, replacements),
+        ];
       }
       if (event?.type === "response.done" || eventName === "response.done") {
         const interruptBlocks = this.#drainInterruptBlocks();
-        if (this.#injectOnly) return [...interruptBlocks, block];
-        return [...interruptBlocks, rebuilt.join("\n")];
+        if (!changed) return [...interruptBlocks, frame];
+        this.#commitSemanticMutation();
+        replacements.push([dataLine, `data: ${JSON.stringify(event)}`]);
+        return [
+          ...interruptBlocks,
+          this.#rewrittenSseFrame(frame, replacements),
+        ];
       }
-      if (this.#injectOnly) return [block];
-      return [rebuilt.join("\n")];
-    } catch {
-      return [block];
+      if (!changed) return [frame];
+      this.#commitSemanticMutation();
+      replacements.push([dataLine, `data: ${JSON.stringify(event)}`]);
+      return [this.#rewrittenSseFrame(frame, replacements)];
+    } catch (error) {
+      if (error instanceof NamespaceRelayCommittedStreamError) throw error;
+      return this.#unsafeSseFrame(frame, "event rewrite failure");
     }
   }
 
@@ -2103,6 +3511,7 @@ export class NamespaceToolCallTransform extends Transform {
       this.#lastInjectedCalls = [];
       return [];
     }
+    this.#commitSemanticMutation();
     const blocks = [];
     const injectedCalls = [];
     for (const target of remaining) {
@@ -2136,12 +3545,24 @@ export class NamespaceToolCallTransform extends Transform {
           arguments: call.arguments,
         },
       };
-      blocks.push(formatSseBlock("response.output_item.added", added).trimEnd() + "\n");
-      blocks.push(formatSseBlock("response.output_item.done", done).trimEnd() + "\n");
+      blocks.push(
+        Buffer.from(
+          `event: response.output_item.added${this.#sseLineEnding}` +
+            `data: ${JSON.stringify(added)}${this.#sseLineEnding}${this.#sseLineEnding}`,
+          "utf8",
+        ),
+      );
+      blocks.push(
+        Buffer.from(
+          `event: response.output_item.done${this.#sseLineEnding}` +
+            `data: ${JSON.stringify(done)}${this.#sseLineEnding}${this.#sseLineEnding}`,
+          "utf8",
+        ),
+      );
     }
     this.#lastInjectedCalls = injectedCalls;
     this.#injectionsDone = true;
-    return blocks.map((block) => block.replace(/\n$/, ""));
+    return blocks;
   }
 
   #mergeInjectedIntoCompleted(event) {
