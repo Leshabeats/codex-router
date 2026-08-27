@@ -191,9 +191,15 @@ function completeWindowsPrivateWorkerLine(worker, line) {
 }
 
 function startWindowsPrivateWorker() {
+  // Keep the worker program out of Windows command-line re-parsing. The
+  // request protocol owns stdin for its entire lifetime, so `-Command -`
+  // cannot be used here; an encoded UTF-16LE command gives PowerShell the
+  // complete program while leaving the stdin pipe exclusively to the bounded
+  // base64 request stream.
+  const encodedWorker = Buffer.from(powershellPrivateWorkerScript(), "utf16le").toString("base64");
   const child = spawn(
     "powershell.exe",
-    ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", powershellPrivateWorkerScript()],
+    ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encodedWorker],
     {
       env: windowsWorkerEnvironment(),
       stdio: ["pipe", "pipe", "pipe"],

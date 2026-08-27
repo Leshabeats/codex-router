@@ -20,11 +20,17 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 test("Windows CI runs every ACL test without parallel PowerShell worker starvation", () => {
   const workflow = readFileSync(path.join(root, ".github", "workflows", "ci.yml"), "utf8");
+  const implementation = readFileSync(path.join(root, "src", "file-security.mjs"), "utf8");
   assert.match(workflow, /if: runner\.os != 'Windows'\s+run: npm test/);
   assert.match(
     workflow,
     /if: runner\.os == 'Windows'\s+run: npm test -- --test-concurrency=1/,
   );
+  assert.match(
+    implementation,
+    /Buffer\.from\(powershellPrivateWorkerScript\(\), "utf16le"\)/,
+  );
+  assert.match(implementation, /"-EncodedCommand", encodedWorker/);
 });
 
 test("private JSON state uses one owner-only atomic writer", () => {
