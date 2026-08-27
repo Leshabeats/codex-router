@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import http from "node:http";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { openPort } from "./port-pool.mjs";
+import { credentialFingerprint, ROUTE_RECHECK_MS } from "../src/commandcode-plan.mjs";
+import { upsertProviderApiKey } from "../src/provider-api-key-pool.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const internalKey = "test-commandcode-internal-service-key-with-length";
@@ -323,7 +325,123 @@ test("pooled Command Code failover uses the winning key for its plan route", asy
     assert.equal(calls[2].authorization, calls[1].authorization);
     assert.equal(calls[2].url, "/alpha/generate");
     const plan = JSON.parse(readFileSync(path.join(stateDir, "commandcode-plan.json"), "utf8"));
-    assert.ok(plan.commandcode.credential, "the winning credential fingerprint is retained");
+    assert.equal(
+      plan.commandcode.credential,
+      credentialFingerprint(calls[1].authorization.replace(/^Bearer /, "")),
+      "the exact winning credential fingerprint is retained",
+    );
+  } finally {
+    if (child.exitCode === null) {
+      child.kill("SIGTERM");
+      await new Promise((resolve) => child.once("exit", resolve));
+    }
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(stateDir, { recursive: true, force: true });
+    rmSync(cliHome, { recursive: true, force: true });
+  }
+});
+
+test("pooled Command Code recheck success is cached against the exact winning key", async () => {
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "commandcode-forwarder-recheck-state-"));
+  const cliHome = mkdtempSync(path.join(os.tmpdir(), "commandcode-forwarder-recheck-home-"));
+  const credentialStorePath = path.join(stateDir, "provider-credentials.json");
+  const poolStatePath = path.join(stateDir, "provider-api-key-pools.json");
+  for (const name of ["COMMAND_CODE_API_KEY", "COMMANDCODE_API_KEY"]) {
+    execFileSync(process.execPath, [
+      path.join(root, "src", "control.mjs"),
+      "key-pool",
+      "commandcode",
+      "add-env",
+      name,
+    ], {
+      cwd: root,
+      env: {
+        ...process.env,
+        MODEL_ROUTER_TARGET: "codex",
+        MODEL_ROUTER_STATE_DIR: stateDir,
+        MODEL_ROUTER_PROVIDER_CREDENTIAL_STORE: credentialStorePath,
+        MODEL_ROUTER_API_KEY_POOL_PATH: poolStatePath,
+      },
+      stdio: "ignore",
+    });
+  }
+  const references = JSON.parse(readFileSync(credentialStorePath, "utf8")).credentials;
+  const firstId = references.find((entry) => entry.secretRef.name === "COMMAND_CODE_API_KEY").id;
+  const secondId = references.find((entry) => entry.secretRef.name === "COMMANDCODE_API_KEY").id;
+  await upsertProviderApiKey("commandcode", { id: firstId, priority: 2 }, { filePath: poolStatePath });
+  await upsertProviderApiKey("commandcode", { id: secondId, priority: 1 }, { filePath: poolStatePath });
+  const planPath = path.join(stateDir, "commandcode-plan.json");
+  writeFileSync(planPath, `${JSON.stringify({
+    commandcode: {
+      credential: credentialFingerprint("POOL_B"),
+      providerApi: false,
+      observedAt: new Date(Date.now() - ROUTE_RECHECK_MS - 1_000).toISOString(),
+    },
+  }, null, 2)}\n`, { mode: 0o600 });
+
+  const upstreamPort = await openPort();
+  const forwarderPort = await openPort();
+  const authorizations = [];
+  const server = http.createServer((request, response) => {
+    const authorization = request.headers.authorization;
+    authorizations.push(authorization);
+    request.resume();
+    request.on("end", () => {
+      if (authorization === "Bearer POOL_A") {
+        response.writeHead(429, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ error: { message: "rate limited" } }));
+        return;
+      }
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({
+        id: "chatcmpl_commandcode_pool_recheck",
+        object: "chat.completion",
+        model: "deepseek/deepseek-v4-flash",
+        choices: [{ index: 0, message: { role: "assistant", content: "WINNER_B" }, finish_reason: "stop" }],
+      }));
+    });
+  });
+  await listen(server, upstreamPort);
+  const child = spawn(process.execPath, [path.join(root, "src", "api-forwarder.mjs")], {
+    cwd: root,
+    env: {
+      ...process.env,
+      MODEL_ROUTER_TARGET: "codex",
+      MODEL_ROUTER_INTERNAL_KEY: internalKey,
+      MODEL_ROUTER_API_PORT: String(forwarderPort),
+      MODEL_ROUTER_STATE_DIR: stateDir,
+      MODEL_ROUTER_PROVIDER_CREDENTIAL_STORE: credentialStorePath,
+      MODEL_ROUTER_API_KEY_POOL_PATH: poolStatePath,
+      MODEL_ROUTER_QUIET: "1",
+      COMMANDCODE_BASE_URL: `http://127.0.0.1:${upstreamPort}/provider/v1`,
+      COMMAND_CODE_API_KEY: "POOL_A",
+      COMMANDCODE_API_KEY: "POOL_B",
+      COMMANDCODE_CLI_HOME: cliHome,
+    },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  child.stderr.setEncoding("utf8");
+  let stderr = "";
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const base = `http://127.0.0.1:${forwarderPort}`;
+  const headers = { Authorization: `Bearer ${internalKey}`, "Content-Type": "application/json" };
+  try {
+    await waitForHealth(base, headers, child, () => stderr);
+    const response = await fetch(`${base}/v1/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: "commandcode-deepseek-v4-flash",
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).choices[0].message.content, "WINNER_B");
+    assert.deepEqual(authorizations, ["Bearer POOL_A", "Bearer POOL_B"]);
+    const plan = JSON.parse(readFileSync(planPath, "utf8"));
+    assert.equal(plan.commandcode.providerApi, true);
+    assert.equal(plan.commandcode.credential, credentialFingerprint("POOL_B"));
+    assert.notEqual(plan.commandcode.credential, credentialFingerprint("POOL_A"));
   } finally {
     if (child.exitCode === null) {
       child.kill("SIGTERM");

@@ -38,6 +38,7 @@ import {
   redactCredentialText,
 } from "./provider-credential-store.mjs";
 import { providerApiKeyPoolsSnapshot } from "./provider-api-key-pool.mjs";
+import { resolveStoredCredential } from "./provider-api-key-routing.mjs";
 
 function runJson(script, args = []) {
   const result = spawnSync(
@@ -218,7 +219,12 @@ export function createSupportBundle(options = {}) {
     service: runJson("service.mjs", ["status"]),
     selection,
     credentialSources,
-    apiKeyPools: providerApiKeyPoolsSnapshot(),
+    apiKeyPools: providerApiKeyPoolsSnapshot({
+      resolveCredential: (providerId, credentialId) => {
+        const provider = PROVIDERS.get(providerId);
+        return provider ? resolveStoredCredential(provider, credentialId) : undefined;
+      },
+    }),
     ownership: detectLegacyInstallations(),
     install: sharableInstallManifest(),
     files: {

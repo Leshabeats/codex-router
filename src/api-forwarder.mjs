@@ -976,11 +976,15 @@ function recordUpstreamLimits(normalized, upstream) {
 
 function healthPayload() {
   const providers = {};
+  let ok = true;
   const enabled = new Set(readProviderSelection());
   for (const provider of PROVIDERS.values()) {
     if (provider.kind !== "openai-compatible" || !enabled.has(provider.id)) continue;
     const status = credentialStatus(provider);
-    const pool = providerApiKeyPoolStatus(provider.id);
+    const pool = providerApiKeyPoolStatus(provider.id, {
+      resolveCredential: (credentialId) => resolveStoredCredential(provider, credentialId),
+    });
+    if (pool.configured && (!pool.valid || pool.readiness?.usable !== true)) ok = false;
     providers[provider.id] = {
       credential_present: status.configured,
       ...(status.configured
@@ -991,13 +995,17 @@ function healthPayload() {
             api_key_pool: {
               configured: true,
               valid: pool.valid,
-              credential_count: pool.valid ? Object.keys(pool.pool?.credentials || {}).length : 0,
+              usable: pool.readiness?.usable === true,
+              reason: pool.readiness?.reason || "invalid_pool_state",
+              credential_count: pool.readiness?.credentialCount || 0,
+              eligible_credential_count: pool.readiness?.eligibleCredentialCount || 0,
+              resolvable_credential_count: pool.readiness?.resolvableCredentialCount || 0,
             },
           }
         : {}),
     };
   }
-  return { ok: true, service: "codex-router-api-forwarder", providers };
+  return { ok, service: "codex-router-api-forwarder", providers };
 }
 
 function localModels(response) {
@@ -1019,7 +1027,8 @@ async function handleRequest(request, response) {
   );
   if (!requireInternalAuth(request, response, INTERNAL_KEY)) return;
   if (request.method === "GET" && requestUrl.pathname === "/health") {
-    writeJson(response, 200, healthPayload());
+    const health = healthPayload();
+    writeJson(response, health.ok ? 200 : 503, health);
     return;
   }
 
@@ -1085,13 +1094,14 @@ async function handleRequest(request, response) {
   // its customers buy. The CLI's own route serves those plans, so an account
   // already known to be refused goes straight there rather than paying a 403
   // for the privilege of finding out again.
+  let routedCredentialValue = credential.value;
   let commandCode = isCommandCodeProvider(normalized.provider)
     ? (() => {
         const id = canonicalProviderId(normalized.provider.id);
-        return { id, ...commandCodeRoute(id, credential.value) };
+        return { id, ...commandCodeRoute(id, routedCredentialValue) };
       })()
     : undefined;
-  const relayThroughPlan = async (apiKey = credential.value, { recordOutcome = true } = {}) => {
+  const relayThroughPlan = async (apiKey = routedCredentialValue, { recordOutcome = true } = {}) => {
     const outcome = await relayCommandCodeGenerate({
       payload: normalized.payload,
       model: normalized.model,
@@ -1213,7 +1223,13 @@ async function handleRequest(request, response) {
       },
     });
     const result = pooled.result;
-    if (pooled.committed || result?.committed) return;
+    if (pooled.committed || result?.committed) {
+      // A committed attempt owns the response even when its relay throws. Let
+      // the server-level error path terminate that existing stream; falling
+      // through would try to create a second JSON response after its head.
+      if (pooled.error) throw pooled.error;
+      return;
+    }
     if (!result || (result.response === undefined && result.bodyText === undefined)) {
       writeJson(response, 503, {
         error: {
@@ -1227,7 +1243,8 @@ async function handleRequest(request, response) {
     target = result.target;
     if (isCommandCodeProvider(normalized.provider) && pooled.credentialValue) {
       const id = canonicalProviderId(normalized.provider.id);
-      commandCode = { id, ...commandCodeRoute(id, pooled.credentialValue) };
+      routedCredentialValue = pooled.credentialValue;
+      commandCode = { id, ...commandCodeRoute(id, routedCredentialValue) };
     }
     upstream = result.response || new Response(result.bodyText || "", {
       status: result.status,
@@ -1296,7 +1313,7 @@ async function handleRequest(request, response) {
       refusal = undefined;
     }
     if (isUpgradeRequired(upstream.status, refusal)) {
-      recordCommandCodeRoute(commandCode.id, credential.value, { providerApi: false });
+      recordCommandCodeRoute(commandCode.id, routedCredentialValue, { providerApi: false });
       await relayThroughPlan();
       return;
     }
@@ -1316,7 +1333,7 @@ async function handleRequest(request, response) {
   // re-check window came due, so a healthy Provider-plan account never rewrites
   // this state once per turn to repeat what it already said.
   if (commandCode?.recheck && upstream.ok) {
-    recordCommandCodeRoute(commandCode.id, credential.value, { providerApi: true });
+    recordCommandCodeRoute(commandCode.id, routedCredentialValue, { providerApi: true });
   }
   const upstreamContentType = upstream.headers.get("content-type") || "";
   const responsesStream = normalized.responseAdapter === "responses" &&

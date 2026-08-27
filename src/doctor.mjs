@@ -49,6 +49,7 @@ import {
 import { discoveryDisabled } from "./discovery-mode.mjs";
 import { credentialLabel, credentialStatus } from "./provider-credentials.mjs";
 import { providerApiKeyPoolsSnapshot } from "./provider-api-key-pool.mjs";
+import { resolveStoredCredential } from "./provider-api-key-routing.mjs";
 import { providerNeedsCuration } from "./provider-onboarding.mjs";
 import { stateOwnershipStatus } from "./state-owner.mjs";
 import {
@@ -845,18 +846,31 @@ if (!credentialDiscoveryOff) {
   );
 }
 
-const apiKeyPools = providerApiKeyPoolsSnapshot();
+const apiKeyPools = providerApiKeyPoolsSnapshot({
+  resolveCredential: (providerId, credentialId) => {
+    const provider = PROVIDERS.get(providerId);
+    return provider ? resolveStoredCredential(provider, credentialId) : undefined;
+  },
+});
 if (apiKeyPools.configured) {
   const poolCount = Object.keys(apiKeyPools.providers).length;
   const credentialCount = Object.values(apiKeyPools.providers)
     .reduce((total, pool) => total + pool.credentials.length, 0);
+  const unusable = Object.entries(apiKeyPools.providers)
+    .filter(([, pool]) => pool.readiness?.usable !== true)
+    .map(([providerId, pool]) => `${providerId} (${pool.readiness?.reason || "invalid_pool_state"})`);
+  const unusableDetail = unusable.length > 8
+    ? `${unusable.slice(0, 8).join(", ")}, and ${unusable.length - 8} more`
+    : unusable.join(", ");
   add(
-    apiKeyPools.valid ? "ok" : "fail",
+    apiKeyPools.valid && apiKeyPools.usable ? "ok" : "fail",
     "Provider API-key pools",
-    apiKeyPools.valid
+    apiKeyPools.valid && apiKeyPools.usable
       ? `${poolCount} pool(s), ${credentialCount} credential reference(s)`
-      : "authoritative pool state is invalid; provider fallback is disabled",
-    "Inspect or remove the invalid provider-api-key-pools.json state before retrying.",
+      : apiKeyPools.valid
+        ? `authoritative pool unavailable: ${unusableDetail}; provider fallback is disabled`
+        : "authoritative pool state is invalid; provider fallback is disabled",
+    "Restore an eligible resolvable credential, or delete the pool to return to the legacy single-key path.",
   );
 }
 
