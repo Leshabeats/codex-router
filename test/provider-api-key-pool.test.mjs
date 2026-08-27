@@ -18,7 +18,6 @@ const {
   getProviderApiKeyPool,
   isRetryableProviderApiKeyFailure,
   providerApiKeyPoolStatus,
-  providerApiKeySecretRefIdentity,
   readProviderApiKeyPoolState,
   recordProviderApiKeyOutcome,
   runProviderApiKeyAttempts,
@@ -29,10 +28,8 @@ const {
   upsertProviderApiKey,
 } = await import("../src/provider-api-key-pool.mjs");
 
-const ref = (id) => ({ type: "opaque", id: `ref_${id}_12345678` });
 const credential = (id, secret, patch = {}) => ({
   id: `cred_${id}_12345678`,
-  secretRef: ref(id),
   ...patch,
   _secret: secret,
 });
@@ -47,7 +44,7 @@ test.after(() => rmSync(root, { recursive: true, force: true }));
 test("an absent pool explicitly permits the legacy single-key path", async () => {
   const result = await selectProviderApiKey("openrouter", {
     filePath: path.join(root, "absent.json"),
-    resolveSecret: () => "unused",
+    resolveCredential: () => "unused",
   });
   assert.equal(result.configured, false);
   assert.equal(result.fallbackAllowed, true);
@@ -59,7 +56,7 @@ test("a configured pool is authoritative and never falls back when empty or inva
   await setProviderApiKeyPaused("openrouter", "cred_one_12345678", true, { filePath: emptyPath });
   const empty = await selectProviderApiKey("openrouter", {
     filePath: emptyPath,
-    resolveSecret: () => undefined,
+    resolveCredential: () => undefined,
   });
   assert.equal(empty.configured, true);
   assert.equal(empty.credentialId, null);
@@ -70,30 +67,9 @@ test("a configured pool is authoritative and never falls back when empty or inva
   const invalid = providerApiKeyPoolStatus("openrouter", { filePath: invalidPath });
   assert.equal(invalid.configured, true);
   assert.equal(invalid.valid, false);
-  const selected = await selectProviderApiKey("openrouter", { filePath: invalidPath, resolveSecret: () => "LEGACY" });
+  const selected = await selectProviderApiKey("openrouter", { filePath: invalidPath, resolveCredential: () => "LEGACY" });
   assert.equal(selected.reason, "invalid_pool_state");
   assert.equal(selected.fallbackAllowed, false);
-});
-
-test("duplicate secret references are rejected rather than selecting one arbitrarily", async () => {
-  const filePath = path.join(root, "duplicates.json");
-  const first = metadata({
-    ...credential("first", "A"),
-    secretRef: { type: "provider-file", name: "openrouter-api-key.secret" },
-  });
-  const second = metadata({
-    ...credential("second", "B"),
-    secretRef: { ...first.secretRef, providerId: "openrouter" },
-  });
-  await upsertProviderApiKey("openrouter", first, { filePath });
-  await assert.rejects(
-    upsertProviderApiKey("openrouter", second, { filePath }),
-    /already contains this secret reference/,
-  );
-  assert.equal(
-    providerApiKeySecretRefIdentity(first.secretRef, "openrouter"),
-    providerApiKeySecretRefIdentity(second.secretRef, "openrouter"),
-  );
 });
 
 test("resolution refuses duplicate secret values even when references differ", async () => {
@@ -102,7 +78,7 @@ test("resolution refuses duplicate secret values even when references differ", a
   await upsertProviderApiKey("openrouter", metadata(credential("second", "SAME")), { filePath });
   const result = await selectProviderApiKey("openrouter", {
     filePath,
-    resolveSecret: () => "SAME",
+    resolveCredential: () => "SAME",
   });
   assert.equal(result.credentialId, null);
   assert.equal(result.reason, "duplicate_secret_reference");
@@ -114,13 +90,13 @@ test("quota and round-robin selection never returns the secret value in metadata
   await upsertProviderApiKey("openrouter", metadata(credential("high", "HIGH", { priority: 2, quota: { limit: 100, remaining: 90 } })), { filePath });
   const result = await selectProviderApiKey("openrouter", {
     filePath,
-    resolveSecret: ({ id }) => id.includes("high") ? "HIGH" : "LOW",
+    resolveCredential: (id) => id.includes("high") ? "HIGH" : "LOW",
     now: NOW,
   });
   assert.equal(result.credentialId, "cred_high_12345678");
   assert.equal(result.credentialValue, "HIGH");
   const snapshot = getProviderApiKeyPool("openrouter", { filePath, now: NOW });
-  assert.equal(snapshot.credentials[0].secretRef.type, "opaque");
+  assert.equal(snapshot.credentials[0].id.startsWith("cred_"), true);
   assert.doesNotMatch(readFileSync(filePath, "utf8"), /HIGH|LOW/);
 });
 
@@ -140,7 +116,7 @@ test("ordinary 400 and 404 responses do not disable a key", async () => {
   }
   const selected = await selectProviderApiKey("openrouter", {
     filePath,
-    resolveSecret: () => "ORDINARY",
+    resolveCredential: () => "ORDINARY",
     now: NOW,
   });
   assert.equal(selected.credentialId, entry.id);
@@ -182,11 +158,11 @@ test("runProviderApiKeyAttempts retries before relay and stops after relay begin
   const second = metadata(credential("second", "SECOND", { priority: 1 }));
   await upsertProviderApiKey("openrouter", first, { filePath });
   await upsertProviderApiKey("openrouter", second, { filePath });
-  const secrets = new Map([[first.secretRef.id, "FIRST"], [second.secretRef.id, "SECOND"]]);
+  const secrets = new Map([[first.id, "FIRST"], [second.id, "SECOND"]]);
   let calls = 0;
   const recovered = await runProviderApiKeyAttempts("openrouter", {
     filePath,
-    resolveSecret: ({ id }) => secrets.get(id),
+    resolveCredential: (id) => secrets.get(id),
     send: async ({ apiKey }) => {
       calls += 1;
       return apiKey === "FIRST"
@@ -204,7 +180,7 @@ test("runProviderApiKeyAttempts retries before relay and stops after relay begin
   let lateCalls = 0;
   const late = await runProviderApiKeyAttempts("openrouter", {
     filePath: latePath,
-    resolveSecret: () => "LATE",
+    resolveCredential: () => "LATE",
     send: async () => {
       lateCalls += 1;
       return { status: 401, ok: false, committed: true };
@@ -224,7 +200,7 @@ test("duplicate resolved secrets remain blocked after a failed candidate is excl
   await upsertProviderApiKey("openrouter", second, { filePath });
   const result = await runProviderApiKeyAttempts("openrouter", {
     filePath,
-    resolveSecret: () => "SAME",
+    resolveCredential: () => "SAME",
     send: async () => ({ status: 401, ok: false, committed: false }),
     now: () => NOW,
   });
@@ -239,7 +215,7 @@ test("lock serializes concurrent state updates and preserves every session turn"
   const results = await Promise.all(Array.from({ length: 12 }, () => selectProviderApiKeyLocked("openrouter", {
     filePath,
     sessionId: "session-1",
-    resolveSecret: () => "CONCURRENT",
+    resolveCredential: () => "CONCURRENT",
     now: NOW,
   })));
   assert.equal(new Set(results.map((result) => result.credentialId)).size, 1);

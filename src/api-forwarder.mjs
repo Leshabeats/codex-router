@@ -30,7 +30,6 @@ import { stripImages, supportsImageInput } from "./vision-bridge.mjs";
 import {
   credentialLabel,
   credentialStatus,
-  resolveProviderCredentialReference,
 } from "./provider-credentials.mjs";
 import {
   ensureFreshGitHubCopilotSession,
@@ -54,6 +53,7 @@ import { threadIdFromHeaders } from "./codex-session-names.mjs";
 import {
   recordProviderApiKeyRequestOutcome,
   resolveProviderApiKeyForRequest,
+  resolveStoredCredential,
 } from "./provider-api-key-routing.mjs";
 import { runProviderApiKeyAttempts } from "./provider-api-key-pool.mjs";
 
@@ -1121,11 +1121,8 @@ async function handleRequest(request, response) {
   if (poolRouting.pooled) {
     const pooled = await runProviderApiKeyAttempts(normalized.endpoint.id, {
       filePath: undefined,
-      resolveSecret: (reference) =>
-        // The first selection already resolved this reference. The resolver
-        // is repeated only for a pre-commit failover candidate and remains
-        // constrained by the provider's registry-declared sources.
-        resolveProviderCredentialReference(normalized.endpoint, reference),
+      resolveCredential: (credentialId) =>
+        resolveStoredCredential(normalized.endpoint, credentialId),
       initialSelection: poolRouting.selection,
       sessionId: threadIdFromHeaders(request.headers),
       isResponseCommitted: () => response.headersSent || response.writableEnded || response.writableFinished,

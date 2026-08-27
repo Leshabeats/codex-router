@@ -22,7 +22,6 @@ export const PROVIDER_API_KEY_POOL_PATH_DEFAULT = PROVIDER_API_KEY_POOL_PATH;
 
 const PROVIDER_ID = /^[a-z0-9][a-z0-9-]{0,99}$/;
 const CREDENTIAL_ID = /^cred_[A-Za-z0-9_-]{8,96}$/;
-const REFERENCE_ID = /^ref_[A-Za-z0-9_-]{8,128}$/;
 const SESSION_ID_LIMIT = 256;
 const MAX_PROVIDERS = 128;
 const MAX_CREDENTIALS = 256;
@@ -129,46 +128,6 @@ function assertAllowedKeys(value, allowed, context) {
   }
 }
 
-export function normalizeProviderApiKeySecretRef(value) {
-  if (!record(value)) {
-    throw new Error("secretRef must be a reference object.");
-  }
-  assertAllowedKeys(value, new Set(["type", "id", "name", "service", "providerId"]), "secretRef");
-  const type = text(value.type, "secretRef.type", { max: 32, required: true });
-  if (!["opaque", "provider-file", "keychain", "environment"].includes(type)) {
-    throw new Error("secretRef.type is unsupported.");
-  }
-  if (type === "opaque") {
-    if (value.name !== undefined || value.service !== undefined || value.providerId !== undefined) {
-      throw new Error("Opaque secret references may only contain type and id.");
-    }
-    const id = text(value.id, "secretRef.id", { max: 140, required: true });
-    if (!REFERENCE_ID.test(id)) throw new Error("secretRef.id is invalid.");
-    return { type, id };
-  }
-  if (value.id !== undefined) throw new Error(`${type} secret references do not accept id.`);
-  const providerIdValue = value.providerId === undefined
-    ? undefined
-    : text(value.providerId, "secretRef.providerId", { max: 100, required: true });
-  if (type === "keychain") {
-    if (value.name !== undefined) throw new Error("Keychain references use service.");
-    const service = text(value.service, "secretRef.service", { max: 200, required: true });
-    return { type, service, ...(providerIdValue ? { providerId: providerIdValue } : {}) };
-  }
-  if (value.service !== undefined) throw new Error(`${type} references use name.`);
-  const name = text(value.name, "secretRef.name", { max: 200, required: true });
-  return { type, name, ...(providerIdValue ? { providerId: providerIdValue } : {}) };
-}
-
-export function providerApiKeySecretRefIdentity(value, providerScope) {
-  const ref = normalizeProviderApiKeySecretRef(value);
-  const source = ref.id || ref.name || ref.service;
-  const scope = providerScope === undefined
-    ? ref.providerId || ""
-    : providerId(providerScope);
-  return `${scope}:${ref.type}:${source}`;
-}
-
 function normalizeQuota(value) {
   if (!record(value)) return undefined;
   assertAllowedKeys(value, new Set(["limit", "remaining", "used", "resetAt", "observedAt"]), "quota");
@@ -220,14 +179,13 @@ function normalizeCredential(value, provider, now = Date.now()) {
   if (!record(value)) throw new Error("Each pool credential must be an object.");
   assertAllowedKeys(
     value,
-    new Set(["id", "providerId", "secretRef", "state", "paused", "priority", "quota", "health", "requestCount", "tokenCount"]),
+    new Set(["id", "providerId", "state", "paused", "priority", "quota", "health", "requestCount", "tokenCount"]),
     "pool credential",
   );
   const id = credentialId(value.id);
   if (value.providerId !== undefined && providerId(value.providerId) !== provider) {
     throw new Error(`Credential ${id} belongs to a different provider.`);
   }
-  const secretRef = normalizeProviderApiKeySecretRef(value.secretRef);
   const state = ["active", "paused", "revoked"].includes(value.state)
     ? value.state
     : "active";
@@ -237,7 +195,6 @@ function normalizeCredential(value, provider, now = Date.now()) {
   const result = {
     id,
     providerId: provider,
-    secretRef,
     state,
     paused: value.paused === true,
     priority,
@@ -315,12 +272,8 @@ function normalizePool(value, provider, now = Date.now()) {
     : record(source.credentials)
       ? Object.entries(source.credentials)
       : (() => { throw new Error(`${provider} credentials must be an object.`); })();
-  const refs = new Set();
   for (const [id, raw] of credentials.slice(0, MAX_CREDENTIALS)) {
     const normalized = normalizeCredential({ ...(record(raw) ? raw : {}), id }, provider, now);
-    const refIdentity = providerApiKeySecretRefIdentity(normalized.secretRef, provider);
-    if (refs.has(refIdentity)) throw new Error(`Provider ${provider} contains duplicate secret references.`);
-    refs.add(refIdentity);
     result.credentials[normalized.id] = normalized;
   }
   const sessions = source.sessions === undefined
@@ -391,7 +344,6 @@ export function sanitizeProviderApiKeyPoolCredential(value) {
   return {
     id: value.id,
     providerId: value.providerId,
-    secretRef: { ...value.secretRef },
     state: value.state,
     paused: value.paused === true,
     priority: value.priority,
@@ -499,13 +451,13 @@ function duplicateResolvedSecrets(entries) {
   return false;
 }
 
-async function resolvedCandidates(pool, { resolveSecret, now, exclude }) {
-  if (typeof resolveSecret !== "function") return { entries: [], reason: "secret_resolver_required" };
+async function resolvedCandidates(pool, { resolveCredential, now, exclude }) {
+  if (typeof resolveCredential !== "function") return { entries: [], reason: "credential_resolver_required" };
   const entries = [];
   for (const meta of eligibleMeta(pool, now)) {
     let resolved;
     try {
-      resolved = await resolveSecret({ ...meta.secretRef });
+      resolved = await resolveCredential(meta.id);
     } catch {
       resolved = undefined;
     }
@@ -528,7 +480,6 @@ function selectedResult(provider, pool, selected, value, session, rebound = fals
     valid: true,
     providerId: provider,
     credentialId: selected?.id || null,
-    credentialRef: selected ? { ...selected.secretRef } : undefined,
     credentialValue: value,
     reason: selected ? (rebound ? "rebound" : session ? "sticky" : "selected") : "no_eligible_credentials",
     strategy: pool.policy.strategy,
@@ -550,7 +501,7 @@ async function selectFromState(providerOrId, options = {}) {
   }
   const excluded = new Set((options.excludeCredentialIds || []).map((id) => credentialId(id)));
   const resolved = await resolvedCandidates(pool, {
-    resolveSecret: options.resolveSecret,
+    resolveCredential: options.resolveCredential,
     now: at,
     exclude: excluded,
   });
@@ -688,15 +639,6 @@ export async function upsertProviderApiKey(providerOrId, credential, {
       credentials: {},
       sessions: {},
     };
-    for (const current of Object.values(pool.credentials)) {
-      if (
-        current.id !== normalized.id &&
-        providerApiKeySecretRefIdentity(current.secretRef, provider) ===
-          providerApiKeySecretRefIdentity(normalized.secretRef, provider)
-      ) {
-        throw new Error(`Provider ${provider} already contains this secret reference.`);
-      }
-    }
     pool.credentials[normalized.id] = normalized;
     state.providers[provider] = pool;
     return sanitizeProviderApiKeyPoolCredential(normalized);
@@ -805,7 +747,7 @@ export async function recordProviderApiKeyOutcome(providerOrId, credentialOrId, 
 }
 
 export async function runProviderApiKeyAttempts(providerOrId, {
-  resolveSecret,
+  resolveCredential,
   send,
   sessionId: sessionValue,
   initialSelection,
@@ -829,7 +771,7 @@ export async function runProviderApiKeyAttempts(providerOrId, {
       ? initialSelection
       : await selectProviderApiKeyLocked(provider, {
           filePath,
-          resolveSecret,
+          resolveCredential,
           sessionId: sessionValue,
           excludeCredentialIds: [...attempted],
           now: now(),
@@ -845,7 +787,6 @@ export async function runProviderApiKeyAttempts(providerOrId, {
       result = await send({
         apiKey: selection.credentialValue,
         credentialId: selection.credentialId,
-        secretRef: { ...selection.credentialRef },
         attempt: index,
       });
     } catch (caught) {

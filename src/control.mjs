@@ -746,6 +746,28 @@ async function deleteProviderCredential(providerId) {
   );
 }
 
+async function handleProviderKeyPool(providerId, action, value) {
+  const {
+    addEnvironmentCredentialToPool,
+    addStoredCredentialToPool,
+    setStoredCredentialPoolPolicy,
+    setStoredCredentialPoolState,
+    storedCredentialPoolStatus,
+  } = await import("./provider-api-key-control.mjs");
+  let result;
+  if (!action || action === "status") result = storedCredentialPoolStatus(providerId);
+  else if (action === "add" && value) result = await addStoredCredentialToPool(providerId, value);
+  else if (action === "add-env" && value) result = await addEnvironmentCredentialToPool(providerId, value);
+  else if ((action === "pause" || action === "resume") && value) {
+    result = await setStoredCredentialPoolState(providerId, value, action === "pause");
+  } else if (action === "policy" && value) {
+    result = await setStoredCredentialPoolPolicy(providerId, value);
+  } else {
+    throw new Error("Usage: control key-pool <provider> status|add|add-env|pause|resume|policy [credential-id|environment-name|strategy]");
+  }
+  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+}
+
 async function setLoginFreeMode(desired) {
   if (desired !== "on" && desired !== "off") {
     throw new Error("Usage: control auth-mode <on|off>");
@@ -2811,6 +2833,9 @@ if (args.includes("--probe")) {
   } else {
     await saveProviderCredential(args[1]);
   }
+} else if (args[0] === "key-pool") {
+  if (!args[1]) throw new Error("Usage: control key-pool <provider> status|add|add-env|pause|resume|policy [credential-id|environment-name|strategy]");
+  await handleProviderKeyPool(args[1], args[2], args[3]);
 } else if (args[0] === "auth-mode") {
   await setLoginFreeMode(args[1]);
 } else if (args[0] === "signed-routing") {

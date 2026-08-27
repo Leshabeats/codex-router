@@ -7,6 +7,19 @@ import {
   resolveProviderCredential,
   resolveProviderCredentialReference,
 } from "./provider-credentials.mjs";
+import { readProviderCredentialStore } from "./provider-credential-store.mjs";
+
+export function resolveStoredCredential(provider, credentialId, credentialStorePath) {
+  const canonicalId = provider.variantOf || provider.id;
+  const entry = readProviderCredentialStore(credentialStorePath).credentials.find(
+    (candidate) =>
+      candidate.id === credentialId &&
+      candidate.providerId === canonicalId &&
+      candidate.kind === "api_key" &&
+      candidate.state === "active",
+  );
+  return entry ? resolveProviderCredentialReference(provider, entry.secretRef) : undefined;
+}
 
 /**
  * Resolve one request credential without silently falling back around a pool.
@@ -23,6 +36,7 @@ export async function resolveProviderApiKeyForRequest(
     sessionId,
     now = Date.now(),
     poolStatePath,
+    credentialStorePath,
     resolveLegacy = () => resolveProviderCredential(provider),
     waitMs,
     retryMs,
@@ -59,7 +73,8 @@ export async function resolveProviderApiKeyForRequest(
       waitMs,
       retryMs,
       staleMs,
-      resolveSecret: (reference) => resolveProviderCredentialReference(provider, reference),
+      resolveCredential: (credentialId) =>
+        resolveStoredCredential(provider, credentialId, credentialStorePath),
     });
   } catch (error) {
     return {
