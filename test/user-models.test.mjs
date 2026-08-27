@@ -280,10 +280,10 @@ test("registry merges valid user models and skips collisions", async () => {
   assert.ok(registry.USER_MODEL_WARNINGS.length >= 4);
   assert.ok(registry.USER_MODEL_WARNINGS.some((warning) => /may not declare multiAgentVersion v2/.test(warning)));
   assert.ok(registry.USER_MODEL_WARNINGS.some((warning) => (
-    /alias deepseek\/deepseek-v4-pro/.test(warning) && /collides with an existing model or alias/.test(warning)
+    /deepseek\/deepseek-v4-pro/.test(warning) && /duplicates checked-in route/.test(warning)
   )));
   assert.ok(registry.USER_MODEL_WARNINGS.some((warning) => (
-    /alias opencode-go\/grok-4\.5/.test(warning) && /collides with an existing model or alias/.test(warning)
+    /opencode-go\/grok-4\.5/.test(warning) && /collides with an existing model alias/.test(warning)
   )));
   const merged = registry.MODEL_BY_SLUG.get("deepseek/deepseek-user-test");
   assert.equal(merged.listed, true);

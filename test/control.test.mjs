@@ -1059,8 +1059,8 @@ test("aggregate overview exposes the router-owned catalog separately from client
       parsed.catalog.models
         .filter((model) => model.slug.endsWith("/ox-alpha"))
         .map((model) => model.slug),
-      ["opencode-free/ox-alpha"],
-      "unavailable research routes must not enter the routable catalog",
+      [],
+      "withdrawn research routes must not enter the routable catalog",
     );
     for (const slug of [
       "commandcode/ox-alpha",

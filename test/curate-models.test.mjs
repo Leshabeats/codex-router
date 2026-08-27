@@ -529,7 +529,7 @@ test("scripted curation stores the advertised window, not the conservative guess
   }
 });
 
-test("OpenCode Free curation migrates Muse to Responses while Ox stays on Chat", () => {
+test("OpenCode Free curation migrates Muse to Responses", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "curate-opencode-free-protocol-"));
   const file = path.join(dir, "user-models.json");
   const pickerFile = path.join(dir, "model-picker.json");
@@ -620,9 +620,6 @@ test("OpenCode Free curation migrates Muse to Responses while Ox stays on Chat",
     assert.equal(muse.contextWindow, oldMuse.contextWindow);
     assert.deepEqual(muse.inputModalities, oldMuse.inputModalities);
     assert.equal(muse.requestProfile, oldMuse.requestProfile);
-    const oxEntry = MODEL_BY_SLUG.get("opencode-free/ox-alpha");
-    assert.equal(oxEntry.provider, "opencode-free");
-    assert.equal(oxEntry.upstreamModel, oxId);
 
     const picker = JSON.parse(readFileSync(pickerFile, "utf8"));
     assert.deepEqual(picker.visible, [muse.slug]);
@@ -650,12 +647,6 @@ test("OpenCode Free curation migrates Muse to Responses while Ox stays on Chat",
       /model: "openai\/responses\/opencode-free-responses-muse-spark-1-2-contributor-free"/,
     );
     assert.doesNotMatch(museBlock, /use_chat_completions_api/);
-    // Ox still reaches Chat Completions -- now from the checked-in entry rather
-    // than from a curated one, which is what "Ox stays on Chat" has to mean
-    // once it ships checked in.
-    const oxBlock = blockFor(oxEntry.gatewayModel);
-    assert.match(oxBlock, /model: "openai\/opencode-free-ox-alpha"/);
-    assert.match(oxBlock, /use_chat_completions_api: true/);
 
     const beforeRepeat = readFileSync(file, "utf8");
     const pickerBeforeRepeat = readFileSync(pickerFile, "utf8");
