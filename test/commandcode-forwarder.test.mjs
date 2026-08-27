@@ -81,6 +81,16 @@ async function waitForHealth(base, headers, child, errors) {
   throw new Error(`forwarder never became healthy: ${errors()}`);
 }
 
+async function waitForFile(target, child, errors) {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    if (existsSync(target)) return;
+    if (child.exitCode !== null) throw new Error(`forwarder exited: ${errors()}`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`forwarder did not persist ${path.basename(target)}: ${errors()}`);
+}
+
 test("a plan-refused Command Code account is served through the CLI route", async () => {
   const stateDir = mkdtempSync(path.join(os.tmpdir(), "commandcode-forwarder-state-"));
   const cliHome = mkdtempSync(path.join(os.tmpdir(), "commandcode-forwarder-home-"));
@@ -278,7 +288,11 @@ test("pooled Command Code failover uses the winning key for its plan route", asy
         return;
       }
       if (request.url === "/alpha/generate") {
-        response.writeHead(200, { "Content-Type": "text/event-stream" });
+        response.writeHead(200, {
+          "Content-Type": "text/event-stream",
+          "x-ratelimit-limit-requests": "100",
+          "x-ratelimit-remaining-requests": "88",
+        });
         for (const event of TURN) response.write(`${JSON.stringify(event)}\n`);
         response.end();
         return;
@@ -334,6 +348,11 @@ test("pooled Command Code failover uses the winning key for its plan route", asy
       winningFingerprint,
       "the exact winning credential fingerprint is retained",
     );
+    const limitsPath = path.join(stateDir, "rate-limits.json");
+    await waitForFile(limitsPath, child, () => stderr);
+    const limits = JSON.parse(readFileSync(limitsPath, "utf8"));
+    assert.equal(limits.commandcode.requests.remaining, 88);
+    assert.equal(limits.commandcode.requests.limit, 100);
   } finally {
     if (child.exitCode === null) {
       child.kill("SIGTERM");
@@ -345,7 +364,7 @@ test("pooled Command Code failover uses the winning key for its plan route", asy
   }
 });
 
-test("a cached pooled plan rejection remains pre-commit and rotates to the next key", async () => {
+test("an intermediate pooled plan limit stays per-key until the winning response", async () => {
   const stateDir = mkdtempSync(path.join(os.tmpdir(), "commandcode-forwarder-plan-rotate-state-"));
   const cliHome = mkdtempSync(path.join(os.tmpdir(), "commandcode-forwarder-plan-rotate-home-"));
   const credentialStorePath = path.join(stateDir, "provider-credentials.json");
@@ -392,18 +411,35 @@ test("a cached pooled plan rejection remains pre-commit and rotates to the next 
   const upstreamPort = await openPort();
   const forwarderPort = await openPort();
   const calls = [];
+  let releaseWinner;
+  const winnerReleased = new Promise((resolve) => { releaseWinner = resolve; });
+  let markWinnerSeen;
+  const winnerSeen = new Promise((resolve) => { markWinnerSeen = resolve; });
   const server = http.createServer((request, response) => {
     const authorization = request.headers.authorization;
     calls.push({ url: request.url, authorization });
     request.resume();
-    request.on("end", () => {
+    request.on("end", async () => {
       if (request.url === "/alpha/generate" && authorization === "Bearer PLAN_A") {
-        response.writeHead(401, { "Content-Type": "application/json" });
-        response.end(JSON.stringify({ message: "revoked plan credential" }));
+        response.writeHead(429, {
+          "Content-Type": "application/json",
+          "Retry-After": "300",
+          "x-ratelimit-limit-requests": "100",
+          "x-ratelimit-remaining-requests": "0",
+          "x-ratelimit-reset-requests": "300",
+        });
+        response.end(JSON.stringify({ message: "plan key rate limited" }));
         return;
       }
       if (request.url.startsWith("/provider/v1/") && authorization === "Bearer PROVIDER_B") {
-        response.writeHead(200, { "Content-Type": "application/json" });
+        markWinnerSeen();
+        await winnerReleased;
+        response.writeHead(200, {
+          "Content-Type": "application/json",
+          "x-ratelimit-limit-requests": "100",
+          "x-ratelimit-remaining-requests": "77",
+          "x-ratelimit-reset-requests": "300",
+        });
         response.end(JSON.stringify({
           id: "chatcmpl_plan_rotate",
           object: "chat.completion",
@@ -442,7 +478,7 @@ test("a cached pooled plan rejection remains pre-commit and rotates to the next 
   const headers = { Authorization: `Bearer ${internalKey}`, "Content-Type": "application/json" };
   try {
     await waitForHealth(base, headers, child, () => stderr);
-    const response = await fetch(`${base}/v1/chat/completions`, {
+    const responsePending = fetch(`${base}/v1/chat/completions`, {
       method: "POST",
       headers,
       body: JSON.stringify({
@@ -450,13 +486,33 @@ test("a cached pooled plan rejection remains pre-commit and rotates to the next 
         messages: [{ role: "user", content: "hi" }],
       }),
     });
+    await winnerSeen;
+    assert.equal(
+      existsSync(path.join(stateDir, "rate-limits.json")),
+      false,
+      "an intermediate key's limit must not become provider-wide telemetry",
+    );
+    assert.equal(
+      existsSync(path.join(stateDir, "provider-cooldowns.json")),
+      false,
+      "an intermediate key's reset must not cool every key in the provider",
+    );
+    releaseWinner();
+    const response = await responsePending;
     assert.equal(response.status, 200);
     assert.equal((await response.json()).choices[0].message.content, "KEY_B");
     assert.deepEqual(calls, [
       { url: "/alpha/generate", authorization: "Bearer PLAN_A" },
       { url: "/provider/v1/chat/completions", authorization: "Bearer PROVIDER_B" },
     ]);
+    const limitsPath = path.join(stateDir, "rate-limits.json");
+    await waitForFile(limitsPath, child, () => stderr);
+    const limits = JSON.parse(readFileSync(limitsPath, "utf8"));
+    assert.equal(limits.commandcode.requests.remaining, 77);
+    assert.equal(limits.commandcode.requests.limit, 100);
+    assert.equal(existsSync(path.join(stateDir, "provider-cooldowns.json")), false);
   } finally {
+    releaseWinner();
     if (child.exitCode === null) {
       child.kill("SIGTERM");
       await new Promise((resolve) => child.once("exit", resolve));

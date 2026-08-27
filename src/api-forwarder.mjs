@@ -1127,9 +1127,9 @@ async function handleRequest(request, response) {
       deferErrors,
     });
     // The plan route meters the same subscription and answers the same quota
-    // headers, so it reports limits and cooldowns exactly as the documented
-    // one does. Skipping this would leave the router blind to an exhausted
-    // plan on the very accounts this route exists to serve.
+    // headers. A direct or pool-selected outcome reports those limits here;
+    // intermediate pooled failures defer them until another key wins so one
+    // credential cannot cool the whole provider before failover finishes.
     if (recordOutcome) {
       await recordProviderApiKeyRequestOutcome(poolRouting, normalized.endpoint, {
         status: outcome.status,
@@ -1137,8 +1137,8 @@ async function handleRequest(request, response) {
         committed: true,
         error: outcome.ok ? undefined : `upstream status ${outcome.status}`,
       });
+      recordUpstreamLimits(normalized, outcome);
     }
-    recordUpstreamLimits(normalized, outcome);
     if (!QUIET) {
       console.error(
         `[api-forwarder] provider=${normalized.provider.id} model=${normalized.model.upstreamModel} ` +
@@ -1160,6 +1160,7 @@ async function handleRequest(request, response) {
   let session;
   let target;
   let upstream;
+  let deferredUpstreamLimits;
   if (poolRouting.pooled) {
     const pooled = await runProviderApiKeyAttempts(normalized.endpoint.id, {
       filePath: undefined,
@@ -1286,11 +1287,19 @@ async function handleRequest(request, response) {
       },
     });
     const result = pooled.result;
+    if (result?.upstreamHeaders) {
+      // Plan attempts keep their provider headers separate from the safe error
+      // headers relayed to the caller. Only the result the pool selected may
+      // update provider-wide telemetry; rejected intermediate keys already
+      // recorded their quota and cooldown in per-credential pool state.
+      deferredUpstreamLimits = { ...result, headers: result.upstreamHeaders };
+    }
     if (pooled.committed || result?.committed) {
       // A committed attempt owns the response even when its relay throws. Let
       // the server-level error path terminate that existing stream; falling
       // through would try to create a second JSON response after its head.
       if (pooled.error) throw pooled.error;
+      if (deferredUpstreamLimits) recordUpstreamLimits(normalized, deferredUpstreamLimits);
       return;
     }
     if (!result || (result.response === undefined && result.bodyText === undefined)) {
@@ -1414,7 +1423,7 @@ async function handleRequest(request, response) {
   if (responsesStream) response.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   if (responsesJson) response.setHeader("Content-Type", "application/json; charset=utf-8");
   await pipeResponse(upstream, response, denylist, transform);
-  recordUpstreamLimits(normalized, upstream);
+  recordUpstreamLimits(normalized, deferredUpstreamLimits || upstream);
   if (!QUIET) {
     console.error(
       `[api-forwarder] provider=${normalized.provider.id} model=${normalized.model.upstreamModel} status=${upstream.status} duration_ms=${Date.now() - startedAt}`,

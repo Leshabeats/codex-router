@@ -140,14 +140,14 @@ function normalizeHealth(value, now = Date.now()) {
   const source = record(value) ? value : {};
   assertAllowedKeys(
     source,
-    new Set(["state", "cooldownUntil", "lastSuccessAt", "lastErrorAt", "lastUsedAt", "lastStatus", "lastError", "failureCount"]),
+    new Set(["state", "cooldownUntil", "lastSuccessAt", "lastErrorAt", "lastUsedAt", "lastOutcomeAt", "lastStatus", "lastError", "failureCount"]),
     "health",
   );
   const state = ["healthy", "cooldown", "failed"].includes(source.state)
     ? source.state
     : "healthy";
   const result = { state };
-  for (const field of ["cooldownUntil", "lastSuccessAt", "lastErrorAt", "lastUsedAt"]) {
+  for (const field of ["cooldownUntil", "lastSuccessAt", "lastErrorAt", "lastUsedAt", "lastOutcomeAt"]) {
     const timestamp = isoTimestamp(source[field]);
     if (timestamp) result[field] = timestamp;
   }
@@ -868,6 +868,30 @@ function cooldownSeconds(pool, { status, retryAfterSeconds } = {}) {
   return 0;
 }
 
+function quotaObservationAdvances(current, next) {
+  if (!current) return true;
+  const currentAt = Date.parse(current.observedAt || "");
+  const nextAt = Date.parse(next.observedAt || "");
+  if (!Number.isFinite(currentAt)) return true;
+  if (!Number.isFinite(nextAt) || nextAt < currentAt) return false;
+  if (nextAt > currentAt) return true;
+  // Wall-clock observations have millisecond precision. If two responses land
+  // in the same millisecond, retain the more conservative complete window so
+  // an exhausted key cannot be resurrected by arbitrary lock acquisition.
+  return next.remaining / next.limit < current.remaining / current.limit;
+}
+
+function healthObservationAdvances(health, at, ok) {
+  const currentAt = Date.parse(health.lastOutcomeAt || "");
+  if (!Number.isFinite(currentAt)) return true;
+  if (at > currentAt) return true;
+  if (at < currentAt) return false;
+  // On a timestamp tie, a failure may tighten healthy state but a success may
+  // not clear failure state. This is the fail-closed answer when ordering
+  // cannot be recovered more precisely than the persisted millisecond.
+  return !ok && health.state === "healthy";
+}
+
 export async function recordProviderApiKeyOutcome(providerOrId, credentialOrId, outcome = {}, {
   filePath = PROVIDER_API_KEY_POOL_PATH_DEFAULT,
 } = {}) {
@@ -881,8 +905,11 @@ export async function recordProviderApiKeyOutcome(providerOrId, credentialOrId, 
     const status = Number.isInteger(Number(outcome.status)) ? Number(outcome.status) : undefined;
     const committed = outcome.committed === true;
     const ok = outcome.ok === true || (status !== undefined && status >= 200 && status < 400);
-    meta.health.lastStatus = status;
-    meta.health.lastUsedAt = isoNow(at);
+    const retryable = !ok && isRetryableProviderApiKeyFailure({
+      status,
+      errorCode: outcome.errorCode,
+      committed,
+    });
     meta.requestCount += 1;
     if (Number.isFinite(outcome.tokens) && outcome.tokens >= 0) meta.tokenCount += Math.floor(outcome.tokens);
     if (record(outcome.quota)) {
@@ -891,30 +918,34 @@ export async function recordProviderApiKeyOutcome(providerOrId, credentialOrId, 
         observedAt: outcome.quota.observedAt || isoNow(at),
       });
       // Partial rate-limit headers are not a complete window and must not
-      // erase the last complete observation for this exact credential.
-      if (quota) meta.quota = quota;
+      // erase the last complete observation for this exact credential. An
+      // older complete response is equally stale when concurrent requests
+      // acquire the state lock in reverse response order.
+      if (quota && quotaObservationAdvances(meta.quota, quota)) meta.quota = quota;
     }
-    if (ok) {
-      meta.health.state = "healthy";
-      meta.health.lastSuccessAt = isoNow(at);
-      delete meta.health.cooldownUntil;
-      delete meta.health.lastError;
-      meta.health.failureCount = 0;
-    } else {
-      const retryable = isRetryableProviderApiKeyFailure({
-        status,
-        errorCode: outcome.errorCode,
-        committed,
-      });
-      const seconds = retryable ? cooldownSeconds(pool, { status, retryAfterSeconds: outcome.retryAfterSeconds }) : 0;
-      meta.health.lastErrorAt = isoNow(at);
-      const error = text(outcome.error || outcome.message, "outcome error", { max: MAX_ERROR_LENGTH });
-      if (error) meta.health.lastError = error;
-      meta.health.failureCount = integer(meta.health.failureCount, 0) + 1;
-      if (retryable && seconds > 0) {
-        meta.health.state = "cooldown";
-        meta.health.cooldownUntil = new Date(at + seconds * 1_000).toISOString();
+    if (healthObservationAdvances(meta.health, at, ok)) {
+      meta.health.lastStatus = status;
+      meta.health.lastUsedAt = isoNow(at);
+      meta.health.lastOutcomeAt = isoNow(at);
+      if (ok) {
+        meta.health.state = "healthy";
+        meta.health.lastSuccessAt = isoNow(at);
+        delete meta.health.cooldownUntil;
+        delete meta.health.lastError;
+        meta.health.failureCount = 0;
+      } else {
+        const seconds = retryable ? cooldownSeconds(pool, { status, retryAfterSeconds: outcome.retryAfterSeconds }) : 0;
+        meta.health.lastErrorAt = isoNow(at);
+        const error = text(outcome.error || outcome.message, "outcome error", { max: MAX_ERROR_LENGTH });
+        if (error) meta.health.lastError = error;
+        meta.health.failureCount = integer(meta.health.failureCount, 0) + 1;
+        if (retryable && seconds > 0) {
+          meta.health.state = "cooldown";
+          meta.health.cooldownUntil = new Date(at + seconds * 1_000).toISOString();
+        }
       }
+    }
+    if (!ok) {
       return {
         recorded: true,
         rebindRecommended: retryable && !committed,

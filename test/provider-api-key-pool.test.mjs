@@ -168,6 +168,64 @@ test("an attempt records only its exact credential's complete request window", a
   );
 });
 
+test("an older outcome cannot replace a newer credential failure or quota observation", async () => {
+  const filePath = path.join(root, "out-of-order-outcomes.json");
+  const entry = metadata(credential("ordered", "ORDERED"));
+  await upsertProviderApiKey("openrouter", entry, { filePath });
+  const baseAt = Date.now();
+  const olderAt = baseAt + 1_000;
+  const newerAt = baseAt + 2_000;
+  const resetAt = new Date(baseAt + 300_000).toISOString();
+
+  // Two concurrent upstream requests can finish in one order and acquire the
+  // pool lock in the other. Persist the later observation first, then replay
+  // the delayed older success deterministically.
+  await recordProviderApiKeyOutcome("openrouter", entry.id, {
+    status: 429,
+    ok: false,
+    committed: false,
+    retryAfterSeconds: 300,
+    quota: {
+      unit: "requests",
+      limit: 100,
+      remaining: 0,
+      resetAt,
+      observedAt: new Date(newerAt).toISOString(),
+    },
+    now: newerAt,
+  }, { filePath });
+  const delayed = await recordProviderApiKeyOutcome("openrouter", entry.id, {
+    status: 200,
+    ok: true,
+    committed: false,
+    quota: {
+      unit: "requests",
+      limit: 100,
+      remaining: 90,
+      resetAt,
+      observedAt: new Date(olderAt).toISOString(),
+    },
+    now: olderAt,
+  }, { filePath });
+
+  const state = readProviderApiKeyPoolState(filePath, { now: newerAt });
+  const stored = state.providers.openrouter.credentials[entry.id];
+  assert.equal(stored.requestCount, 2, "both completed attempts remain accounted for");
+  assert.equal(stored.quota.remaining, 0);
+  assert.equal(stored.quota.observedAt, new Date(newerAt).toISOString());
+  assert.equal(stored.health.state, "cooldown");
+  assert.equal(stored.health.lastStatus, 429);
+  assert.equal(stored.health.lastOutcomeAt, new Date(newerAt).toISOString());
+  assert.equal(stored.health.lastSuccessAt, undefined);
+  assert.equal(delayed.credential.health.state, "cooldown");
+  const selected = await selectProviderApiKey("openrouter", {
+    filePath,
+    resolveCredential: () => "ORDERED",
+    now: newerAt,
+  });
+  assert.equal(selected.credentialId, null, "the delayed success must not resurrect the exhausted key");
+});
+
 test("non-sticky round-robin advances across every credential for a bound session", async () => {
   const filePath = path.join(root, "round-robin-session.json");
   const entries = ["a", "b", "c"].map((id) => metadata(credential(`round_${id}`, id.toUpperCase())));
