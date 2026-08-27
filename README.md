@@ -1739,9 +1739,24 @@ name collision with an existing skill of your own is skipped, not
 overwritten. To install or remove them by hand:
 
 ```sh
-node src/skills-install.mjs install
-node src/skills-install.mjs uninstall
+./bin/model-router codex skills install
+./bin/model-router codex skills uninstall
 ```
+
+If another manager owns a skill with the same name, review that complete
+directory and explicitly approve its exact contents instead of transferring
+ownership to codex-router:
+
+```sh
+./bin/model-router codex skills approve-external codex-router
+./bin/model-router codex skills revoke-external codex-router
+```
+
+Approval records digests of both the external directory and this checkout's
+matching skill. Any change to either side requires review and re-approval.
+Symlinks, special files, unreadable trees, and oversized trees are refused.
+Approval never authorizes codex-router to replace or remove the external
+directory; uninstall preserves it.
 
 `./bin/model-router codex doctor` checks the pack: installed, current
 against the checkout, free of name collisions, and matching the app
