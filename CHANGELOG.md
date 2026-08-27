@@ -11,6 +11,15 @@
   when every waiter leaves. Aggregate limits and cache counters are visible
   only through caller-authenticated health.
 
+- **Qwen3.8 Flash and GLM-5.3 full are now pinned on listed providers.**
+  Live catalogs confirmed 2026-08-27: OpenRouter `qwen/qwen3.8-flash` and
+  `z-ai/glm-5.3`; Command Code `Qwen/Qwen3.8-Flash` and `zai-org/GLM-5.3`;
+  QwenCloud/DashScope `qwen3.8-flash`; Nous Research `qwen/qwen3.8-flash`;
+  Venice `z-ai-glm-5-3`; Z.ai API `glm-5.3-flash`. GLM-5.3-Flash was already
+  shipped in #466; this adds the full GLM-5.3 on OpenRouter, Command Code, and
+  Venice, plus Qwen3.8 Flash on OpenRouter, Command Code, Nous Research, and
+  Qwen Plan, plus GLM-5.3-Flash on zai-api.
+
 - **OpenCode Go's Ox Alpha preview has graduated to GLM-5.3-Flash.** The
   authenticated catalog now publishes `glm-5.3-flash` and reports the old
   `ox-alpha-free` ID unavailable, matching OpenCode's current Chat Completions
