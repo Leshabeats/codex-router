@@ -216,7 +216,11 @@ const bridgeSource = String.raw`
   window.routerControlTest = Object.freeze({
     calls: () => calls.map((call) => ({ name: call.name, args: call.args })),
     navigationReady: () => Boolean(navigationListener),
-    navigate: (destination) => navigationListener?.(destination),
+    navigate: (destination) => {
+      if (!navigationListener) return false;
+      navigationListener(destination);
+      return true;
+    },
     setUsageDelay: (milliseconds) => { usageDelayMs = milliseconds; },
   });
 })();
@@ -286,7 +290,7 @@ const chromiumPath = [
   process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, "Google", "Chrome", "Application", "chrome.exe"),
 ].find((candidate) => candidate && existsSync(candidate));
 
-test("the production renderer exposes model discovery and picker actions", { timeout: 60_000 }, async () => {
+test("the production renderer exposes model discovery and picker actions", { timeout: 120_000 }, async () => {
   assert.equal(existsSync(path.join(dist, "index.html")), true, "npm test must build the renderer first");
   assert.ok(chromiumPath, "No Chromium executable is available for the Control Center renderer test.");
 
@@ -299,6 +303,10 @@ test("the production renderer exposes model discovery and picker actions", { tim
   const pageErrors = [];
   try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 840 } });
+    // Windows hosted runners routinely spend about 30 seconds starting the
+    // browser. Keep UI waits short and diagnostic without letting that startup
+    // consume the whole integration-test deadline.
+    page.setDefaultTimeout(10_000);
     page.on("pageerror", (error) => pageErrors.push(error.message));
     page.on("console", (message) => {
       if (message.type() === "error") pageErrors.push(message.text());
@@ -311,14 +319,23 @@ test("the production renderer exposes model discovery and picker actions", { tim
     assert.equal(await wordmark.locator("img").count(), 0);
     await page.waitForFunction(() => window.routerControlTest.navigationReady());
     await page.evaluate(() => window.routerControlTest.setUsageDelay(600));
-    await page.evaluate(() => window.routerControlTest.navigate({ destination: "usage", sourceId: "deepseek" }));
+    assert.equal(
+      await page.evaluate(() => window.routerControlTest.navigate({ destination: "usage", sourceId: "deepseek" })),
+      true,
+    );
     await page.getByRole("heading", { name: "Usage", exact: true }).waitFor();
-    await page.evaluate(() => window.routerControlTest.navigate({ destination: "usage-resets", sourceId: "deepseek" }));
+    assert.equal(
+      await page.evaluate(() => window.routerControlTest.navigate({ destination: "usage-resets", sourceId: "deepseek" })),
+      true,
+    );
     const resetCard = page.locator(".us-metric-card.is-navigation-focus");
     await resetCard.waitFor();
     await page.waitForFunction(() => document.activeElement?.classList.contains("us-metric-card"));
     assert.match(await resetCard.getAttribute("aria-label"), /DeepSeek, Rolling window.*Resets/);
-    await page.evaluate(() => window.routerControlTest.navigate({ destination: "usage", sourceId: "openai" }));
+    assert.equal(
+      await page.evaluate(() => window.routerControlTest.navigate({ destination: "usage", sourceId: "openai" })),
+      true,
+    );
     await page.waitForFunction(() => document.activeElement?.getAttribute("aria-label") === "Usage overview");
     assert.equal(await page.getByLabel("Usage source").inputValue(), "chatgpt-subscription");
     await page.getByRole("button", { name: "Models", exact: true }).click();
