@@ -48,6 +48,7 @@ import {
 } from "./skills-install.mjs";
 import { discoveryDisabled } from "./discovery-mode.mjs";
 import { credentialLabel, credentialStatus } from "./provider-credentials.mjs";
+import { providerApiKeyPoolsSnapshot } from "./provider-api-key-pool.mjs";
 import { providerNeedsCuration } from "./provider-onboarding.mjs";
 import { stateOwnershipStatus } from "./state-owner.mjs";
 import {
@@ -841,6 +842,21 @@ if (!credentialDiscoveryOff) {
     "Antigravity OAuth",
     antigravityHealth.detail,
     antigravityHealth.fix,
+  );
+}
+
+const apiKeyPools = providerApiKeyPoolsSnapshot();
+if (apiKeyPools.configured) {
+  const poolCount = Object.keys(apiKeyPools.providers).length;
+  const credentialCount = Object.values(apiKeyPools.providers)
+    .reduce((total, pool) => total + pool.credentials.length, 0);
+  add(
+    apiKeyPools.valid ? "ok" : "fail",
+    "Provider API-key pools",
+    apiKeyPools.valid
+      ? `${poolCount} pool(s), ${credentialCount} credential reference(s)`
+      : "authoritative pool state is invalid; provider fallback is disabled",
+    "Inspect or remove the invalid provider-api-key-pools.json state before retrying.",
   );
 }
 

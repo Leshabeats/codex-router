@@ -1,7 +1,7 @@
 import {
   providerApiKeyPoolStatus,
   recordProviderApiKeyOutcome,
-  selectProviderApiKeyLocked,
+  selectProviderApiKey,
 } from "./provider-api-key-pool.mjs";
 import {
   resolveProviderCredential,
@@ -66,7 +66,11 @@ export async function resolveProviderApiKeyForRequest(
   }
   let selection;
   try {
-    selection = await selectProviderApiKeyLocked(provider.id, {
+    // This is only an availability preview for setup/error reporting. The
+    // attempt runner performs the locked, committing re-read immediately
+    // before send, so one request does not advance sticky/round-robin state
+    // twice and this earlier value is never trusted for authorization.
+    selection = await selectProviderApiKey(provider.id, {
       filePath: poolStatePath,
       sessionId,
       now,

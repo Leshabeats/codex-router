@@ -7,6 +7,8 @@ import {
 import { PROVIDERS } from "./model-registry.mjs";
 import {
   getProviderApiKeyPool,
+  deleteProviderApiKeyPool,
+  removeProviderApiKey,
   setProviderApiKeyPaused,
   setProviderApiKeyPoolPolicy,
   upsertProviderApiKey,
@@ -74,6 +76,16 @@ export async function setStoredCredentialPoolState(providerId, credentialId, pau
 export async function setStoredCredentialPoolPolicy(providerId, strategy, options = {}) {
   const provider = canonicalProvider(providerId);
   return setProviderApiKeyPoolPolicy(provider, { strategy }, { filePath: options.poolStatePath });
+}
+
+export async function removeStoredCredentialFromPool(providerId, credentialId, options = {}) {
+  const provider = canonicalProvider(providerId);
+  return removeProviderApiKey(provider, credentialId, { filePath: options.poolStatePath });
+}
+
+export async function deleteStoredCredentialPool(providerId, options = {}) {
+  const provider = canonicalProvider(providerId);
+  return deleteProviderApiKeyPool(provider, { filePath: options.poolStatePath });
 }
 
 export function storedCredentialPoolStatus(providerId, options = {}) {

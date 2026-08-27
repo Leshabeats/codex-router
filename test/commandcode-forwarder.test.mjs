@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import http from "node:http";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
@@ -218,6 +218,112 @@ test("a 403 that is not the plan refusal is relayed, not routed around", async (
     assert.equal(generateCalls, 0);
     // Nothing was learned about the plan, so nothing was written down.
     assert.equal(existsSync(path.join(stateDir, "commandcode-plan.json")), false);
+  } finally {
+    if (child.exitCode === null) {
+      child.kill("SIGTERM");
+      await new Promise((resolve) => child.once("exit", resolve));
+    }
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(stateDir, { recursive: true, force: true });
+    rmSync(cliHome, { recursive: true, force: true });
+  }
+});
+
+test("pooled Command Code failover uses the winning key for its plan route", async () => {
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "commandcode-forwarder-pool-state-"));
+  const cliHome = mkdtempSync(path.join(os.tmpdir(), "commandcode-forwarder-pool-home-"));
+  const credentialStorePath = path.join(stateDir, "provider-credentials.json");
+  const poolStatePath = path.join(stateDir, "provider-api-key-pools.json");
+  for (const name of ["COMMAND_CODE_API_KEY", "COMMANDCODE_API_KEY"]) {
+    execFileSync(process.execPath, [
+      path.join(root, "src", "control.mjs"),
+      "key-pool",
+      "commandcode",
+      "add-env",
+      name,
+    ], {
+      cwd: root,
+      env: {
+        ...process.env,
+        MODEL_ROUTER_TARGET: "codex",
+        MODEL_ROUTER_STATE_DIR: stateDir,
+        MODEL_ROUTER_PROVIDER_CREDENTIAL_STORE: credentialStorePath,
+        MODEL_ROUTER_API_KEY_POOL_PATH: poolStatePath,
+      },
+      stdio: "ignore",
+    });
+  }
+  const upstreamPort = await openPort();
+  const forwarderPort = await openPort();
+  const calls = [];
+  let providerCalls = 0;
+  const server = http.createServer((request, response) => {
+    const authorization = request.headers.authorization;
+    calls.push({ url: request.url, authorization });
+    request.resume();
+    request.on("end", () => {
+      if (request.url.startsWith("/provider/v1/") && providerCalls++ === 0) {
+        response.writeHead(429, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ error: { message: "rate limited" } }));
+        return;
+      }
+      if (request.url.startsWith("/provider/v1/")) {
+        response.writeHead(403, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ error: { code: "upgrade_required", message: "Upgrade to API access" } }));
+        return;
+      }
+      if (request.url === "/alpha/generate") {
+        response.writeHead(200, { "Content-Type": "text/event-stream" });
+        for (const event of TURN) response.write(`${JSON.stringify(event)}\n`);
+        response.end();
+        return;
+      }
+      response.writeHead(404).end("{}");
+    });
+  });
+  await listen(server, upstreamPort);
+  const child = spawn(process.execPath, [path.join(root, "src", "api-forwarder.mjs")], {
+    cwd: root,
+    env: {
+      ...process.env,
+      MODEL_ROUTER_TARGET: "codex",
+      MODEL_ROUTER_INTERNAL_KEY: internalKey,
+      MODEL_ROUTER_API_PORT: String(forwarderPort),
+      MODEL_ROUTER_STATE_DIR: stateDir,
+      MODEL_ROUTER_PROVIDER_CREDENTIAL_STORE: credentialStorePath,
+      MODEL_ROUTER_API_KEY_POOL_PATH: poolStatePath,
+      MODEL_ROUTER_QUIET: "1",
+      COMMANDCODE_BASE_URL: `http://127.0.0.1:${upstreamPort}/provider/v1`,
+      COMMAND_CODE_API_KEY: "POOL_A",
+      COMMANDCODE_API_KEY: "POOL_B",
+      COMMANDCODE_CLI_HOME: cliHome,
+    },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  child.stderr.setEncoding("utf8");
+  let stderr = "";
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const base = `http://127.0.0.1:${forwarderPort}`;
+  const headers = { Authorization: `Bearer ${internalKey}`, "Content-Type": "application/json" };
+  try {
+    await waitForHealth(base, headers, child, () => stderr);
+    const response = await fetch(`${base}/v1/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: "commandcode-deepseek-v4-flash",
+        stream: true,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    });
+    assert.equal(response.status, 200);
+    assert.match(await response.text(), /"content":"OK"/);
+    assert.equal(calls.length, 3);
+    assert.notEqual(calls[0].authorization, calls[1].authorization);
+    assert.equal(calls[2].authorization, calls[1].authorization);
+    assert.equal(calls[2].url, "/alpha/generate");
+    const plan = JSON.parse(readFileSync(path.join(stateDir, "commandcode-plan.json"), "utf8"));
+    assert.ok(plan.commandcode.credential, "the winning credential fingerprint is retained");
   } finally {
     if (child.exitCode === null) {
       child.kill("SIGTERM");

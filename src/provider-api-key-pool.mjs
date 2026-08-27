@@ -1,7 +1,12 @@
 import { createHash } from "node:crypto";
 import {
+  closeSync,
+  constants as fsConstants,
   existsSync,
+  fstatSync,
+  lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
 } from "node:fs";
 import path from "node:path";
@@ -11,6 +16,11 @@ import lockfile from "proper-lockfile";
 import { writePrivateJson } from "./file-security.mjs";
 import { PROVIDER_API_KEY_POOL_PATH, STATE_DIR } from "./paths.mjs";
 import { canonicalProviderId } from "./provider-selection.mjs";
+import {
+  isRetryableStatus,
+  isRetryableTransportError,
+  sleep,
+} from "./upstream-retry.mjs";
 
 export const PROVIDER_API_KEY_POOL_SCHEMA_VERSION = 1;
 export const PROVIDER_API_KEY_POOL_STRATEGIES = Object.freeze([
@@ -27,42 +37,16 @@ const MAX_PROVIDERS = 128;
 const MAX_CREDENTIALS = 256;
 const MAX_SESSIONS = 2_048;
 const MAX_ERROR_LENGTH = 512;
+const MAX_STATE_BYTES = 4 * 1024 * 1024;
 const MAX_COOLDOWN_SECONDS = 24 * 60 * 60;
 const DEFAULT_LOCK_WAIT_MS = 120_000;
 const DEFAULT_LOCK_RETRY_MS = 25;
 const DEFAULT_LOCK_STALE_MS = 10 * 60_000;
+const DEFAULT_ATTEMPT_LIMIT = 3;
+const DEFAULT_ATTEMPT_BUDGET_MS = 5_000;
+const DEFAULT_ATTEMPT_BACKOFF_MS = 250;
 
-const TRANSIENT_STATUS = new Set([
-  401,
-  403,
-  408,
-  429,
-  500,
-  501,
-  502,
-  503,
-  504,
-  505,
-  506,
-  507,
-  508,
-  509,
-  510,
-  511,
-]);
-const TRANSIENT_ERROR_CODES = new Set([
-  "ECONNABORTED",
-  "ECONNRESET",
-  "ECONNREFUSED",
-  "EHOSTUNREACH",
-  "ENETDOWN",
-  "ENETUNREACH",
-  "ENOTFOUND",
-  "ETIMEDOUT",
-  "UND_ERR_CONNECT_TIMEOUT",
-  "UND_ERR_HEADERS_TIMEOUT",
-  "UND_ERR_SOCKET",
-]);
+const ROTATABLE_CREDENTIAL_STATUSES = new Set([401, 403, 408, 429]);
 
 function record(value) {
   return value && typeof value === "object" && !Array.isArray(value);
@@ -218,11 +202,17 @@ function normalizePolicy(value) {
     ? source.strategy
     : "quota";
   const threshold = finiteNumber(source.autoSwitchThreshold);
+  if (Array.isArray(source.priorityOrder) && source.priorityOrder.length > MAX_CREDENTIALS) {
+    throw new Error(`Pool priorityOrder exceeds ${MAX_CREDENTIALS} entries.`);
+  }
+  if (Array.isArray(source.pausedCredentialIds) && source.pausedCredentialIds.length > MAX_CREDENTIALS) {
+    throw new Error(`Pool pausedCredentialIds exceeds ${MAX_CREDENTIALS} entries.`);
+  }
   const priorityOrder = Array.isArray(source.priorityOrder)
-    ? [...new Set(source.priorityOrder.map((id) => text(id, "priority credential id", { max: 100 })).filter((id) => id && CREDENTIAL_ID.test(id)))].slice(0, MAX_CREDENTIALS)
+    ? [...new Set(source.priorityOrder.map((id) => text(id, "priority credential id", { max: 100 })).filter((id) => id && CREDENTIAL_ID.test(id)))]
     : [];
   const pausedCredentialIds = Array.isArray(source.pausedCredentialIds)
-    ? [...new Set(source.pausedCredentialIds.map((id) => text(id, "paused credential id", { max: 100 })).filter((id) => id && CREDENTIAL_ID.test(id)))].slice(0, MAX_CREDENTIALS)
+    ? [...new Set(source.pausedCredentialIds.map((id) => text(id, "paused credential id", { max: 100 })).filter((id) => id && CREDENTIAL_ID.test(id)))]
     : [];
   return {
     strategy,
@@ -272,7 +262,10 @@ function normalizePool(value, provider, now = Date.now()) {
     : record(source.credentials)
       ? Object.entries(source.credentials)
       : (() => { throw new Error(`${provider} credentials must be an object.`); })();
-  for (const [id, raw] of credentials.slice(0, MAX_CREDENTIALS)) {
+  if (credentials.length > MAX_CREDENTIALS) {
+    throw new Error(`Provider ${provider} exceeds ${MAX_CREDENTIALS} credentials.`);
+  }
+  for (const [id, raw] of credentials) {
     const normalized = normalizeCredential({ ...(record(raw) ? raw : {}), id }, provider, now);
     result.credentials[normalized.id] = normalized;
   }
@@ -281,7 +274,10 @@ function normalizePool(value, provider, now = Date.now()) {
     : record(source.sessions)
       ? Object.entries(source.sessions)
       : (() => { throw new Error(`${provider} sessions must be an object.`); })();
-  for (const [id, raw] of sessions.slice(0, MAX_SESSIONS)) {
+  if (sessions.length > MAX_SESSIONS) {
+    throw new Error(`Provider ${provider} exceeds ${MAX_SESSIONS} sessions.`);
+  }
+  for (const [id, raw] of sessions) {
     const normalizedId = sessionId(id);
     if (!normalizedId) continue;
     const normalized = normalizeSession(raw, now);
@@ -297,8 +293,11 @@ function normalizeState(value, now = Date.now()) {
   }
   assertAllowedKeys(value, new Set(["version", "providers"]), "provider API-key pool state");
   if (!record(value.providers)) throw new Error("Provider API-key pool providers must be an object.");
+  if (Object.keys(value.providers).length > MAX_PROVIDERS) {
+    throw new Error(`Provider API-key pool exceeds ${MAX_PROVIDERS} providers.`);
+  }
   const result = { version: PROVIDER_API_KEY_POOL_SCHEMA_VERSION, providers: {} };
-  for (const [rawProvider, rawPool] of Object.entries(value.providers).slice(0, MAX_PROVIDERS)) {
+  for (const [rawProvider, rawPool] of Object.entries(value.providers)) {
     const provider = providerId(rawProvider);
     if (result.providers[provider]) throw new Error(`Duplicate provider pool: ${provider}`);
     result.providers[provider] = normalizePool(rawPool, provider, now);
@@ -312,10 +311,25 @@ function emptyState() {
 
 export function readProviderApiKeyPoolState(filePath = PROVIDER_API_KEY_POOL_PATH_DEFAULT, { now = Date.now() } = {}) {
   if (!existsSync(filePath)) return { ...emptyState(), valid: true };
+  let descriptor;
   try {
-    return { ...normalizeState(JSON.parse(readFileSync(filePath, "utf8")), now), valid: true };
+    const file = lstatSync(filePath);
+    if (!file.isFile() || file.isSymbolicLink() || file.size > MAX_STATE_BYTES) {
+      throw new Error("Provider API-key pool state is not a bounded regular file.");
+    }
+    descriptor = openSync(
+      filePath,
+      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0),
+    );
+    const opened = fstatSync(descriptor);
+    if (!opened.isFile() || opened.size > MAX_STATE_BYTES) {
+      throw new Error("Provider API-key pool state is not a bounded regular file.");
+    }
+    return { ...normalizeState(JSON.parse(readFileSync(descriptor, "utf8")), now), valid: true };
   } catch {
     return { ...emptyState(), valid: false };
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
   }
 }
 
@@ -373,6 +387,21 @@ export function getProviderApiKeyPool(providerOrId, { filePath = PROVIDER_API_KE
     ...sanitizeProviderApiKeyPool(status.providerId, status.pool || { }),
     configured: status.configured,
     valid: true,
+  };
+}
+
+export function providerApiKeyPoolsSnapshot({ filePath = PROVIDER_API_KEY_POOL_PATH_DEFAULT, now = Date.now() } = {}) {
+  const state = readProviderApiKeyPoolState(filePath, { now });
+  if (!state.valid) return { configured: true, valid: false, providers: {} };
+  return {
+    configured: Object.keys(state.providers).length > 0,
+    valid: true,
+    providers: Object.fromEntries(
+      Object.entries(state.providers).map(([provider, pool]) => [
+        provider,
+        sanitizeProviderApiKeyPool(provider, pool),
+      ]),
+    ),
   };
 }
 
@@ -675,11 +704,43 @@ export async function setProviderApiKeyPaused(providerOrId, credentialOrId, paus
   });
 }
 
-export function isRetryableProviderApiKeyFailure({ status, errorCode, committed = false } = {}) {
+export async function removeProviderApiKey(providerOrId, credentialOrId, {
+  filePath = PROVIDER_API_KEY_POOL_PATH_DEFAULT,
+} = {}) {
+  const provider = providerId(providerOrId);
+  const id = credentialId(credentialOrId);
+  return mutatePool(filePath, async (state) => {
+    const pool = state.providers[provider];
+    if (!pool?.credentials[id]) throw new Error(`Credential ${id} is not configured for ${provider}.`);
+    delete pool.credentials[id];
+    pool.policy.priorityOrder = pool.policy.priorityOrder.filter((entry) => entry !== id);
+    pool.policy.pausedCredentialIds = pool.policy.pausedCredentialIds.filter((entry) => entry !== id);
+    for (const [session, binding] of Object.entries(pool.sessions)) {
+      if (binding.credentialId === id) delete pool.sessions[session];
+    }
+    return { providerId: provider, credentialId: id, removed: true };
+  });
+}
+
+export async function deleteProviderApiKeyPool(providerOrId, {
+  filePath = PROVIDER_API_KEY_POOL_PATH_DEFAULT,
+} = {}) {
+  const provider = providerId(providerOrId);
+  return mutatePool(filePath, async (state) => {
+    if (!state.providers[provider]) throw new Error(`Provider ${provider} API-key pool is not configured.`);
+    delete state.providers[provider];
+    return { providerId: provider, deleted: true };
+  });
+}
+
+export function isRetryableProviderApiKeyFailure({ status, error, errorCode, committed = false } = {}) {
   if (committed) return false;
   const normalizedStatus = Number(status);
-  if (Number.isInteger(normalizedStatus)) return TRANSIENT_STATUS.has(normalizedStatus);
-  return TRANSIENT_ERROR_CODES.has(String(errorCode || ""));
+  if (Number.isInteger(normalizedStatus)) {
+    return ROTATABLE_CREDENTIAL_STATUSES.has(normalizedStatus) || isRetryableStatus(normalizedStatus);
+  }
+  if (isRetryableTransportError(error)) return true;
+  return isRetryableTransportError({ code: String(errorCode || "") });
 }
 
 function cooldownSeconds(pool, { status, retryAfterSeconds } = {}) {
@@ -750,11 +811,13 @@ export async function runProviderApiKeyAttempts(providerOrId, {
   resolveCredential,
   send,
   sessionId: sessionValue,
-  initialSelection,
   filePath = PROVIDER_API_KEY_POOL_PATH_DEFAULT,
-  maxAttempts = MAX_CREDENTIALS,
+  maxAttempts = DEFAULT_ATTEMPT_LIMIT,
+  budgetMs = DEFAULT_ATTEMPT_BUDGET_MS,
+  backoffMs = DEFAULT_ATTEMPT_BACKOFF_MS,
   isResponseCommitted,
   now = Date.now,
+  sleepImpl = sleep,
 } = {}) {
   const provider = providerId(providerOrId);
   if (typeof send !== "function") throw new Error("send must be a function.");
@@ -763,20 +826,24 @@ export async function runProviderApiKeyAttempts(providerOrId, {
   if (!status.valid) return { configured: true, valid: false, fallbackAllowed: false, providerId: provider, reason: "invalid_pool_state" };
   const attempted = new Set();
   const attempts = [];
-  for (let index = 0; index < Math.min(MAX_CREDENTIALS, Math.max(1, Math.floor(maxAttempts))); index += 1) {
+  const startedAt = now();
+  const limit = Math.min(DEFAULT_ATTEMPT_LIMIT, Math.max(1, Math.floor(maxAttempts)));
+  for (let index = 0; index < limit; index += 1) {
     if (typeof isResponseCommitted === "function" && isResponseCommitted()) {
       return { configured: true, valid: true, providerId: provider, attempts, committed: true, reason: "response_committed" };
     }
-    const selection = initialSelection && index === 0
-      ? initialSelection
-      : await selectProviderApiKeyLocked(provider, {
-          filePath,
-          resolveCredential,
-          sessionId: sessionValue,
-          excludeCredentialIds: [...attempted],
-          now: now(),
-          rebindReason: "previous_credential_failed_before_response",
-        });
+    // Re-read the authoritative pool immediately before each send. A caller
+    // may have resolved a candidate earlier for setup/error reporting, but an
+    // operator can pause or revoke it in that gap and that stale selection
+    // must never be sent.
+    const selection = await selectProviderApiKeyLocked(provider, {
+      filePath,
+      resolveCredential,
+      sessionId: sessionValue,
+      excludeCredentialIds: [...attempted],
+      now: now(),
+      rebindReason: "previous_credential_failed_before_response",
+    });
     if (!selection.credentialId || !selection.credentialValue) {
       return { configured: true, valid: true, providerId: provider, attempts, reason: selection.reason };
     }
@@ -799,7 +866,7 @@ export async function runProviderApiKeyAttempts(providerOrId, {
         : true;
     const statusCode = Number.isInteger(Number(result?.status)) ? Number(result.status) : undefined;
     const ok = !error && (result?.ok === true || (statusCode !== undefined && statusCode >= 200 && statusCode < 400));
-    const errorCode = error?.code || result?.errorCode;
+    const errorCode = error?.code || error?.cause?.code || result?.errorCode;
     const outcome = await recordProviderApiKeyOutcome(provider, selection.credentialId, {
       status: statusCode,
       ok,
@@ -818,12 +885,14 @@ export async function runProviderApiKeyAttempts(providerOrId, {
     };
     attempts.push(attempt);
     if (error) {
-      if (!isRetryableProviderApiKeyFailure({ errorCode, committed: responseCommitted })) {
-        return { configured: true, valid: true, providerId: provider, result, error, attempts, reason: "failed" };
+      if (!isRetryableProviderApiKeyFailure({ error, errorCode, committed: responseCommitted })) {
+        return { configured: true, valid: true, providerId: provider, credentialId: selection.credentialId, credentialValue: selection.credentialValue, result, error, attempts, reason: "failed" };
       }
     } else if (ok || responseCommitted || !isRetryableProviderApiKeyFailure({ status: statusCode, committed: responseCommitted })) {
-      return { configured: true, valid: true, providerId: provider, result, attempts, reason: ok ? "success" : "failed" };
+      return { configured: true, valid: true, providerId: provider, credentialId: selection.credentialId, credentialValue: selection.credentialValue, result, attempts, reason: ok ? "success" : "failed" };
     }
+    if (index + 1 >= limit || now() - startedAt >= budgetMs) break;
+    await sleepImpl(backoffMs * 3 ** index);
   }
   return { configured: true, valid: true, providerId: provider, attempts, reason: "no_retry_candidate" };
 }

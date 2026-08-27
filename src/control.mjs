@@ -750,6 +750,8 @@ async function handleProviderKeyPool(providerId, action, value) {
   const {
     addEnvironmentCredentialToPool,
     addStoredCredentialToPool,
+    deleteStoredCredentialPool,
+    removeStoredCredentialFromPool,
     setStoredCredentialPoolPolicy,
     setStoredCredentialPoolState,
     storedCredentialPoolStatus,
@@ -758,12 +760,14 @@ async function handleProviderKeyPool(providerId, action, value) {
   if (!action || action === "status") result = storedCredentialPoolStatus(providerId);
   else if (action === "add" && value) result = await addStoredCredentialToPool(providerId, value);
   else if (action === "add-env" && value) result = await addEnvironmentCredentialToPool(providerId, value);
+  else if (action === "remove" && value) result = await removeStoredCredentialFromPool(providerId, value);
+  else if (action === "delete" && !value) result = await deleteStoredCredentialPool(providerId);
   else if ((action === "pause" || action === "resume") && value) {
     result = await setStoredCredentialPoolState(providerId, value, action === "pause");
   } else if (action === "policy" && value) {
     result = await setStoredCredentialPoolPolicy(providerId, value);
   } else {
-    throw new Error("Usage: control key-pool <provider> status|add|add-env|pause|resume|policy [credential-id|environment-name|strategy]");
+    throw new Error("Usage: control key-pool <provider> status|add|add-env|remove|delete|pause|resume|policy [credential-id|environment-name|strategy]");
   }
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
@@ -2834,7 +2838,7 @@ if (args.includes("--probe")) {
     await saveProviderCredential(args[1]);
   }
 } else if (args[0] === "key-pool") {
-  if (!args[1]) throw new Error("Usage: control key-pool <provider> status|add|add-env|pause|resume|policy [credential-id|environment-name|strategy]");
+  if (!args[1]) throw new Error("Usage: control key-pool <provider> status|add|add-env|remove|delete|pause|resume|policy [credential-id|environment-name|strategy]");
   await handleProviderKeyPool(args[1], args[2], args[3]);
 } else if (args[0] === "auth-mode") {
   await setLoginFreeMode(args[1]);

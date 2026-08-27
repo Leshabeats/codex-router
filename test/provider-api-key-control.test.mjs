@@ -17,6 +17,8 @@ const { addCredentialReference, readProviderCredentialStore } = await import("..
 const {
   addEnvironmentCredentialToPool,
   addStoredCredentialToPool,
+  deleteStoredCredentialPool,
+  removeStoredCredentialFromPool,
   setStoredCredentialPoolPolicy,
   setStoredCredentialPoolState,
   storedCredentialPoolStatus,
@@ -74,4 +76,14 @@ test("an allowed environment source can be registered and pooled in one operatio
     }),
     /secretRef\.name is not configured for this provider/,
   );
+  await removeStoredCredentialFromPool("opencode-go", result.credential.id, { poolStatePath });
+  assert.equal(
+    readProviderCredentialStore(credentialStorePath).credentials.some(
+      (entry) => entry.id === result.credential.id,
+    ),
+    true,
+    "removing a pool member must preserve its shared credential reference",
+  );
+  await deleteStoredCredentialPool("opencode-go", { poolStatePath });
+  assert.equal(storedCredentialPoolStatus("opencode-go", { poolStatePath }).configured, false);
 });

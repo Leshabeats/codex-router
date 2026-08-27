@@ -9,6 +9,7 @@ import {
   installGracefulShutdown,
   pipeResponse,
   readRequestBody,
+  readResponseBody,
   reportListenFailure,
   requireInternalAuth,
   writeJson,
@@ -55,7 +56,10 @@ import {
   resolveProviderApiKeyForRequest,
   resolveStoredCredential,
 } from "./provider-api-key-routing.mjs";
-import { runProviderApiKeyAttempts } from "./provider-api-key-pool.mjs";
+import {
+  providerApiKeyPoolStatus,
+  runProviderApiKeyAttempts,
+} from "./provider-api-key-pool.mjs";
 
 installStableFetchTransport();
 
@@ -976,11 +980,21 @@ function healthPayload() {
   for (const provider of PROVIDERS.values()) {
     if (provider.kind !== "openai-compatible" || !enabled.has(provider.id)) continue;
     const status = credentialStatus(provider);
+    const pool = providerApiKeyPoolStatus(provider.id);
     providers[provider.id] = {
       credential_present: status.configured,
       ...(status.configured
         ? { credential_source: status.source }
         : { setup: status.setup }),
+      ...(pool.configured
+        ? {
+            api_key_pool: {
+              configured: true,
+              valid: pool.valid,
+              credential_count: pool.valid ? Object.keys(pool.pool?.credentials || {}).length : 0,
+            },
+          }
+        : {}),
     };
   }
   return { ok: true, service: "codex-router-api-forwarder", providers };
@@ -1071,18 +1085,18 @@ async function handleRequest(request, response) {
   // its customers buy. The CLI's own route serves those plans, so an account
   // already known to be refused goes straight there rather than paying a 403
   // for the privilege of finding out again.
-  const commandCode = isCommandCodeProvider(normalized.provider)
+  let commandCode = isCommandCodeProvider(normalized.provider)
     ? (() => {
         const id = canonicalProviderId(normalized.provider.id);
         return { id, ...commandCodeRoute(id, credential.value) };
       })()
     : undefined;
-  const relayThroughPlan = async () => {
+  const relayThroughPlan = async (apiKey = credential.value, { recordOutcome = true } = {}) => {
     const outcome = await relayCommandCodeGenerate({
       payload: normalized.payload,
       model: normalized.model,
       provider: normalized.provider,
-      apiKey: credential.value,
+      apiKey,
       baseUrl: providerBaseUrl(normalized.endpoint),
       response,
       signal: controller.signal,
@@ -1091,12 +1105,14 @@ async function handleRequest(request, response) {
     // headers, so it reports limits and cooldowns exactly as the documented
     // one does. Skipping this would leave the router blind to an exhausted
     // plan on the very accounts this route exists to serve.
-    await recordProviderApiKeyRequestOutcome(poolRouting, normalized.endpoint, {
-      status: outcome.status,
-      ok: outcome.ok,
-      committed: true,
-      error: outcome.ok ? undefined : `upstream status ${outcome.status}`,
-    });
+    if (recordOutcome) {
+      await recordProviderApiKeyRequestOutcome(poolRouting, normalized.endpoint, {
+        status: outcome.status,
+        ok: outcome.ok,
+        committed: true,
+        error: outcome.ok ? undefined : `upstream status ${outcome.status}`,
+      });
+    }
     recordUpstreamLimits(normalized, outcome);
     if (!QUIET) {
       console.error(
@@ -1104,8 +1120,9 @@ async function handleRequest(request, response) {
           `route=alpha-generate status=${outcome.status} duration_ms=${Date.now() - startedAt}`,
       );
     }
+    return outcome;
   };
-  if (commandCode?.route === "plan") {
+  if (!poolRouting.pooled && commandCode?.route === "plan") {
     await relayThroughPlan();
     return;
   }
@@ -1123,10 +1140,19 @@ async function handleRequest(request, response) {
       filePath: undefined,
       resolveCredential: (credentialId) =>
         resolveStoredCredential(normalized.endpoint, credentialId),
-      initialSelection: poolRouting.selection,
       sessionId: threadIdFromHeaders(request.headers),
       isResponseCommitted: () => response.headersSent || response.writableEnded || response.writableFinished,
-      send: async ({ apiKey }) => {
+      send: async ({ apiKey, credentialId }) => {
+        const attemptCommandCode = isCommandCodeProvider(normalized.provider)
+          ? (() => {
+              const id = canonicalProviderId(normalized.provider.id);
+              return { id, ...commandCodeRoute(id, apiKey) };
+            })()
+          : undefined;
+        if (attemptCommandCode?.route === "plan") {
+          const outcome = await relayThroughPlan(apiKey, { recordOutcome: false });
+          return { ...outcome, committed: true, route: "plan", credentialId };
+        }
         const attemptCredential = { ...credential, value: apiKey };
         const attemptSession = await upstreamSession(
           normalized.provider,
@@ -1150,7 +1176,22 @@ async function handleRequest(request, response) {
           signal: controller.signal,
         });
         if (!attemptResponse.ok) {
-          const bodyText = await attemptResponse.text().catch(() => "");
+          const bodyText = (await readResponseBody(attemptResponse, {
+            signal: controller.signal,
+          })).toString("utf8");
+          if (attemptCommandCode && attemptResponse.status === 403) {
+            let refusal;
+            try {
+              refusal = JSON.parse(bodyText);
+            } catch {
+              refusal = undefined;
+            }
+            if (isUpgradeRequired(attemptResponse.status, refusal)) {
+              recordCommandCodeRoute(attemptCommandCode.id, apiKey, { providerApi: false });
+              const outcome = await relayThroughPlan(apiKey, { recordOutcome: false });
+              return { ...outcome, committed: true, route: "plan", credentialId };
+            }
+          }
           return {
             status: attemptResponse.status,
             ok: false,
@@ -1172,6 +1213,7 @@ async function handleRequest(request, response) {
       },
     });
     const result = pooled.result;
+    if (pooled.committed || result?.committed) return;
     if (!result || (result.response === undefined && result.bodyText === undefined)) {
       writeJson(response, 503, {
         error: {
@@ -1183,6 +1225,10 @@ async function handleRequest(request, response) {
     }
     session = result.session;
     target = result.target;
+    if (isCommandCodeProvider(normalized.provider) && pooled.credentialValue) {
+      const id = canonicalProviderId(normalized.provider.id);
+      commandCode = { id, ...commandCodeRoute(id, pooled.credentialValue) };
+    }
     upstream = result.response || new Response(result.bodyText || "", {
       status: result.status,
       headers: result.headers,
@@ -1241,8 +1287,8 @@ async function handleRequest(request, response) {
   // because only its body distinguishes "this plan has no API access" from
   // every other 403 a gateway can send, and a plan refusal must not reach the
   // caller as a failed turn when a working route exists.
-  if (commandCode && upstream.status === 403) {
-    const raw = await upstream.text().catch(() => "");
+  if (commandCode && !poolRouting.pooled && upstream.status === 403) {
+    const raw = (await readResponseBody(upstream, { signal: controller.signal })).toString("utf8");
     let refusal;
     try {
       refusal = JSON.parse(raw);

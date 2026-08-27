@@ -4,6 +4,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -16,10 +17,12 @@ const NOW = Date.parse("2026-08-24T00:00:00.000Z");
 
 const {
   getProviderApiKeyPool,
+  deleteProviderApiKeyPool,
   isRetryableProviderApiKeyFailure,
   providerApiKeyPoolStatus,
   readProviderApiKeyPoolState,
   recordProviderApiKeyOutcome,
+  removeProviderApiKey,
   runProviderApiKeyAttempts,
   selectProviderApiKey,
   selectProviderApiKeyLocked,
@@ -150,6 +153,10 @@ test("only pre-commit transient failures recommend a rebind", async () => {
   assert.equal(isRetryableProviderApiKeyFailure({ status: 404 }), false);
   assert.equal(isRetryableProviderApiKeyFailure({ status: 401, committed: true }), false);
   assert.equal(isRetryableProviderApiKeyFailure({ status: 401, committed: false }), true);
+  assert.equal(isRetryableProviderApiKeyFailure({ status: 500, committed: false }), false);
+  assert.equal(isRetryableProviderApiKeyFailure({
+    error: new TypeError("fetch failed", { cause: Object.assign(new Error("reset"), { code: "ECONNRESET" }) }),
+  }), true);
 });
 
 test("runProviderApiKeyAttempts retries before relay and stops after relay begins", async () => {
@@ -206,6 +213,108 @@ test("duplicate resolved secrets remain blocked after a failed candidate is excl
   });
   assert.equal(result.attempts.length, 0);
   assert.equal(result.reason, "duplicate_secret_reference");
+});
+
+test("attempts re-read a paused initial candidate before sending", async () => {
+  const filePath = path.join(root, "stale-selection.json");
+  const first = metadata(credential("stale", "STALE", { priority: 2 }));
+  const second = metadata(credential("fresh", "FRESH", { priority: 1 }));
+  await upsertProviderApiKey("openrouter", first, { filePath });
+  await upsertProviderApiKey("openrouter", second, { filePath });
+  const initialSelection = await selectProviderApiKeyLocked("openrouter", {
+    filePath,
+    resolveCredential: (id) => id === first.id ? "STALE" : "FRESH",
+    now: NOW,
+  });
+  await setProviderApiKeyPaused("openrouter", first.id, true, { filePath });
+  const sent = [];
+  const result = await runProviderApiKeyAttempts("openrouter", {
+    filePath,
+    initialSelection,
+    resolveCredential: (id) => id === first.id ? "STALE" : "FRESH",
+    send: async ({ apiKey }) => {
+      sent.push(apiKey);
+      return { status: 200, ok: true, committed: false };
+    },
+    now: () => NOW,
+  });
+  assert.deepEqual(sent, ["FRESH"]);
+  assert.equal(result.credentialId, second.id);
+});
+
+test("attempts never retry origin 500 and cap an explicit large attempt request", async () => {
+  const noRetryPath = path.join(root, "no-retry-500.json");
+  for (const id of ["one", "two"]) {
+    await upsertProviderApiKey("openrouter", metadata(credential(`five_${id}`, id)), { filePath: noRetryPath });
+  }
+  let calls = 0;
+  const originFailure = await runProviderApiKeyAttempts("openrouter", {
+    filePath: noRetryPath,
+    resolveCredential: (id) => id,
+    send: async () => {
+      calls += 1;
+      return { status: 500, ok: false, committed: false };
+    },
+    sleepImpl: async () => {},
+  });
+  assert.equal(calls, 1);
+  assert.equal(originFailure.reason, "failed");
+
+  const cappedPath = path.join(root, "attempt-cap.json");
+  for (const id of ["a", "b", "c", "d"]) {
+    await upsertProviderApiKey("openrouter", metadata(credential(`cap_${id}`, id)), { filePath: cappedPath });
+  }
+  calls = 0;
+  await runProviderApiKeyAttempts("openrouter", {
+    filePath: cappedPath,
+    maxAttempts: 256,
+    resolveCredential: (id) => id,
+    send: async () => {
+      calls += 1;
+      return { status: 429, ok: false, committed: false };
+    },
+    sleepImpl: async () => {},
+  });
+  assert.equal(calls, 3);
+});
+
+test("oversized maps and symlink state fail closed without truncation", async () => {
+  const oversizedPath = path.join(root, "oversized.json");
+  const credentials = Object.fromEntries(Array.from({ length: 257 }, (_, index) => {
+    const id = `cred_over_${String(index).padStart(8, "0")}`;
+    return [id, { id, providerId: "openrouter", health: { state: "healthy" } }];
+  }));
+  writeFileSync(oversizedPath, JSON.stringify({
+    version: 1,
+    providers: { openrouter: { providerId: "openrouter", credentials } },
+  }));
+  assert.equal(readProviderApiKeyPoolState(oversizedPath).valid, false);
+  await assert.rejects(
+    upsertProviderApiKey("openrouter", metadata(credential("extra", "EXTRA")), { filePath: oversizedPath }),
+    /invalid; refusing to overwrite/i,
+  );
+
+  const linkedPath = path.join(root, "linked.json");
+  symlinkSync(oversizedPath, linkedPath);
+  assert.equal(readProviderApiKeyPoolState(linkedPath).valid, false);
+});
+
+test("credential and pool removal clean bindings but preserve external credential references", async () => {
+  const filePath = path.join(root, "remove.json");
+  const first = metadata(credential("remove", "REMOVE"));
+  await upsertProviderApiKey("openrouter", first, { filePath });
+  await selectProviderApiKeyLocked("openrouter", {
+    filePath,
+    sessionId: "bound-session",
+    resolveCredential: () => "REMOVE",
+    now: NOW,
+  });
+  await removeProviderApiKey("openrouter", first.id, { filePath });
+  const afterRemoval = getProviderApiKeyPool("openrouter", { filePath, now: NOW });
+  assert.equal(afterRemoval.credentials.length, 0);
+  assert.equal(afterRemoval.sessions["bound-session"], undefined);
+  await deleteProviderApiKeyPool("openrouter", { filePath });
+  assert.equal(providerApiKeyPoolStatus("openrouter", { filePath }).configured, false);
 });
 
 test("lock serializes concurrent state updates and preserves every session turn", async () => {
