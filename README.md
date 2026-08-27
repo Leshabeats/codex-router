@@ -404,9 +404,12 @@ enable the family:
 ```
 
 An optional API-key pool can rotate between the two registry-declared
-OpenCode environment sources without copying either secret into router state.
-Set both variables in the router service environment, register their opaque
-credential IDs, and choose a policy:
+OpenCode environment sources without copying either secret into pool or
+credential metadata. Export the values in an interactive shell (never put a
+key in a command argument or chat). If the managed router is already running,
+stop it before adding a new environment-backed entry: a running service cannot
+inherit a newly named shell variable, and the command refuses to publish a
+route the service could not authenticate.
 
 ```sh
 codex-router key-pool opencode-go add-env OPENCODE_API_KEY
@@ -414,6 +417,14 @@ codex-router key-pool opencode-go add-env OPENCODE_GO_API_KEY
 codex-router key-pool opencode-go policy round-robin
 codex-router key-pool opencode-go status
 ```
+
+Then rerun the installer from that same shell with `--providers configured`
+(and the same target you installed originally). The installer copies only the
+allowlisted variables referenced by the pool into the owner-only service
+definition and starts it. A plain service restart is not enough because it
+replays the old definition. Rerun the installer after removing or deleting an
+environment-backed entry as well, so its old value is removed from the service
+definition.
 
 `pause <credential-id>` and `resume <credential-id>` change one entry without
 deleting its credential metadata. Once a pool exists it is authoritative: an

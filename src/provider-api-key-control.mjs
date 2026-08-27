@@ -35,6 +35,15 @@ function storedCredential(providerId, credentialId, credentialStorePath) {
   return { provider, credential };
 }
 
+export function storedCredentialRequiresServiceEnvironment(
+  providerId,
+  credentialId,
+  { credentialStorePath = PROVIDER_CREDENTIAL_STORE_PATH } = {},
+) {
+  return storedCredential(providerId, credentialId, credentialStorePath)
+    .credential.secretRef.type === "environment";
+}
+
 export async function addStoredCredentialToPool(
   providerId,
   credentialId,

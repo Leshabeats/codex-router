@@ -18,6 +18,8 @@ import { withNativeContextVariants } from "./native-context-variants.mjs";
 import {
   DSH_CATALOG_PATH,
   GEMINI_CATALOG_PATH,
+  PROVIDER_API_KEY_POOL_PATH,
+  PROVIDER_CREDENTIAL_STORE_PATH,
   PROVIDER_SELECTION_PATH,
 } from "./paths.mjs";
 // Same reasoning: presence is a property of the shared plane, not of a target,
@@ -754,6 +756,7 @@ async function handleProviderKeyPool(providerId, action, value) {
     removeStoredCredentialFromPool,
     setStoredCredentialPoolPolicy,
     setStoredCredentialPoolState,
+    storedCredentialRequiresServiceEnvironment,
     storedCredentialPoolStatus,
   } = await import("./provider-api-key-control.mjs");
   if (!action || action === "status") {
@@ -778,15 +781,44 @@ async function handleProviderKeyPool(providerId, action, value) {
   } else {
     throw new Error("Usage: control key-pool <provider> status|add|add-env|remove|delete|pause|resume|policy [credential-id|environment-name|strategy]");
   }
+  const environmentBacked = action === "add-env" || (
+    action === "add" && storedCredentialRequiresServiceEnvironment(providerId, value)
+  );
+  let serviceEnvironmentStatus;
   let result;
-  // Pool readiness decides whether this provider's models are routable. Keep
-  // the state mutation and every installed client's publication inside the
-  // same cross-process transaction so no target advertises a stale route.
-  await withModelOverlayLock(async () => {
-    result = await mutation();
-    refreshTargetPickerIfInstalled();
+  // Pool readiness decides whether this provider's models are routable. Treat
+  // its two metadata files, the gateway, and every installed client as one
+  // publication: a failed rebuild restores the exact previous pool/store and
+  // republishes that state rather than leaving a half-adopted credential.
+  const transact = (lock = true) => transactModelOverlayMutation({
+    files: [PROVIDER_API_KEY_POOL_PATH, PROVIDER_CREDENTIAL_STORE_PATH],
+    mutate: async () => { result = await mutation(); },
+    lock,
   });
+  if (environmentBacked) {
+    // Keep lock ordering consistent with model-overlay operations that restart
+    // the service: publication ownership first, service ownership second. The
+    // service lock stays held through client/gateway publication so a
+    // concurrent start cannot race in with the old stored environment.
+    await withModelOverlayLock(async () => {
+      const { withServiceOperationLock } = await import("./service-operation-lock.mjs");
+      await withServiceOperationLock(async () => {
+        const { environmentPoolMutationServiceStatus } = await import("./router-restart.mjs");
+        serviceEnvironmentStatus = environmentPoolMutationServiceStatus();
+        await transact(false);
+      });
+    });
+  } else {
+    await transact();
+  }
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  if (environmentBacked) {
+    process.stderr.write(
+      serviceEnvironmentStatus.serviceReinstallRequired
+        ? "Environment-backed pool entry staged. Rerun the installer from this same environment; a service restart alone will not persist the variable.\n"
+        : "Environment-backed pool entry registered. Start the foreground router from this environment, or install the managed service from it.\n",
+    );
+  }
 }
 
 async function setLoginFreeMode(desired) {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -20,6 +20,7 @@ process.env.MODEL_ROUTER_API_KEY_POOL_PATH = poolStatePath;
 const { addCredentialReference, readProviderCredentialStore } = await import("../src/provider-credential-store.mjs");
 const { upsertProviderApiKey } = await import("../src/provider-api-key-pool.mjs");
 const { withModelOverlayLock } = await import("../src/model-overlay-lock.mjs");
+const { withServiceOperationLock } = await import("../src/service-operation-lock.mjs");
 const {
   addEnvironmentCredentialToPool,
   addStoredCredentialToPool,
@@ -27,6 +28,7 @@ const {
   removeStoredCredentialFromPool,
   setStoredCredentialPoolPolicy,
   setStoredCredentialPoolState,
+  storedCredentialRequiresServiceEnvironment,
   storedCredentialPoolStatus,
 } = await import("../src/provider-api-key-control.mjs");
 
@@ -38,6 +40,10 @@ test("credential lifecycle control is provider-bound and never stores secret byt
     kind: "api_key",
     secretRef: { type: "environment", name: "OPENCODE_GO_API_KEY" },
   }, credentialStorePath);
+  assert.equal(
+    storedCredentialRequiresServiceEnvironment("opencode-go", credential.id, { credentialStorePath }),
+    true,
+  );
 
   await assert.rejects(
     addStoredCredentialToPool("openrouter", credential.id, { credentialStorePath, poolStatePath }),
@@ -161,6 +167,8 @@ function runControl(arguments_) {
       MODEL_ROUTER_PROVIDER_CREDENTIAL_STORE: credentialStorePath,
       MODEL_ROUTER_PROVIDER_CREDENTIAL_MIGRATIONS: process.env.MODEL_ROUTER_PROVIDER_CREDENTIAL_MIGRATIONS,
       MODEL_ROUTER_API_KEY_POOL_PATH: poolStatePath,
+      MODEL_ROUTER_LAUNCH_AGENTS_DIR: path.join(root, "launch-agents"),
+      DSH_HOME: path.join(root, "dsh"),
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -194,4 +202,48 @@ test("key-pool status stays read-only while mutations wait for publication owner
   const result = await mutation.completed;
   assert.equal(result.status, 0, result.stderr);
   assert.equal(existsSync(poolStatePath), true);
+});
+
+test("an environment-backed mutation waits for service ownership through publication", { timeout: 30_000 }, async () => {
+  rmSync(poolStatePath, { force: true });
+  let mutation;
+  await withServiceOperationLock(async () => {
+    mutation = runControl(["key-pool", "opencode-go", "add-env", "OPENCODE_GO_API_KEY"]);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(mutation.child.exitCode, null, "the mutation must wait for the service-operation lock");
+    assert.equal(existsSync(poolStatePath), false, "pool state must not change before service ownership");
+  }, { stateDir });
+
+  const result = await mutation.completed;
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(existsSync(poolStatePath), true);
+});
+
+test("a failed client publication restores both pool metadata files", { timeout: 30_000 }, async () => {
+  rmSync(poolStatePath, { force: true });
+  const added = await addEnvironmentCredentialToPool("opencode-go", "OPENCODE_API_KEY", {
+    credentialStorePath,
+    poolStatePath,
+  });
+  const beforePool = readFileSync(poolStatePath);
+  const beforeStore = readFileSync(credentialStorePath);
+  const dshMarker = path.join(stateDir, "dsh-models.json");
+  // The marker makes the shared republisher reach the harness integration.
+  // Its caller capability is deliberately absent, so publication fails after
+  // the pool mutation and exercises the transaction's exact-file rollback.
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(dshMarker, '{"version":1,"models":[]}\n');
+  try {
+    const result = await runControl([
+      "key-pool",
+      "opencode-go",
+      "pause",
+      added.credential.id,
+    ]).completed;
+    assert.notEqual(result.status, 0);
+    assert.deepEqual(readFileSync(poolStatePath), beforePool);
+    assert.deepEqual(readFileSync(credentialStorePath), beforeStore);
+  } finally {
+    rmSync(dshMarker, { force: true });
+  }
 });

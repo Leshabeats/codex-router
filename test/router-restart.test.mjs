@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  environmentPoolMutationServiceStatus,
   restartRouterServiceIfInstalled,
   routerServiceStatus,
 } from "../src/router-restart.mjs";
@@ -37,6 +38,37 @@ test("routerServiceStatus degrades to not-installed on an unusable probe", () =>
   assert.deepEqual(
     routerServiceStatus({ spawn: () => ({ status: 1, error: undefined, stdout: "" }) }),
     { installed: false },
+  );
+});
+
+test("environment-backed pool changes refuse a running managed service", () => {
+  assert.throws(
+    () => environmentPoolMutationServiceStatus({ spawn: () => INSTALLED_STATUS }),
+    (error) => {
+      assert.equal(error.code, "provider_api_key_pool_service_environment_stale");
+      assert.match(error.message, /stop the service/i);
+      assert.match(error.message, /restart alone does not rewrite/i);
+      return true;
+    },
+  );
+  assert.deepEqual(
+    environmentPoolMutationServiceStatus({
+      spawn: () => ({
+        status: 0,
+        error: undefined,
+        stdout: JSON.stringify({ installed: true, loaded: false, state: "stopped" }),
+      }),
+    }),
+    {
+      installed: true,
+      loaded: false,
+      state: "stopped",
+      serviceReinstallRequired: true,
+    },
+  );
+  assert.deepEqual(
+    environmentPoolMutationServiceStatus({ spawn: () => NOT_INSTALLED_STATUS }),
+    { installed: false, serviceReinstallRequired: false },
   );
 });
 

@@ -29,6 +29,29 @@ export function routerServiceStatus({ spawn = spawnSync, env = process.env } = {
   }
 }
 
+// A running managed service cannot acquire a newly named shell variable from a
+// restart: launchd, systemd, and Task Scheduler replay the environment already
+// stored in their private definitions. Publishing an environment-backed pool
+// before that definition is re-rendered would advertise models the live router
+// cannot authenticate. Stage only while the service is stopped, then let the
+// installer render and start it from the same environment.
+export function environmentPoolMutationServiceStatus({ spawn = spawnSync, env = process.env } = {}) {
+  const status = routerServiceStatus({ spawn, env });
+  if (status.installed && status.loaded) {
+    const error = new Error(
+      "Cannot add an environment-backed API-key pool entry while the managed router service is running. " +
+        "Stop the service, repeat the command with every pooled variable set, then rerun the installer; " +
+        "a restart alone does not rewrite the service environment.",
+    );
+    error.code = "provider_api_key_pool_service_environment_stale";
+    throw error;
+  }
+  return {
+    ...status,
+    serviceReinstallRequired: status.installed === true,
+  };
+}
+
 export function restartRouterServiceIfInstalled({ spawn = spawnSync, env = process.env } = {}) {
   if (!routerServiceStatus({ spawn, env }).installed) return false;
   const result = spawn(process.execPath, [SERVICE_SCRIPT, "restart"], {

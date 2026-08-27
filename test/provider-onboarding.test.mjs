@@ -36,6 +36,8 @@ function isolatedEnvironment(testRoot) {
     npm_config_prefix: path.join(testRoot, "npm-global"),
     MODEL_ROUTER_TARGET: "codex",
     MODEL_ROUTER_STATE_DIR: path.join(testRoot, "state"),
+    CODEX_ROUTER_SERVICE_PLATFORM: "darwin",
+    MODEL_ROUTER_LAUNCH_AGENTS_DIR: path.join(testRoot, "launch-agents"),
     KIMI_CODE_HOME: path.join(testRoot, "kimi"),
     GROK_HOME: path.join(testRoot, "grok-home"),
     GROK_AUTH_PATH: path.join(testRoot, "grok", "auth.json"),

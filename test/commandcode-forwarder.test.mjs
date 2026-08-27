@@ -252,6 +252,8 @@ test("pooled Command Code failover uses the winning key for its plan route", asy
         MODEL_ROUTER_STATE_DIR: stateDir,
         MODEL_ROUTER_PROVIDER_CREDENTIAL_STORE: credentialStorePath,
         MODEL_ROUTER_API_KEY_POOL_PATH: poolStatePath,
+        CODEX_ROUTER_SERVICE_PLATFORM: "darwin",
+        MODEL_ROUTER_LAUNCH_AGENTS_DIR: path.join(stateDir, "launch-agents"),
       },
       stdio: "ignore",
     });
@@ -363,6 +365,8 @@ test("a cached pooled plan rejection remains pre-commit and rotates to the next 
         MODEL_ROUTER_STATE_DIR: stateDir,
         MODEL_ROUTER_PROVIDER_CREDENTIAL_STORE: credentialStorePath,
         MODEL_ROUTER_API_KEY_POOL_PATH: poolStatePath,
+        CODEX_ROUTER_SERVICE_PLATFORM: "darwin",
+        MODEL_ROUTER_LAUNCH_AGENTS_DIR: path.join(stateDir, "launch-agents"),
       },
       stdio: "ignore",
     });
@@ -483,6 +487,8 @@ test("pooled Command Code recheck success is cached against the exact winning ke
         MODEL_ROUTER_STATE_DIR: stateDir,
         MODEL_ROUTER_PROVIDER_CREDENTIAL_STORE: credentialStorePath,
         MODEL_ROUTER_API_KEY_POOL_PATH: poolStatePath,
+        CODEX_ROUTER_SERVICE_PLATFORM: "darwin",
+        MODEL_ROUTER_LAUNCH_AGENTS_DIR: path.join(stateDir, "launch-agents"),
       },
       stdio: "ignore",
     });
