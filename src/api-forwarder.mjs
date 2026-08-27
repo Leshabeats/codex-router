@@ -52,12 +52,13 @@ import {
 } from "./openai-adapters.mjs";
 import { threadIdFromHeaders } from "./codex-session-names.mjs";
 import {
+  effectiveProviderCredentialStatus,
+  providerApiKeyAuthoritySnapshot,
   recordProviderApiKeyRequestOutcome,
   resolveProviderApiKeyForRequest,
   resolveStoredCredential,
 } from "./provider-api-key-routing.mjs";
 import {
-  providerApiKeyPoolStatus,
   runProviderApiKeyAttempts,
 } from "./provider-api-key-pool.mjs";
 
@@ -974,32 +975,38 @@ function recordUpstreamLimits(normalized, upstream) {
   });
 }
 
+function responseRetryAfterSeconds(headers, now = Date.now()) {
+  const retryAt = Date.parse(parseRateLimitHeaders(headers, { now })?.retryAt || "");
+  if (!Number.isFinite(retryAt) || retryAt <= now) return undefined;
+  return Math.max(1, Math.ceil((retryAt - now) / 1_000));
+}
+
 function healthPayload() {
   const providers = {};
   let ok = true;
   const enabled = new Set(readProviderSelection());
+  const poolAuthoritySnapshot = providerApiKeyAuthoritySnapshot();
   for (const provider of PROVIDERS.values()) {
     if (provider.kind !== "openai-compatible" || !enabled.has(provider.id)) continue;
-    const status = credentialStatus(provider);
-    const pool = providerApiKeyPoolStatus(provider.id, {
-      resolveCredential: (credentialId) => resolveStoredCredential(provider, credentialId),
+    const status = effectiveProviderCredentialStatus(provider, {
+      poolAuthoritySnapshot,
     });
-    if (pool.configured && (!pool.valid || pool.readiness?.usable !== true)) ok = false;
+    if (status.pooled && status.configured !== true) ok = false;
     providers[provider.id] = {
       credential_present: status.configured,
       ...(status.configured
         ? { credential_source: status.source }
         : { setup: status.setup }),
-      ...(pool.configured
+      ...(status.pooled
         ? {
             api_key_pool: {
               configured: true,
-              valid: pool.valid,
-              usable: pool.readiness?.usable === true,
-              reason: pool.readiness?.reason || "invalid_pool_state",
-              credential_count: pool.readiness?.credentialCount || 0,
-              eligible_credential_count: pool.readiness?.eligibleCredentialCount || 0,
-              resolvable_credential_count: pool.readiness?.resolvableCredentialCount || 0,
+              valid: poolAuthoritySnapshot.valid,
+              usable: status.poolReadiness?.usable === true,
+              reason: status.poolReadiness?.reason || "invalid_pool_state",
+              credential_count: status.poolReadiness?.credentialCount || 0,
+              eligible_credential_count: status.poolReadiness?.eligibleCredentialCount || 0,
+              resolvable_credential_count: status.poolReadiness?.resolvableCredentialCount || 0,
             },
           }
         : {}),
@@ -1246,6 +1253,7 @@ async function handleRequest(request, response) {
             status: attemptResponse.status,
             ok: false,
             committed: false,
+            retryAfterSeconds: responseRetryAfterSeconds(attemptResponse.headers),
             bodyText,
             headers: attemptResponse.headers,
             session: attemptSession,

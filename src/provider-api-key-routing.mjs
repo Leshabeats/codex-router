@@ -1,13 +1,27 @@
 import {
+  providerApiKeyPoolsSnapshot,
   providerApiKeyPoolStatus,
   recordProviderApiKeyOutcome,
   selectProviderApiKey,
 } from "./provider-api-key-pool.mjs";
 import {
+  credentialStatus,
   resolveProviderCredential,
   resolveProviderCredentialReference,
 } from "./provider-credentials.mjs";
 import { readProviderCredentialStore } from "./provider-credential-store.mjs";
+import { PROVIDERS, providerNeedsNoKey } from "./model-registry.mjs";
+import { discoveryDisabled } from "./discovery-mode.mjs";
+
+function sanitizedReadiness(readiness, valid) {
+  return {
+    usable: valid && readiness?.usable === true,
+    reason: valid ? readiness?.reason || "invalid_pool_state" : "invalid_pool_state",
+    credentialCount: Number(readiness?.credentialCount) || 0,
+    eligibleCredentialCount: Number(readiness?.eligibleCredentialCount) || 0,
+    resolvableCredentialCount: Number(readiness?.resolvableCredentialCount) || 0,
+  };
+}
 
 export function resolveStoredCredential(provider, credentialId, credentialStorePath) {
   const canonicalId = provider.variantOf || provider.id;
@@ -19,6 +33,133 @@ export function resolveStoredCredential(provider, credentialId, credentialStoreP
       candidate.state === "active",
   );
   return entry ? resolveProviderCredentialReference(provider, entry.secretRef) : undefined;
+}
+
+/**
+ * Report whether a provider's authoritative API-key pool can currently route.
+ *
+ * This intentionally returns only a reason and counts. Credential ids, source
+ * names, references, and resolved values stay below this boundary so catalog,
+ * setup, doctor, and status callers can share one authority decision without
+ * growing a second secret-bearing diagnostics shape.
+ */
+export function providerApiKeyPoolReadiness(
+  provider,
+  {
+    now = Date.now(),
+    poolStatePath,
+    credentialStorePath,
+  } = {},
+) {
+  const resolutionAllowed = !discoveryDisabled();
+  const status = providerApiKeyPoolStatus(provider.id, {
+    filePath: poolStatePath,
+    now,
+    ...(resolutionAllowed
+      ? {
+          resolveCredential: (credentialId) =>
+            resolveStoredCredential(provider, credentialId, credentialStorePath),
+        }
+      : {}),
+  });
+  return {
+    configured: status.configured,
+    valid: status.valid,
+    ...(status.configured
+      ? { readiness: sanitizedReadiness(status.readiness, status.valid) }
+      : {}),
+  };
+}
+
+/**
+ * Read every configured pool once for callers that scan the whole registry.
+ * A bounded pool document can still be several MiB; reparsing it once per
+ * provider would turn a single catalog build into dozens of synchronous reads.
+ */
+export function providerApiKeyAuthoritySnapshot({
+  now = Date.now(),
+  poolStatePath,
+  credentialStorePath,
+} = {}) {
+  const resolutionAllowed = !discoveryDisabled();
+  const snapshot = providerApiKeyPoolsSnapshot({
+    filePath: poolStatePath,
+    now,
+    ...(resolutionAllowed
+      ? {
+          resolveCredential: (providerId, credentialId) => {
+            const provider = PROVIDERS.get(providerId);
+            return provider
+              ? resolveStoredCredential(provider, credentialId, credentialStorePath)
+              : undefined;
+          },
+        }
+      : {}),
+  });
+  return {
+    configured: snapshot.configured,
+    valid: snapshot.valid,
+    providers: Object.fromEntries(
+      Object.entries(snapshot.providers).map(([providerId, pool]) => [
+        providerId,
+        {
+          configured: true,
+          valid: true,
+          readiness: sanitizedReadiness(pool.readiness, true),
+        },
+      ]),
+    ),
+  };
+}
+
+function poolAuthorityForProvider(provider, options) {
+  const snapshot = options.poolAuthoritySnapshot;
+  if (!snapshot) return providerApiKeyPoolReadiness(provider, options);
+  if (!snapshot.valid) {
+    return {
+      configured: true,
+      valid: false,
+      readiness: sanitizedReadiness(undefined, false),
+    };
+  }
+  return snapshot.providers[provider.variantOf || provider.id] || {
+    configured: false,
+    valid: true,
+  };
+}
+
+/**
+ * Resolve the effective credential authority for catalog and control surfaces.
+ *
+ * A missing pool preserves the legacy single-key contract. Once a pool entry
+ * exists it is authoritative: a ready referenced key counts as configured even
+ * without a legacy key, while an unusable pool cannot be masked by one.
+ */
+export function effectiveProviderCredentialStatus(provider, options = {}) {
+  if (providerNeedsNoKey(provider)) {
+    return credentialStatus(provider, { persistent: options.persistent === true });
+  }
+  const pool = poolAuthorityForProvider(provider, options);
+  if (!pool.configured) {
+    return credentialStatus(provider, { persistent: options.persistent === true });
+  }
+  const readiness = pool.readiness;
+  if (pool.valid && readiness.usable) {
+    const count = readiness.resolvableCredentialCount;
+    return {
+      configured: true,
+      source: `provider API-key pool (${count} resolvable credential${count === 1 ? "" : "s"})`,
+      persistent: true,
+      pooled: true,
+      poolReadiness: readiness,
+    };
+  }
+  return {
+    configured: false,
+    setup: "Restore an eligible resolvable credential in the provider API-key pool, or delete the pool to use the legacy key.",
+    pooled: true,
+    poolReadiness: readiness,
+  };
 }
 
 /**

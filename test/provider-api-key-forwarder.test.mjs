@@ -22,6 +22,7 @@ process.env.MODEL_ROUTER_PROVIDER_CREDENTIAL_MIGRATIONS = path.join(stateDir, "m
 process.env.MODEL_ROUTER_API_KEY_POOL_PATH = poolStatePath;
 
 const { addEnvironmentCredentialToPool } = await import("../src/provider-api-key-control.mjs");
+const { readProviderApiKeyPoolState } = await import("../src/provider-api-key-pool.mjs");
 
 async function listen(server) {
   await new Promise((resolve, reject) => {
@@ -63,7 +64,7 @@ test("configured OpenCode credential ids fail over on 429 before committing a re
     request.resume();
     request.once("end", () => {
       if (authorizations.length === 1) {
-        response.writeHead(429, { "Content-Type": "application/json", "Retry-After": "60" });
+        response.writeHead(429, { "Content-Type": "application/json", "Retry-After": "137" });
         response.end(JSON.stringify({ error: { message: "rate limited" } }));
         return;
       }
@@ -119,6 +120,11 @@ test("configured OpenCode credential ids fail over on 429 before committing a re
     assert.equal(authorizations.length, 2);
     assert.notEqual(authorizations[0], authorizations[1]);
     assert.deepEqual(new Set(authorizations), new Set(["Bearer POOL_KEY_ONE", "Bearer POOL_KEY_TWO"]));
+    const pool = readProviderApiKeyPoolState(poolStatePath).providers["opencode-go"];
+    const limited = Object.values(pool.credentials).find((entry) => entry.health.lastStatus === 429);
+    assert.ok(limited, "the failed credential should retain its own rate-limit outcome");
+    const cooldownMs = Date.parse(limited.health.cooldownUntil) - Date.now();
+    assert.ok(cooldownMs >= 130_000 && cooldownMs <= 140_000, `unexpected cooldown ${cooldownMs}ms`);
   } finally {
     child.kill("SIGTERM");
     if (child.exitCode === null) await new Promise((resolve) => child.once("exit", resolve));

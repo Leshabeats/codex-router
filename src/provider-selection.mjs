@@ -18,7 +18,10 @@ import { kimiOAuthStatus } from "./oauth-status.mjs";
 import { grokOAuthStatus } from "./grok-oauth-status.mjs";
 import { antigravityOAuthStatus } from "./antigravity-oauth-status.mjs";
 import { devinCliStatus } from "./devin-cli-status.mjs";
-import { credentialStatus } from "./provider-credentials.mjs";
+import {
+  effectiveProviderCredentialStatus,
+  providerApiKeyAuthoritySnapshot,
+} from "./provider-api-key-routing.mjs";
 
 const RETIRED_PROVIDER_ALIASES = new Map([["chatgpt-oauth", "grok-oauth"]]);
 
@@ -87,6 +90,7 @@ export function configuredProviderIds() {
   // selection, the catalog, and the enable gate, and an idle install promises
   // all of those stay empty until the operator re-runs setup.
   if (discoveryDisabled()) return [];
+  const poolAuthoritySnapshot = providerApiKeyAuthoritySnapshot();
   const configured = [];
   for (const provider of PROVIDERS.values()) {
     if (provider.kind === "oauth") {
@@ -105,7 +109,10 @@ export function configuredProviderIds() {
       // Reachability and rate limits remain health questions, not reasons to
       // hide a provider from the picker.
       configured.push(provider.id);
-    } else if (credentialStatus(provider, { persistent: true }).configured) {
+    } else if (effectiveProviderCredentialStatus(provider, {
+      persistent: true,
+      poolAuthoritySnapshot,
+    }).configured) {
       configured.push(provider.id);
     }
   }

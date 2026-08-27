@@ -756,19 +756,36 @@ async function handleProviderKeyPool(providerId, action, value) {
     setStoredCredentialPoolState,
     storedCredentialPoolStatus,
   } = await import("./provider-api-key-control.mjs");
-  let result;
-  if (!action || action === "status") result = storedCredentialPoolStatus(providerId);
-  else if (action === "add" && value) result = await addStoredCredentialToPool(providerId, value);
-  else if (action === "add-env" && value) result = await addEnvironmentCredentialToPool(providerId, value);
-  else if (action === "remove" && value) result = await removeStoredCredentialFromPool(providerId, value);
-  else if (action === "delete" && !value) result = await deleteStoredCredentialPool(providerId);
-  else if ((action === "pause" || action === "resume") && value) {
-    result = await setStoredCredentialPoolState(providerId, value, action === "pause");
+  if (!action || action === "status") {
+    // Status is deliberately lock-free and read-only. It must remain usable
+    // while a catalog publication is slow or recovering an abandoned owner.
+    process.stdout.write(`${JSON.stringify(storedCredentialPoolStatus(providerId), null, 2)}\n`);
+    return;
+  }
+  let mutation;
+  if (action === "add" && value) {
+    mutation = () => addStoredCredentialToPool(providerId, value);
+  } else if (action === "add-env" && value) {
+    mutation = () => addEnvironmentCredentialToPool(providerId, value);
+  } else if (action === "remove" && value) {
+    mutation = () => removeStoredCredentialFromPool(providerId, value);
+  } else if (action === "delete" && !value) {
+    mutation = () => deleteStoredCredentialPool(providerId);
+  } else if ((action === "pause" || action === "resume") && value) {
+    mutation = () => setStoredCredentialPoolState(providerId, value, action === "pause");
   } else if (action === "policy" && value) {
-    result = await setStoredCredentialPoolPolicy(providerId, value);
+    mutation = () => setStoredCredentialPoolPolicy(providerId, value);
   } else {
     throw new Error("Usage: control key-pool <provider> status|add|add-env|remove|delete|pause|resume|policy [credential-id|environment-name|strategy]");
   }
+  let result;
+  // Pool readiness decides whether this provider's models are routable. Keep
+  // the state mutation and every installed client's publication inside the
+  // same cross-process transaction so no target advertises a stale route.
+  await withModelOverlayLock(async () => {
+    result = await mutation();
+    refreshTargetPickerIfInstalled();
+  });
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 

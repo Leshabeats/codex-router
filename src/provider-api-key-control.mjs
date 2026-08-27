@@ -13,6 +13,7 @@ import {
   setProviderApiKeyPoolPolicy,
   upsertProviderApiKey,
 } from "./provider-api-key-pool.mjs";
+import { providerApiKeyPoolReadiness } from "./provider-api-key-routing.mjs";
 
 function canonicalProvider(providerId) {
   const provider = PROVIDERS.get(providerId);
@@ -89,5 +90,22 @@ export async function deleteStoredCredentialPool(providerId, options = {}) {
 }
 
 export function storedCredentialPoolStatus(providerId, options = {}) {
-  return getProviderApiKeyPool(canonicalProvider(providerId), { filePath: options.poolStatePath });
+  const canonical = canonicalProvider(providerId);
+  const status = getProviderApiKeyPool(canonical, { filePath: options.poolStatePath });
+  const authority = providerApiKeyPoolReadiness(PROVIDERS.get(canonical), {
+    poolStatePath: options.poolStatePath,
+    credentialStorePath: options.credentialStorePath,
+  });
+  return {
+    ...status,
+    readiness: authority.configured
+      ? authority.readiness
+      : {
+          usable: false,
+          reason: "pool_not_configured",
+          credentialCount: 0,
+          eligibleCredentialCount: 0,
+          resolvableCredentialCount: 0,
+        },
+  };
 }

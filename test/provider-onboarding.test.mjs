@@ -131,6 +131,53 @@ test("provider onboarding reports install, login, and API key actions without se
   }
 });
 
+test("provider onboarding follows authoritative pool readiness instead of a legacy key", () => {
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "provider-pool-onboarding-"));
+  const readyEnvironment = {
+    ...isolatedEnvironment(testRoot),
+    OPENCODE_API_KEY: "TEST_ONBOARDING_POOL_KEY",
+  };
+  try {
+    const added = spawnSync(
+      process.execPath,
+      [path.join(root, "src", "control.mjs"), "key-pool", "opencode-go", "add-env", "OPENCODE_API_KEY"],
+      { cwd: root, encoding: "utf8", env: readyEnvironment },
+    );
+    assert.equal(added.status, 0, added.stderr);
+    const ready = JSON.parse(execFileSync(
+      process.execPath,
+      [path.join(root, "src", "control.mjs"), "providers", "--json"],
+      { cwd: root, encoding: "utf8", env: readyEnvironment },
+    ));
+    assert.equal(ready.providers.find((provider) => provider.id === "opencode-go").configured, true);
+
+    const unusableEnvironment = { ...readyEnvironment, OPENCODE_API_KEY: "" };
+    const savedLegacy = spawnSync(
+      process.execPath,
+      [path.join(root, "src", "control.mjs"), "credential", "opencode-go"],
+      {
+        cwd: root,
+        encoding: "utf8",
+        env: unusableEnvironment,
+        input: "TEST_LEGACY_KEY_MUST_NOT_MASK_POOL\n",
+      },
+    );
+    assert.equal(savedLegacy.status, 0, savedLegacy.stderr);
+    const unavailable = JSON.parse(execFileSync(
+      process.execPath,
+      [path.join(root, "src", "control.mjs"), "providers", "--json"],
+      { cwd: root, encoding: "utf8", env: unusableEnvironment },
+    ));
+    assert.equal(unavailable.providers.find((provider) => provider.id === "opencode-go").configured, false);
+    assert.doesNotMatch(
+      JSON.stringify(unavailable),
+      /TEST_ONBOARDING_POOL_KEY|TEST_LEGACY_KEY_MUST_NOT_MASK_POOL/,
+    );
+  } finally {
+    rmSync(testRoot, { recursive: true, force: true });
+  }
+});
+
 test("control accepts an API key only through stdin and stores it privately", () => {
   const testRoot = mkdtempSync(path.join(os.tmpdir(), "provider-key-control-"));
   const testKey = "TEST_TRAY_XAI_KEY";

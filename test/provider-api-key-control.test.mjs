@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const root = mkdtempSync(path.join(os.tmpdir(), "codex-router-api-key-control-"));
 const stateDir = path.join(root, "state");
 const credentialStorePath = path.join(stateDir, "provider-credentials.json");
@@ -12,9 +15,11 @@ process.env.CODEX_HOME = path.join(root, "codex");
 process.env.CODEX_ROUTER_STATE_DIR = stateDir;
 process.env.MODEL_ROUTER_PROVIDER_CREDENTIAL_STORE = credentialStorePath;
 process.env.MODEL_ROUTER_PROVIDER_CREDENTIAL_MIGRATIONS = path.join(stateDir, "migrations", "provider-credentials");
+process.env.MODEL_ROUTER_API_KEY_POOL_PATH = poolStatePath;
 
 const { addCredentialReference, readProviderCredentialStore } = await import("../src/provider-credential-store.mjs");
 const { upsertProviderApiKey } = await import("../src/provider-api-key-pool.mjs");
+const { withModelOverlayLock } = await import("../src/model-overlay-lock.mjs");
 const {
   addEnvironmentCredentialToPool,
   addStoredCredentialToPool,
@@ -55,7 +60,15 @@ test("credential lifecycle control is provider-bound and never stores secret byt
   assert.equal(status.policy.strategy, "round-robin");
   assert.equal(status.credentials[0].paused, false);
   assert.equal(status.credentials[0].id, credential.id);
+  assert.deepEqual(status.readiness, {
+    usable: false,
+    reason: "unresolvable_credentials",
+    credentialCount: 1,
+    eligibleCredentialCount: 1,
+    resolvableCredentialCount: 0,
+  });
   assert.doesNotMatch(readFileSync(poolStatePath, "utf8"), /OPENCODE_GO_API_KEY|secretRef|Bearer/);
+  assert.doesNotMatch(JSON.stringify(status), /OPENCODE_GO_API_KEY|Bearer/);
 });
 
 test("an allowed environment source can be registered and pooled in one operation", async () => {
@@ -102,6 +115,21 @@ test("an allowed environment source can be registered and pooled in one operatio
       .filter((entry) => entry.id === result.credential.id).length,
     1,
   );
+  process.env.OPENCODE_GO_API_KEY = "TEST_READY_POOL_KEY";
+  try {
+    assert.deepEqual(
+      storedCredentialPoolStatus("opencode-go", options).readiness,
+      {
+        usable: true,
+        reason: "ready",
+        credentialCount: 2,
+        eligibleCredentialCount: 1,
+        resolvableCredentialCount: 1,
+      },
+    );
+  } finally {
+    delete process.env.OPENCODE_GO_API_KEY;
+  }
   await assert.rejects(
     addEnvironmentCredentialToPool("opencode-go", "UNDECLARED_SECRET", {
       credentialStorePath,
@@ -119,4 +147,51 @@ test("an allowed environment source can be registered and pooled in one operatio
   );
   await deleteStoredCredentialPool("opencode-go", { poolStatePath });
   assert.equal(storedCredentialPoolStatus("opencode-go", { poolStatePath }).configured, false);
+});
+
+function runControl(arguments_) {
+  const child = spawn(process.execPath, [path.join(repoRoot, "src", "control.mjs"), ...arguments_], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      MODEL_ROUTER_TARGET: "codex",
+      CODEX_HOME: process.env.CODEX_HOME,
+      CODEX_ROUTER_STATE_DIR: stateDir,
+      MODEL_ROUTER_STATE_DIR: stateDir,
+      MODEL_ROUTER_PROVIDER_CREDENTIAL_STORE: credentialStorePath,
+      MODEL_ROUTER_PROVIDER_CREDENTIAL_MIGRATIONS: process.env.MODEL_ROUTER_PROVIDER_CREDENTIAL_MIGRATIONS,
+      MODEL_ROUTER_API_KEY_POOL_PATH: poolStatePath,
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const completed = new Promise((resolve) => {
+    child.once("exit", (status, signal) => resolve({ status, signal, stdout, stderr }));
+  });
+  return { child, completed };
+}
+
+test("key-pool status stays read-only while mutations wait for publication ownership", { timeout: 30_000 }, async () => {
+  rmSync(poolStatePath, { force: true });
+  let mutation;
+  await withModelOverlayLock(async () => {
+    const status = await runControl(["key-pool", "opencode-go", "status"]).completed;
+    assert.equal(status.status, 0, status.stderr);
+    assert.equal(JSON.parse(status.stdout).readiness.reason, "pool_not_configured");
+    assert.equal(existsSync(poolStatePath), false, "status must not create pool state");
+
+    mutation = runControl(["key-pool", "opencode-go", "add-env", "OPENCODE_API_KEY"]);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(mutation.child.exitCode, null, "the mutation must wait for the model publication lock");
+    assert.equal(existsSync(poolStatePath), false, "pool state must not change before publication ownership");
+  });
+
+  const result = await mutation.completed;
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(existsSync(poolStatePath), true);
 });
