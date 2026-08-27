@@ -19,7 +19,9 @@ let windowsPrivateWorker;
 let windowsPrivateWorkerSequence = 0;
 let windowsPrivateWorkerSpawns = 0;
 
-// Windows private-file hardening is one PowerShell spawn per call.
+// Synchronous Windows private-file hardening is one PowerShell spawn per call.
+// The request-path async writer below reuses a single narrow ACL worker so pool
+// bookkeeping does not cold-start PowerShell twice per routed request.
 //
 // Keeping it a single process is the point: `main` memoized the current SID
 // and then ran `icacls` per file, and icacls is what this module exists to
@@ -114,10 +116,14 @@ function windowsWorkerEnvironment() {
   // Do not copy provider API keys into a helper that only needs Windows and a
   // temporary directory. PowerShell itself may need any of these canonical
   // names depending on the host configuration; everything else is omitted.
-  return Object.fromEntries(
+  const allowed = new Set(
     ["SystemRoot", "WINDIR", "ComSpec", "PATH", "PATHEXT", "TEMP", "TMP"]
-      .filter((name) => typeof process.env[name] === "string")
-      .map((name) => [name, process.env[name]]),
+      .map((name) => name.toLowerCase()),
+  );
+  return Object.fromEntries(
+    Object.entries(process.env).filter(
+      ([name, value]) => allowed.has(name.toLowerCase()) && typeof value === "string",
+    ),
   );
 }
 
