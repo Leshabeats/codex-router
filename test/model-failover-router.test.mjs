@@ -20,6 +20,22 @@ const CALLER_KEY = "test-router-caller-capability-with-sufficient-length";
 // credentials for.
 const PRIMARY = { slug: "deepseek/deepseek-v4-pro", gatewayModel: "deepseek-v4-pro" };
 const FALLBACK = { slug: "zai-api/glm-5.2", gatewayModel: "zai-api-glm-5-2" };
+const GROQ_CANDIDATE = {
+  slug: "groq/tool-limit-failover-fixture",
+  gatewayModel: "groq-tool-limit-failover-fixture",
+  upstreamModel: "openai/gpt-oss-120b",
+  provider: "groq",
+  listed: true,
+  displayName: "Groq tool-limit failover fixture",
+  description: "Local routing test fixture.",
+  priority: 500,
+  defaultEffort: "high",
+  reasoningLevels: [{ effort: "high", description: "Adaptive reasoning" }],
+  contextWindow: 131_072,
+  autoCompact: 111_411,
+  inputModalities: ["text"],
+  compHash: "groq-tool-limit-failover-fixture-v1",
+};
 
 const TURN_BODY = { model: PRIMARY.slug, input: "hello", stream: true };
 
@@ -109,7 +125,13 @@ function bodyJson(request) {
 
 function run(
   env,
-  { chain = [FALLBACK.slug], enabled = true, cooldowns, toolResultAging = false } = {},
+  {
+    chain = [FALLBACK.slug],
+    enabled = true,
+    cooldowns,
+    toolResultAging = false,
+    userModels,
+  } = {},
 ) {
   const stateDir = mkdtempSync(path.join(os.tmpdir(), "model-failover-router-state-"));
   if (chain !== null) {
@@ -130,6 +152,13 @@ function run(
     writeFileSync(
       path.join(stateDir, "tool-result-aging.json"),
       JSON.stringify({ version: 1, enabled: true, nativeEnabled: false }),
+      "utf8",
+    );
+  }
+  if (Array.isArray(userModels)) {
+    writeFileSync(
+      path.join(stateDir, "user-models.json"),
+      JSON.stringify({ version: 1, models: userModels }),
       "utf8",
     );
   }
@@ -156,6 +185,12 @@ function run(
     encoding: "utf8",
     mode: 0o600,
   });
+  if (userModels?.some((model) => model?.provider === "groq")) {
+    writeFileSync(path.join(stateDir, "groq-api-key.secret"), "test-groq-key\n", {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+  }
   const child = spawn(process.execPath, [path.join(root, "src", "router.mjs")], {
     cwd: root,
     env: {
@@ -564,6 +599,59 @@ test("a provider that answers again clears the cooldown this router recorded", a
       readFileSync(path.join(child.stateDir, "provider-cooldowns.json"), "utf8"),
     );
     assert.equal(cooldowns.deepseek, undefined);
+  } finally {
+    await stopChild(child);
+    await closeServer(gw.server);
+  }
+});
+
+test("cooldown failover skips a locally incompatible Groq candidate", async () => {
+  const seen = [];
+  const gw = await gateway(async (request, response) => {
+    const body = await bodyJson(request);
+    seen.push(body);
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    response.end(contentSse("safe-candidate"));
+  });
+  const routerPort = await openPort();
+  const child = run(routerEnv(gw.port, routerPort), {
+    chain: [GROQ_CANDIDATE.slug, FALLBACK.slug],
+    cooldowns: {
+      deepseek: {
+        until: new Date(Date.now() + 30 * 60_000).toISOString(),
+        reason: "out_of_usage",
+      },
+    },
+    userModels: [GROQ_CANDIDATE],
+  });
+  try {
+    await waitFor(`http://127.0.0.1:${routerPort}/health`, child);
+    const result = await readRouted(routerPort, {
+      ...TURN_BODY,
+      tools: Array.from({ length: 129 }, (_, index) => ({
+        type: "function",
+        name: `client_tool_${index}`,
+        parameters: { type: "object" },
+      })),
+    });
+    assert.equal(result.status, 200);
+    assert.match(result.body, /answered-by-safe-candidate/);
+    assert.equal(seen.length, 1, "neither the cooled route nor rejected Groq candidate is sent");
+    assert.equal(seen[0].model, FALLBACK.gatewayModel);
+
+    const logs = child.testErrors();
+    assert.match(
+      logs,
+      /-> groq\/tool-limit-failover-fixture outcome=compatibility\/groq_tool_limit_exceeded/,
+    );
+    assert.match(logs, /-> zai-api\/glm-5\.2 outcome=swapped/);
+
+    const events = await waitForUsageEvents(child.stateDir, 1, child);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].model, FALLBACK.slug);
+    assert.equal(events[0].provider, "zai-api");
+    assert.equal(events[0].failoverFrom, PRIMARY.slug);
+    assert.equal(events[0].status, 200);
   } finally {
     await stopChild(child);
     await closeServer(gw.server);

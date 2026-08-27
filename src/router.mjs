@@ -92,7 +92,14 @@ import {
   repairToolSchemaRoots,
   strictOpenCodeCompactionInput,
   stripSearchContentTypes,
+  ToolSearchHistoryCapacityError,
 } from "./namespace-relay.mjs";
+import {
+  chatProviderToolSurface,
+  GROQ_MAX_TOOLS,
+  GroqToolLimitError,
+  GROQ_TOOL_LIMIT_CODE,
+} from "./chat-tool-surface.mjs";
 import { collaborationToolAvailable, pendingInterruptTargets } from "./subagent-completion.mjs";
 import {
   FAILOVER_BUDGET_MS,
@@ -113,7 +120,6 @@ import {
 } from "./subagent-proofs.mjs";
 import { forgetChildSpawn, observeChildTurn } from "./subagent-turns.mjs";
 import { subagentEffort } from "./multi-agent-state.mjs";
-import { mergeCodexAppTools } from "./codex-app-tools.mjs";
 import {
   activityMetadataFromHeaders,
   threadIdFromHeaders,
@@ -2524,8 +2530,42 @@ function observeSubagentOutcome(request, route, status, options = {}) {
 async function buildRoutedRequest({ request, payload, route, agedInput, tokenMaxxing = false }) {
   let namespacesFlattened = false;
   let flattenedNamespaces = new Map();
+  const provider = providerForModel(route);
+  const chatCompletionsProvider = provider?.protocol !== "openai-responses";
+  const consoleGoResponsesCompatibility = needsConsoleGoResponsesToolCompatibility(route);
+  const compatibleInput = zenFreeCompatibleInput(agedInput, route);
+  // Image substitution may spend another provider's quota. Every Groq tool
+  // limit that is already knowable from the client request and stored history
+  // must fail locally before that work starts; the normal post-bridge pass
+  // below runs again so any later transformation cannot bypass the invariant.
+  if (provider?.id === "groq" && chatCompletionsProvider) {
+    const preflight = chatProviderToolSurface(payload.tools, provider.id, {
+      input: compatibleInput,
+      toolChoice: payload.tool_choice,
+    });
+    try {
+      flattenToolSearchHistory(
+        compatibleInput,
+        preflight.tools,
+        preflight.namespaces,
+        {
+          maxTools: GROQ_MAX_TOOLS,
+          recoverWithoutRelay: true,
+          toolChoice: payload.tool_choice,
+        },
+      );
+    } catch (error) {
+      if (!(error instanceof ToolSearchHistoryCapacityError)) throw error;
+      throw new GroqToolLimitError({
+        clientToolCount: preflight.tools.length,
+        expandedToolCount: preflight.tools.length + error.required,
+        historyToolCapacity: error.available,
+        historyToolCount: error.required,
+      });
+    }
+  }
   const bridged = await bridgeVisionInput(
-    zenFreeCompatibleInput(agedInput, route),
+    compatibleInput,
     route,
     request,
   );
@@ -2539,9 +2579,6 @@ async function buildRoutedRequest({ request, payload, route, agedInput, tokenMax
   // -- a turn that still reaches the provider, and still reads as a 200,
   // having quietly replaced the prompt with its own letters.
   const input = Array.isArray(bridged) ? [...bridged] : bridged;
-  const provider = providerForModel(route);
-  const chatCompletionsProvider = provider?.protocol !== "openai-responses";
-  const consoleGoResponsesCompatibility = needsConsoleGoResponsesToolCompatibility(route);
   // Thinking chat providers need the assistant's reasoning replayed, but
   // LiteLLM drops Responses `reasoning` input items. Generic providers keep
   // the established visible-content carry used for DeepSeek. GLM's native
@@ -2576,13 +2613,16 @@ async function buildRoutedRequest({ request, payload, route, agedInput, tokenMax
     // Relay the app's full native toolset (threads, automations, app
     // navigation) to the provider. The client registers these tools with
     // deferLoading and executes the calls natively, but only sends a reduced
-    // codex_app namespace on routed requests; merge the deferred definitions in
-    // so routed models see what native models see. The router never executes
-    // these calls -- the app owns thread, automation, and navigation state --
-    // it only relays definitions and results.
-    const merged = mergeCodexAppTools(tools);
-    if (merged.merged) tools = merged.tools;
-    const flattened = flattenNamespaceTools(tools);
+    // codex_app namespace on routed requests; normally merge the deferred
+    // definitions in so routed models see what native models see. A provider
+    // with a hard tool cap may omit unreferenced injected definitions and add
+    // back only those required by stored calls or a forced choice. The router
+    // never executes these calls -- the app owns thread, automation, and
+    // navigation state -- it only relays definitions and results.
+    const flattened = chatProviderToolSurface(tools, provider?.id, {
+      input,
+      toolChoice: payload.tool_choice,
+    });
     namespacesFlattened = flattened.flattened;
     flattenedNamespaces = flattened.namespaces;
     if (namespacesFlattened) {
@@ -2643,13 +2683,39 @@ async function buildRoutedRequest({ request, payload, route, agedInput, tokenMax
     routedToolChoice = customTools.toolChoice;
   }
   if (chatCompletionsProvider || consoleGoResponsesCompatibility) {
-    const searchHistory = flattenToolSearchHistory(
-      routedInput,
-      tools,
-      flattenedNamespaces,
-    );
+    let searchHistory;
+    try {
+      searchHistory = flattenToolSearchHistory(
+        routedInput,
+        tools,
+        flattenedNamespaces,
+        provider?.id === "groq"
+          ? {
+              maxTools: GROQ_MAX_TOOLS,
+              recoverWithoutRelay: true,
+              toolChoice: routedToolChoice,
+            }
+          : undefined,
+      );
+    } catch (error) {
+      if (provider?.id !== "groq" || !(error instanceof ToolSearchHistoryCapacityError)) {
+        throw error;
+      }
+      throw new GroqToolLimitError({
+        clientToolCount: tools.length,
+        expandedToolCount: tools.length + error.required,
+        historyToolCapacity: error.available,
+        historyToolCount: error.required,
+      });
+    }
     routedInput = searchHistory.input;
     tools = searchHistory.tools;
+    if (
+      provider?.id === "groq" &&
+      (searchHistory.flattened || flattenedNamespaces.size > 0)
+    ) {
+      namespacesFlattened = true;
+    }
     if (needsZenFreeToolCompatibility(route)) {
       tools = repairToolSchemaRoots(tools, { nonRecursive: true });
     }
@@ -2658,6 +2724,12 @@ async function buildRoutedRequest({ request, payload, route, agedInput, tokenMax
   // the model copies the bare names out of its own transcript.
   if (namespacesFlattened) {
     routedInput = flattenNamespacedHistory(routedInput, flattenedNamespaces);
+    if (provider?.id === "groq") {
+      routedToolChoice = flattenToolChoice(
+        routedToolChoice,
+        flattenedNamespaces,
+      );
+    }
   }
   if (consoleGoResponsesCompatibility) {
     routedToolChoice = flattenToolChoice(routedToolChoice, flattenedNamespaces);
@@ -3112,23 +3184,37 @@ async function handleResponses(request, response, requestUrl) {
       const settings = readFailoverSettings();
       const cooled = settings.enabled ? providerCooldown(route.provider) : undefined;
       if (cooled) {
-        const [next] = failoverCandidates({
+        const candidates = failoverCandidates({
           route,
           agedInput,
           flattenedNamespaces,
           chain: settings.chain,
-        });
-        if (next) {
-          const candidate = await prepareRoutedRequest({
-            request,
-            payload,
-            route: next.model,
-            normalizedInput,
-            agingEnabled,
-          });
+        }).slice(0, MAX_FAILOVER_HOPS);
+        for (const next of candidates) {
+          let candidate;
+          try {
+            candidate = await prepareRoutedRequest({
+              request,
+              payload,
+              route: next.model,
+              normalizedInput,
+              agingEnabled,
+            });
+          } catch (error) {
+            if (error?.code !== GROQ_TOOL_LIMIT_CODE || error?.provider !== "groq") throw error;
+            logFailover(
+              route,
+              next.model,
+              `cooled_until_${cooled.until}`,
+              "not-sent",
+              `compatibility/${error.code}`,
+            );
+            continue;
+          }
           if (routedRequestFits(next.model, candidate.body)) {
             logFailover(route, next.model, `cooled_until_${cooled.until}`, "not-sent", "swapped");
             adoptRoute(next.model, candidate);
+            break;
           } else {
             logFailover(
               route,
@@ -3739,6 +3825,32 @@ async function handleResponses(request, response, requestUrl) {
           message: "The router canceled a request that exceeded its execution deadline.",
         });
       }
+      return;
+    }
+    if (
+      error?.code === GROQ_TOOL_LIMIT_CODE &&
+      error?.provider === "groq" &&
+      !response.headersSent
+    ) {
+      finalStatus = error.status;
+      activityStatus = error.status;
+      writeJson(response, error.status, {
+        error: {
+          type: "provider_compatibility_error",
+          code: error.code,
+          provider: error.provider,
+          limit: error.limit,
+          message: error.message,
+        },
+      });
+      recordUsageEvent({
+        model: route?.slug || requestedModel,
+        provider: route ? canonicalProviderId(route.provider) : "openai",
+        status: error.status,
+        durationMs: Date.now() - startedAt,
+        responseStartMs: upstreamLatencyMs,
+      });
+      usageRecorded = true;
       return;
     }
     if (retryEmptyCompletionGuard?.hasContent()) emptyCompletion = false;

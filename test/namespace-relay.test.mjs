@@ -16,6 +16,7 @@ import {
   rewriteNamespaceResponsePayload,
   repairToolSchemaRoots,
   stripSearchContentTypes,
+  ToolSearchHistoryCapacityError,
 } from "../src/namespace-relay.mjs";
 import { CODEX_APP_TOOLS, mergeCodexAppTools } from "../src/codex-app-tools.mjs";
 
@@ -354,6 +355,74 @@ test("bounded aliases avoid request-local collisions without renaming the legal 
     second.tools.map((tool) => tool.name),
     "collision fallback is deterministic",
   );
+});
+
+test("collision-only aliases preserve long Groq names without applying the OpenCode bound", () => {
+  const namespace = `mcp__${"very_long_namespace_".repeat(4)}`;
+  const nativeName = "read";
+  const wireName = `${namespace}__${nativeName}`;
+  const flattened = flattenNamespaceTools([
+    { type: "function", name: wireName },
+    {
+      type: "namespace",
+      name: namespace,
+      tools: [{ type: "function", name: nativeName }],
+    },
+  ], { aliasCollisions: true });
+  const names = flattened.tools.map((tool) => tool.name);
+  assert.equal(new Set(names).size, 2);
+  assert.ok(names.every((name) => name.startsWith(`${wireName}_`)));
+  assert.ok(names.every((name) => name.length > 64));
+
+  const history = flattenNamespacedHistory([
+    { type: "function_call", name: wireName, call_id: "plain" },
+    { type: "function_call", namespace, name: nativeName, call_id: "native" },
+  ], flattened.namespaces);
+  assert.notEqual(history[0].name, history[1].name);
+  const restored = rewriteNamespaceResponsePayload({ output: history }, buildNamespaceLookups(
+    flattened.namespaces,
+  ));
+  assert.deepEqual(restored.output[0], {
+    type: "function_call",
+    name: wireName,
+    call_id: "plain",
+  });
+  assert.deepEqual(restored.output[1], {
+    type: "function_call",
+    namespace,
+    name: nativeName,
+    call_id: "native",
+  });
+});
+
+test("delimiter-colliding namespace identities round-trip through distinct aliases", () => {
+  const flattened = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "a__b",
+      tools: [{ type: "function", name: "c" }],
+    },
+    {
+      type: "namespace",
+      name: "a",
+      tools: [{ type: "function", name: "b__c" }],
+    },
+  ], { aliasCollisions: true });
+  assert.equal(new Set(flattened.tools.map((tool) => tool.name)).size, 2);
+  const history = flattenNamespacedHistory([
+    { type: "function_call", namespace: "a__b", name: "c" },
+    { type: "function_call", namespace: "a", name: "b__c" },
+  ], flattened.namespaces);
+  assert.notEqual(history[0].name, history[1].name);
+
+  const restored = rewriteNamespaceResponsePayload(
+    { output: history },
+    buildNamespaceLookups(flattened.namespaces),
+  );
+  assert.deepEqual(restored.output, [
+    { type: "function_call", namespace: "a__b", name: "c" },
+    { type: "function_call", namespace: "a", name: "b__c" },
+  ]);
 });
 
 test("bounded history keeps ordinary and bridged names ahead of bare namespace inference", () => {
@@ -957,6 +1026,509 @@ test("matched tool_search history declares discovered tools and expands namespac
   });
 });
 
+test("tool_search history admits only definitions within provider capacity", () => {
+  const flattened = flattenNamespaceTools([
+    clientToolSearchControl(),
+    ...Array.from({ length: 126 }, (_, index) => ({
+      type: "function",
+      name: `core_tool_${index}`,
+    })),
+  ]);
+  assert.equal(flattened.tools.length, 127);
+  const history = [
+    {
+      type: "tool_search_call",
+      call_id: "capacity-search",
+      execution: "client",
+      arguments: { query: "calendar" },
+    },
+    {
+      type: "tool_search_output",
+      call_id: "capacity-search",
+      status: "completed",
+      execution: "client",
+      tools: [
+        {
+          type: "namespace",
+          name: "mcp__calendar",
+          tools: [
+            { type: "function", name: "first" },
+            { type: "function", name: "second" },
+          ],
+        },
+        { type: "function", name: "third" },
+      ],
+    },
+  ];
+
+  const routed = flattenToolSearchHistory(
+    history,
+    flattened.tools,
+    flattened.namespaces,
+    { maxTools: 128 },
+  );
+  assert.equal(routed.tools.length, 128);
+  assert.deepEqual(
+    routed.tools.slice(127).map((tool) => tool.name),
+    ["mcp__calendar__first"],
+  );
+  assert.deepEqual(
+    JSON.parse(routed.input[1].output).tools.map((tool) => tool.name),
+    ["mcp__calendar__first"],
+    "translated history promises only definitions actually admitted",
+  );
+  assert.deepEqual([...flattened.namespaces.get("mcp__calendar")], ["first"]);
+});
+
+test("tool_search capacity reserves every supported forced-choice function shape", () => {
+  const choices = [
+    { type: "function", namespace: "mcp__x", name: "forced" },
+    { type: "function", namespace: "mcp__x", function: { name: "forced" } },
+    {
+      type: "allowed_tools",
+      mode: "required",
+      tools: [
+        { type: "custom", name: "apply_patch" },
+        { type: "function", name: "mcp__x__forced" },
+        { type: "tool_search", execution: "client" },
+      ],
+    },
+  ];
+  for (const toolChoice of choices) {
+    const flattened = flattenNamespaceTools([
+      clientToolSearchControl(),
+      ...Array.from({ length: 126 }, (_, index) => ({
+        type: "function",
+        name: `core_tool_${index}`,
+      })),
+    ], { aliasCollisions: true });
+    const routed = flattenToolSearchHistory(
+      referencedDiscoveryHistory(undefined).slice(0, 2),
+      flattened.tools,
+      flattened.namespaces,
+      { maxTools: 128, toolChoice },
+    );
+    assert.equal(routed.tools.length, 128);
+    assert.equal(routed.tools.at(-1).name, "mcp__x__forced");
+  }
+});
+
+test("a forced discovered tool over capacity fails closed", () => {
+  const flattened = flattenNamespaceTools([
+    clientToolSearchControl(),
+    ...Array.from({ length: 127 }, (_, index) => ({
+      type: "function",
+      name: `core_tool_${index}`,
+    })),
+  ], { aliasCollisions: true });
+  assert.throws(
+    () => flattenToolSearchHistory(
+      referencedDiscoveryHistory(undefined).slice(0, 2),
+      flattened.tools,
+      flattened.namespaces,
+      {
+        maxTools: 128,
+        toolChoice: { type: "function", namespace: "mcp__x", name: "forced" },
+      },
+    ),
+    (error) => {
+      assert.ok(error instanceof ToolSearchHistoryCapacityError);
+      assert.equal(error.available, 0);
+      assert.equal(error.required, 1);
+      return true;
+    },
+  );
+});
+
+test("discovery references follow request-local identity and transcript time", () => {
+  const collision = flattenNamespaceTools([{
+    type: "namespace",
+    name: "a",
+    tools: [{ type: "function", name: "b" }],
+  }], { aliasCollisions: true });
+  const collisionHistory = [
+    {
+      type: "tool_search_call",
+      call_id: "plain-collision-search",
+      execution: "client",
+      arguments: { query: "plain collision" },
+    },
+    {
+      type: "tool_search_output",
+      call_id: "plain-collision-search",
+      execution: "client",
+      status: "completed",
+      tools: [
+        { type: "function", name: "unused" },
+        { type: "function", name: "a__b" },
+      ],
+    },
+    { type: "function_call", name: "a__b", call_id: "plain-collision-call" },
+  ];
+  const collisionRouted = flattenToolSearchHistory(
+    collisionHistory,
+    collision.tools,
+    collision.namespaces,
+    { maxTools: 2, recoverWithoutRelay: true },
+  );
+  assert.equal(collisionRouted.tools.length, 2);
+  const discoveredPlainAlias = collisionRouted.tools.at(-1).name;
+  assert.notEqual(discoveredPlainAlias, "a__b");
+  assert.equal(
+    flattenNamespacedHistory(collisionRouted.input, collision.namespaces)[0].name,
+    discoveredPlainAlias,
+  );
+
+  const differing = flattenNamespaceTools([clientToolSearchControl()]);
+  const differingHistory = [
+    {
+      type: "tool_search_call",
+      call_id: "different-namespace-search",
+      execution: "client",
+      arguments: { query: "different namespace" },
+    },
+    {
+      type: "tool_search_output",
+      call_id: "different-namespace-search",
+      execution: "client",
+      status: "completed",
+      tools: [
+        { type: "function", name: "unused" },
+        { type: "function", name: "x" },
+      ],
+    },
+    { type: "function_call", namespace: "mcp__other", name: "x" },
+  ];
+  const differingRouted = flattenToolSearchHistory(
+    differingHistory,
+    differing.tools,
+    differing.namespaces,
+    { maxTools: 2 },
+  );
+  assert.equal(differingRouted.tools.at(-1).name, "unused");
+
+  const temporal = flattenNamespaceTools([clientToolSearchControl()]);
+  const temporalHistory = [
+    {
+      type: "tool_search_call",
+      call_id: "temporal-a",
+      execution: "client",
+      arguments: { query: "first" },
+    },
+    {
+      type: "tool_search_output",
+      call_id: "temporal-a",
+      execution: "client",
+      status: "completed",
+      tools: [
+        { type: "function", name: "unused" },
+        {
+          type: "namespace",
+          name: "mcp__a",
+          tools: [{ type: "function", name: "read" }],
+        },
+      ],
+    },
+    { type: "function_call", name: "read", call_id: "temporal-read" },
+    {
+      type: "tool_search_call",
+      call_id: "temporal-b",
+      execution: "client",
+      arguments: { query: "second" },
+    },
+    {
+      type: "tool_search_output",
+      call_id: "temporal-b",
+      execution: "client",
+      status: "completed",
+      tools: [{
+        type: "namespace",
+        name: "mcp__b",
+        tools: [{ type: "function", name: "read" }],
+      }],
+    },
+  ];
+  const temporalRouted = flattenToolSearchHistory(
+    temporalHistory,
+    temporal.tools,
+    temporal.namespaces,
+    { maxTools: 2 },
+  );
+  assert.equal(temporalRouted.tools.at(-1).name, "mcp__a__read");
+});
+
+function referencedDiscoveryHistory(call) {
+  return [
+    {
+      type: "tool_search_call",
+      call_id: "referenced-search",
+      execution: "client",
+      arguments: { query: "deferred" },
+    },
+    {
+      type: "tool_search_output",
+      call_id: "referenced-search",
+      status: "completed",
+      execution: "client",
+      tools: [
+        {
+          type: "namespace",
+          name: "mcp__x",
+          tools: [
+            { type: "function", name: "unused" },
+            { type: "function", name: call === undefined ? "forced" : "used" },
+          ],
+        },
+      ],
+    },
+    ...(call === undefined ? [] : [call]),
+  ];
+}
+
+test("tool_search capacity reserves a later namespace-referenced discovery", () => {
+  const flattened = flattenNamespaceTools([clientToolSearchControl()]);
+  const routed = flattenToolSearchHistory(
+    referencedDiscoveryHistory({
+      type: "function_call",
+      name: "used",
+      namespace: "mcp__x",
+      call_id: "used-call",
+      arguments: "{}",
+    }),
+    flattened.tools,
+    flattened.namespaces,
+    { maxTools: 2 },
+  );
+  assert.deepEqual(
+    routed.tools.map((tool) => tool.name),
+    ["tool_search", "mcp__x__used"],
+  );
+  assert.deepEqual(
+    JSON.parse(routed.input[1].output).tools.map((tool) => tool.name),
+    ["mcp__x__used"],
+  );
+  const history = flattenNamespacedHistory(routed.input, flattened.namespaces);
+  assert.equal(history[2].name, "mcp__x__used");
+  assert.equal(history[2].namespace, undefined);
+});
+
+test("tool_search capacity reserves a uniquely owned bare history name", () => {
+  const flattened = flattenNamespaceTools([clientToolSearchControl()]);
+  const routed = flattenToolSearchHistory(
+    referencedDiscoveryHistory({
+      type: "function_call",
+      name: "used",
+      call_id: "bare-used-call",
+      arguments: "{}",
+    }),
+    flattened.tools,
+    flattened.namespaces,
+    { maxTools: 2 },
+  );
+  assert.deepEqual(
+    routed.tools.map((tool) => tool.name),
+    ["tool_search", "mcp__x__used"],
+  );
+  const history = flattenNamespacedHistory(routed.input, flattened.namespaces);
+  assert.equal(history[2].name, "mcp__x__used");
+});
+
+test("referenced tool_search discoveries exceeding capacity fail closed", () => {
+  const flattened = flattenNamespaceTools([clientToolSearchControl()]);
+  const history = referencedDiscoveryHistory({
+    type: "function_call",
+    name: "used",
+    namespace: "mcp__x",
+    call_id: "used-call",
+    arguments: "{}",
+  });
+  history.push({
+    type: "function_call",
+    name: "unused",
+    namespace: "mcp__x",
+    call_id: "also-used-call",
+    arguments: "{}",
+  });
+  assert.throws(
+    () =>
+      flattenToolSearchHistory(history, flattened.tools, flattened.namespaces, {
+        maxTools: 2,
+      }),
+    (error) => {
+      assert.ok(error instanceof ToolSearchHistoryCapacityError);
+      assert.equal(error.available, 1);
+      assert.equal(error.required, 2);
+      return true;
+    },
+  );
+  assert.equal(flattened.namespaces.has("mcp__x"), false);
+});
+
+test("a referenced duplicate discovery still reserves its shared definition", () => {
+  const flattened = flattenNamespaceTools([clientToolSearchControl()]);
+  const pair = (suffix) => [
+    {
+      type: "tool_search_call",
+      call_id: `duplicate-search-${suffix}`,
+      execution: "client",
+      arguments: { query: "duplicate" },
+    },
+    {
+      type: "tool_search_output",
+      call_id: `duplicate-search-${suffix}`,
+      status: "completed",
+      execution: "client",
+      tools: [{
+        type: "namespace",
+        name: "mcp__x",
+        tools: [{ type: "function", name: "used" }],
+      }],
+    },
+  ];
+  const history = [
+    ...pair("first"),
+    ...pair("second"),
+    {
+      type: "function_call",
+      name: "used",
+      namespace: "mcp__x",
+      call_id: "duplicate-used-call",
+      arguments: "{}",
+    },
+  ];
+  assert.throws(
+    () => flattenToolSearchHistory(
+      history,
+      flattened.tools,
+      flattened.namespaces,
+      { maxTools: 1 },
+    ),
+    (error) => {
+      assert.ok(error instanceof ToolSearchHistoryCapacityError);
+      assert.equal(error.available, 0);
+      assert.equal(error.required, 1);
+      return true;
+    },
+  );
+  assert.equal(flattened.namespaces.has("mcp__x"), false);
+});
+
+test("model-switch history recovers referenced discoveries without a live search relay", () => {
+  const flattened = flattenNamespaceTools([
+    { type: "function", name: "exec_command" },
+  ]);
+  const routed = flattenToolSearchHistory(
+    referencedDiscoveryHistory({
+      type: "function_call",
+      name: "used",
+      namespace: "mcp__x",
+      call_id: "used-after-switch",
+      arguments: "{}",
+    }),
+    flattened.tools,
+    flattened.namespaces,
+    { maxTools: 2, recoverWithoutRelay: true },
+  );
+  assert.deepEqual(
+    routed.tools.map((tool) => tool.name),
+    ["exec_command", "mcp__x__used"],
+  );
+  assert.deepEqual(
+    routed.input.map((item) => item.type),
+    ["function_call"],
+    "the unusable native search control pair is removed",
+  );
+  const history = flattenNamespacedHistory(routed.input, flattened.namespaces);
+  assert.equal(history[0].name, "mcp__x__used");
+  assert.equal(history[0].namespace, undefined);
+  const restored = rewriteNamespaceResponsePayload(
+    {
+      output: [{
+        type: "function_call",
+        name: "mcp__x__used",
+        call_id: "used-again",
+        arguments: "{}",
+      }],
+    },
+    buildNamespaceLookups(flattened.namespaces),
+  );
+  assert.deepEqual(restored.output[0], {
+    type: "function_call",
+    name: "used",
+    namespace: "mcp__x",
+    call_id: "used-again",
+    arguments: "{}",
+  });
+});
+
+test("model-switch discovery collisions keep the current client schema", () => {
+  const current = {
+    type: "function",
+    name: "mcp__x__used",
+    description: "Current client schema wins.",
+    parameters: {
+      type: "object",
+      properties: { current: { type: "boolean" } },
+    },
+  };
+  const flattened = flattenNamespaceTools([current]);
+  const routed = flattenToolSearchHistory(
+    referencedDiscoveryHistory({
+      type: "function_call",
+      name: "used",
+      namespace: "mcp__x",
+      call_id: "colliding-used-call",
+      arguments: "{}",
+    }),
+    flattened.tools,
+    flattened.namespaces,
+    { maxTools: 1, recoverWithoutRelay: true },
+  );
+  assert.equal(routed.tools.length, 1);
+  assert.equal(routed.tools[0], current);
+  const history = flattenNamespacedHistory(routed.input, flattened.namespaces);
+  assert.equal(history[0].name, "mcp__x__used");
+  assert.equal(history[0].namespace, undefined);
+});
+
+test("model-switch referenced discovery overflow fails before mutating identities", () => {
+  const flattened = flattenNamespaceTools([
+    ...Array.from({ length: 127 }, (_, index) => ({
+      type: "function",
+      name: `core_tool_${index}`,
+    })),
+  ]);
+  const history = referencedDiscoveryHistory({
+    type: "function_call",
+    name: "used",
+    namespace: "mcp__x",
+    call_id: "used-call",
+    arguments: "{}",
+  });
+  history.push({
+    type: "function_call",
+    name: "unused",
+    namespace: "mcp__x",
+    call_id: "also-used-call",
+    arguments: "{}",
+  });
+  assert.throws(
+    () => flattenToolSearchHistory(
+      history,
+      flattened.tools,
+      flattened.namespaces,
+      { maxTools: 128, recoverWithoutRelay: true },
+    ),
+    (error) => {
+      assert.ok(error instanceof ToolSearchHistoryCapacityError);
+      assert.equal(error.available, 1);
+      assert.equal(error.required, 2);
+      return true;
+    },
+  );
+  assert.equal(flattened.namespaces.has("mcp__x"), false);
+});
+
 test("parallel tool_search calls pair by call_id when all outputs follow the calls", () => {
   const flattened = flattenNamespaceTools([clientToolSearchControl()]);
   const history = [
@@ -1155,7 +1727,7 @@ test("history rename is idempotent and leaves other namespaces alone", () => {
   const { namespaces } = flattenNamespaceTools(clientRoutedTools());
   const alreadyFlat = {
     type: "function_call",
-    name: "codex_app__list_threads",
+    name: "codex_app__navigate_to_codex_page",
     namespace: "codex_app",
     call_id: "call_2",
   };
@@ -1166,7 +1738,7 @@ test("history rename is idempotent and leaves other namespaces alone", () => {
     call_id: "call_3",
   };
   const input = flattenNamespacedHistory([alreadyFlat, unknownNamespace], namespaces);
-  assert.equal(input[0].name, "codex_app__list_threads");
+  assert.equal(input[0].name, "codex_app__navigate_to_codex_page");
   assert.equal(input[0].namespace, "codex_app");
   assert.deepEqual(input[1], unknownNamespace);
 });
