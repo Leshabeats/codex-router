@@ -215,6 +215,7 @@ const bridgeSource = String.raw`
   });
   window.routerControlTest = Object.freeze({
     calls: () => calls.map((call) => ({ name: call.name, args: call.args })),
+    navigationReady: () => Boolean(navigationListener),
     navigate: (destination) => navigationListener?.(destination),
     setUsageDelay: (milliseconds) => { usageDelayMs = milliseconds; },
   });
@@ -308,6 +309,7 @@ test("the production renderer exposes model discovery and picker actions", { tim
     const wordmark = page.locator(".router-wordmark");
     assert.equal((await wordmark.locator("strong").innerText()).trim(), "Codex Router");
     assert.equal(await wordmark.locator("img").count(), 0);
+    await page.waitForFunction(() => window.routerControlTest.navigationReady());
     await page.evaluate(() => window.routerControlTest.setUsageDelay(600));
     await page.evaluate(() => window.routerControlTest.navigate({ destination: "usage", sourceId: "deepseek" }));
     await page.getByRole("heading", { name: "Usage", exact: true }).waitFor();
