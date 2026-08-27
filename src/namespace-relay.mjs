@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { Transform } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
 
+import { jsonNumberIsStableForRewrite } from "./json-number-rewrite.mjs";
 import { HeaderlessSseDetector } from "./sse-prefix.mjs";
 import { coerceFunctionCallArguments } from "./tool-arguments.mjs";
 import {
@@ -512,15 +513,12 @@ const TRACKED_STATE_FIXED_BYTES = 512;
 // raw bytes before a commit and terminates the stream after one.
 const MAX_SSE_FRAME_BYTES = 256 * 1024;
 const MAX_COMMITTED_SSE_FRAME_BYTES = MAX_JSON_CAPTURE_BYTES;
-const MAX_EXACT_JSON_NUMBER_LENGTH = 4096;
 const LINE_FEED = 0x0a;
 const CARRIAGE_RETURN = 0x0d;
 const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]);
 const SSE_EVENT_FIELD = Buffer.from("event", "ascii");
 const SSE_DATA_FIELD = Buffer.from("data", "ascii");
 const JSON_NUMBER_AT_OFFSET = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
-const JSON_NUMBER_PARTS =
-  /^(-?)(0|[1-9]\d*)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/;
 
 function sseFieldValue(line, prefixLength) {
   const value = line.slice(prefixLength);
@@ -630,52 +628,6 @@ function trackedStateBytes(state) {
     if (typeof state[field] === "string") bytes += Buffer.byteLength(state[field], "utf8");
   }
   return bytes;
-}
-
-// Normalize a bounded JSON number as exact decimal coefficient + power. This
-// compares mathematical decimal values rather than spellings, so 1.0 and 1e3
-// can survive a rewrite when JSON.stringify emits 1 and 1000 respectively,
-// while underflow and rounded high-precision tokens cannot.
-function canonicalDecimalToken(token) {
-  if (typeof token !== "string" || token.length > MAX_EXACT_JSON_NUMBER_LENGTH) {
-    return undefined;
-  }
-  const match = JSON_NUMBER_PARTS.exec(token);
-  if (!match) return undefined;
-  const [, sign, integer, fraction = "", exponentText = "0"] = match;
-  let digits = integer + fraction;
-  if (/^0+$/u.test(digits)) return sign === "-" ? "-0" : "0";
-
-  const exponentSign = exponentText.startsWith("-") ? -1 : 1;
-  const unsignedExponent = exponentText.replace(/^[+-]/u, "");
-  const significantExponent = unsignedExponent.replace(/^0+/u, "") || "0";
-  // A non-zero finite Number cannot retain an exponent remotely this large;
-  // bounding it also prevents attacker-controlled giant integer arithmetic.
-  if (significantExponent.length > 6) return undefined;
-  let exponent = exponentSign * Number(significantExponent) - fraction.length;
-
-  digits = digits.replace(/^0+/u, "");
-  const trailingZeros = /0+$/u.exec(digits)?.[0].length || 0;
-  if (trailingZeros) {
-    digits = digits.slice(0, -trailingZeros);
-    exponent += trailingZeros;
-  }
-  return `${sign}${digits}e${exponent}`;
-}
-
-function jsonNumberIsStableForRewrite(token) {
-  if (token.length > MAX_EXACT_JSON_NUMBER_LENGTH) return false;
-  const parsed = Number(token);
-  if (
-    !Number.isFinite(parsed) ||
-    Object.is(parsed, -0) ||
-    (Number.isInteger(parsed) && !Number.isSafeInteger(parsed))
-  ) {
-    return false;
-  }
-  const original = canonicalDecimalToken(token);
-  const serialized = canonicalDecimalToken(JSON.stringify(parsed));
-  return original !== undefined && original === serialized;
 }
 
 // JSON.parse deliberately accepts duplicate object members and keeps the last

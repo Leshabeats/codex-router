@@ -103,6 +103,36 @@ async function transformedThroughNamespace(
   return output;
 }
 
+async function transformedBytesThroughNamespace(
+  input,
+  namespaces,
+  {
+    contentType = "text/event-stream",
+    json = false,
+    compatOptions = {},
+  } = {},
+  chunkSize = 0,
+) {
+  const compat = json
+    ? new TranslatedToolMessageJsonCompatTransform(compatOptions)
+    : new TranslatedToolMessageCompatTransform(compatOptions);
+  const namespace = new NamespaceToolCallTransform(namespaces, contentType);
+  const output = [];
+  namespace.on("data", (chunk) => { output.push(Buffer.from(chunk)); });
+  compat.pipe(namespace);
+  const bytes = Buffer.isBuffer(input) ? input : Buffer.from(input);
+  if (chunkSize > 0) {
+    for (let at = 0; at < bytes.length; at += chunkSize) {
+      compat.write(bytes.subarray(at, at + chunkSize));
+    }
+  } else {
+    compat.write(bytes);
+  }
+  compat.end();
+  await once(namespace, "end");
+  return Buffer.concat(output);
+}
+
 async function transformedJson(input, options = {}, chunkSize = 0) {
   const stream = new TranslatedToolMessageJsonCompatTransform(options);
   let output = "";
@@ -2656,6 +2686,171 @@ test("blank compaction composes with ordinary, custom, and tool_search restorati
   assert.equal(completed.response.output[0].name, "read_file");
   assert.equal(completed.response.output[1].input, "*** Begin Patch\n*** End Patch");
   assert.deepEqual(completed.response.output[2].arguments, { query: "calendar" });
+});
+
+test("compat and namespace stages preserve invalid UTF-8 byte-for-byte", async () => {
+  const flattened = flattenNamespaceTools([{
+    type: "namespace",
+    name: "mcp__files",
+    tools: [{
+      type: "function",
+      name: "read_file",
+      inputSchema: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"],
+        additionalProperties: false,
+      },
+    }],
+  }]);
+  const namespaceCall = {
+    ...functionCall,
+    name: "mcp__files__read_file",
+    arguments: '{"path":"README.md"}',
+  };
+  const source = pinnedLiteLlmPhantomToolStream((wireEvents) => {
+    for (const event of wireEvents) {
+      if (event.type === "response.function_call_arguments.delta") {
+        event.delta = namespaceCall.arguments;
+      } else if (event.type === "response.function_call_arguments.done") {
+        event.arguments = namespaceCall.arguments;
+      } else if (event.item?.type === "function_call") {
+        Object.assign(event.item, namespaceCall);
+      } else if (event.type === "response.completed") {
+        Object.assign(
+          event.response.output.find((item) => item.type === "function_call"),
+          namespaceCall,
+        );
+      }
+    }
+  });
+  const insertAt = source.indexOf("event: response.output_item.added");
+  assert.ok(insertAt > 0);
+  const invalidSse = Buffer.concat([
+    Buffer.from(source.slice(0, insertAt)),
+    Buffer.from("event: opaque\ndata: ", "ascii"),
+    Buffer.from([0xff]),
+    Buffer.from("\n\n", "ascii"),
+    Buffer.from(source.slice(insertAt)),
+  ]);
+  assert.deepEqual(
+    await transformedBytesThroughNamespace(
+      invalidSse,
+      flattened.namespaces,
+      {},
+      1,
+    ),
+    invalidSse,
+  );
+
+  const jsonPrefix = Buffer.from(
+    `{"id":"resp_invalid_utf8","status":"completed","output":[${JSON.stringify(blankMessage)},`,
+  );
+  const jsonSuffix = Buffer.from(
+    `${JSON.stringify(namespaceCall)}],"opaque":"tail"}`,
+  );
+  const invalidJson = Buffer.concat([
+    jsonPrefix,
+    Buffer.from('{"invalid":"', "ascii"),
+    Buffer.from([0xff]),
+    Buffer.from('"},', "ascii"),
+    jsonSuffix,
+  ]);
+  assert.deepEqual(
+    await transformedBytesThroughNamespace(
+      invalidJson,
+      flattened.namespaces,
+      { contentType: "application/json", json: true },
+      1,
+    ),
+    invalidJson,
+  );
+});
+
+test("compat and namespace stages jointly reject lossy numeric rewrites", async () => {
+  const flattened = flattenNamespaceTools([{
+    type: "namespace",
+    name: "mcp__files",
+    tools: [{
+      type: "function",
+      name: "read_file",
+      inputSchema: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"],
+        additionalProperties: false,
+      },
+    }],
+  }]);
+  const namespaceCall = {
+    ...functionCall,
+    name: "mcp__files__read_file",
+    arguments: '{"path":"README.md"}',
+  };
+  const source = pinnedLiteLlmPhantomToolStream((wireEvents) => {
+    for (const event of wireEvents) {
+      if (event.type === "response.function_call_arguments.delta") {
+        event.delta = namespaceCall.arguments;
+      } else if (event.type === "response.function_call_arguments.done") {
+        event.arguments = namespaceCall.arguments;
+      } else if (event.item?.type === "function_call") {
+        Object.assign(event.item, namespaceCall);
+      } else if (event.type === "response.completed") {
+        Object.assign(
+          event.response.output.find((item) => item.type === "function_call"),
+          namespaceCall,
+        );
+      }
+    }
+  });
+  const jsonTemplate = JSON.stringify({
+    id: "resp_lossy_composed",
+    object: "response",
+    error: null,
+    status: "completed",
+    numeric_provenance: 123,
+    output: [blankMessage, namespaceCall],
+  });
+
+  for (const literal of [
+    "1e-324",
+    "1.0000000000000001",
+    "0.10000000000000001",
+  ]) {
+    const unsafeSse = source.replace(
+      '"error":null',
+      `"error":null,"numeric_provenance":${literal}`,
+    );
+    assert.notEqual(unsafeSse, source);
+    const unsafeSseBytes = Buffer.from(unsafeSse);
+    assert.deepEqual(
+      await transformedBytesThroughNamespace(
+        unsafeSseBytes,
+        flattened.namespaces,
+        {},
+        1,
+      ),
+      unsafeSseBytes,
+      `SSE ${literal}`,
+    );
+
+    const unsafeJson = jsonTemplate.replace(
+      '"numeric_provenance":123',
+      `"numeric_provenance":${literal}`,
+    );
+    assert.notEqual(unsafeJson, jsonTemplate);
+    const unsafeJsonBytes = Buffer.from(unsafeJson);
+    assert.deepEqual(
+      await transformedBytesThroughNamespace(
+        unsafeJsonBytes,
+        flattened.namespaces,
+        { contentType: "application/json", json: true },
+        1,
+      ),
+      unsafeJsonBytes,
+      `JSON ${literal}`,
+    );
+  }
 });
 
 test("preserves real reasoning bytes, ids, and sequence numbers while compacting", async () => {
