@@ -141,26 +141,6 @@ test("codex probe reports enabled models", () => {
   assert.ok(deepseek.length > 0 && deepseek.every((m) => m.enabled));
 });
 
-test("desktop snapshots expose the canonical Ox Alpha route instead of its opaque OpenCode id", () => {
-  const stored = {
-    ...userModelEntry({
-      providerId: "opencode-free",
-      upstreamId: "x-preview-f-free",
-      priority: 100,
-      metadata: { isFree: true },
-    }),
-    // Simulate curation written by an older router. Registry normalization
-    // updates presentation without changing the routing identity.
-    displayName: "x-preview-f-free (curated)",
-  };
-  const slice = probe("codex", ["opencode-free"], [], { userModels: [stored] });
-  const model = slice.models.find((entry) => entry.slug === "opencode-free/ox-alpha");
-  assert.equal(model.displayName, "Ox Alpha (OpenCode Free)");
-  assert.equal(model.slug, "opencode-free/ox-alpha");
-  assert.equal(model.provider, "opencode-free");
-  assert.equal(model.enabled, true);
-});
-
 test("codex probe folds protocol variants into one provider family", () => {
   const slice = probe("codex", ["opencode-go"]);
   // Models served by the messages/responses variants group under the family
@@ -1071,28 +1051,26 @@ test("aggregate overview exposes the router-owned catalog separately from client
       "operator-curated models must not be described as checked-in research routes",
     );
     const oxAlphaRoutes = parsed.catalog.knownModels
-      .filter((model) => model.displayName.startsWith("Ox Alpha"))
+      .filter((model) => model.displayName.startsWith("Ox Alpha") || model.slug.endsWith("/ox-alpha"))
       .map((model) => [model.slug, model.available])
       .sort(([left], [right]) => left.localeCompare(right));
-    assert.deepEqual(oxAlphaRoutes, [
-      ["commandcode/ox-alpha", false],
-      ["nousresearch/ox-alpha", false],
-      ["opencode-free/ox-alpha", true],
-      ["openrouter/ox-alpha", false],
-      ["venice/ox-alpha", false],
-    ]);
+    assert.deepEqual(oxAlphaRoutes, []);
     assert.deepEqual(
       parsed.catalog.models
         .filter((model) => model.slug.endsWith("/ox-alpha"))
         .map((model) => model.slug),
-      ["opencode-free/ox-alpha"],
-      "unavailable research routes must not enter the routable catalog",
+      [],
+      "withdrawn research routes must not enter the routable catalog",
     );
-    const activeOxAlpha = parsed.catalog.models.find(
-      (model) => model.slug === "opencode-free/ox-alpha",
-    );
-    assert.equal(activeOxAlpha.contextWindow, 1_048_576);
-    assert.deepEqual(activeOxAlpha.inputModalities, ["text", "image"]);
+    for (const slug of [
+      "commandcode/ox-alpha",
+      "opencode-free/ox-alpha",
+      "openrouter/ox-alpha",
+      "nousresearch/ox-alpha",
+      "venice/ox-alpha",
+    ]) {
+      assert.equal(parsed.catalog.knownModels.some((model) => model.slug === slug), false, slug);
+    }
     const flash = parsed.catalog.knownModels.find(
       (model) => model.slug === "opencode-go/glm-5.3-flash",
     );

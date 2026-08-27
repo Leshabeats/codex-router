@@ -588,7 +588,6 @@ function normalizeAutoToolChoice(payload, route) {
 function needsZenFreeToolCompatibility(route) {
   const providerId = providerForModel(route)?.id;
   return (
-    (providerId === "opencode-free" && route.upstreamModel === "x-preview-f-free") ||
     (providerId === "opencode-free-responses" &&
       route.upstreamModel === "muse-spark-1.2-contributor-free")
   );
@@ -3034,12 +3033,11 @@ async function handleResponses(request, response, requestUrl) {
       let envelopeCompat = route
         ? zaiResponsesCompatTransform(route.provider, contentType)
         : undefined;
-      // LiteLLM's Ox Chat -> Responses bridge can start assistant text after
-      // reasoning without its message envelope. Keep that repair exact.
+      // Z.ai Responses streams from GLM-5.3 can start assistant text after
+      // reasoning without its message envelope. Keep that repair provider-scoped.
       if (
         !envelopeCompat &&
-        route?.provider === "opencode-free" &&
-        route.upstreamModel === "x-preview-f-free" &&
+        route?.provider === "zai-coding" &&
         String(contentType).toLowerCase().includes("text/event-stream")
       ) {
         envelopeCompat = new ZaiResponsesCompatTransform();
