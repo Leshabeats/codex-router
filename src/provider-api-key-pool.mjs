@@ -34,6 +34,7 @@ const SESSION_ID_LIMIT = 256;
 const MAX_PROVIDERS = 128;
 const MAX_CREDENTIALS = 256;
 const MAX_SESSIONS = 2_048;
+const MAX_GLOBAL_SESSIONS = MAX_SESSIONS * 2;
 const MAX_ERROR_LENGTH = 512;
 const MAX_STATE_BYTES = 4 * 1024 * 1024;
 const MAX_COOLDOWN_SECONDS = 24 * 60 * 60;
@@ -339,7 +340,45 @@ export function readProviderApiKeyPoolState(filePath = PROVIDER_API_KEY_POOL_PAT
 }
 
 function stateForWrite(state, now = Date.now()) {
-  return normalizeState({ version: PROVIDER_API_KEY_POOL_SCHEMA_VERSION, providers: state?.providers || {} }, now);
+  const normalized = normalizeState({
+    version: PROVIDER_API_KEY_POOL_SCHEMA_VERSION,
+    providers: state?.providers || {},
+  }, now);
+  // Per-provider caps alone do not bound the shared document: enough long-lived
+  // pools can each retain their own full session map and produce a file that
+  // the guarded reader immediately rejects. Evict globally by LRU first, then
+  // use the actual serialized size as the final authority before replacement.
+  const sessions = Object.entries(normalized.providers)
+    .flatMap(([provider, pool]) => Object.entries(pool.sessions).map(([id, session]) => ({
+      provider,
+      id,
+      updatedAt: Date.parse(session.updatedAt || session.boundAt || ""),
+    })))
+    .sort((left, right) => {
+      if (left.updatedAt !== right.updatedAt) return left.updatedAt - right.updatedAt;
+      if (left.provider !== right.provider) return left.provider < right.provider ? -1 : 1;
+      return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
+    });
+  let removed = Math.max(0, sessions.length - MAX_GLOBAL_SESSIONS);
+  for (let index = 0; index < removed; index += 1) {
+    delete normalized.providers[sessions[index].provider].sessions[sessions[index].id];
+  }
+  let serializedBytes = Buffer.byteLength(`${JSON.stringify(normalized, null, 2)}\n`);
+  while (serializedBytes > MAX_STATE_BYTES && removed < sessions.length) {
+    const remaining = sessions.length - removed;
+    const excess = serializedBytes - MAX_STATE_BYTES;
+    const batch = Math.max(1, Math.ceil((remaining * excess) / serializedBytes));
+    const end = Math.min(sessions.length, removed + batch);
+    for (let index = removed; index < end; index += 1) {
+      delete normalized.providers[sessions[index].provider].sessions[sessions[index].id];
+    }
+    removed = end;
+    serializedBytes = Buffer.byteLength(`${JSON.stringify(normalized, null, 2)}\n`);
+  }
+  if (serializedBytes > MAX_STATE_BYTES) {
+    throw new Error(`Provider API-key pool state exceeds ${MAX_STATE_BYTES} bytes; refusing to write it.`);
+  }
+  return normalized;
 }
 
 function poolStatus(providerOrId, filePath, now = Date.now()) {

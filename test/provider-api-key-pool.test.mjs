@@ -638,6 +638,58 @@ test("a new thread evicts the least-recently-used binding at the session cap", a
   assert.equal(sessions["new-session"].credentialId, entry.id);
 });
 
+test("pool writes globally evict old sessions before the state can outgrow its read bound", async () => {
+  const filePath = path.join(root, "global-session-cap.json");
+  const providers = [
+    "openrouter",
+    "deepseek",
+    "grok-api",
+    "kimi-api",
+    "kimi-api-cn",
+    "anthropic-api",
+    "commandcode",
+    "github-copilot",
+    "venice",
+  ];
+  const entries = new Map();
+  for (const provider of providers) {
+    const entry = metadata(credential(`global_${provider.replaceAll("-", "_")}`, provider));
+    entries.set(provider, entry);
+    await upsertProviderApiKey(provider, entry, { filePath });
+  }
+  const document = JSON.parse(readFileSync(filePath, "utf8"));
+  for (const [providerIndex, provider] of providers.entries()) {
+    document.providers[provider].sessions = Object.fromEntries(
+      Array.from({ length: 2_048 }, (_, index) => {
+        const timestamp = new Date(NOW + providerIndex * 10_000_000 + index).toISOString();
+        return [`${provider}-session-${String(index).padStart(4, "0")}`, {
+          credentialId: entries.get(provider).id,
+          turns: 1,
+          requests: 1,
+          boundAt: timestamp,
+          updatedAt: timestamp,
+        }];
+      }),
+    );
+  }
+  writeFileSync(filePath, `${JSON.stringify(document)}\n`, { mode: 0o600 });
+  assert.ok(Buffer.byteLength(readFileSync(filePath)) <= 4 * 1024 * 1024);
+
+  await setProviderApiKeyPoolPolicy("venice", { stickyLimit: 25 }, { filePath });
+
+  const state = readProviderApiKeyPoolState(filePath, { now: NOW });
+  assert.equal(state.valid, true);
+  const sessionCount = providers.reduce(
+    (count, provider) => count + Object.keys(state.providers[provider].sessions).length,
+    0,
+  );
+  assert.equal(sessionCount, 4_096);
+  assert.equal(Object.keys(state.providers.openrouter.sessions).length, 0);
+  assert.equal(Object.keys(state.providers["github-copilot"].sessions).length, 2_048);
+  assert.equal(Object.keys(state.providers.venice.sessions).length, 2_048);
+  assert.ok(Buffer.byteLength(readFileSync(filePath)) <= 4 * 1024 * 1024);
+});
+
 test("lock serializes concurrent state updates and preserves every session turn", async () => {
   const filePath = path.join(root, "concurrency.json");
   const entry = metadata(credential("concurrent", "CONCURRENT"));
