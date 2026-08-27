@@ -739,7 +739,10 @@ test("installer rollback undoes only what the run created", () => {
 // The manifest names the checkout that owns the generated state, and the
 // desktop app resolves its source root from it. Recording it only after the
 // health wait meant a timeout left the manifest naming the previous owner
-// while the installed service pointed at the new one.
+// while the installed service pointed at the new one. It must also precede
+// the service step itself: the service refuses to boot while the manifest
+// still names another checkout, so a record that runs after the service step
+// -- which contains the health wait -- can never run at all.
 test("both installers record the manifest before waiting on health", () => {
   const posix = readFileSync(path.join(root, "bin", "install"), "utf8");
   const windows = readFileSync(path.join(root, "install.ps1"), "utf8");
@@ -751,5 +754,14 @@ test("both installers record the manifest before waiting on health", () => {
   assert.ok(
     windows.indexOf("install-manifest.mjs record") < windows.indexOf("wait-health.mjs"),
     "Windows must record the manifest before the health wait",
+  );
+  assert.ok(
+    posix.indexOf("install-manifest.mjs record") < posix.indexOf("node src/service.mjs install"),
+    "POSIX must record the manifest before installing the service",
+  );
+  assert.ok(
+    windows.indexOf("install-manifest.mjs record") <
+      windows.indexOf("& node src/service.mjs install"),
+    "Windows must record the manifest before installing the service",
   );
 });

@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **Reinstalling over a state directory owned by another checkout no longer
+  deadlocks.** The installers recorded the state directory's new owner only
+  after the background service reported healthy, while the service itself
+  refuses to boot for as long as the record still names another checkout
+  (`foreign_state_owner`): an install that followed one from a different
+  checkout crash-looped for the full 300-second readiness budget, rolled
+  back, and repeated on every retry, and deleting the whole state directory
+  -- every stored provider key with it -- was the only escape. The record now
+  precedes the service step it describes, so the service boots against its
+  own ownership. Linux readiness also fails fast once the service manager's
+  restart counter shows a crash loop, instead of waiting out the whole
+  budget, and names the journal and the router log in the error.
+
 - **OpenCode Go Kimi K2.7 Code now accepts current Codex tool schemas.** Its
   Moonshot-backed validator receives the same bounded decorated-`$defs` repair
   as the first-party Kimi routes. The compatibility gate names only this

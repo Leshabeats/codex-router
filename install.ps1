@@ -457,17 +457,19 @@ try {
   & node @ConfigArguments
   if ($LASTEXITCODE -ne 0) { throw "$Target configuration update failed." }
   $AdoptionPending = $false
+  # Record before the service starts, not after. The manifest is provenance for
+  # the install that just happened -- which checkout owns the state, and the
+  # proxy environment a later repair must restore -- and the service itself
+  # needs the record in place first: start.mjs rewrites the gateway config on
+  # every boot and refuses while the manifest still names another checkout, so
+  # recording after `service.mjs install` -- a step that contains the health
+  # wait -- let an install over a foreign-owned state directory crash-loop for
+  # the whole readiness budget while the ownership transfer never ran.
+  & node src/install-manifest.mjs record | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "Install-manifest recording failed." }
   $ServiceInstalled = $true
   & node src/service.mjs install
   if ($LASTEXITCODE -ne 0) { throw "Background-service installation failed." }
-  # Record before the health wait, not after. The manifest is provenance for
-  # the install that just happened -- which checkout owns the state, and the
-  # proxy environment a later repair must restore -- and the service is already
-  # in place. Recording it only after a health check that a cold-starting
-  # gateway can lose left the manifest naming the previous owner while the
-  # running service pointed somewhere else.
-  & node src/install-manifest.mjs record | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw "Install-manifest recording failed." }
   & node src/wait-health.mjs
   if ($LASTEXITCODE -ne 0) { throw "The router did not become healthy." }
 
