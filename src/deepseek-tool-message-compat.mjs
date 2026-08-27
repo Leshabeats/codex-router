@@ -486,7 +486,12 @@ function parsedBlock(blockBytes, jsonLimits) {
     return { malformed: true };
   }
   const [dataLineIndex] = dataLineIndexes;
-  const dataText = lines[dataLineIndex].slice(5).trimStart();
+  const dataValue = lines[dataLineIndex].slice(5);
+  // The SSE grammar removes at most one U+0020 after a field colon. Leave
+  // every other code point to JSON.parse: it accepts JSON's own ASCII
+  // whitespace, while a BOM or non-JSON Unicode whitespace remains invalid
+  // instead of being silently normalized into trusted bridge evidence.
+  const dataText = dataValue.startsWith(" ") ? dataValue.slice(1) : dataValue;
   if (!dataText) return { malformed: true };
   if (dataText === "[DONE]") {
     return eventLines.length === 0 ? { done: true } : { malformed: true };
@@ -494,11 +499,12 @@ function parsedBlock(blockBytes, jsonLimits) {
   try {
     if (!uniqueJsonObjectMembers(dataText, jsonLimits)) return { malformed: true };
     const event = JSON.parse(dataText);
-    if (
-      eventLines.length === 1 &&
-      eventLines[0].slice(6).trim() !== event?.type
-    ) {
-      return { malformed: true };
+    if (eventLines.length === 1) {
+      const eventValue = eventLines[0].slice(6);
+      const declaredType = eventValue.startsWith(" ")
+        ? eventValue.slice(1)
+        : eventValue;
+      if (declaredType !== event?.type) return { malformed: true };
     }
     return { parsed: { lines, dataLineIndex, newline, event } };
   } catch {
@@ -1014,8 +1020,9 @@ export class DeepseekToolMessageCompatTransform extends Transform {
       return;
     }
     this.#emitCompleteBlocks(true);
-    if (this.#capture?.stage === "completed") this.#repairCapture();
-    else if (this.#capture) this.#failOpen();
+    if (["completed", "sentinel"].includes(this.#capture?.stage)) {
+      this.#finishAtEof();
+    } else if (this.#capture) this.#failOpen();
     this.#pushBuffered();
     callback();
   }
@@ -1073,9 +1080,11 @@ export class DeepseekToolMessageCompatTransform extends Transform {
       return;
     }
     if (parsedResult.done) {
-      if (this.#capture?.stage === "completed") this.#repairCapture();
-      else if (this.#capture) this.#failOpen(frame);
-      if (!this.#disabled) {
+      if (this.#capture?.stage === "completed") {
+        this.#holdSentinel(frame);
+      } else if (this.#capture) {
+        this.#failOpen(frame);
+      } else if (!this.#disabled) {
         this.push(frame.original);
         this.#finished = true;
       }
@@ -1188,8 +1197,8 @@ export class DeepseekToolMessageCompatTransform extends Transform {
       terminalTool: undefined,
       terminalReasoning: undefined,
       terminalBlank: undefined,
+      sentinel: undefined,
     };
-    this.#startTimer();
     this.#hold(frame);
   }
 
@@ -1509,6 +1518,12 @@ export class DeepseekToolMessageCompatTransform extends Transform {
     else if (this.#capture?.mode === "current") this.#repairCurrent();
   }
 
+  #finishAtEof() {
+    const sentinel = this.#capture?.sentinel;
+    this.#repairCapture();
+    if (sentinel) this.push(sentinel.original);
+  }
+
   #repairHistorical() {
     const capture = this.#capture;
     if (!capture) return;
@@ -1620,6 +1635,22 @@ export class DeepseekToolMessageCompatTransform extends Transform {
     }
     this.#capture.frames.push(frame);
     this.#capture.bytes += frame.original.length;
+    this.#resetWatchdog();
+  }
+
+  #holdSentinel(frame) {
+    if (!this.#capture || this.#capture.sentinel) {
+      this.#failOpen(frame);
+      return;
+    }
+    if (this.#capture.bytes + frame.original.length > this.#maxCandidateBytes) {
+      this.#failOpen(frame);
+      return;
+    }
+    this.#capture.sentinel = frame;
+    this.#capture.bytes += frame.original.length;
+    this.#capture.stage = "sentinel";
+    this.#resetWatchdog();
   }
 
   #failOpen(extraFrame) {
@@ -1628,6 +1659,7 @@ export class DeepseekToolMessageCompatTransform extends Transform {
     this.#clearTimer();
     if (capture) {
       for (const frame of capture.frames) this.push(frame.original);
+      if (capture.sentinel) this.push(capture.sentinel.original);
     }
     if (extraFrame) this.push(extraFrame.original);
     this.#disabled = true;
@@ -1644,8 +1676,9 @@ export class DeepseekToolMessageCompatTransform extends Transform {
     this.#buffer = Buffer.alloc(0);
   }
 
-  #startTimer() {
-    if (this.#timer || !this.#capture) return;
+  #resetWatchdog() {
+    this.#clearTimer();
+    if (!this.#capture) return;
     this.#timer = setTimeout(() => {
       this.#failOpen();
       this.#pushBuffered();

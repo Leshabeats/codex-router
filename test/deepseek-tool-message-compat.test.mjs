@@ -806,6 +806,140 @@ test("historical direct-DeepSeek grammar remains exact and bounded", async () =>
   );
 });
 
+test("direct DeepSeek holds one terminal sentinel until EOF and rejects every trailer", async () => {
+  const fixtures = [
+    [historicalDirectDeepseekStream, "msg_direct_historical"],
+    [currentDirectDeepseekStream, "msg_direct_live"],
+  ];
+  for (const [fixture, blankId] of fixtures) {
+    const source = fixture();
+    const stream = new DeepseekToolMessageCompatTransform();
+    let heldOutput = "";
+    stream.setEncoding("utf8");
+    stream.on("data", (chunk) => { heldOutput += chunk; });
+    stream.write(source);
+    assert.equal(heldOutput.includes("[DONE]"), false);
+    stream.end();
+    await once(stream, "end");
+    assert.equal(heldOutput.includes(blankId), false);
+    assert.match(heldOutput, /data: \[DONE\]\n\n$/);
+
+    const withoutSentinel = source.replace(/data: \[DONE\]\n\n$/, "");
+    const eofOutput = await transformedDirect(withoutSentinel, {}, 1);
+    assert.equal(eofOutput.includes(blankId), false);
+
+    const trailingEvent = block({
+      type: "response.output_item.added",
+      output_index: 9,
+      item: {
+        id: "msg_after_done",
+        type: "message",
+        status: "in_progress",
+        role: "assistant",
+        content: [],
+      },
+    });
+    for (const suffix of [
+      "data: [DONE]\n\n",
+      trailingEvent,
+      "opaque trailing byte",
+    ]) {
+      const input = source + suffix;
+      assert.equal(await transformedDirect(input, {}, 1), input);
+    }
+  }
+});
+
+test("direct DeepSeek watchdog measures inactivity rather than total capture time", async () => {
+  const timeout = 1_000;
+  const gap = 150;
+  const frames = historicalDirectDeepseekEvents().map((event) => block(event));
+  const source = `${frames.join("")}data: [DONE]\n\n`;
+  const stream = new DeepseekToolMessageCompatTransform({ maxCandidateMs: timeout });
+  let output = "";
+  stream.setEncoding("utf8");
+  stream.on("data", (chunk) => { output += chunk; });
+  const started = Date.now();
+  for (const frame of frames) {
+    stream.write(frame);
+    await new Promise((resolve) => setTimeout(resolve, gap));
+  }
+  stream.write("data: [DONE]\n\n");
+  await new Promise((resolve) => setTimeout(resolve, gap));
+  stream.end();
+  await once(stream, "end");
+
+  assert.ok(Date.now() - started > timeout);
+  assert.equal(output.includes("msg_direct_historical"), false);
+  assert.match(output, /data: \[DONE\]\n\n$/);
+  assert.notEqual(output, source);
+});
+
+test("direct DeepSeek watchdog fails open after one inactive gap", async () => {
+  const frames = historicalDirectDeepseekEvents().map((event) => block(event));
+  const source = `${frames.join("")}data: [DONE]\n\n`;
+  const stream = new DeepseekToolMessageCompatTransform({ maxCandidateMs: 20 });
+  let output = "";
+  stream.setEncoding("utf8");
+  stream.on("data", (chunk) => { output += chunk; });
+  stream.write(frames[0]);
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  stream.end(`${frames.slice(1).join("")}data: [DONE]\n\n`);
+  await once(stream, "end");
+  assert.equal(output, source);
+});
+
+test("direct DeepSeek watchdog releases an incomplete frame byte-for-byte", async () => {
+  const start = block(historicalDirectDeepseekEvents()[0]);
+  const partial = "event: response.content_part.added\ndata: {\"type\":";
+  const stream = new DeepseekToolMessageCompatTransform({ maxCandidateMs: 20 });
+  let output = "";
+  stream.setEncoding("utf8");
+  stream.on("data", (chunk) => { output += chunk; });
+  stream.write(start + partial);
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(output, start + partial);
+  stream.end();
+  await once(stream, "end");
+  assert.equal(output, start + partial);
+});
+
+test("destroying a pending direct DeepSeek capture cancels its watchdog", async () => {
+  const start = block(historicalDirectDeepseekEvents()[0]);
+  const stream = new DeepseekToolMessageCompatTransform({ maxCandidateMs: 20 });
+  let output = "";
+  stream.on("data", (chunk) => { output += chunk.toString("utf8"); });
+  stream.write(start);
+  stream.destroy();
+  await once(stream, "close");
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(output, "");
+});
+
+test("SSE field parsing removes only one optional ASCII space", async () => {
+  const source = historicalDirectDeepseekStream();
+  for (const prefix of ["data:  {", "data: \t  {"]) {
+    const spaced = source.replace("data: {", prefix);
+    const output = await transformedDirect(spaced, {}, 1);
+    assert.equal(output.includes("msg_direct_historical"), false);
+  }
+
+  for (const invalid of [
+    source.replace("data: {", "data: \ufeff{"),
+    source.replace("data: {", "data: \u00a0{"),
+    source.replace(
+      "event: response.output_item.added",
+      "event: \ufeffresponse.output_item.added",
+    ),
+    source.replace(
+      "event: response.output_item.added",
+      "event:  response.output_item.added",
+    ),
+  ]) {
+    assert.equal(await transformedDirect(invalid, {}, 1), invalid);
+  }
+});
+
 test("repairs LiteLLM 1.96.0's pinned terminal sequence reset", async () => {
   const source = pinnedLiteLlmPhantomToolStream();
   const output = await transformed(source, {}, 5);
