@@ -130,6 +130,7 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "nousresearch/muse-spark-1.2-contributor",
       "nousresearch/nemotron-3-ultra",
       "nousresearch/qwen3.7-max",
+      "nousresearch/qwen3.8-flash",
       "nousresearch/qwen3.8-max",
       "nousresearch/solar-pro4-free",
       "nousresearch/step-3.7-flash-free",

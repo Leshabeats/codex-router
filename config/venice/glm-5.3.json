@@ -4,11 +4,11 @@
     {
       "slug": "venice/glm-5.3",
       "gatewayModel": "venice-glm-5-3",
-      "upstreamModel": "z-ai/glm-5.3",
+      "upstreamModel": "z-ai-glm-5-3",
       "provider": "venice",
       "listed": true,
       "displayName": "GLM-5.3 (Venice)",
-      "description": "Z.ai GLM-5.3 through the Venice API. The 1M-context route uses the model's low/high/max reasoning ladder with mandatory thinking.",
+      "description": "GLM-5.3 through Venice AI. The 1M-context route uses the model's low/high/max reasoning ladder.",
       "priority": 102,
       "defaultEffort": "max",
       "reasoningLevels": [
@@ -25,8 +25,8 @@
           "description": "Maximum reasoning depth"
         }
       ],
-      "contextWindow": 1048576,
-      "autoCompact": 943000,
+      "contextWindow": 1000000,
+      "autoCompact": 900000,
       "inputModalities": [
         "text"
       ],

@@ -7,9 +7,9 @@
       "upstreamModel": "glm-5.3-flash",
       "provider": "zai-api",
       "listed": true,
-      "displayName": "GLM-5.3-Flash (API Key)",
-      "description": "GLM-5.3-Flash through the Z.ai API with a provider API key. The 1M-context route uses the model's low/high/max reasoning ladder and the conservative compaction threshold proven for the same model on opencode Go.",
-      "priority": 102,
+      "displayName": "GLM-5.3-Flash (Z.ai API)",
+      "description": "GLM-5.3-Flash billed per token on the Z.ai open platform, with the low/high/max reasoning ladder and conservative flash compaction.",
+      "priority": 63,
       "defaultEffort": "max",
       "reasoningLevels": [
         {
