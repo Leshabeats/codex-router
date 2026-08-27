@@ -502,6 +502,8 @@ const MAX_JSON_CAPTURE_BYTES = 64 * 1024 * 1024;
 const CAPTURE_PART_BYTES = 64 * 1024;
 const INITIAL_SSE_CAPTURE_PART_BYTES = 1024;
 const MAX_TRACKED_OUTPUT_ITEMS = 4096;
+const MAX_TRACKED_STATE_BYTES = 8 * 1024 * 1024;
+const TRACKED_STATE_FIXED_BYTES = 512;
 // Streaming and non-streaming Responses payloads share the same maximum
 // capturable JSON value. A terminal SSE event can carry the complete response,
 // including large custom-tool input, so it is not valid to impose the much
@@ -529,6 +531,105 @@ function sseFieldValue(line, prefixLength) {
 
 function sseLineFieldValue(line, name) {
   return line === name ? "" : sseFieldValue(line, name.length + 1);
+}
+
+function stringFingerprint(value) {
+  return {
+    length: value.length,
+    digest: createHash("sha256").update(value, "utf16le").digest(),
+  };
+}
+
+function canonicalJsonFingerprint(value) {
+  const hash = createHash("sha256");
+  let length = 0;
+  const update = (part, encoding = "utf8") => {
+    hash.update(part, encoding);
+    length += Buffer.byteLength(part, encoding);
+  };
+  const updateString = (marker, text) => {
+    update(`${marker}${text.length}:`, "ascii");
+    update(text, "utf16le");
+  };
+  const stack = [{ kind: "value", value }];
+  while (stack.length) {
+    const frame = stack.pop();
+    if (frame.kind === "array") {
+      if (frame.index >= frame.value.length) {
+        update("]", "ascii");
+        continue;
+      }
+      stack.push({ ...frame, index: frame.index + 1 });
+      stack.push({ kind: "value", value: frame.value[frame.index] });
+      continue;
+    }
+    if (frame.kind === "object") {
+      if (frame.index >= frame.keys.length) {
+        update("}", "ascii");
+        continue;
+      }
+      const key = frame.keys[frame.index];
+      stack.push({ ...frame, index: frame.index + 1 });
+      stack.push({ kind: "value", value: frame.value[key] });
+      stack.push({ kind: "key", value: key });
+      continue;
+    }
+    if (frame.kind === "key") {
+      updateString("k", frame.value);
+      continue;
+    }
+
+    const current = frame.value;
+    if (current === null) {
+      update("n", "ascii");
+    } else if (typeof current === "string") {
+      updateString("s", current);
+    } else if (typeof current === "number") {
+      const number = Number.isNaN(current)
+        ? "NaN"
+        : Object.is(current, -0)
+          ? "-0"
+          : String(current);
+      updateString("d", number);
+    } else if (typeof current === "boolean") {
+      update(current ? "t" : "f", "ascii");
+    } else if (Array.isArray(current)) {
+      update(`a${current.length}:[`, "ascii");
+      stack.push({ kind: "array", value: current, index: 0 });
+    } else if (typeof current === "object") {
+      const keys = Object.keys(current).sort();
+      update(`o${keys.length}:{`, "ascii");
+      stack.push({ kind: "object", value: current, keys, index: 0 });
+    } else {
+      throw new TypeError("Tool-search arguments contain a non-JSON value.");
+    }
+  }
+  return { length, digest: hash.digest() };
+}
+
+function fingerprintMatches(fingerprint, length, digest) {
+  return (
+    fingerprint.length === length &&
+    Buffer.isBuffer(digest) &&
+    fingerprint.digest.equals(digest)
+  );
+}
+
+function trackedStateBytes(state) {
+  let bytes = TRACKED_STATE_FIXED_BYTES;
+  for (const field of [
+    "itemId",
+    "callId",
+    "sourceType",
+    "sourceName",
+    "sourceNamespace",
+    "outputType",
+    "outputName",
+    "outputNamespace",
+  ]) {
+    if (typeof state[field] === "string") bytes += Buffer.byteLength(state[field], "utf8");
+  }
+  return bytes;
 }
 
 // Normalize a bounded JSON number as exact decimal coefficient + power. This
@@ -2114,6 +2215,7 @@ export class NamespaceToolCallTransform extends Transform {
   #maxJsonCaptureBytes;
   #maxSseFrameBytes;
   #maxTrackedOutputItems;
+  #maxTrackedStateBytes;
   #rewriteDisabled = false;
   #semanticMutationCommitted = false;
   #lookups;
@@ -2133,6 +2235,7 @@ export class NamespaceToolCallTransform extends Transform {
   #callsByItemId = new Map();
   #callsByCallId = new Map();
   #trackedCallCount = 0;
+  #trackedStateBytes = 0;
 
   constructor(namespaces, contentType = "", sessionModel, options = {}) {
     super();
@@ -2158,6 +2261,10 @@ export class NamespaceToolCallTransform extends Transform {
       Number.isInteger(options.maxTrackedOutputItems) && options.maxTrackedOutputItems > 0
         ? options.maxTrackedOutputItems
         : MAX_TRACKED_OUTPUT_ITEMS;
+    this.#maxTrackedStateBytes =
+      Number.isInteger(options.maxTrackedStateBytes) && options.maxTrackedStateBytes > 0
+        ? options.maxTrackedStateBytes
+        : MAX_TRACKED_STATE_BYTES;
     const declared = String(contentType).toLowerCase();
     this.#eventStream = declared.includes("text/event-stream");
     this.#headerlessDetector =
@@ -2580,6 +2687,7 @@ export class NamespaceToolCallTransform extends Transform {
     this.#callsByItemId.clear();
     this.#callsByCallId.clear();
     this.#trackedCallCount = 0;
+    this.#trackedStateBytes = 0;
   }
 
   #specialCallKind(item) {
@@ -2617,6 +2725,21 @@ export class NamespaceToolCallTransform extends Transform {
     return undefined;
   }
 
+  #storeCallState(state) {
+    if (this.#trackedCallCount >= this.#maxTrackedOutputItems) {
+      return "output item identity limit";
+    }
+    const retainedBytes = trackedStateBytes(state);
+    if (retainedBytes > this.#maxTrackedStateBytes - this.#trackedStateBytes) {
+      return "output item state byte limit";
+    }
+    if (state.itemId) this.#callsByItemId.set(state.itemId, state);
+    if (state.callId) this.#callsByCallId.set(state.callId, state);
+    this.#trackedCallCount += 1;
+    this.#trackedStateBytes += retainedBytes;
+    return undefined;
+  }
+
   #registerCall(sourceItem, item) {
     const kind = this.#specialCallKind(item);
     const sourceKind = this.#sourceSpecialCallKind(sourceItem);
@@ -2649,9 +2772,6 @@ export class NamespaceToolCallTransform extends Transform {
     if (!itemId && !callId) return undefined;
     const conflict = this.#openingIdentityConflict(item);
     if (conflict) return conflict;
-    if (this.#trackedCallCount >= this.#maxTrackedOutputItems) {
-      return "output item identity limit";
-    }
     const state = {
       kind,
       itemId,
@@ -2663,8 +2783,10 @@ export class NamespaceToolCallTransform extends Transform {
       outputName: item.name,
       outputNamespace: item.namespace,
       argumentsDone: false,
-      finalInput: undefined,
-      finalArguments: undefined,
+      finalInputLength: undefined,
+      finalInputDigest: undefined,
+      finalArgumentsLength: undefined,
+      finalArgumentsDigest: undefined,
       sawArgumentDelta: false,
       deltaCharacters: 0,
       deltaHash: kind === "custom" ? createHash("sha256") : undefined,
@@ -2681,10 +2803,7 @@ export class NamespaceToolCallTransform extends Transform {
             }
           : undefined,
     };
-    if (state.itemId) this.#callsByItemId.set(state.itemId, state);
-    if (state.callId) this.#callsByCallId.set(state.callId, state);
-    this.#trackedCallCount += 1;
-    return undefined;
+    return this.#storeCallState(state);
   }
 
   // Some Responses bridges omit output_item.added and emit only one complete
@@ -2766,9 +2885,12 @@ export class NamespaceToolCallTransform extends Transform {
 
     const conflict = this.#openingIdentityConflict(item);
     if (conflict) return conflict;
-    if (this.#trackedCallCount >= this.#maxTrackedOutputItems) {
-      return "output item identity limit";
-    }
+    const finalInputFingerprint = kind === "custom"
+      ? stringFingerprint(item.input)
+      : undefined;
+    const finalArgumentsFingerprint = kind === "tool_search"
+      ? canonicalJsonFingerprint(item.arguments)
+      : undefined;
     const state = {
       kind,
       itemId,
@@ -2780,8 +2902,10 @@ export class NamespaceToolCallTransform extends Transform {
       outputName: item.name,
       outputNamespace: item.namespace,
       argumentsDone: true,
-      finalInput: kind === "custom" ? item.input : undefined,
-      finalArguments: kind === "tool_search" ? item.arguments : undefined,
+      finalInputLength: finalInputFingerprint?.length,
+      finalInputDigest: finalInputFingerprint?.digest,
+      finalArgumentsLength: finalArgumentsFingerprint?.length,
+      finalArgumentsDigest: finalArgumentsFingerprint?.digest,
       sawArgumentDelta: false,
       deltaCharacters: 0,
       deltaHash: undefined,
@@ -2789,10 +2913,7 @@ export class NamespaceToolCallTransform extends Transform {
       summarySeen,
       deltaState: undefined,
     };
-    if (itemId) this.#callsByItemId.set(itemId, state);
-    this.#callsByCallId.set(callId, state);
-    this.#trackedCallCount += 1;
-    return undefined;
+    return this.#storeCallState(state);
   }
 
   #registerAtomicOutputItem(sourceItem, item, { summarySeen = false } = {}) {
@@ -2839,9 +2960,6 @@ export class NamespaceToolCallTransform extends Transform {
     if (!itemId && !callId) return undefined;
     const conflict = this.#openingIdentityConflict(item);
     if (conflict) return conflict;
-    if (this.#trackedCallCount >= this.#maxTrackedOutputItems) {
-      return "output item identity limit";
-    }
     const state = {
       kind: undefined,
       itemId,
@@ -2853,8 +2971,10 @@ export class NamespaceToolCallTransform extends Transform {
       outputName: item?.name,
       outputNamespace: item?.namespace,
       argumentsDone: true,
-      finalInput: undefined,
-      finalArguments: undefined,
+      finalInputLength: undefined,
+      finalInputDigest: undefined,
+      finalArgumentsLength: undefined,
+      finalArgumentsDigest: undefined,
       sawArgumentDelta: false,
       deltaCharacters: 0,
       deltaHash: undefined,
@@ -2862,10 +2982,7 @@ export class NamespaceToolCallTransform extends Transform {
       summarySeen,
       deltaState: undefined,
     };
-    if (itemId) this.#callsByItemId.set(itemId, state);
-    if (callId) this.#callsByCallId.set(callId, state);
-    this.#trackedCallCount += 1;
-    return undefined;
+    return this.#storeCallState(state);
   }
 
   #outputItemMatchesState(sourceItem, item, state) {
@@ -2907,7 +3024,7 @@ export class NamespaceToolCallTransform extends Transform {
     return { state };
   }
 
-  #customDeltaMismatch(state, input) {
+  #customDeltaMismatch(state, inputFingerprint) {
     if (!state.sawArgumentDelta) return undefined;
     if (
       state.deltaState.invalid ||
@@ -2917,14 +3034,11 @@ export class NamespaceToolCallTransform extends Transform {
     ) {
       return "incomplete custom tool argument delta sequence";
     }
-    if (state.deltaCharacters !== input.length) {
+    if (state.deltaCharacters !== inputFingerprint.length) {
       return "custom tool argument deltas disagree with completed input";
     }
-    const streamed = state.deltaHash.copy().digest("hex");
-    const completed = createHash("sha256")
-      .update(Buffer.from(input, "utf16le"))
-      .digest("hex");
-    return streamed === completed
+    const streamed = state.deltaHash.copy().digest();
+    return streamed.equals(inputFingerprint.digest)
       ? undefined
       : "custom tool argument deltas disagree with completed input";
   }
@@ -2958,23 +3072,46 @@ export class NamespaceToolCallTransform extends Transform {
       return undefined;
     }
     if (state.kind === "custom") {
-      if (state.argumentsDone && item.input !== state.finalInput) {
+      if (typeof item.input !== "string") {
+        return "custom tool call input changed before close";
+      }
+      const inputFingerprint = stringFingerprint(item.input);
+      if (
+        state.argumentsDone &&
+        !fingerprintMatches(
+          inputFingerprint,
+          state.finalInputLength,
+          state.finalInputDigest,
+        )
+      ) {
         return "custom tool call input changed before close";
       }
       if (!state.argumentsDone) {
-        const reason = this.#customDeltaMismatch(state, item.input);
+        const reason = this.#customDeltaMismatch(state, inputFingerprint);
         if (reason) return reason;
-        state.finalInput = item.input;
+        state.finalInputLength = inputFingerprint.length;
+        state.finalInputDigest = inputFingerprint.digest;
       }
+      state.argumentsDone = true;
+      state.deltaHash = undefined;
+      state.deltaState = undefined;
     }
-    if (
-      state.kind === "tool_search" &&
-      state.argumentsDone &&
-      !isDeepStrictEqual(item.arguments, state.finalArguments)
-    ) {
-      return "tool search arguments changed before close";
+    if (state.kind === "tool_search") {
+      const argumentsFingerprint = canonicalJsonFingerprint(item.arguments);
+      if (
+        state.argumentsDone &&
+        !fingerprintMatches(
+          argumentsFingerprint,
+          state.finalArgumentsLength,
+          state.finalArgumentsDigest,
+        )
+      ) {
+        return "tool search arguments changed before close";
+      }
+      state.finalArgumentsLength = argumentsFingerprint.length;
+      state.finalArgumentsDigest = argumentsFingerprint.digest;
+      state.argumentsDone = true;
     }
-    if (state.kind === "tool_search") state.finalArguments = item.arguments;
     state.closed = true;
     return undefined;
   }
@@ -3014,14 +3151,32 @@ export class NamespaceToolCallTransform extends Transform {
       state.summarySeen = true;
       return undefined;
     }
-    if (state.kind === "custom" && item.input !== state.finalInput) {
-      return "custom tool call summary input changed after close";
+    if (state.kind === "custom") {
+      if (typeof item.input !== "string") {
+        return "custom tool call summary input changed after close";
+      }
+      const inputFingerprint = stringFingerprint(item.input);
+      if (
+        !fingerprintMatches(
+          inputFingerprint,
+          state.finalInputLength,
+          state.finalInputDigest,
+        )
+      ) {
+        return "custom tool call summary input changed after close";
+      }
     }
-    if (
-      state.kind === "tool_search" &&
-      !isDeepStrictEqual(item.arguments, state.finalArguments)
-    ) {
-      return "tool search arguments changed after close";
+    if (state.kind === "tool_search") {
+      const argumentsFingerprint = canonicalJsonFingerprint(item.arguments);
+      if (
+        !fingerprintMatches(
+          argumentsFingerprint,
+          state.finalArgumentsLength,
+          state.finalArgumentsDigest,
+        )
+      ) {
+        return "tool search arguments changed after close";
+      }
     }
     state.summarySeen = true;
     return undefined;
@@ -3193,8 +3348,10 @@ export class NamespaceToolCallTransform extends Transform {
             if (!argumentsObject) {
               return this.#unsafeSseFrame(frame, "invalid tool search arguments done");
             }
+            const argumentsFingerprint = canonicalJsonFingerprint(argumentsObject);
             matched.state.argumentsDone = true;
-            matched.state.finalArguments = argumentsObject;
+            matched.state.finalArgumentsLength = argumentsFingerprint.length;
+            matched.state.finalArgumentsDigest = argumentsFingerprint.digest;
             this.#commitSemanticMutation();
             return [];
           }
@@ -3202,7 +3359,11 @@ export class NamespaceToolCallTransform extends Transform {
           if (input === undefined) {
             return this.#unsafeSseFrame(frame, "invalid custom tool arguments done");
           }
-          const deltaReason = this.#customDeltaMismatch(matched.state, input);
+          const inputFingerprint = stringFingerprint(input);
+          const deltaReason = this.#customDeltaMismatch(
+            matched.state,
+            inputFingerprint,
+          );
           if (deltaReason) return this.#unsafeSseFrame(frame, deltaReason);
           const { arguments: _arguments, ...rest } = event;
           event = {
@@ -3211,7 +3372,10 @@ export class NamespaceToolCallTransform extends Transform {
             input,
           };
           matched.state.argumentsDone = true;
-          matched.state.finalInput = input;
+          matched.state.finalInputLength = inputFingerprint.length;
+          matched.state.finalInputDigest = inputFingerprint.digest;
+          matched.state.deltaHash = undefined;
+          matched.state.deltaState = undefined;
           changed = true;
         }
       }

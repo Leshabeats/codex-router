@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import test from "node:test";
@@ -4029,7 +4030,75 @@ test("special relay identities cannot be reused or changed after conversion", as
   );
   assert.equal(boundedCommitted.error.code, "ERR_NAMESPACE_RELAY_COMMITTED_STREAM");
   assert.doesNotMatch(boundedCommitted.output.toString("utf8"), /post-commit-identity-limit/u);
+
+  const stateBounded = await collectUntilPipelineError(
+    [Buffer.from(overLimitSource, "utf8")],
+    new NamespaceToolCallTransform(namespaces, "text/event-stream", undefined, {
+      maxTrackedStateBytes: 1024,
+    }),
+  );
+  assert.equal(stateBounded.error.code, "ERR_NAMESPACE_RELAY_COMMITTED_STREAM");
+  assert.doesNotMatch(stateBounded.output.toString("utf8"), /post-commit-identity-limit/u);
 });
+
+test(
+  "closed special-call tracking retains fingerprints instead of payload-scale strings",
+  { timeout: 30_000 },
+  () => {
+    const moduleUrl = new URL("../src/namespace-relay.mjs", import.meta.url).href;
+    const script = String.raw`
+      import { once } from "node:events";
+      import { bridgeCustomTools, NamespaceToolCallTransform } from ${JSON.stringify(moduleUrl)};
+      const namespaces = new Map();
+      bridgeCustomTools([{ type: "custom", name: "apply_patch" }], [], namespaces);
+      const transform = new NamespaceToolCallTransform(namespaces, "text/event-stream");
+      transform.on("data", () => {});
+      global.gc();
+      const before = process.memoryUsage();
+      let payloadCharacters = 0;
+      const calls = 256;
+      for (let index = 0; index < calls; index += 1) {
+        const input = String(index) + ":" +
+          String.fromCharCode(65 + (index % 26)).repeat(180_000);
+        payloadCharacters += input.length;
+        const event = {
+          type: "response.output_item.done",
+          item: {
+            type: "function_call",
+            id: "fc_" + index,
+            call_id: "call_" + index,
+            name: "apply_patch",
+            arguments: JSON.stringify({ input }),
+          },
+        };
+        const frame = Buffer.from("data: " + JSON.stringify(event) + "\n\n");
+        if (!transform.write(frame)) await once(transform, "drain");
+      }
+      global.gc();
+      const after = process.memoryUsage();
+      process.stdout.write(JSON.stringify({
+        calls,
+        payloadCharacters,
+        heapDelta: after.heapUsed - before.heapUsed,
+      }));
+      transform.destroy();
+    `;
+    const child = spawnSync(
+      process.execPath,
+      ["--expose-gc", "--input-type=module", "--eval", script],
+      { encoding: "utf8", timeout: 25_000, maxBuffer: 1024 * 1024 },
+    );
+    assert.equal(child.status, 0, child.stderr || child.stdout);
+    const measurement = JSON.parse(child.stdout);
+    assert.equal(measurement.calls, 256);
+    assert.ok(measurement.payloadCharacters > 40 * 1024 * 1024);
+    assert.ok(
+      measurement.heapDelta < 8 * 1024 * 1024,
+      `retained heap grew by ${measurement.heapDelta} bytes for ` +
+        `${measurement.payloadCharacters} payload characters`,
+    );
+  },
+);
 
 test("complete special closes and terminal summaries establish atomic lifecycles", async () => {
   const collaboration = {
@@ -4503,6 +4572,50 @@ test("invalid or inconsistent tool_search arguments fail closed after conversion
     assert.doesNotMatch(output.toString("utf8"), /function_call_arguments\.done/u);
     assert.doesNotMatch(output.toString("utf8"), /response\.output_item\.done/u);
   }
+});
+
+test("tool_search lifecycle fingerprints ignore object key order", async () => {
+  const { namespaces } = flattenNamespaceTools([clientToolSearchControl()]);
+  const open = {
+    type: "response.output_item.added",
+    item: {
+      type: "function_call",
+      id: "fc_search_canonical",
+      call_id: "call_search_canonical",
+      name: "tool_search",
+      arguments: "",
+    },
+  };
+  const argumentsDone = {
+    type: "response.function_call_arguments.done",
+    item_id: "fc_search_canonical",
+    call_id: "call_search_canonical",
+    arguments: JSON.stringify({ query: "calendar", limit: 4 }),
+  };
+  const closeItem = {
+    ...open.item,
+    arguments: JSON.stringify({ limit: 4, query: "calendar" }),
+  };
+  const events = [
+    open,
+    argumentsDone,
+    { type: "response.output_item.done", item: closeItem },
+    { type: "response.completed", response: { output: [closeItem] } },
+  ];
+  const output = await collect(
+    Readable.from(
+      events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`),
+    ).pipe(new NamespaceToolCallTransform(namespaces, "text/event-stream")),
+  );
+  const payloads = output
+    .split("\n")
+    .filter((line) => line.startsWith("data: "))
+    .map((line) => JSON.parse(line.slice(6)));
+  assert.deepEqual(payloads.at(-2).item.arguments, { limit: 4, query: "calendar" });
+  assert.deepEqual(payloads.at(-1).response.output[0].arguments, {
+    limit: 4,
+    query: "calendar",
+  });
 });
 
 test("converted custom and tool_search calls must close before terminal or EOF", async () => {
