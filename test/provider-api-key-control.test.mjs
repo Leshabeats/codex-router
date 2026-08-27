@@ -1,16 +1,22 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+
+import { freePort } from "./port-pool.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const root = mkdtempSync(path.join(os.tmpdir(), "codex-router-api-key-control-"));
 const stateDir = path.join(root, "state");
 const credentialStorePath = path.join(stateDir, "provider-credentials.json");
 const poolStatePath = path.join(stateDir, "provider-api-key-pools.json");
+const launchAgentsDir = path.join(root, "launch-agents");
+const inactiveRouterPort = await freePort();
+const foregroundRouterPort = await freePort();
 process.env.CODEX_HOME = path.join(root, "codex");
 process.env.CODEX_ROUTER_STATE_DIR = stateDir;
 process.env.MODEL_ROUTER_PROVIDER_CREDENTIAL_STORE = credentialStorePath;
@@ -28,6 +34,7 @@ const {
   removeStoredCredentialFromPool,
   setStoredCredentialPoolPolicy,
   setStoredCredentialPoolState,
+  storedCredentialPoolUsesServiceEnvironment,
   storedCredentialRequiresServiceEnvironment,
   storedCredentialPoolStatus,
 } = await import("../src/provider-api-key-control.mjs");
@@ -155,7 +162,47 @@ test("an allowed environment source can be registered and pooled in one operatio
   assert.equal(storedCredentialPoolStatus("opencode-go", { poolStatePath }).configured, false);
 });
 
-function runControl(arguments_) {
+test("removal classification follows the exact pool members and fails closed on missing metadata", async () => {
+  rmSync(poolStatePath, { force: true });
+  const environment = await addEnvironmentCredentialToPool(
+    "opencode-go",
+    "OPENCODE_API_KEY",
+    { credentialStorePath, poolStatePath },
+  );
+  const fileBacked = addCredentialReference({
+    providerId: "opencode-go",
+    kind: "api_key",
+    secretRef: { type: "provider-file", providerId: "opencode-go", target: "codex" },
+  }, credentialStorePath);
+  await addStoredCredentialToPool("opencode-go", fileBacked.id, {
+    credentialStorePath,
+    poolStatePath,
+  });
+
+  assert.equal(storedCredentialPoolUsesServiceEnvironment("opencode-go", {
+    credentialId: environment.credential.id,
+    credentialStorePath,
+    poolStatePath,
+  }), true);
+  assert.equal(storedCredentialPoolUsesServiceEnvironment("opencode-go", {
+    credentialId: fileBacked.id,
+    credentialStorePath,
+    poolStatePath,
+  }), false);
+  assert.equal(storedCredentialPoolUsesServiceEnvironment("opencode-go", {
+    credentialStorePath,
+    poolStatePath,
+  }), true);
+
+  const missingStorePath = path.join(stateDir, "missing-credential-store.json");
+  assert.equal(storedCredentialPoolUsesServiceEnvironment("opencode-go", {
+    credentialId: environment.credential.id,
+    credentialStorePath: missingStorePath,
+    poolStatePath,
+  }), true);
+});
+
+function runControl(arguments_, environment = {}) {
   const child = spawn(process.execPath, [path.join(repoRoot, "src", "control.mjs"), ...arguments_], {
     cwd: repoRoot,
     env: {
@@ -167,8 +214,12 @@ function runControl(arguments_) {
       MODEL_ROUTER_PROVIDER_CREDENTIAL_STORE: credentialStorePath,
       MODEL_ROUTER_PROVIDER_CREDENTIAL_MIGRATIONS: process.env.MODEL_ROUTER_PROVIDER_CREDENTIAL_MIGRATIONS,
       MODEL_ROUTER_API_KEY_POOL_PATH: poolStatePath,
-      MODEL_ROUTER_LAUNCH_AGENTS_DIR: path.join(root, "launch-agents"),
+      MODEL_ROUTER_LAUNCH_AGENTS_DIR: launchAgentsDir,
+      CODEX_ROUTER_SERVICE_PLATFORM: "darwin",
+      MODEL_ROUTER_PORT: String(inactiveRouterPort),
+      CODEX_ROUTER_PORT: String(inactiveRouterPort),
       DSH_HOME: path.join(root, "dsh"),
+      ...environment,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -183,6 +234,45 @@ function runControl(arguments_) {
   });
   return { child, completed };
 }
+
+test("a live foreground router blocks environment pool publication before metadata changes", { timeout: 30_000 }, async () => {
+  rmSync(poolStatePath, { force: true });
+  const beforeStore = readFileSync(credentialStorePath);
+  const server = createServer((request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      ok: true,
+      service: "codex-router",
+      version: "foreground-lifecycle-test",
+      degraded: [],
+    }));
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(foregroundRouterPort, "127.0.0.1", resolve);
+  });
+  try {
+    const result = await runControl(
+      ["key-pool", "opencode-go", "add-env", "OPENCODE_API_KEY"],
+      {
+        MODEL_ROUTER_PORT: String(foregroundRouterPort),
+        CODEX_ROUTER_PORT: String(foregroundRouterPort),
+        OPENCODE_API_KEY: "secret-live-foreground-test",
+      },
+    ).completed;
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /live router process/i);
+    assert.match(result.stderr, /stop the foreground router/i);
+    assert.equal(existsSync(poolStatePath), false, "a live foreground owner must block before mutation");
+    assert.deepEqual(readFileSync(credentialStorePath), beforeStore);
+    assert.doesNotMatch(
+      `${result.stdout}\n${result.stderr}`,
+      /OPENCODE_API_KEY|secret-live-foreground-test/,
+    );
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
 
 test("key-pool status stays read-only while mutations wait for publication ownership", { timeout: 30_000 }, async () => {
   rmSync(poolStatePath, { force: true });
@@ -217,6 +307,77 @@ test("an environment-backed mutation waits for service ownership through publica
   const result = await mutation.completed;
   assert.equal(result.status, 0, result.stderr);
   assert.equal(existsSync(poolStatePath), true);
+});
+
+test("remove and delete of environment pool entries name the installed-service cleanup", { timeout: 30_000 }, async () => {
+  rmSync(poolStatePath, { force: true });
+  const first = await addEnvironmentCredentialToPool("opencode-go", "OPENCODE_API_KEY", {
+    credentialStorePath,
+    poolStatePath,
+  });
+  await addEnvironmentCredentialToPool("opencode-go", "OPENCODE_GO_API_KEY", {
+    credentialStorePath,
+    poolStatePath,
+  });
+  mkdirSync(launchAgentsDir, { recursive: true });
+  const launchAgentPath = path.join(launchAgentsDir, "io.github.codex-router.plist");
+  writeFileSync(launchAgentPath, "installed-service-fixture\n", { mode: 0o600 });
+  const secretValues = ["secret-test-one", "secret-test-two"];
+  const childEnvironment = {
+    OPENCODE_API_KEY: secretValues[0],
+    OPENCODE_GO_API_KEY: secretValues[1],
+  };
+  try {
+    const removed = await runControl(
+      ["key-pool", "opencode-go", "remove", first.credential.id],
+      childEnvironment,
+    ).completed;
+    assert.equal(removed.status, 0, removed.stderr);
+    assert.match(removed.stderr, /rerun the installer/i);
+    assert.match(removed.stderr, /remove the retired secret/i);
+    assert.match(removed.stderr, /managed service definition/i);
+    assert.match(removed.stderr, /restart alone/i);
+
+    const deleted = await runControl(
+      ["key-pool", "opencode-go", "delete"],
+      childEnvironment,
+    ).completed;
+    assert.equal(deleted.status, 0, deleted.stderr);
+    assert.match(deleted.stderr, /rerun the installer/i);
+    assert.match(deleted.stderr, /remove the retired secret/i);
+    assert.match(deleted.stderr, /managed service definition/i);
+    assert.match(deleted.stderr, /restart alone/i);
+
+    for (const output of [
+      removed.stdout,
+      removed.stderr,
+      deleted.stdout,
+      deleted.stderr,
+    ]) {
+      assert.doesNotMatch(
+        output,
+        /OPENCODE_API_KEY|OPENCODE_GO_API_KEY|secret-test-one|secret-test-two/,
+      );
+    }
+
+    const fileBacked = addCredentialReference({
+      providerId: "opencode-go",
+      kind: "api_key",
+      secretRef: { type: "provider-file", providerId: "opencode-go", target: "codex" },
+    }, credentialStorePath);
+    await addStoredCredentialToPool("opencode-go", fileBacked.id, {
+      credentialStorePath,
+      poolStatePath,
+    });
+    const ordinaryDelete = await runControl(
+      ["key-pool", "opencode-go", "delete"],
+      childEnvironment,
+    ).completed;
+    assert.equal(ordinaryDelete.status, 0, ordinaryDelete.stderr);
+    assert.doesNotMatch(ordinaryDelete.stderr, /environment-backed|rerun the installer/i);
+  } finally {
+    rmSync(launchAgentPath, { force: true });
+  }
 });
 
 test("a failed client publication restores both pool metadata files", { timeout: 30_000 }, async () => {

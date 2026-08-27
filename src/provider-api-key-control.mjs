@@ -44,6 +44,43 @@ export function storedCredentialRequiresServiceEnvironment(
     .credential.secretRef.type === "environment";
 }
 
+// Removal is deliberately classified from the pool membership that is about
+// to be changed, not from the command spelling: `remove` and `delete` carry
+// only opaque credential ids. A missing credential-store entry is treated as
+// environment-backed. It cannot prove that the installed service definition
+// holds no retired variable, so omitting the reinstall reminder would be the
+// unsafe answer.
+export function storedCredentialPoolUsesServiceEnvironment(
+  providerId,
+  {
+    credentialId,
+    credentialStorePath = PROVIDER_CREDENTIAL_STORE_PATH,
+    poolStatePath,
+  } = {},
+) {
+  const provider = canonicalProvider(providerId);
+  const pool = getProviderApiKeyPool(provider, { filePath: poolStatePath });
+  if (!pool.valid) return true;
+  const candidates = credentialId
+    ? pool.credentials.filter((entry) => entry.id === credentialId)
+    : pool.credentials;
+  if (candidates.length === 0) return false;
+
+  const stored = readProviderCredentialStore(credentialStorePath);
+  const byId = new Map(stored.credentials.map((entry) => [entry.id, entry]));
+  return candidates.some((candidate) => {
+    const credential = byId.get(candidate.id);
+    if (
+      !credential ||
+      credential.providerId !== provider ||
+      credential.kind !== "api_key"
+    ) {
+      return true;
+    }
+    return credential.secretRef?.type === "environment";
+  });
+}
+
 export async function addStoredCredentialToPool(
   providerId,
   credentialId,

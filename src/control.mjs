@@ -756,6 +756,7 @@ async function handleProviderKeyPool(providerId, action, value) {
     removeStoredCredentialFromPool,
     setStoredCredentialPoolPolicy,
     setStoredCredentialPoolState,
+    storedCredentialPoolUsesServiceEnvironment,
     storedCredentialRequiresServiceEnvironment,
     storedCredentialPoolStatus,
   } = await import("./provider-api-key-control.mjs");
@@ -781,9 +782,9 @@ async function handleProviderKeyPool(providerId, action, value) {
   } else {
     throw new Error("Usage: control key-pool <provider> status|add|add-env|remove|delete|pause|resume|policy [credential-id|environment-name|strategy]");
   }
-  const environmentBacked = action === "add-env" || (
-    action === "add" && storedCredentialRequiresServiceEnvironment(providerId, value)
-  );
+  const addition = action === "add" || action === "add-env";
+  const removal = action === "remove" || action === "delete";
+  let environmentBacked = false;
   let serviceEnvironmentStatus;
   let result;
   // Pool readiness decides whether this provider's models are routable. Treat
@@ -795,16 +796,36 @@ async function handleProviderKeyPool(providerId, action, value) {
     mutate: async () => { result = await mutation(); },
     lock,
   });
-  if (environmentBacked) {
-    // Keep lock ordering consistent with model-overlay operations that restart
-    // the service: publication ownership first, service ownership second. The
-    // service lock stays held through client/gateway publication so a
-    // concurrent start cannot race in with the old stored environment.
+  if (addition || removal) {
+    // Classify against the same pool/store generation the transaction will
+    // change. In particular, a concurrent pause/remove must not turn an opaque
+    // remove id from environment-backed into apparently ordinary metadata.
     await withModelOverlayLock(async () => {
+      environmentBacked = action === "add-env" || (
+        action === "add" && storedCredentialRequiresServiceEnvironment(providerId, value)
+      ) || (
+        removal && storedCredentialPoolUsesServiceEnvironment(providerId, {
+          ...(action === "remove" ? { credentialId: value } : {}),
+        })
+      );
+      if (!environmentBacked) {
+        await transact(false);
+        return;
+      }
+
+      // Keep lock ordering consistent with model-overlay operations that
+      // restart the service: publication ownership first, service ownership
+      // second. The service lock stays held through publication, serializing
+      // both a new variable and removal of a retired one with service renders.
       const { withServiceOperationLock } = await import("./service-operation-lock.mjs");
       await withServiceOperationLock(async () => {
-        const { environmentPoolMutationServiceStatus } = await import("./router-restart.mjs");
-        serviceEnvironmentStatus = environmentPoolMutationServiceStatus();
+        const {
+          environmentPoolMutationServiceStatus,
+          routerServiceStatus,
+        } = await import("./router-restart.mjs");
+        serviceEnvironmentStatus = addition
+          ? await environmentPoolMutationServiceStatus()
+          : routerServiceStatus();
         await transact(false);
       });
     });
@@ -813,11 +834,16 @@ async function handleProviderKeyPool(providerId, action, value) {
   }
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   if (environmentBacked) {
-    process.stderr.write(
-      serviceEnvironmentStatus.serviceReinstallRequired
-        ? "Environment-backed pool entry staged. Rerun the installer from this same environment; a service restart alone will not persist the variable.\n"
-        : "Environment-backed pool entry registered. Start the foreground router from this environment, or install the managed service from it.\n",
-    );
+    if (removal) {
+      const { environmentPoolRemovalReminder } = await import("./router-restart.mjs");
+      process.stderr.write(environmentPoolRemovalReminder(serviceEnvironmentStatus));
+    } else {
+      process.stderr.write(
+        serviceEnvironmentStatus.serviceReinstallRequired
+          ? "Environment-backed pool entry staged. Rerun the installer from this same environment; a service restart alone will not persist the variable.\n"
+          : "Environment-backed pool entry registered. Start the foreground router from this environment, or install the managed service from it.\n",
+      );
+    }
   }
 }
 

@@ -7,8 +7,10 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { oauthLoginArgs } from "../src/provider-onboarding.mjs";
+import { freePort } from "./port-pool.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const inactiveRouterPort = await freePort();
 
 test("Grok tray sign-in explicitly starts the OAuth flow", () => {
   assert.deepEqual(oauthLoginArgs("grok-oauth"), ["login", "--oauth"]);
@@ -36,6 +38,8 @@ function isolatedEnvironment(testRoot) {
     npm_config_prefix: path.join(testRoot, "npm-global"),
     MODEL_ROUTER_TARGET: "codex",
     MODEL_ROUTER_STATE_DIR: path.join(testRoot, "state"),
+    MODEL_ROUTER_PORT: String(inactiveRouterPort),
+    CODEX_ROUTER_PORT: String(inactiveRouterPort),
     CODEX_ROUTER_SERVICE_PLATFORM: "darwin",
     MODEL_ROUTER_LAUNCH_AGENTS_DIR: path.join(testRoot, "launch-agents"),
     KIMI_CODE_HOME: path.join(testRoot, "kimi"),
