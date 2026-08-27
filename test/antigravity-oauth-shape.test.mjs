@@ -118,6 +118,8 @@ test("sanitizes unsupported JSON Schema constructs for Antigravity", () => {
               type: "object",
               properties: {
                 mode: { type: "string", const: "fast" },
+                retries: { type: "integer", enum: [1, 2] },
+                enabled: { type: "boolean", const: true },
                 count: { type: "integer", default: 1, encrypted: true },
                 bounded: { type: "number", minimum: 0, exclusiveMaximum: 10 },
               },
@@ -131,6 +133,8 @@ test("sanitizes unsupported JSON Schema constructs for Antigravity", () => {
   );
   const declaration = request.request.tools[0].functionDeclarations[0];
   assert.equal(declaration.parameters.properties.mode.enum[0], "fast");
+  assert.deepEqual(declaration.parameters.properties.retries.enum, ["1", "2"]);
+  assert.deepEqual(declaration.parameters.properties.enabled.enum, ["true"]);
   assert.equal("const" in declaration.parameters.properties.mode, false);
   assert.equal("default" in declaration.parameters.properties.count, false);
   assert.equal("encrypted" in declaration.parameters.properties.count, false);
