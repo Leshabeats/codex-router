@@ -112,6 +112,11 @@ async function resolveSession(githubToken, fetchImpl, now) {
     await response.body?.cancel().catch(() => undefined);
     const error = new Error(`GitHub Copilot authentication returned HTTP ${response.status}.`);
     error.status = response.status === 401 || response.status === 403 ? 503 : 502;
+    // `status` is the local answer exposed to a caller. Pool failover needs the
+    // provider's credential-specific answer instead: a rejected source token
+    // should cool only that pool entry and try the next one, while the
+    // unpooled surface continues to report a setup-oriented 503.
+    error.providerStatus = response.status;
     throw error;
   }
   const payload = await response.json().catch(() => undefined);
@@ -138,6 +143,7 @@ export async function ensureFreshGitHubCopilotSession(
   } catch (cause) {
     const error = new Error(cause.message);
     error.status = 503;
+    error.providerStatus = 401;
     throw error;
   }
   const sourceFingerprint = tokenFingerprint(token);

@@ -84,6 +84,7 @@ test("Copilot authentication failures never echo the source token", async () => 
     }),
     (error) => {
       assert.equal(error.status, 503);
+      assert.equal(error.providerStatus, 401);
       assert.doesNotMatch(error.message, /TEST_SECRET_SOURCE_TOKEN/);
       return true;
     },

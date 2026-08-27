@@ -13,7 +13,7 @@ import path from "node:path";
 
 import lockfile from "proper-lockfile";
 
-import { writePrivateJson } from "./file-security.mjs";
+import { writePrivateJsonAsync } from "./file-security.mjs";
 import { PROVIDER_API_KEY_POOL_PATH, STATE_DIR } from "./paths.mjs";
 import { canonicalProviderId } from "./provider-selection.mjs";
 import {
@@ -575,6 +575,28 @@ function sessionCanStay(pool, session, meta, at) {
   return !cooldownActive(meta, at) && meta.state === "active" && !meta.paused;
 }
 
+// Session affinity is an optimization, not durable request history. Keep the
+// bounded state writable when a long-running router sees more distinct Codex
+// threads than the on-disk schema permits: before adding one new binding,
+// discard the least-recently-used bindings until there is exactly one slot.
+// Existing bindings are never evicted merely because they are read or updated,
+// and byte-order session-id comparison makes equal timestamps deterministic on
+// every platform.
+function makeRoomForSession(pool, incomingSession) {
+  if (!incomingSession || pool.sessions[incomingSession]) return;
+  const excess = Object.keys(pool.sessions).length - (MAX_SESSIONS - 1);
+  if (excess <= 0) return;
+  const oldest = Object.entries(pool.sessions).sort(([leftId, left], [rightId, right]) => {
+    const leftAt = Date.parse(left.updatedAt || left.boundAt || "");
+    const rightAt = Date.parse(right.updatedAt || right.boundAt || "");
+    if (leftAt !== rightAt) return leftAt - rightAt;
+    return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
+  });
+  for (let index = 0; index < excess; index += 1) {
+    delete pool.sessions[oldest[index][0]];
+  }
+}
+
 function selectedResult(provider, pool, selected, value, session, rebound = false) {
   return {
     configured: true,
@@ -634,6 +656,7 @@ async function selectFromState(providerOrId, options = {}) {
       pool.roundRobinCursor = (pool.roundRobinCursor + 1) % Math.max(1, resolved.entries.length);
     }
     if (session) {
+      makeRoomForSession(pool, session);
       const previous = pool.sessions[session];
       pool.sessions[session] = {
         credentialId: selectedEntry.meta.id,
@@ -701,7 +724,7 @@ async function mutatePool(filePath, operation) {
     if (!state.valid) throw new Error("Provider API-key pool state is invalid; refusing to overwrite it.");
     const next = { version: PROVIDER_API_KEY_POOL_SCHEMA_VERSION, providers: state.providers };
     const result = await operation(next);
-    writePrivateJson(filePath, stateForWrite(next), { directoryMode: 0o700 });
+    await writePrivateJsonAsync(filePath, stateForWrite(next), { directoryMode: 0o700 });
     return result;
   }, { filePath });
 }
@@ -724,7 +747,7 @@ async function mutateSelect(providerOrId, options) {
   if (!state.valid) return { configured: true, valid: false, providerId: providerId(providerOrId), credentialId: null, reason: "invalid_pool_state", fallbackAllowed: false };
   const result = await selectFromState(providerOrId, { ...options, state, filePath, commit: true });
   if (state.providers[result.providerId]) {
-    writePrivateJson(filePath, stateForWrite(state, nowMs(options.now)), { directoryMode: 0o700 });
+    await writePrivateJsonAsync(filePath, stateForWrite(state, nowMs(options.now)), { directoryMode: 0o700 });
   }
   return result;
 }
@@ -894,6 +917,7 @@ export async function runProviderApiKeyAttempts(providerOrId, {
   budgetMs = DEFAULT_ATTEMPT_BUDGET_MS,
   backoffMs = DEFAULT_ATTEMPT_BACKOFF_MS,
   isResponseCommitted,
+  recordOutcome = recordProviderApiKeyOutcome,
   now = Date.now,
   sleepImpl = sleep,
 } = {}) {
@@ -942,28 +966,61 @@ export async function runProviderApiKeyAttempts(providerOrId, {
       : typeof result?.committed === "boolean"
         ? result.committed
         : true;
-    const statusCode = Number.isInteger(Number(result?.status)) ? Number(result.status) : undefined;
+    const reportedStatus = result?.status ?? error?.providerStatus;
+    const statusCode = Number.isInteger(Number(reportedStatus)) ? Number(reportedStatus) : undefined;
     const ok = !error && (result?.ok === true || (statusCode !== undefined && statusCode >= 200 && statusCode < 400));
     const errorCode = error?.code || error?.cause?.code || result?.errorCode;
-    const outcome = await recordProviderApiKeyOutcome(provider, selection.credentialId, {
-      status: statusCode,
-      ok,
-      committed: responseCommitted,
-      errorCode,
-      error: error?.message || result?.error,
-      retryAfterSeconds: Number(result?.retryAfterSeconds),
-      now: now(),
-    }, { filePath });
+    let outcome;
+    let persistenceError;
+    try {
+      outcome = await recordOutcome(provider, selection.credentialId, {
+        status: statusCode,
+        ok,
+        committed: responseCommitted,
+        errorCode,
+        error: error?.message || result?.error,
+        retryAfterSeconds: Number(result?.retryAfterSeconds),
+        now: now(),
+      }, { filePath });
+    } catch (caught) {
+      persistenceError = caught;
+    }
     const attempt = {
       credentialId: selection.credentialId,
       status: statusCode,
       ok,
       committed: responseCommitted,
+      statePersisted: !persistenceError,
       ...(outcome?.rebindRecommended ? { rebound: true } : {}),
     };
     attempts.push(attempt);
+    if (persistenceError) {
+      // The provider result already exists. A successful response remains the
+      // caller's response even when telemetry cannot be saved; discarding it
+      // would turn a completed paid request into a local 5xx. Conversely, a
+      // failed attempt cannot rotate to another account until its cooldown is
+      // durable, or a state-disk failure could spend every key in the pool.
+      return {
+        configured: true,
+        valid: true,
+        providerId: provider,
+        credentialId: selection.credentialId,
+        credentialValue: selection.credentialValue,
+        result,
+        error,
+        attempts,
+        committed: responseCommitted,
+        persistenceError,
+        reason: ok ? "success" : "state_persistence_failed",
+      };
+    }
     if (error) {
-      if (!isRetryableProviderApiKeyFailure({ error, errorCode, committed: responseCommitted })) {
+      if (!isRetryableProviderApiKeyFailure({
+        status: statusCode,
+        error,
+        errorCode,
+        committed: responseCommitted,
+      })) {
         return { configured: true, valid: true, providerId: provider, credentialId: selection.credentialId, credentialValue: selection.credentialValue, result, error, attempts, committed: responseCommitted, reason: "failed" };
       }
     } else if (ok || responseCommitted || !isRetryableProviderApiKeyFailure({ status: statusCode, committed: responseCommitted })) {

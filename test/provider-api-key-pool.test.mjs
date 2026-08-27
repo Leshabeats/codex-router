@@ -265,6 +265,81 @@ test("runProviderApiKeyAttempts retries before relay and stops after relay begin
   assert.equal(late.reason, "failed");
 });
 
+test("outcome persistence failure preserves success and prevents an unrecorded failover", async () => {
+  const successPath = path.join(root, "outcome-write-success.json");
+  const first = metadata(credential("write_success", "FIRST", { priority: 2 }));
+  const second = metadata(credential("write_second", "SECOND", { priority: 1 }));
+  await upsertProviderApiKey("openrouter", first, { filePath: successPath });
+  await upsertProviderApiKey("openrouter", second, { filePath: successPath });
+  const writeFailure = new Error("simulated state disk failure");
+  let sends = 0;
+  const success = await runProviderApiKeyAttempts("openrouter", {
+    filePath: successPath,
+    resolveCredential: (id) => id === first.id ? "FIRST" : "SECOND",
+    send: async () => {
+      sends += 1;
+      return { status: 200, ok: true, committed: false, bodyText: "success" };
+    },
+    recordOutcome: async () => { throw writeFailure; },
+    now: () => NOW,
+  });
+  assert.equal(sends, 1);
+  assert.equal(success.reason, "success");
+  assert.equal(success.result.status, 200);
+  assert.equal(success.persistenceError, writeFailure);
+  assert.equal(success.attempts[0].statePersisted, false);
+
+  sends = 0;
+  const failed = await runProviderApiKeyAttempts("openrouter", {
+    filePath: successPath,
+    resolveCredential: (id) => id === first.id ? "FIRST" : "SECOND",
+    send: async () => {
+      sends += 1;
+      return { status: 401, ok: false, committed: false, bodyText: "unauthorized" };
+    },
+    recordOutcome: async () => { throw writeFailure; },
+    now: () => NOW,
+  });
+  assert.equal(sends, 1);
+  assert.equal(failed.reason, "state_persistence_failed");
+  assert.equal(failed.result.status, 401);
+  assert.equal(failed.persistenceError, writeFailure);
+  assert.equal(failed.attempts[0].statePersisted, false);
+});
+
+test("a credential-specific preflight rejection rotates even when its public error is 503", async () => {
+  const filePath = path.join(root, "preflight-rejection.json");
+  const at = Date.now();
+  const first = metadata(credential("preflight_a", "FIRST", { priority: 2 }));
+  const second = metadata(credential("preflight_b", "SECOND", { priority: 1 }));
+  await upsertProviderApiKey("github-copilot", first, { filePath });
+  await upsertProviderApiKey("github-copilot", second, { filePath });
+  const secrets = new Map([[first.id, "FIRST"], [second.id, "SECOND"]]);
+  const sent = [];
+  const result = await runProviderApiKeyAttempts("github-copilot", {
+    filePath,
+    resolveCredential: (id) => secrets.get(id),
+    isResponseCommitted: () => false,
+    send: async ({ apiKey }) => {
+      sent.push(apiKey);
+      if (apiKey === "FIRST") {
+        const error = new Error("Copilot setup unavailable");
+        error.status = 503;
+        error.providerStatus = 401;
+        throw error;
+      }
+      return { status: 200, ok: true, committed: false };
+    },
+    now: () => at,
+    sleepImpl: async () => {},
+  });
+  assert.deepEqual(sent, ["FIRST", "SECOND"]);
+  assert.equal(result.reason, "success");
+  assert.deepEqual(result.attempts.map((attempt) => attempt.status), [401, 200]);
+  const state = readProviderApiKeyPoolState(filePath, { now: at });
+  assert.equal(state.providers["github-copilot"].credentials[first.id].health.state, "cooldown");
+});
+
 test("a send error after response commit propagates the commit boundary", async () => {
   const filePath = path.join(root, "committed-send-error.json");
   const entry = metadata(credential("committed_throw", "COMMITTED"));
@@ -405,6 +480,40 @@ test("credential and pool removal clean bindings but preserve external credentia
   assert.equal(afterRemoval.sessions["bound-session"], undefined);
   await deleteProviderApiKeyPool("openrouter", { filePath });
   assert.equal(providerApiKeyPoolStatus("openrouter", { filePath }).configured, false);
+});
+
+test("a new thread evicts the least-recently-used binding at the session cap", async () => {
+  const filePath = path.join(root, "session-cap.json");
+  const entry = metadata(credential("session_cap", "SESSION_CAP"));
+  await upsertProviderApiKey("openrouter", entry, { filePath });
+  const document = JSON.parse(readFileSync(filePath, "utf8"));
+  document.providers.openrouter.sessions = Object.fromEntries(
+    Array.from({ length: 2_048 }, (_, index) => {
+      const timestamp = new Date(NOW - (2_048 - index) * 1_000).toISOString();
+      return [`old-session-${String(index).padStart(4, "0")}`, {
+        credentialId: entry.id,
+        turns: 1,
+        requests: 1,
+        boundAt: timestamp,
+        updatedAt: timestamp,
+      }];
+    }),
+  );
+  writeFileSync(filePath, `${JSON.stringify(document)}\n`, { mode: 0o600 });
+
+  const selected = await selectProviderApiKeyLocked("openrouter", {
+    filePath,
+    sessionId: "new-session",
+    resolveCredential: () => "SESSION_CAP",
+    now: NOW,
+  });
+  assert.equal(selected.credentialId, entry.id);
+  const state = readProviderApiKeyPoolState(filePath, { now: NOW });
+  const sessions = state.providers.openrouter.sessions;
+  assert.equal(Object.keys(sessions).length, 2_048);
+  assert.equal(sessions["old-session-0000"], undefined);
+  assert.ok(sessions["old-session-2047"]);
+  assert.equal(sessions["new-session"].credentialId, entry.id);
 });
 
 test("lock serializes concurrent state updates and preserves every session turn", async () => {

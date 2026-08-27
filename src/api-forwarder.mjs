@@ -1101,7 +1101,10 @@ async function handleRequest(request, response) {
         return { id, ...commandCodeRoute(id, routedCredentialValue) };
       })()
     : undefined;
-  const relayThroughPlan = async (apiKey = routedCredentialValue, { recordOutcome = true } = {}) => {
+  const relayThroughPlan = async (
+    apiKey = routedCredentialValue,
+    { recordOutcome = true, deferErrors = false } = {},
+  ) => {
     const outcome = await relayCommandCodeGenerate({
       payload: normalized.payload,
       model: normalized.model,
@@ -1110,6 +1113,7 @@ async function handleRequest(request, response) {
       baseUrl: providerBaseUrl(normalized.endpoint),
       response,
       signal: controller.signal,
+      deferErrors,
     });
     // The plan route meters the same subscription and answers the same quota
     // headers, so it reports limits and cooldowns exactly as the documented
@@ -1160,19 +1164,28 @@ async function handleRequest(request, response) {
             })()
           : undefined;
         if (attemptCommandCode?.route === "plan") {
-          const outcome = await relayThroughPlan(apiKey, { recordOutcome: false });
-          return { ...outcome, committed: true, route: "plan", credentialId };
+          const outcome = await relayThroughPlan(apiKey, {
+            recordOutcome: false,
+            deferErrors: true,
+          });
+          return {
+            ...outcome,
+            headers: outcome.responseHeaders || outcome.headers,
+            committed: outcome.committed === true,
+            route: "plan",
+            credentialId,
+          };
         }
         const attemptCredential = { ...credential, value: apiKey };
-        const attemptSession = await upstreamSession(
+        let attemptSession = await upstreamSession(
           normalized.provider,
           attemptCredential,
           normalized.payload,
           {},
           normalized.endpoint,
         );
-        const attemptTarget = `${attemptSession.baseUrl}${route}${requestUrl.search}`;
-        const attemptResponse = await fetch(attemptTarget, {
+        let attemptTarget = `${attemptSession.baseUrl}${route}${requestUrl.search}`;
+        const sendAttempt = () => fetch(attemptTarget, {
           method: request.method,
           headers: upstreamHeaders(
             request.headers,
@@ -1185,6 +1198,24 @@ async function handleRequest(request, response) {
           body: upstreamBody,
           signal: controller.signal,
         });
+        let attemptResponse = await sendAttempt();
+        // The source credential can still be valid when Copilot changes the
+        // account's inference endpoint or short-lived routing token. Preserve
+        // the existing same-key force-refresh contract inside each pool
+        // attempt; only a second 401 proves this credential should be cooled
+        // and the next pool entry tried.
+        if (normalized.provider.authProfile === "github-copilot" && attemptResponse.status === 401) {
+          await attemptResponse.body?.cancel().catch(() => undefined);
+          attemptSession = await upstreamSession(
+            normalized.provider,
+            attemptCredential,
+            normalized.payload,
+            { force: true },
+            normalized.endpoint,
+          );
+          attemptTarget = `${attemptSession.baseUrl}${route}${requestUrl.search}`;
+          attemptResponse = await sendAttempt();
+        }
         if (!attemptResponse.ok) {
           const bodyText = (await readResponseBody(attemptResponse, {
             signal: controller.signal,
@@ -1198,8 +1229,17 @@ async function handleRequest(request, response) {
             }
             if (isUpgradeRequired(attemptResponse.status, refusal)) {
               recordCommandCodeRoute(attemptCommandCode.id, apiKey, { providerApi: false });
-              const outcome = await relayThroughPlan(apiKey, { recordOutcome: false });
-              return { ...outcome, committed: true, route: "plan", credentialId };
+              const outcome = await relayThroughPlan(apiKey, {
+                recordOutcome: false,
+                deferErrors: true,
+              });
+              return {
+                ...outcome,
+                headers: outcome.responseHeaders || outcome.headers,
+                committed: outcome.committed === true,
+                route: "plan",
+                credentialId,
+              };
             }
           }
           return {

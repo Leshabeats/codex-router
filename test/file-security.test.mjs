@@ -6,10 +6,13 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  closeWindowsPrivateFileWorker,
   privateFileIsProtected,
   protectPrivateFile,
   writePrivateJson,
+  writePrivateJsonAsync,
   writePrivateFile,
+  windowsPrivateFileWorkerSpawnCount,
 } from "../src/file-security.mjs";
 
 test("private JSON state uses one owner-only atomic writer", () => {
@@ -225,6 +228,26 @@ test(
         },
       ]);
     } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "Windows request-path private writes reuse one ACL worker and preserve the atomic target ACL",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "codex-router-write-worker-"));
+    const target = path.join(directory, "pool.json");
+    const before = windowsPrivateFileWorkerSpawnCount();
+    try {
+      await writePrivateJsonAsync(target, { version: 1, value: "first" });
+      await writePrivateJsonAsync(target, { version: 1, value: "second" });
+      assert.equal(windowsPrivateFileWorkerSpawnCount() - before, 1);
+      assert.deepEqual(JSON.parse(readFileSync(target, "utf8")), { version: 1, value: "second" });
+      assert.equal(privateFileIsProtected(target), true);
+    } finally {
+      closeWindowsPrivateFileWorker();
       rmSync(directory, { recursive: true, force: true });
     }
   },

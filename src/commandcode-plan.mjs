@@ -24,6 +24,8 @@ export const COMMANDCODE_PLAN_PATH = path.join(STATE_DIR, "commandcode-plan.json
 // Long enough that a Go-plan account is not paying a wasted round-trip through
 // a working day, short enough that an upgrade is noticed the same afternoon.
 export const ROUTE_RECHECK_MS = 6 * 60 * 60 * 1000;
+const MAX_CREDENTIAL_ROUTES = 256;
+const FINGERPRINT_PATTERN = /^[0-9a-f]{16}$/;
 
 // Never the key itself, and never enough of it to be one: this file is state,
 // not a credential store, and a fingerprint answers the only question asked of
@@ -59,6 +61,53 @@ function writeDocument(document) {
   }
 }
 
+function routeRecord(value, fingerprint) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  if (!FINGERPRINT_PATTERN.test(fingerprint)) return undefined;
+  if (value.credential !== undefined && value.credential !== fingerprint) return undefined;
+  if (typeof value.providerApi !== "boolean") return undefined;
+  const observed = Date.parse(value.observedAt || "");
+  if (!Number.isFinite(observed)) return undefined;
+  return {
+    credential: fingerprint,
+    providerApi: value.providerApi,
+    observedAt: new Date(observed).toISOString(),
+  };
+}
+
+// Version-one builds stored one answer directly under the provider id. Read
+// that shape indefinitely, but migrate it into the per-credential map on the
+// next write so adding key B can never erase the known route for key A.
+function credentialRoutes(providerEntry) {
+  const routes = {};
+  if (!providerEntry || typeof providerEntry !== "object" || Array.isArray(providerEntry)) {
+    return routes;
+  }
+  if (providerEntry.credentials && typeof providerEntry.credentials === "object" && !Array.isArray(providerEntry.credentials)) {
+    for (const [fingerprint, raw] of Object.entries(providerEntry.credentials)) {
+      const route = routeRecord(raw, fingerprint);
+      if (route) routes[fingerprint] = route;
+    }
+  }
+  if (typeof providerEntry.credential === "string") {
+    const legacy = routeRecord(providerEntry, providerEntry.credential);
+    if (legacy) routes[legacy.credential] = legacy;
+  }
+  return routes;
+}
+
+function boundedCredentialRoutes(routes) {
+  return Object.fromEntries(
+    Object.entries(routes)
+      .sort(([leftFingerprint, left], [rightFingerprint, right]) => {
+        const time = Date.parse(right.observedAt) - Date.parse(left.observedAt);
+        if (time !== 0) return time;
+        return leftFingerprint < rightFingerprint ? -1 : leftFingerprint > rightFingerprint ? 1 : 0;
+      })
+      .slice(0, MAX_CREDENTIAL_ROUTES),
+  );
+}
+
 /**
  * The route to try for this account right now.
  *
@@ -71,9 +120,9 @@ function writeDocument(document) {
  * turn to say what it already said.
  */
 export function commandCodeRoute(providerId, credentialValue, { at = Date.now() } = {}) {
-  const entry = readDocument()[String(providerId || "")];
-  const known =
-    entry && entry.credential === credentialFingerprint(credentialValue) && entry.providerApi === false;
+  const fingerprint = credentialFingerprint(credentialValue);
+  const entry = credentialRoutes(readDocument()[String(providerId || "")])[fingerprint];
+  const known = entry?.providerApi === false;
   if (!known) return { route: "provider-api", recheck: false };
   const observed = Date.parse(entry.observedAt || "");
   if (Number.isFinite(observed) && at - observed > ROUTE_RECHECK_MS) {
@@ -98,11 +147,14 @@ export function recordCommandCodeRoute(
   const id = String(providerId || "").trim();
   if (!id || typeof providerApi !== "boolean") return;
   const document = readDocument();
-  document[id] = {
-    credential: credentialFingerprint(credentialValue),
+  const fingerprint = credentialFingerprint(credentialValue);
+  const credentials = credentialRoutes(document[id]);
+  credentials[fingerprint] = {
+    credential: fingerprint,
     providerApi,
     observedAt: new Date(at).toISOString(),
   };
+  document[id] = { credentials: boundedCredentialRoutes(credentials) };
   writeDocument(document);
 }
 

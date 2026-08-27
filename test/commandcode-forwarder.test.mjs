@@ -142,7 +142,8 @@ test("a plan-refused Command Code account is served through the CLI route", asyn
     // The refusal was written down, so the second turn never buys it again.
     const planPath = path.join(stateDir, "commandcode-plan.json");
     assert.ok(existsSync(planPath));
-    assert.equal(JSON.parse(readFileSync(planPath, "utf8")).commandcode.providerApi, false);
+    const remembered = JSON.parse(readFileSync(planPath, "utf8")).commandcode.credentials;
+    assert.equal(remembered[credentialFingerprint("user_test_key")].providerApi, false);
 
     const second = await turn();
     assert.equal(second.status, 200);
@@ -325,11 +326,132 @@ test("pooled Command Code failover uses the winning key for its plan route", asy
     assert.equal(calls[2].authorization, calls[1].authorization);
     assert.equal(calls[2].url, "/alpha/generate");
     const plan = JSON.parse(readFileSync(path.join(stateDir, "commandcode-plan.json"), "utf8"));
+    const winningFingerprint = credentialFingerprint(calls[1].authorization.replace(/^Bearer /, ""));
     assert.equal(
-      plan.commandcode.credential,
-      credentialFingerprint(calls[1].authorization.replace(/^Bearer /, "")),
+      plan.commandcode.credentials[winningFingerprint].credential,
+      winningFingerprint,
       "the exact winning credential fingerprint is retained",
     );
+  } finally {
+    if (child.exitCode === null) {
+      child.kill("SIGTERM");
+      await new Promise((resolve) => child.once("exit", resolve));
+    }
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(stateDir, { recursive: true, force: true });
+    rmSync(cliHome, { recursive: true, force: true });
+  }
+});
+
+test("a cached pooled plan rejection remains pre-commit and rotates to the next key", async () => {
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "commandcode-forwarder-plan-rotate-state-"));
+  const cliHome = mkdtempSync(path.join(os.tmpdir(), "commandcode-forwarder-plan-rotate-home-"));
+  const credentialStorePath = path.join(stateDir, "provider-credentials.json");
+  const poolStatePath = path.join(stateDir, "provider-api-key-pools.json");
+  for (const name of ["COMMAND_CODE_API_KEY", "COMMANDCODE_API_KEY"]) {
+    execFileSync(process.execPath, [
+      path.join(root, "src", "control.mjs"),
+      "key-pool",
+      "commandcode",
+      "add-env",
+      name,
+    ], {
+      cwd: root,
+      env: {
+        ...process.env,
+        MODEL_ROUTER_TARGET: "codex",
+        MODEL_ROUTER_STATE_DIR: stateDir,
+        MODEL_ROUTER_PROVIDER_CREDENTIAL_STORE: credentialStorePath,
+        MODEL_ROUTER_API_KEY_POOL_PATH: poolStatePath,
+      },
+      stdio: "ignore",
+    });
+  }
+  const references = JSON.parse(readFileSync(credentialStorePath, "utf8")).credentials;
+  const firstId = references.find((entry) => entry.secretRef.name === "COMMAND_CODE_API_KEY").id;
+  const secondId = references.find((entry) => entry.secretRef.name === "COMMANDCODE_API_KEY").id;
+  await upsertProviderApiKey("commandcode", { id: firstId, priority: 2 }, { filePath: poolStatePath });
+  await upsertProviderApiKey("commandcode", { id: secondId, priority: 1 }, { filePath: poolStatePath });
+  const firstFingerprint = credentialFingerprint("PLAN_A");
+  writeFileSync(path.join(stateDir, "commandcode-plan.json"), `${JSON.stringify({
+    commandcode: {
+      credentials: {
+        [firstFingerprint]: {
+          credential: firstFingerprint,
+          providerApi: false,
+          observedAt: new Date().toISOString(),
+        },
+      },
+    },
+  }, null, 2)}\n`, { mode: 0o600 });
+
+  const upstreamPort = await openPort();
+  const forwarderPort = await openPort();
+  const calls = [];
+  const server = http.createServer((request, response) => {
+    const authorization = request.headers.authorization;
+    calls.push({ url: request.url, authorization });
+    request.resume();
+    request.on("end", () => {
+      if (request.url === "/alpha/generate" && authorization === "Bearer PLAN_A") {
+        response.writeHead(401, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ message: "revoked plan credential" }));
+        return;
+      }
+      if (request.url.startsWith("/provider/v1/") && authorization === "Bearer PROVIDER_B") {
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({
+          id: "chatcmpl_plan_rotate",
+          object: "chat.completion",
+          model: "deepseek/deepseek-v4-flash",
+          choices: [{ index: 0, message: { role: "assistant", content: "KEY_B" }, finish_reason: "stop" }],
+        }));
+        return;
+      }
+      response.writeHead(500, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: { message: "unexpected route" } }));
+    });
+  });
+  await listen(server, upstreamPort);
+  const child = spawn(process.execPath, [path.join(root, "src", "api-forwarder.mjs")], {
+    cwd: root,
+    env: {
+      ...process.env,
+      MODEL_ROUTER_TARGET: "codex",
+      MODEL_ROUTER_INTERNAL_KEY: internalKey,
+      MODEL_ROUTER_API_PORT: String(forwarderPort),
+      MODEL_ROUTER_STATE_DIR: stateDir,
+      MODEL_ROUTER_PROVIDER_CREDENTIAL_STORE: credentialStorePath,
+      MODEL_ROUTER_API_KEY_POOL_PATH: poolStatePath,
+      MODEL_ROUTER_QUIET: "1",
+      COMMANDCODE_BASE_URL: `http://127.0.0.1:${upstreamPort}/provider/v1`,
+      COMMAND_CODE_API_KEY: "PLAN_A",
+      COMMANDCODE_API_KEY: "PROVIDER_B",
+      COMMANDCODE_CLI_HOME: cliHome,
+    },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  child.stderr.setEncoding("utf8");
+  let stderr = "";
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const base = `http://127.0.0.1:${forwarderPort}`;
+  const headers = { Authorization: `Bearer ${internalKey}`, "Content-Type": "application/json" };
+  try {
+    await waitForHealth(base, headers, child, () => stderr);
+    const response = await fetch(`${base}/v1/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: "commandcode-deepseek-v4-flash",
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).choices[0].message.content, "KEY_B");
+    assert.deepEqual(calls, [
+      { url: "/alpha/generate", authorization: "Bearer PLAN_A" },
+      { url: "/provider/v1/chat/completions", authorization: "Bearer PROVIDER_B" },
+    ]);
   } finally {
     if (child.exitCode === null) {
       child.kill("SIGTERM");
@@ -439,9 +561,10 @@ test("pooled Command Code recheck success is cached against the exact winning ke
     assert.equal((await response.json()).choices[0].message.content, "WINNER_B");
     assert.deepEqual(authorizations, ["Bearer POOL_A", "Bearer POOL_B"]);
     const plan = JSON.parse(readFileSync(planPath, "utf8"));
-    assert.equal(plan.commandcode.providerApi, true);
-    assert.equal(plan.commandcode.credential, credentialFingerprint("POOL_B"));
-    assert.notEqual(plan.commandcode.credential, credentialFingerprint("POOL_A"));
+    const winnerFingerprint = credentialFingerprint("POOL_B");
+    assert.equal(plan.commandcode.credentials[winnerFingerprint].providerApi, true);
+    assert.equal(plan.commandcode.credentials[winnerFingerprint].credential, winnerFingerprint);
+    assert.equal(plan.commandcode.credentials[credentialFingerprint("POOL_A")], undefined);
   } finally {
     if (child.exitCode === null) {
       child.kill("SIGTERM");

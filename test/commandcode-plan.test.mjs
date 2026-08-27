@@ -11,6 +11,7 @@ const {
   COMMANDCODE_PLAN_PATH,
   ROUTE_RECHECK_MS,
   commandCodeRoute,
+  credentialFingerprint,
   isUpgradeRequired,
   readCommandCodePlanState,
   recordCommandCodeRoute,
@@ -49,6 +50,14 @@ test("a different credential is a different question", () => {
   assert.equal(commandCodeRoute("commandcode", "key-b", { at: AT }).route, "provider-api");
 });
 
+test("route memory retains independent answers for multiple pooled credentials", () => {
+  forget();
+  recordCommandCodeRoute("commandcode", "key-a", { providerApi: false, at: AT });
+  recordCommandCodeRoute("commandcode", "key-b", { providerApi: false, at: AT + 1 });
+  assert.equal(commandCodeRoute("commandcode", "key-a", { at: AT + 2 }).route, "plan");
+  assert.equal(commandCodeRoute("commandcode", "key-b", { at: AT + 2 }).route, "plan");
+});
+
 test("the refusal is re-checked once its window comes due", () => {
   forget();
   recordCommandCodeRoute("commandcode", "key-a", { providerApi: false, at: AT });
@@ -68,7 +77,8 @@ test("the state file records a fingerprint and never the key", () => {
   recordCommandCodeRoute("commandcode", "user_supersecret_value", { providerApi: false, at: AT });
   const raw = readFileSync(COMMANDCODE_PLAN_PATH, "utf8");
   assert.doesNotMatch(raw, /supersecret/);
-  const entry = readCommandCodePlanState().commandcode;
+  const fingerprint = credentialFingerprint("user_supersecret_value");
+  const entry = readCommandCodePlanState().commandcode.credentials[fingerprint];
   assert.match(entry.credential, /^[0-9a-f]{16}$/);
   assert.equal(entry.providerApi, false);
   assert.equal(entry.observedAt, new Date(AT).toISOString());
