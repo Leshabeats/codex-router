@@ -315,8 +315,6 @@ function dereferenceAntigravitySchema(schema, root = schema, stack = new Set(), 
 const UNSUPPORTED_SCHEMA_KEYWORDS = Object.freeze([
   "$schema",
   "$id",
-  "id",
-  "discriminator",
   "$anchor",
   "$dynamicAnchor",
   "$dynamicRef",
@@ -367,15 +365,317 @@ const UNSUPPORTED_SCHEMA_KEYWORDS = Object.freeze([
   "prototype",
 ]);
 
+const CLAUDE_UNSUPPORTED_SCHEMA_ANNOTATIONS = new Set(["id", "discriminator"]);
+const CLAUDE_UNION_SIBLINGS = new Set([
+  "$schema",
+  "$id",
+  "$anchor",
+  "$comment",
+  "$defs",
+  "definitions",
+  "default",
+  "deprecated",
+  "description",
+  "discriminator",
+  "examples",
+  "id",
+  "readOnly",
+  "title",
+  "writeOnly",
+]);
+const CLAUDE_CLEANING_WIDENS_KEYWORDS = new Set([
+  "$dynamicRef",
+  "$ref",
+  "additionalProperties",
+  "contains",
+  "dependentRequired",
+  "dependentSchemas",
+  "else",
+  "encrypted",
+  "exclusiveMaximum",
+  "exclusiveMinimum",
+  "format",
+  "if",
+  "maxContains",
+  "maxItems",
+  "maxLength",
+  "maxProperties",
+  "maximum",
+  "minContains",
+  "minItems",
+  "minLength",
+  "minProperties",
+  "minimum",
+  "multipleOf",
+  "not",
+  "pattern",
+  "patternProperties",
+  "prefixItems",
+  "propertyNames",
+  "then",
+  "unevaluatedItems",
+  "unevaluatedProperties",
+  "uniqueItems",
+]);
+
+function jsonSchemaType(value) {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  if (typeof value === "number") return Number.isInteger(value) ? "integer" : "number";
+  if (["boolean", "string"].includes(typeof value)) return typeof value;
+  if (isPlainObject(value)) return "object";
+  return undefined;
+}
+
+function schemaTypes(schema) {
+  if (!isPlainObject(schema)) return undefined;
+  if (typeof schema.type === "string") return new Set([schema.type]);
+  if (Array.isArray(schema.type)) {
+    const types = schema.type.filter((entry) => typeof entry === "string");
+    return types.length ? new Set(types) : undefined;
+  }
+  if (Object.hasOwn(schema, "const")) {
+    const type = jsonSchemaType(schema.const);
+    return type ? new Set([type]) : undefined;
+  }
+  if (Array.isArray(schema.enum) && schema.enum.length) {
+    const types = schema.enum.map(jsonSchemaType).filter(Boolean);
+    return types.length ? new Set(types) : undefined;
+  }
+  return undefined;
+}
+
+function schemaTypesOverlap(left, right) {
+  for (const leftType of left) {
+    for (const rightType of right) {
+      if (leftType === rightType) return true;
+      if (
+        (leftType === "integer" && rightType === "number") ||
+        (leftType === "number" && rightType === "integer")
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function finitePrimitiveValues(schema) {
+  if (!isPlainObject(schema)) return undefined;
+  const values = Object.hasOwn(schema, "const")
+    ? [schema.const]
+    : Array.isArray(schema.enum)
+      ? schema.enum
+      : undefined;
+  if (!values?.length) return undefined;
+  if (values.some((value) => value !== null && !["boolean", "number", "string"].includes(typeof value))) {
+    return undefined;
+  }
+  return values;
+}
+
+// This is deliberately a proof, not a guess. A selected oneOf branch is a
+// narrowing only when every value it accepts is known not to match another
+// branch. Primitive type domains, finite literals, and required discriminant
+// properties are the small set for which that can be established locally.
+function schemasProvablyDisjoint(left, right, depth = 0) {
+  if (left === false || right === false) return true;
+  if (left === true || right === true || depth > MAX_SCHEMA_DEPTH) return false;
+  if (!isPlainObject(left) || !isPlainObject(right)) return false;
+
+  const leftTypes = schemaTypes(left);
+  const rightTypes = schemaTypes(right);
+  if (leftTypes && rightTypes && !schemaTypesOverlap(leftTypes, rightTypes)) return true;
+
+  const leftValues = finitePrimitiveValues(left);
+  const rightValues = finitePrimitiveValues(right);
+  if (
+    leftValues &&
+    rightValues &&
+    leftValues.every((leftValue) => !rightValues.some((rightValue) => leftValue === rightValue))
+  ) {
+    return true;
+  }
+
+  const leftRequired = new Set(Array.isArray(left.required) ? left.required : []);
+  const rightRequired = new Set(Array.isArray(right.required) ? right.required : []);
+  if (isPlainObject(left.properties) && isPlainObject(right.properties)) {
+    for (const name of leftRequired) {
+      if (!rightRequired.has(name)) continue;
+      if (!Object.hasOwn(left.properties, name) || !Object.hasOwn(right.properties, name)) {
+        continue;
+      }
+      if (schemasProvablyDisjoint(left.properties[name], right.properties[name], depth + 1)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function withUnionSiblings(schema, keyword, selected) {
+  const siblings = Object.entries(schema).filter(([key]) => key !== keyword);
+  if (siblings.some(([key]) => !CLAUDE_UNION_SIBLINGS.has(key))) return undefined;
+  const merged = { ...selected };
+  for (const [key, value] of siblings) {
+    if (!Object.hasOwn(merged, key)) merged[key] = value;
+  }
+  return merged;
+}
+
+function survivesClaudeCleaning(schema, depth = 0) {
+  if (!isPlainObject(schema) || depth > MAX_SCHEMA_DEPTH) return false;
+  for (const [key, value] of Object.entries(schema)) {
+    if (CLAUDE_CLEANING_WIDENS_KEYWORDS.has(key)) {
+      // Removing the default `additionalProperties: true` changes no accepted
+      // instance. Every other value is a constraint the protobuf schema cannot
+      // carry, so a union branch containing it is not a safe narrowing.
+      if (key !== "additionalProperties" || value !== true) return false;
+    }
+    if (key === "const" && typeof value !== "string") return false;
+    if (key === "enum" && Array.isArray(value) && value.some((entry) => typeof entry !== "string")) {
+      return false;
+    }
+  }
+  if (Object.hasOwn(schema, "const") && Array.isArray(schema.enum)) {
+    if (!schema.enum.length || schema.enum.some((entry) => entry !== schema.const)) return false;
+  }
+  if (isPlainObject(schema.properties)) {
+    for (const child of Object.values(schema.properties)) {
+      if (!survivesClaudeCleaning(child, depth + 1)) return false;
+    }
+  }
+  if (Object.hasOwn(schema, "items")) {
+    if (!survivesClaudeCleaning(schema.items, depth + 1)) return false;
+  }
+  return true;
+}
+
+function claudeSchemaResult(schema, depth = 0) {
+  if (schema === true) return { ok: true, identity: true, schema: {} };
+  if (schema === false) return { ok: false, impossible: true };
+  if (!isPlainObject(schema) || depth > MAX_SCHEMA_DEPTH) return { ok: false };
+  if (schema.type === "null") return { ok: false };
+
+  const unionKeywords = ["anyOf", "oneOf", "allOf"].filter((key) =>
+    Array.isArray(schema[key]),
+  );
+  if (unionKeywords.length > 1) return { ok: false };
+  if (unionKeywords.length === 1) {
+    const keyword = unionKeywords[0];
+    const branches = schema[keyword];
+    if (!branches.length) {
+      if (keyword !== "allOf") return { ok: false, impossible: true };
+      const merged = withUnionSiblings(schema, keyword, {});
+      return merged
+        ? { ok: true, identity: true, schema: merged }
+        : { ok: false };
+    }
+    const translated = branches.map((branch) => claudeSchemaResult(branch, depth + 1));
+    const safelyRepresentable = translated.map(
+      (result) => result.ok && survivesClaudeCleaning(result.schema, depth + 1),
+    );
+    let selected;
+    if (keyword === "allOf") {
+      if (translated.some((result) => result.impossible)) return { ok: false, impossible: true };
+      if (translated.some((result) => !result.ok)) return { ok: false };
+      const constraining = translated.filter((result) => !result.identity);
+      if (constraining.length > 1) return { ok: false };
+      selected = constraining[0] || { ok: true, identity: true, schema: {} };
+      if (!survivesClaudeCleaning(selected.schema, depth + 1)) return { ok: false };
+    } else if (keyword === "anyOf") {
+      selected = translated.find((_result, index) => safelyRepresentable[index]);
+      if (!selected) {
+        return translated.every((result) => result.impossible)
+          ? { ok: false, impossible: true }
+          : { ok: false };
+      }
+    } else {
+      for (let index = 0; index < translated.length; index += 1) {
+        const candidate = translated[index];
+        if (!safelyRepresentable[index]) continue;
+        const disjoint = branches.every((branch, otherIndex) =>
+          otherIndex === index ||
+          translated[otherIndex].impossible ||
+          schemasProvablyDisjoint(candidate.schema, branch),
+        );
+        if (disjoint) {
+          selected = candidate;
+          break;
+        }
+      }
+      if (!selected) return { ok: false };
+    }
+    const merged = withUnionSiblings(schema, keyword, selected.schema);
+    return merged
+      ? { ok: true, identity: selected.identity === true, schema: merged }
+      : { ok: false };
+  }
+
+  let next = schema;
+  const replace = (key, value) => {
+    if (next === schema) next = { ...schema };
+    next[key] = value;
+  };
+
+  if (Array.isArray(schema.type)) {
+    const candidateTypes = schema.type.filter(
+      (type) => typeof type === "string" && type !== "null",
+    );
+    let selectedType;
+    if (Object.hasOwn(schema, "const")) {
+      if (typeof schema.const !== "string" || !candidateTypes.includes("string")) {
+        return { ok: false };
+      }
+      if (Array.isArray(schema.enum) && !schema.enum.includes(schema.const)) {
+        return { ok: false, impossible: true };
+      }
+      selectedType = "string";
+      replace("enum", [schema.const]);
+    } else if (Array.isArray(schema.enum)) {
+      const strings = schema.enum.filter((entry) => typeof entry === "string");
+      if (!strings.length || !candidateTypes.includes("string")) return { ok: false };
+      selectedType = "string";
+      replace("enum", strings);
+    } else {
+      selectedType = candidateTypes[0];
+    }
+    if (!selectedType) return { ok: false };
+    replace("type", selectedType);
+  }
+
+  if (isPlainObject(schema.properties)) {
+    const properties = [];
+    for (const [name, child] of Object.entries(schema.properties)) {
+      const translated = claudeSchemaResult(child, depth + 1);
+      if (!translated.ok) return translated;
+      properties.push([name, translated.schema]);
+    }
+    replace("properties", Object.fromEntries(properties));
+  }
+
+  if (Object.hasOwn(schema, "items")) {
+    if (Array.isArray(schema.items)) return { ok: false };
+    const translated = claudeSchemaResult(schema.items, depth + 1);
+    if (!translated.ok) return translated;
+    replace("items", translated.schema);
+  }
+  return { ok: true, schema: next };
+}
+
 // Antigravity's protobuf-backed schema layer rejects annotations and
 // validation keywords that ordinary JSON Schema permits. This pass is pure:
 // tool schemas are caller-owned objects and must never be mutated in place.
 function cleanAntigravitySchema(schema, depth = 0, { sanitizeClaude = false } = {}) {
-  if (schema === true || schema === false) return {};
   if (!isPlainObject(schema) || depth > MAX_SCHEMA_DEPTH) return schema;
   const next = {};
   for (const [key, value] of Object.entries(schema)) {
-    if (UNSUPPORTED_SCHEMA_KEYWORDS.includes(key)) continue;
+    if (
+      UNSUPPORTED_SCHEMA_KEYWORDS.includes(key) ||
+      (sanitizeClaude && CLAUDE_UNSUPPORTED_SCHEMA_ANNOTATIONS.has(key))
+    ) {
+      continue;
+    }
     if (key === "const") {
       if (!Array.isArray(schema.enum)) next.enum = [String(value)];
       continue;
@@ -393,16 +693,14 @@ function cleanAntigravitySchema(schema, depth = 0, { sanitizeClaude = false } = 
       );
       continue;
     }
-    if (key === "items" && (isPlainObject(value) || typeof value === "boolean")) {
+    if (key === "items" && isPlainObject(value)) {
       next[key] = cleanAntigravitySchema(value, depth + 1, { sanitizeClaude });
       continue;
     }
     if (["anyOf", "oneOf", "allOf"].includes(key) && Array.isArray(value)) {
-      const branches = value
-        .filter((child) => !(sanitizeClaude && child?.type === "null"))
-        .map((child) => cleanAntigravitySchema(child, depth + 1, { sanitizeClaude }));
-      if (branches.length === 1) next[key] = branches;
-      else if (branches.length > 1 && !sanitizeClaude) next[key] = branches;
+      next[key] = value.map((child) =>
+        cleanAntigravitySchema(child, depth + 1, { sanitizeClaude }),
+      );
       continue;
     }
     next[key] = value;
@@ -410,23 +708,23 @@ function cleanAntigravitySchema(schema, depth = 0, { sanitizeClaude = false } = 
   if (Array.isArray(next.type)) {
     next.type = next.type.find((type) => type !== "null") || next.type[0];
   }
-  if (sanitizeClaude) {
-    for (const key of ["anyOf", "oneOf", "allOf"]) {
-      if (!Array.isArray(next[key]) || next[key].length !== 1) continue;
-      const branch = next[key][0];
-      delete next[key];
-      if (isPlainObject(branch)) {
-        for (const [branchKey, branchValue] of Object.entries(branch)) {
-          if (!(branchKey in next)) next[branchKey] = branchValue;
-        }
-      }
-    }
-  }
   return next;
 }
 
 function antigravityToolSchema(schema, options) {
   const normalized = normalizeSchemaLiterals(schema);
+  if (options?.sanitizeClaude) {
+    const dereferenced = dereferenceAntigravitySchema(normalized);
+    const translated = claudeSchemaResult(dereferenced);
+    if (!translated.ok) return undefined;
+    const root = translated.schema;
+    const objectRoot =
+      Object.keys(root).length === 0 ||
+      root.type === "object" ||
+      (root.type === undefined && isPlainObject(root.properties));
+    if (!objectRoot) return undefined;
+    return cleanAntigravitySchema(root, 0, options);
+  }
   if (!isPlainObject(normalized)) return { type: "object", properties: {} };
   const dereferenced = dereferenceAntigravitySchema(normalized);
   // Flatten while definitions are still present and references are already
@@ -443,16 +741,49 @@ function antigravityToolName(name) {
 }
 
 function functionDeclarations(chat, options) {
-  return (Array.isArray(chat.tools) ? chat.tools : [])
-    .filter((tool) => tool?.type === "function" && tool.function?.name)
-    .map((tool) => ({
-      name: antigravityToolName(tool.function.name),
+  const declarations = [];
+  const includedNames = new Set();
+  const omittedNames = new Set();
+  let sourceCount = 0;
+  for (const tool of Array.isArray(chat.tools) ? chat.tools : []) {
+    if (tool?.type !== "function" || !tool.function?.name) continue;
+    sourceCount += 1;
+    const sourceName = String(tool.function.name);
+    const name = antigravityToolName(sourceName);
+    const sourceParameters = tool.function.parameters;
+    const parameters = antigravityToolSchema(
+      options?.sanitizeClaude
+        ? sourceParameters === undefined
+          ? { type: "object", properties: {} }
+          : sourceParameters
+        : sourceParameters || { type: "object", properties: {} },
+      options,
+    );
+    if (parameters === undefined) {
+      omittedNames.add(sourceName);
+      omittedNames.add(name);
+      continue;
+    }
+    includedNames.add(sourceName);
+    includedNames.add(name);
+    declarations.push({
+      name,
       description: tool.function.description,
-      parameters: antigravityToolSchema(
-        tool.function.parameters || { type: "object", properties: {} },
-        options,
-      ),
-    }));
+      parameters,
+    });
+  }
+  return { declarations, includedNames, omittedNames, sourceCount };
+}
+
+function copyMessagesForShaping(messages) {
+  if (!Array.isArray(messages)) return [];
+  return messages.map((message) => {
+    if (!isPlainObject(message)) return message;
+    return {
+      ...message,
+      ...(Array.isArray(message.tool_calls) ? { tool_calls: [...message.tool_calls] } : {}),
+    };
+  });
 }
 
 function modelFamily(model) {
@@ -511,8 +842,9 @@ function resolveAntigravityModel(chat) {
 }
 
 export function toAntigravityRequest(chat, { projectId = "", requestId = undefined } = {}) {
-  foldInterveningAssistantMessages(chat?.messages);
-  const { contents, systemText } = messagesToContents(chat?.messages || []);
+  const messages = copyMessagesForShaping(chat?.messages);
+  foldInterveningAssistantMessages(messages);
+  const { contents, systemText } = messagesToContents(messages);
   const resolved = resolveAntigravityModel(chat);
   const request = {
     contents,
@@ -535,12 +867,40 @@ export function toAntigravityRequest(chat, { projectId = "", requestId = undefin
       includeThoughts: true,
     };
   }
-  const declarations = functionDeclarations(chat, {
-    sanitizeClaude: String(chat?.model || "").startsWith("claude-"),
-  });
+  const sanitizeClaude = String(chat?.model || "").startsWith("claude-");
+  const { declarations, includedNames, omittedNames, sourceCount } = functionDeclarations(
+    chat,
+    { sanitizeClaude },
+  );
+  const choice = chat?.tool_choice;
+  const forcedName =
+    choice?.type === "function" && typeof choice.function?.name === "string"
+      ? choice.function.name
+      : undefined;
+  if (
+    sanitizeClaude &&
+    forcedName &&
+    omittedNames.has(forcedName) &&
+    !includedNames.has(forcedName)
+  ) {
+    throw new AntigravityShapeError(
+      `Forced tool ${JSON.stringify(forcedName)} cannot be represented safely for Claude Antigravity.`,
+      { status: 400, code: "unsupported_forced_tool_schema" },
+    );
+  }
+  if (
+    sanitizeClaude &&
+    choice === "required" &&
+    sourceCount > 0 &&
+    declarations.length === 0
+  ) {
+    throw new AntigravityShapeError(
+      "No required tool can be represented safely for Claude Antigravity.",
+      { status: 400, code: "no_representable_required_tool" },
+    );
+  }
   if (declarations.length) {
     request.tools = [{ functionDeclarations: declarations }];
-    const choice = chat?.tool_choice;
     let functionCallingConfig;
     if (choice === "none") {
       functionCallingConfig = { mode: "NONE" };
