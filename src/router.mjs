@@ -646,9 +646,15 @@ const NATIVE_UNSUPPORTED_PARAMS = Object.freeze([
  * promise that its traffic is byte-identical is worth more than the tidiness of
  * one shared path.
  */
-function normalizeNativeForSubstitutedCaller(payload) {
-  // Not optional upstream: `store` must be false, and anything else is a 400.
-  payload.store = false;
+function normalizeNativeForSubstitutedCaller(payload, { compact = false } = {}) {
+  // Ordinary Responses turns on ChatGPT's backend are stateless: `store` must
+  // be false, and anything else is a 400. The dedicated compact endpoint has
+  // a narrower CompactionInput contract that does not define or send this field.
+  // Injecting `store: false` there also makes its referenced `rs_...` items
+  // look deliberately unpersisted, so omit the field rather than choosing a
+  // persistence policy the compact request never exposed.
+  if (compact) delete payload.store;
+  else payload.store = false;
   for (const key of NATIVE_UNSUPPORTED_PARAMS) delete payload[key];
   return payload;
 }
@@ -3125,7 +3131,7 @@ async function handleResponses(request, response, requestUrl) {
       });
       if (!compactV1) delete native.previous_response_id;
       if (callerBroughtNoUpstreamCredential(request)) {
-        normalizeNativeForSubstitutedCaller(native);
+        normalizeNativeForSubstitutedCaller(native, { compact: compactV1 });
       }
       target = nativeTarget(requestUrl.pathname);
       headers = nativeHeaders(request);
