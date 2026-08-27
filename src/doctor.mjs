@@ -1163,6 +1163,10 @@ if (proxyOptIn) {
 // describes Codex's own tools, so it is not part of a harness install.
 if (codexTarget) {
   const status = skillPackStatus(CODEX_HOME);
+  const skillOperatorCommand =
+    process.platform === "win32"
+      ? ".\\model-router.ps1 codex skills"
+      : "./bin/model-router codex skills";
   add(
     status.missing.length === 0 ? "ok" : "fail",
     "Codex skill pack",
@@ -1181,7 +1185,7 @@ if (codexTarget) {
   );
   if (status.collisions.length > 0) {
     const approvalCommand =
-      `./bin/model-router codex skills approve-external ${status.collisions.join(" ")}`;
+      `${skillOperatorCommand} approve-external ${status.collisions.join(" ")}`;
     add(
       "warn",
       "Codex skill pack collisions",
@@ -1201,20 +1205,19 @@ if (codexTarget) {
   }
   if (status.staleExternal.length > 0) {
     const reapprovable = status.staleExternal.filter((name) => status.pack.includes(name));
-    const obsolete = status.staleExternal.filter((name) => !status.pack.includes(name));
     const actions = [];
     if (reapprovable.length > 0) {
       actions.push(
-        `after review, re-approve with: ./bin/model-router codex skills approve-external ${reapprovable.join(" ")}`,
+        `after review, re-approve with: ${skillOperatorCommand} approve-external ${reapprovable.join(" ")}`,
       );
     }
-    if (obsolete.length > 0) {
-      actions.push(`remove obsolete approvals with: ./bin/install (${obsolete.join(", ")})`);
-    }
+    actions.push(
+      `revoke stale approvals with: ${skillOperatorCommand} revoke-external ${status.staleExternal.join(" ")}`,
+    );
     add(
       "warn",
       "Codex skill pack external approvals",
-      `external approvals require re-review: ${status.staleExternal.join(", ")}; ${actions.join("; ")}`,
+      `external approvals require re-review or revocation: ${status.staleExternal.join(", ")}; ${actions.join("; ")}`,
       actions.join("; "),
     );
   }
