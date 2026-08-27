@@ -3941,7 +3941,7 @@ test("special relay identities cannot be reused or changed after conversion", as
   assert.doesNotMatch(boundedCommitted.output.toString("utf8"), /post-commit-identity-limit/u);
 });
 
-test("special closes and terminal summaries require a registered opening", async () => {
+test("complete special closes and terminal summaries establish atomic lifecycles", async () => {
   const collaboration = {
     type: "namespace",
     name: "collaboration",
@@ -3961,14 +3961,153 @@ test("special closes and terminal summaries require a registered opening", async
         name: "apply_patch",
         arguments: JSON.stringify({ input: "patch" }),
       },
+      expected: {
+        type: "custom_tool_call",
+        id: "fc_done_only_custom",
+        call_id: "call_done_only_custom",
+        name: "apply_patch",
+        input: "patch",
+      },
     },
     {
       name: "tool-search",
       namespaces: search.namespaces,
       item: {
         type: "function_call",
-        id: "fc_done_only_search",
         call_id: "call_done_only_search",
+        name: "tool_search",
+        arguments: JSON.stringify({ query: "calendar" }),
+      },
+      expected: {
+        type: "tool_search_call",
+        call_id: "call_done_only_search",
+        execution: "client",
+        arguments: { query: "calendar" },
+      },
+    },
+  ];
+
+  for (const special of specials) {
+    for (const shape of ["done", "summary"]) {
+      const event =
+        shape === "done"
+          ? { type: "response.output_item.done", item: special.item }
+          : {
+              type: "response.completed",
+              response: { output: [special.item] },
+            };
+      const output = await collect(
+        Readable.from([
+          `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+        ]).pipe(
+          new NamespaceToolCallTransform(special.namespaces, "text/event-stream"),
+        ),
+      );
+      const parsed = JSON.parse(
+        output.split("\n").find((line) => line.startsWith("data:")).slice(5).trimStart(),
+      );
+      assert.deepEqual(
+        shape === "done" ? parsed.item : parsed.response.output[0],
+        special.expected,
+        `${special.name}-${shape}`,
+      );
+    }
+
+    const done = { type: "response.output_item.done", item: special.item };
+    const summary = {
+      type: "response.completed",
+      response: { output: [special.item] },
+    };
+    const output = await collect(
+      Readable.from(
+        [done, summary].map(
+          (event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+        ),
+      ).pipe(
+        new NamespaceToolCallTransform(special.namespaces, "text/event-stream"),
+      ),
+    );
+    const parsed = output
+      .split("\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => JSON.parse(line.slice(5).trimStart()));
+    assert.deepEqual(parsed[0].item, special.expected, `${special.name}-atomic-done`);
+    assert.deepEqual(
+      parsed[1].response.output[0],
+      special.expected,
+      `${special.name}-matching-summary`,
+    );
+  }
+});
+
+test("malformed, contradictory, or reused atomic special lifecycles fail safely", async () => {
+  const collaboration = {
+    type: "namespace",
+    name: "collaboration",
+    tools: [{ type: "function", name: "spawn_agent" }],
+  };
+  const custom = flattenNamespaceTools([collaboration]);
+  bridgeCustomTools([{ type: "custom", name: "apply_patch" }], [], custom.namespaces);
+  const search = flattenNamespaceTools([collaboration, clientToolSearchControl()]);
+  const malformed = [
+    {
+      name: "custom-incomplete-arguments",
+      namespaces: custom.namespaces,
+      item: {
+        type: "function_call",
+        id: "fc_bad_custom_arguments",
+        call_id: "call_bad_custom_arguments",
+        name: "apply_patch",
+        arguments: "{}",
+      },
+    },
+    {
+      name: "custom-missing-call-id",
+      namespaces: custom.namespaces,
+      item: {
+        type: "function_call",
+        id: "fc_bad_custom_identity",
+        name: "apply_patch",
+        arguments: JSON.stringify({ input: "patch" }),
+      },
+    },
+    {
+      name: "custom-empty-item-id",
+      namespaces: custom.namespaces,
+      item: {
+        type: "function_call",
+        id: "",
+        call_id: "call_bad_custom_item_id",
+        name: "apply_patch",
+        arguments: JSON.stringify({ input: "patch" }),
+      },
+    },
+    {
+      name: "custom-provider-namespace",
+      namespaces: custom.namespaces,
+      item: {
+        type: "function_call",
+        namespace: "unexpected",
+        call_id: "call_bad_custom_namespace",
+        name: "apply_patch",
+        arguments: JSON.stringify({ input: "patch" }),
+      },
+    },
+    {
+      name: "tool-search-incomplete-arguments",
+      namespaces: search.namespaces,
+      item: {
+        type: "function_call",
+        call_id: "call_bad_search_arguments",
+        name: "tool_search",
+        arguments: "[]",
+      },
+    },
+    {
+      name: "tool-search-missing-call-id",
+      namespaces: search.namespaces,
+      item: {
+        type: "function_call",
         name: "tool_search",
         arguments: JSON.stringify({ query: "calendar" }),
       },
@@ -3983,27 +4122,26 @@ test("special closes and terminal summaries require a registered opening", async
     },
   };
 
-  for (const special of specials) {
+  for (const fixture of malformed) {
     for (const shape of ["done", "summary"]) {
-      const marker = `${special.name}-${shape}-without-open`;
-      const event =
-        shape === "done"
-          ? { type: "response.output_item.done", marker, item: special.item }
-          : {
-              type: "response.completed",
-              marker,
-              response: { output: [special.item] },
-            };
+      const marker = `${fixture.name}-${shape}`;
+      const event = shape === "done"
+        ? { type: "response.output_item.done", marker, item: fixture.item }
+        : {
+            type: "response.completed",
+            marker,
+            response: { output: [fixture.item] },
+          };
       const frame = Buffer.from(
         `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
         "utf8",
       );
       const preserved = await collectBuffer(
         Readable.from([frame]).pipe(
-          new NamespaceToolCallTransform(special.namespaces, "text/event-stream"),
+          new NamespaceToolCallTransform(fixture.namespaces, "text/event-stream"),
         ),
       );
-      assert.deepEqual(preserved, frame, marker);
+      assert.deepEqual(preserved, frame, `${marker}-precommit`);
 
       const committedPrefix = Buffer.from(
         `event: ${prefix.type}\ndata: ${JSON.stringify(prefix)}\n\n`,
@@ -4011,13 +4149,218 @@ test("special closes and terminal summaries require a registered opening", async
       );
       const { output, error } = await collectUntilPipelineError(
         [committedPrefix, frame],
-        new NamespaceToolCallTransform(special.namespaces, "text/event-stream"),
+        new NamespaceToolCallTransform(fixture.namespaces, "text/event-stream"),
       );
       assert.equal(error.code, "ERR_NAMESPACE_RELAY_COMMITTED_STREAM", marker);
       assert.match(output.toString("utf8"), /"namespace":"collaboration"/u);
       assert.doesNotMatch(output.toString("utf8"), new RegExp(marker, "u"));
     }
   }
+
+  const nonterminalSummary = {
+    type: "response.in_progress",
+    marker: "nonterminal-atomic-summary",
+    response: {
+      output: [
+        {
+          type: "function_call",
+          id: "fc_nonterminal_summary",
+          call_id: "call_nonterminal_summary",
+          name: "apply_patch",
+          arguments: JSON.stringify({ input: "patch" }),
+        },
+      ],
+    },
+  };
+  const nonterminalFrame = Buffer.from(
+    `event: ${nonterminalSummary.type}\ndata: ${JSON.stringify(nonterminalSummary)}\n\n`,
+    "utf8",
+  );
+  const nonterminalPreserved = await collectBuffer(
+    Readable.from([nonterminalFrame]).pipe(
+      new NamespaceToolCallTransform(custom.namespaces, "text/event-stream"),
+    ),
+  );
+  assert.deepEqual(nonterminalPreserved, nonterminalFrame);
+
+  const atomicCustom = (id, callId, marker) => ({
+    type: "response.output_item.done",
+    marker,
+    item: {
+      type: "function_call",
+      id,
+      call_id: callId,
+      name: "apply_patch",
+      arguments: JSON.stringify({ input: "patch" }),
+    },
+  });
+  const atomicOrdinary = (id, callId, marker) => ({
+    type: "response.output_item.done",
+    marker,
+    item: {
+      type: "function_call",
+      id,
+      call_id: callId,
+      name: "exec_command",
+      arguments: "{}",
+    },
+  });
+  const first = atomicCustom("fc_atomic_first", "call_atomic_first");
+  const second = atomicCustom("fc_atomic_second", "call_atomic_second");
+  const crossWired = atomicCustom(
+    "fc_atomic_first",
+    "call_atomic_second",
+    "cross-wired-atomic-identity",
+  );
+  const crossWiredSource = [first, second, crossWired]
+    .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+    .join("");
+  const crossWiredResult = await collectUntilPipelineError(
+    [Buffer.from(crossWiredSource, "utf8")],
+    new NamespaceToolCallTransform(custom.namespaces, "text/event-stream"),
+  );
+  assert.equal(crossWiredResult.error.code, "ERR_NAMESPACE_RELAY_COMMITTED_STREAM");
+  assert.doesNotMatch(
+    crossWiredResult.output.toString("utf8"),
+    /cross-wired-atomic-identity/u,
+  );
+
+  const summaryOnly = {
+    type: "response.completed",
+    response: {
+      output: [atomicCustom("fc_summary_once", "call_summary_once").item],
+    },
+  };
+  const duplicateSummary = {
+    ...summaryOnly,
+    marker: "duplicate-atomic-summary",
+  };
+  const duplicateSummarySource = [summaryOnly, duplicateSummary]
+    .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+    .join("");
+  const duplicateSummaryResult = await collectUntilPipelineError(
+    [Buffer.from(duplicateSummarySource, "utf8")],
+    new NamespaceToolCallTransform(custom.namespaces, "text/event-stream"),
+  );
+  assert.equal(duplicateSummaryResult.error.code, "ERR_NAMESPACE_RELAY_COMMITTED_STREAM");
+  assert.doesNotMatch(
+    duplicateSummaryResult.output.toString("utf8"),
+    /duplicate-atomic-summary/u,
+  );
+
+  const ordinaryThenSpecial = [
+    atomicOrdinary("fc_shared_done", "call_shared_done"),
+    atomicCustom(
+      "fc_shared_done",
+      "call_shared_done",
+      "ordinary-then-special-done-reuse",
+    ),
+  ];
+  const ordinaryThenSpecialSource = Buffer.from(
+    ordinaryThenSpecial
+      .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+      .join(""),
+    "utf8",
+  );
+  const ordinaryThenSpecialOutput = await collectBuffer(
+    Readable.from([ordinaryThenSpecialSource]).pipe(
+      new NamespaceToolCallTransform(custom.namespaces, "text/event-stream"),
+    ),
+  );
+  assert.deepEqual(ordinaryThenSpecialOutput, ordinaryThenSpecialSource);
+
+  const specialThenOrdinary = [
+    atomicCustom("fc_special_first", "call_special_first"),
+    atomicOrdinary(
+      "fc_special_first",
+      "call_special_first",
+      "special-then-ordinary-done-reuse",
+    ),
+  ];
+  const specialThenOrdinarySource = specialThenOrdinary
+    .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+    .join("");
+  const specialThenOrdinaryResult = await collectUntilPipelineError(
+    [Buffer.from(specialThenOrdinarySource, "utf8")],
+    new NamespaceToolCallTransform(custom.namespaces, "text/event-stream"),
+  );
+  assert.equal(specialThenOrdinaryResult.error.code, "ERR_NAMESPACE_RELAY_COMMITTED_STREAM");
+  assert.doesNotMatch(
+    specialThenOrdinaryResult.output.toString("utf8"),
+    /special-then-ordinary-done-reuse/u,
+  );
+
+  for (const [name, items] of [
+    [
+      "ordinary-then-special-summary-reuse",
+      [
+        atomicOrdinary("fc_shared_summary", "call_shared_summary").item,
+        atomicCustom("fc_shared_summary", "call_shared_summary").item,
+      ],
+    ],
+    [
+      "special-then-ordinary-summary-reuse",
+      [
+        atomicCustom("fc_shared_summary", "call_shared_summary").item,
+        atomicOrdinary("fc_shared_summary", "call_shared_summary").item,
+      ],
+    ],
+  ]) {
+    const event = {
+      type: "response.completed",
+      marker: name,
+      response: { output: items },
+    };
+    const frame = Buffer.from(
+      `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+      "utf8",
+    );
+    const preserved = await collectBuffer(
+      Readable.from([frame]).pipe(
+        new NamespaceToolCallTransform(custom.namespaces, "text/event-stream"),
+      ),
+    );
+    assert.deepEqual(preserved, frame, `${name}-precommit`);
+
+    const committedPrefix = Buffer.from(
+      `event: ${prefix.type}\ndata: ${JSON.stringify(prefix)}\n\n`,
+      "utf8",
+    );
+    const result = await collectUntilPipelineError(
+      [committedPrefix, frame],
+      new NamespaceToolCallTransform(custom.namespaces, "text/event-stream"),
+    );
+    assert.equal(result.error.code, "ERR_NAMESPACE_RELAY_COMMITTED_STREAM", name);
+    assert.doesNotMatch(result.output.toString("utf8"), new RegExp(name, "u"));
+  }
+
+  const ordinary = {
+    type: "response.output_item.added",
+    item: {
+      type: "function_call",
+      id: "fc_prior_ordinary",
+      call_id: "call_prior_owner",
+      name: "exec_command",
+      arguments: "",
+    },
+  };
+  const contradictory = atomicCustom(
+    "fc_later_special",
+    "call_prior_owner",
+    "contradictory-atomic-owner",
+  );
+  const contradictorySource = Buffer.from(
+    [ordinary, contradictory]
+      .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+      .join(""),
+    "utf8",
+  );
+  const contradictoryOutput = await collectBuffer(
+    Readable.from([contradictorySource]).pipe(
+      new NamespaceToolCallTransform(custom.namespaces, "text/event-stream"),
+    ),
+  );
+  assert.deepEqual(contradictoryOutput, contradictorySource);
 });
 
 test("invalid or inconsistent tool_search arguments fail closed after conversion", async () => {

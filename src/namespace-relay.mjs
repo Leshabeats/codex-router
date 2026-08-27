@@ -2540,6 +2540,17 @@ export class NamespaceToolCallTransform extends Transform {
     return undefined;
   }
 
+  #sourceSpecialCallKind(item) {
+    const nativeKind = this.#specialCallKind(item);
+    if (nativeKind) return nativeKind;
+    if (item?.type !== "function_call") return undefined;
+    if (this.#lookups.customTools instanceof Map && this.#lookups.customTools.has(item.name)) {
+      return "custom";
+    }
+    if (item.name === this.#lookups.toolSearch?.providerName) return "tool_search";
+    return undefined;
+  }
+
   #hasOpenSpecialCalls() {
     for (const state of this.#callsByItemId.values()) {
       if (state.kind && !state.closed) return true;
@@ -2560,6 +2571,21 @@ export class NamespaceToolCallTransform extends Transform {
 
   #registerCall(sourceItem, item) {
     const kind = this.#specialCallKind(item);
+    const sourceKind = this.#sourceSpecialCallKind(sourceItem);
+    if ((sourceKind || kind) && sourceKind !== kind) {
+      return "special tool call opening was not restored consistently";
+    }
+    if (
+      (kind === "custom" &&
+        (typeof item.name !== "string" || !item.name || item.namespace !== undefined)) ||
+      (kind === "tool_search" &&
+        (item.name !== undefined ||
+          item.namespace !== undefined ||
+          item.execution !== "client" ||
+          !plainObject(item.arguments)))
+    ) {
+      return "special tool call opening is incomplete";
+    }
     const itemId = typeof item?.id === "string" && item.id ? item.id : undefined;
     const callId =
       typeof item?.call_id === "string" && item.call_id ? item.call_id : undefined;
@@ -2584,8 +2610,10 @@ export class NamespaceToolCallTransform extends Transform {
       callId,
       sourceType: sourceItem?.type,
       sourceName: sourceItem?.name,
+      sourceNamespace: sourceItem?.namespace,
       outputType: item.type,
       outputName: item.name,
+      outputNamespace: item.namespace,
       argumentsDone: false,
       finalInput: undefined,
       finalArguments: undefined,
@@ -2593,6 +2621,7 @@ export class NamespaceToolCallTransform extends Transform {
       deltaCharacters: 0,
       deltaHash: kind === "custom" ? createHash("sha256") : undefined,
       closed: false,
+      summarySeen: false,
       deltaState:
         kind === "custom"
           ? {
@@ -2608,6 +2637,202 @@ export class NamespaceToolCallTransform extends Transform {
     if (state.callId) this.#callsByCallId.set(state.callId, state);
     this.#trackedCallCount += 1;
     return undefined;
+  }
+
+  // Some Responses bridges omit output_item.added and emit only one complete
+  // done item or a terminal output summary. Treat that self-contained item as
+  // a closed lifecycle, but reserve its identities exactly like a streamed
+  // opening so later events cannot change owners or replay it.
+  #registerAtomicSpecialCall(sourceItem, item, { summarySeen = false } = {}) {
+    const sourceKind = this.#sourceSpecialCallKind(sourceItem);
+    const kind = this.#specialCallKind(item);
+    if (!sourceKind || sourceKind !== kind) {
+      return "atomic special tool call was incomplete or restored inconsistently";
+    }
+
+    const callId = typeof item?.call_id === "string" && item.call_id
+      ? item.call_id
+      : undefined;
+    if (!callId || sourceItem?.call_id !== callId) {
+      return "atomic special tool call lacks stable identity";
+    }
+    const sourceHasItemId = Object.hasOwn(sourceItem, "id");
+    const outputHasItemId = Object.hasOwn(item, "id");
+    if (
+      sourceHasItemId !== outputHasItemId ||
+      (sourceHasItemId &&
+        (typeof item.id !== "string" || !item.id || sourceItem.id !== item.id))
+    ) {
+      return "atomic special tool call lacks stable identity";
+    }
+    const itemId = outputHasItemId ? item.id : undefined;
+
+    if (kind === "custom") {
+      if (
+        typeof item.name !== "string" ||
+        !item.name ||
+        item.namespace !== undefined ||
+        typeof item.input !== "string"
+      ) {
+        return "incomplete atomic custom tool call";
+      }
+      if (sourceItem.type === "function_call") {
+        const expectedName = this.#lookups.customTools?.get(sourceItem.name);
+        if (
+          expectedName !== item.name ||
+          customToolInput(sourceItem.arguments) !== item.input
+        ) {
+          return "atomic custom tool call was not restored consistently";
+        }
+      } else if (
+        sourceItem.name !== item.name ||
+        sourceItem.input !== item.input
+      ) {
+        return "atomic custom tool call changed native content";
+      }
+    } else {
+      if (
+        item.name !== undefined ||
+        item.namespace !== undefined ||
+        item.execution !== "client" ||
+        !plainObject(item.arguments)
+      ) {
+        return "incomplete atomic tool search call";
+      }
+      if (sourceItem.type === "function_call") {
+        const sourceArguments = toolSearchArguments(sourceItem.arguments, false);
+        if (
+          sourceItem.name !== this.#lookups.toolSearch?.providerName ||
+          !sourceArguments ||
+          !isDeepStrictEqual(sourceArguments, item.arguments)
+        ) {
+          return "atomic tool search call was not restored consistently";
+        }
+      } else if (
+        sourceItem.execution !== item.execution ||
+        !isDeepStrictEqual(sourceItem.arguments, item.arguments)
+      ) {
+        return "atomic tool search call changed native content";
+      }
+    }
+
+    const conflict = this.#openingIdentityConflict(item);
+    if (conflict) return conflict;
+    if (this.#trackedCallCount >= this.#maxTrackedOutputItems) {
+      return "output item identity limit";
+    }
+    const state = {
+      kind,
+      itemId,
+      callId,
+      sourceType: sourceItem.type,
+      sourceName: sourceItem.name,
+      sourceNamespace: sourceItem.namespace,
+      outputType: item.type,
+      outputName: item.name,
+      outputNamespace: item.namespace,
+      argumentsDone: true,
+      finalInput: kind === "custom" ? item.input : undefined,
+      finalArguments: kind === "tool_search" ? item.arguments : undefined,
+      sawArgumentDelta: false,
+      deltaCharacters: 0,
+      deltaHash: undefined,
+      closed: true,
+      summarySeen,
+      deltaState: undefined,
+    };
+    if (itemId) this.#callsByItemId.set(itemId, state);
+    this.#callsByCallId.set(callId, state);
+    this.#trackedCallCount += 1;
+    return undefined;
+  }
+
+  #registerAtomicOutputItem(sourceItem, item, { summarySeen = false } = {}) {
+    const sourceKind = this.#sourceSpecialCallKind(sourceItem);
+    const outputKind = this.#specialCallKind(item);
+    if (sourceKind || outputKind) {
+      return this.#registerAtomicSpecialCall(sourceItem, item, { summarySeen });
+    }
+
+    // Ordinary items reserve the same id domains. Otherwise a done-only
+    // ordinary call could donate its call_id to a later special relay.
+    const itemId = typeof item?.id === "string" && item.id ? item.id : undefined;
+    const callId = typeof item?.call_id === "string" && item.call_id
+      ? item.call_id
+      : undefined;
+    const sourceItemId = typeof sourceItem?.id === "string" && sourceItem.id
+      ? sourceItem.id
+      : undefined;
+    const sourceCallId = typeof sourceItem?.call_id === "string" && sourceItem.call_id
+      ? sourceItem.call_id
+      : undefined;
+    const sourceHasItemId = Boolean(
+      sourceItem && typeof sourceItem === "object" && Object.hasOwn(sourceItem, "id"),
+    );
+    const outputHasItemId = Boolean(
+      item && typeof item === "object" && Object.hasOwn(item, "id"),
+    );
+    const sourceHasCallId = Boolean(
+      sourceItem && typeof sourceItem === "object" && Object.hasOwn(sourceItem, "call_id"),
+    );
+    const outputHasCallId = Boolean(
+      item && typeof item === "object" && Object.hasOwn(item, "call_id"),
+    );
+    if (
+      sourceItemId !== itemId ||
+      sourceCallId !== callId ||
+      sourceHasItemId !== outputHasItemId ||
+      sourceHasCallId !== outputHasCallId ||
+      (sourceHasItemId && !itemId) ||
+      (sourceHasCallId && !callId)
+    ) {
+      return "atomic output item lacks stable identity";
+    }
+    if (!itemId && !callId) return undefined;
+    const conflict = this.#openingIdentityConflict(item);
+    if (conflict) return conflict;
+    if (this.#trackedCallCount >= this.#maxTrackedOutputItems) {
+      return "output item identity limit";
+    }
+    const state = {
+      kind: undefined,
+      itemId,
+      callId,
+      sourceType: sourceItem?.type,
+      sourceName: sourceItem?.name,
+      sourceNamespace: sourceItem?.namespace,
+      outputType: item?.type,
+      outputName: item?.name,
+      outputNamespace: item?.namespace,
+      argumentsDone: true,
+      finalInput: undefined,
+      finalArguments: undefined,
+      sawArgumentDelta: false,
+      deltaCharacters: 0,
+      deltaHash: undefined,
+      closed: true,
+      summarySeen,
+      deltaState: undefined,
+    };
+    if (itemId) this.#callsByItemId.set(itemId, state);
+    if (callId) this.#callsByCallId.set(callId, state);
+    this.#trackedCallCount += 1;
+    return undefined;
+  }
+
+  #outputItemMatchesState(sourceItem, item, state) {
+    return (
+      sourceItem?.id === state.itemId &&
+      sourceItem?.call_id === state.callId &&
+      sourceItem?.type === state.sourceType &&
+      sourceItem?.name === state.sourceName &&
+      sourceItem?.namespace === state.sourceNamespace &&
+      item?.id === state.itemId &&
+      item?.call_id === state.callId &&
+      item?.type === state.outputType &&
+      item?.name === state.outputName &&
+      item?.namespace === state.outputNamespace
+    );
   }
 
   #specialCallForArgumentsEvent(event) {
@@ -2656,7 +2881,7 @@ export class NamespaceToolCallTransform extends Transform {
       : "custom tool argument deltas disagree with completed input";
   }
 
-  #closeSpecialCall(sourceItem, item) {
+  #closeOutputItem(sourceItem, item) {
     const byItemId =
       typeof sourceItem?.id === "string"
         ? this.#callsByItemId.get(sourceItem.id)
@@ -2669,24 +2894,20 @@ export class NamespaceToolCallTransform extends Transform {
       return "conflicting special tool call close identity";
     }
     const state = byItemId || byCallId;
+    const sourceKind = this.#sourceSpecialCallKind(sourceItem);
     const outputKind = this.#specialCallKind(item);
-    if (!state || !state.kind) {
-      return outputKind ? "special tool call close without a matching opening" : undefined;
+    if (!state) {
+      return this.#registerAtomicOutputItem(sourceItem, item);
     }
-    if (state.closed) return "duplicate special tool call close";
-    if (sourceItem?.id !== state.itemId || sourceItem?.call_id !== state.callId) {
-      return "mismatched special tool call close identity";
+    if (state.closed) return "duplicate output item close";
+    if (!this.#outputItemMatchesState(sourceItem, item, state)) {
+      return state.kind || sourceKind || outputKind
+        ? "mismatched special tool call close identity"
+        : "mismatched output item close identity";
     }
-    if (sourceItem.type !== state.sourceType || sourceItem.name !== state.sourceName) {
-      return "mismatched special tool call close source";
-    }
-    if (
-      item?.id !== state.itemId ||
-      item?.call_id !== state.callId ||
-      item?.type !== state.outputType ||
-      item?.name !== state.outputName
-    ) {
-      return "special tool call close was not restored consistently";
+    if (!state.kind) {
+      state.closed = true;
+      return undefined;
     }
     if (state.kind === "custom") {
       if (state.argumentsDone && item.input !== state.finalInput) {
@@ -2710,7 +2931,7 @@ export class NamespaceToolCallTransform extends Transform {
     return undefined;
   }
 
-  #validateSpecialSummaryItem(sourceItem, item) {
+  #validateOutputSummaryItem(sourceItem, item, { allowAtomic = false } = {}) {
     const byItemId =
       typeof sourceItem?.id === "string"
         ? this.#callsByItemId.get(sourceItem.id)
@@ -2723,26 +2944,27 @@ export class NamespaceToolCallTransform extends Transform {
       return "conflicting special tool call summary identity";
     }
     const state = byItemId || byCallId;
+    const sourceKind = this.#sourceSpecialCallKind(sourceItem);
     const outputKind = this.#specialCallKind(item);
-    if (!state || !state.kind) {
-      return outputKind ? "special tool call summary without a matching opening" : undefined;
+    if (!state) {
+      if (!allowAtomic) {
+        return sourceKind || outputKind
+          ? "special tool call summary without a matching opening"
+          : undefined;
+      }
+      return this.#registerAtomicOutputItem(sourceItem, item, { summarySeen: true });
     }
-    if (!state.closed) return "special tool call summary before close";
-    if (
-      sourceItem?.id !== state.itemId ||
-      sourceItem?.call_id !== state.callId ||
-      sourceItem?.type !== state.sourceType ||
-      sourceItem?.name !== state.sourceName
-    ) {
-      return "mismatched special tool call summary source";
+    if (!state.closed && state.kind) return "special tool call summary before close";
+    if (state.summarySeen) return "duplicate output item summary";
+    if (!this.#outputItemMatchesState(sourceItem, item, state)) {
+      return state.kind || sourceKind || outputKind
+        ? "mismatched special tool call summary identity"
+        : "mismatched output item summary identity";
     }
-    if (
-      item?.id !== state.itemId ||
-      item?.call_id !== state.callId ||
-      item?.type !== state.outputType ||
-      item?.name !== state.outputName
-    ) {
-      return "special tool call summary was not restored consistently";
+    if (!state.kind) {
+      state.closed = true;
+      state.summarySeen = true;
+      return undefined;
     }
     if (state.kind === "custom" && item.input !== state.finalInput) {
       return "custom tool call summary input changed after close";
@@ -2753,17 +2975,20 @@ export class NamespaceToolCallTransform extends Transform {
     ) {
       return "tool search arguments changed after close";
     }
+    state.summarySeen = true;
     return undefined;
   }
 
-  #validateSpecialOutputItems(sourceEvent, event) {
+  #validateOutputItems(sourceEvent, event, { allowAtomic = false } = {}) {
     for (const [sourceOutput, output] of [
       [sourceEvent?.output, event?.output],
       [sourceEvent?.response?.output, event?.response?.output],
     ]) {
       if (!Array.isArray(sourceOutput) || !Array.isArray(output)) continue;
       for (let index = 0; index < sourceOutput.length; index += 1) {
-        const reason = this.#validateSpecialSummaryItem(sourceOutput[index], output[index]);
+        const reason = this.#validateOutputSummaryItem(sourceOutput[index], output[index], {
+          allowAtomic,
+        });
         if (reason) return reason;
       }
     }
@@ -2960,16 +3185,18 @@ export class NamespaceToolCallTransform extends Transform {
         if (reason) return this.#unsafeSseFrame(frame, reason);
       }
       if (sourceEvent?.type === "response.output_item.done") {
-        const reason = this.#closeSpecialCall(sourceEvent.item, event.item);
+        const reason = this.#closeOutputItem(sourceEvent.item, event.item);
         if (reason) return this.#unsafeSseFrame(frame, reason);
       }
-      const summaryReason = this.#validateSpecialOutputItems(sourceEvent, event);
-      if (summaryReason) return this.#unsafeSseFrame(frame, summaryReason);
       const terminalEvent =
         event?.type === "response.completed" ||
         event?.type === "response.done" ||
         eventName === "response.completed" ||
         eventName === "response.done";
+      const summaryReason = this.#validateOutputItems(sourceEvent, event, {
+        allowAtomic: terminalEvent,
+      });
+      if (summaryReason) return this.#unsafeSseFrame(frame, summaryReason);
       if (terminalEvent) {
         if (this.#hasOpenSpecialCalls()) {
           return this.#unsafeSseFrame(frame, "terminal event before special tool call close");
