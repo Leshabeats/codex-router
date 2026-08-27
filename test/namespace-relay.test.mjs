@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { Readable } from "node:stream";
+import { Readable, Writable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import test from "node:test";
 
 import {
@@ -29,6 +30,36 @@ function collect(stream) {
     stream.on("end", () => resolve(output));
     stream.on("error", reject);
   });
+}
+
+function collectBuffer(stream) {
+  return new Promise((resolve, reject) => {
+    const output = [];
+    stream.on("data", (chunk) => output.push(Buffer.from(chunk)));
+    stream.on("end", () => resolve(Buffer.concat(output)));
+    stream.on("error", reject);
+  });
+}
+
+async function collectUntilPipelineError(chunks, transform) {
+  const output = [];
+  let error;
+  try {
+    await pipeline(
+      Readable.from(chunks),
+      transform,
+      new Writable({
+        write(chunk, _encoding, callback) {
+          output.push(Buffer.from(chunk));
+          callback();
+        },
+      }),
+    );
+  } catch (caught) {
+    error = caught;
+  }
+  assert.ok(error, "the transform should fail after committing semantic output");
+  return { output: Buffer.concat(output), error };
 }
 
 // The reduced codex_app namespace the client actually sends on routed requests
@@ -2103,6 +2134,763 @@ test("non-streaming rewrite covers nested output and leaves malformed JSON untou
   const malformed = "{not valid json\n";
   const transform = new NamespaceToolCallTransform(namespaces, "application/json");
   assert.equal(await collect(Readable.from([malformed]).pipe(transform)), malformed);
+});
+
+test("response transform preserves no-op SSE and JSON bytes exactly", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "spawn_agent" }],
+    },
+  ]);
+  const sse = Buffer.from(
+    'event: response.created\r\n' +
+      'id: provider-spelling\r\n' +
+      'data: { "type" : "response.created", "ratio": 1.00e+2, "nested": { "ok": true } }\r\n' +
+      "\r\n",
+    "utf8",
+  );
+  const streamed = await collectBuffer(
+    Readable.from([...sse].map((byte) => Buffer.from([byte]))).pipe(
+      new NamespaceToolCallTransform(namespaces, "text/event-stream"),
+    ),
+  );
+  assert.deepEqual(streamed, sse);
+
+  const jsonBody = Buffer.from(
+    '\r\n { "id" : "resp-noop", "ratio" : 1.00e+2, "output" : [ { "type" : "message", "content" : [] } ] } \t',
+    "utf8",
+  );
+  const jsonOutput = await collectBuffer(
+    Readable.from([jsonBody.subarray(0, 7), jsonBody.subarray(7)]).pipe(
+      new NamespaceToolCallTransform(namespaces, "application/json"),
+    ),
+  );
+  assert.deepEqual(jsonOutput, jsonBody);
+});
+
+test("ambiguous SSE frames fail closed before namespace rewriting", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "spawn_agent" }],
+    },
+  ]);
+  const later = Buffer.from(
+    'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}}\r\n\r\n',
+    "utf8",
+  );
+  const duplicate = Buffer.from(
+    'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"ordinary","\\u006eame":"collaboration__spawn_agent","arguments":"{}"}}\r\n\r\n',
+    "utf8",
+  );
+  const malformed = Buffer.from('data: {"type":\r\n\r\n', "utf8");
+  const invalidUtf8 = Buffer.concat([
+    Buffer.from("data: ", "ascii"),
+    Buffer.from([0xff, 0xfe]),
+    Buffer.from("\r\n\r\n", "ascii"),
+  ]);
+
+  for (const ambiguous of [duplicate, malformed, invalidUtf8]) {
+    const source = Buffer.concat([ambiguous, later]);
+    const output = await collectBuffer(
+      Readable.from([...source].map((byte) => Buffer.from([byte]))).pipe(
+        new NamespaceToolCallTransform(namespaces, "text/event-stream"),
+      ),
+    );
+    assert.deepEqual(output, source);
+  }
+});
+
+test("repeated SSE data or event fields disable rewriting without normalizing CRLF", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "spawn_agent" }],
+    },
+  ]);
+  const later =
+    'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}}\r\n\r\n';
+  const repeatedData =
+    'event: response.output_item.done\r\n' +
+    'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}}\r\n' +
+    'data: {"second":"competing EventSource payload"}\r\n\r\n';
+  const repeatedEvent =
+    'event: response.output_item.done\r\n' +
+    'event: response.completed\r\n' +
+    'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}}\r\n\r\n';
+  for (const ambiguous of [repeatedData, repeatedEvent]) {
+    const source = Buffer.from(ambiguous + later, "utf8");
+    const fragments = [...source].map((byte) => Buffer.from([byte]));
+    const output = await collectBuffer(
+      Readable.from(fragments).pipe(
+        new NamespaceToolCallTransform(namespaces, "text/event-stream"),
+      ),
+    );
+    assert.deepEqual(output, source);
+  }
+});
+
+test("raw SSE framing honors downstream backpressure and aborts cleanly", async () => {
+  const source = Buffer.from(
+    'event: response.created\r\ndata: { "type": "response.created", "value": 1.00e+2 }\r\n\r\n',
+    "utf8",
+  );
+  const output = [];
+  await pipeline(
+    Readable.from([...source].map((byte) => Buffer.from([byte]))),
+    new NamespaceToolCallTransform(new Map(), "text/event-stream"),
+    new Writable({
+      highWaterMark: 1,
+      write(chunk, _encoding, callback) {
+        output.push(Buffer.from(chunk));
+        setImmediate(callback);
+      },
+    }),
+  );
+  assert.deepEqual(Buffer.concat(output), source);
+
+  const controller = new AbortController();
+  const transform = new NamespaceToolCallTransform(new Map(), "");
+  let prefixSent = false;
+  const stalledSource = new Readable({
+    read() {
+      if (prefixSent) return;
+      prefixSent = true;
+      this.push(Buffer.from("da", "ascii"));
+    },
+  });
+  const aborted = pipeline(
+    stalledSource,
+    transform,
+    new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
+    { signal: controller.signal },
+  );
+  setImmediate(() => controller.abort());
+  await assert.rejects(aborted, { name: "AbortError" });
+  assert.equal(transform.destroyed, true);
+  stalledSource.destroy();
+});
+
+test("ambiguous non-streaming JSON is preserved byte for byte", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "spawn_agent" }],
+    },
+  ]);
+  const duplicate = Buffer.from(
+    '{"output":[{"type":"function_call","name":"ordinary","\\u006eame":"collaboration__spawn_agent","arguments":"{}"}]}',
+    "utf8",
+  );
+  const malformed = Buffer.from('{"output":[', "utf8");
+  const invalidUtf8 = Buffer.concat([
+    Buffer.from(
+      '{"output":[{"type":"function_call","name":"collaboration__spawn_agent","note":"',
+      "utf8",
+    ),
+    Buffer.from([0xff]),
+    Buffer.from('","arguments":"{}"}]}', "utf8"),
+  ]);
+  for (const body of [duplicate, malformed, invalidUtf8]) {
+    const output = await collectBuffer(
+      Readable.from([body.subarray(0, 3), body.subarray(3)]).pipe(
+        new NamespaceToolCallTransform(namespaces, "application/json"),
+      ),
+    );
+    assert.deepEqual(output, body);
+  }
+});
+
+test("lossy JSON numbers fail closed before SSE or JSON namespace rewrites", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "spawn_agent" }],
+    },
+  ]);
+  const call =
+    '"item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}';
+  const output =
+    '"output":[{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}]';
+  const later =
+    'event: response.output_item.done\r\n' +
+    `data: {"type":"response.output_item.done",${call}}\r\n\r\n`;
+
+  for (const numberText of [
+    "9007199254740993",
+    "1e999",
+    "-0",
+    "1e-324",
+    "0.100000000000000005",
+  ]) {
+    const sse = Buffer.from(
+      'event: response.output_item.done\r\n' +
+        `data: {"type":"response.output_item.done","provider_number":${numberText},${call}}\r\n\r\n` +
+        later,
+      "utf8",
+    );
+    const streamed = await collectBuffer(
+      Readable.from([...sse].map((byte) => Buffer.from([byte]))).pipe(
+        new NamespaceToolCallTransform(namespaces, "text/event-stream"),
+      ),
+    );
+    assert.deepEqual(streamed, sse, numberText);
+
+    const json = Buffer.from(`{"provider_number":${numberText},${output}}`, "utf8");
+    const jsonOutput = await collectBuffer(
+      Readable.from([json.subarray(0, 5), json.subarray(5)]).pipe(
+        new NamespaceToolCallTransform(namespaces, "application/json"),
+      ),
+    );
+    assert.deepEqual(jsonOutput, json, numberText);
+
+    const argumentsLiteral = JSON.stringify(`{"provider_number":${numberText}}`);
+    const nestedItem =
+      '"item":{"type":"function_call","name":"collaboration__spawn_agent",' +
+      `"arguments":${argumentsLiteral}}`;
+    const nestedSse = Buffer.from(
+      'event: response.output_item.done\r\n' +
+        `data: {"type":"response.output_item.done",${nestedItem}}\r\n\r\n` +
+        later,
+      "utf8",
+    );
+    const nestedStreamed = await collectBuffer(
+      Readable.from([nestedSse]).pipe(
+        new NamespaceToolCallTransform(namespaces, "text/event-stream"),
+      ),
+    );
+    assert.deepEqual(nestedStreamed, nestedSse, `nested ${numberText}`);
+
+    const nestedJson = Buffer.from(
+      '{"output":[{"type":"function_call","name":"collaboration__spawn_agent",' +
+        `"arguments":${argumentsLiteral}}]}`,
+      "utf8",
+    );
+    const nestedJsonOutput = await collectBuffer(
+      Readable.from([nestedJson]).pipe(
+        new NamespaceToolCallTransform(namespaces, "application/json"),
+      ),
+    );
+    assert.deepEqual(nestedJsonOutput, nestedJson, `nested ${numberText}`);
+  }
+});
+
+test("exactly equivalent decimal spellings remain eligible for namespace rewrites", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "spawn_agent" }],
+    },
+  ]);
+  for (const [numberText, expected] of [["1.0", 1], ["1e3", 1000]]) {
+    const item =
+      '"item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}';
+    const sse = Buffer.from(
+      'event: response.output_item.done\r\n' +
+        `data: {"type":"response.output_item.done","provider_number":${numberText},${item}}\r\n\r\n`,
+      "utf8",
+    );
+    const streamed = await collect(
+      Readable.from([sse]).pipe(
+        new NamespaceToolCallTransform(namespaces, "text/event-stream"),
+      ),
+    );
+    const event = JSON.parse(
+      streamed.split(/\r?\n/u).find((line) => line.startsWith("data: ")).slice(6),
+    );
+    assert.equal(event.provider_number, expected);
+    assert.equal(event.item.name, "spawn_agent");
+    assert.equal(event.item.namespace, "collaboration");
+
+    const json = Buffer.from(
+      `{"provider_number":${numberText},"output":[{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}]}`,
+      "utf8",
+    );
+    const payload = JSON.parse(
+      await collect(
+        Readable.from([json]).pipe(
+          new NamespaceToolCallTransform(namespaces, "application/json"),
+        ),
+      ),
+    );
+    assert.equal(payload.provider_number, expected);
+    assert.equal(payload.output[0].name, "spawn_agent");
+    assert.equal(payload.output[0].namespace, "collaboration");
+  }
+});
+
+test("inject-only responses preserve lossy decimal payloads without injecting", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "interrupt_agent" }],
+    },
+  ]);
+  for (const numberText of ["1e-324", "0.100000000000000005"]) {
+    const sse = Buffer.from(
+      'event: response.completed\r\n' +
+        `data: {"type":"response.completed","provider_number":${numberText},"response":{"output":[]}}\r\n\r\n`,
+      "utf8",
+    );
+    const streamed = await collectBuffer(
+      Readable.from([sse]).pipe(
+        new NamespaceToolCallTransform(namespaces, "text/event-stream", undefined, {
+          injectOnly: true,
+          pendingInterrupts: ["/root/finished"],
+        }),
+      ),
+    );
+    assert.deepEqual(streamed, sse, numberText);
+
+    const json = Buffer.from(
+      `{"provider_number":${numberText},"output":[]}`,
+      "utf8",
+    );
+    const jsonOutput = await collectBuffer(
+      Readable.from([json]).pipe(
+        new NamespaceToolCallTransform(namespaces, "application/json", undefined, {
+          injectOnly: true,
+          pendingInterrupts: ["/root/finished"],
+        }),
+      ),
+    );
+    assert.deepEqual(jsonOutput, json, numberText);
+  }
+});
+
+test("conflicting SSE event and payload types disable terminal decisions", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [
+        { type: "function", name: "spawn_agent" },
+        { type: "function", name: "interrupt_agent" },
+      ],
+    },
+  ]);
+  const mismatchByEvent =
+    'event: response.completed\r\n' +
+    'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}}\r\n\r\n';
+  const mismatchByPayload =
+    'event: response.output_item.done\r\n' +
+    'data: {"type":"response.completed","response":{"output":[]}}\r\n\r\n';
+  const missingPayloadType =
+    'event: response.completed\r\n' +
+    'data: {"response":{"output":[]}}\r\n\r\n';
+  const nullPayloadType =
+    'event: response.completed\r\n' +
+    'data: {"type":null,"response":{"output":[]}}\r\n\r\n';
+  const tabIsPartOfEventValue =
+    'event:\tresponse.output_item.done\r\n' +
+    'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}}\r\n\r\n';
+  const secondSpaceIsPartOfEventValue =
+    'event:  response.output_item.done\r\n' +
+    'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}}\r\n\r\n';
+  const later =
+    'event: response.output_item.done\r\n' +
+    'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}}\r\n\r\n';
+
+  for (const mismatch of [
+    mismatchByEvent,
+    mismatchByPayload,
+    missingPayloadType,
+    nullPayloadType,
+    tabIsPartOfEventValue,
+    secondSpaceIsPartOfEventValue,
+  ]) {
+    const source = Buffer.from(mismatch + later, "utf8");
+    const transformed = await collectBuffer(
+      Readable.from([...source].map((byte) => Buffer.from([byte]))).pipe(
+        new NamespaceToolCallTransform(namespaces, "text/event-stream", undefined, {
+          pendingInterrupts: ["/root/finished"],
+        }),
+      ),
+    );
+    assert.deepEqual(transformed, source);
+  }
+});
+
+test("raw SSE framing handles CR, LF, and CRLF across one-byte chunks", async () => {
+  const source = Buffer.from(
+    'event: response.created\rdata: { "type": "response.created", "kind": "cr" }\r\r' +
+      'event: response.created\ndata: { "type": "response.created", "kind": "lf" }\n\n' +
+      'event: response.created\r\ndata: { "type": "response.created", "kind": "crlf" }\r\n\r\n',
+    "utf8",
+  );
+  const output = await collectBuffer(
+    Readable.from([...source].map((byte) => Buffer.from([byte]))).pipe(
+      new NamespaceToolCallTransform(new Map(), "text/event-stream"),
+    ),
+  );
+  assert.deepEqual(output, source);
+});
+
+test("headerless bare-CR streams rewrite and generated interrupts adopt CR", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [
+        { type: "function", name: "spawn_agent" },
+        { type: "function", name: "interrupt_agent" },
+      ],
+    },
+  ]);
+  const source = Buffer.from(
+    '\r: provider prelude\r' +
+      'event: response.output_item.done\r' +
+      'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}}\r\r',
+    "utf8",
+  );
+  const output = await collectBuffer(
+    Readable.from([...source].map((byte) => Buffer.from([byte]))).pipe(
+      new NamespaceToolCallTransform(namespaces, ""),
+    ),
+  );
+  assert.match(output.toString("utf8"), /"namespace":"collaboration"/u);
+  assert.equal(output.includes(0x0a), false);
+
+  const terminal = Buffer.from(
+    'event: response.completed\r' +
+      'data: {"type":"response.completed","response":{"output":[]}}\r\r',
+    "utf8",
+  );
+  const injected = await collectBuffer(
+    Readable.from([...terminal].map((byte) => Buffer.from([byte]))).pipe(
+      new NamespaceToolCallTransform(namespaces, "text/event-stream", undefined, {
+        pendingInterrupts: ["/root/finished"],
+      }),
+    ),
+  );
+  assert.match(injected.toString("utf8"), /"name":"interrupt_agent"/u);
+  assert.equal(injected.includes(0x0a), false);
+});
+
+test("an initial SSE BOM is ignored for parsing and preserved in output", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [
+        { type: "function", name: "spawn_agent" },
+        { type: "function", name: "interrupt_agent" },
+      ],
+    },
+  ]);
+  const bom = Buffer.from([0xef, 0xbb, 0xbf]);
+  const matching = Buffer.concat([
+    bom,
+    Buffer.from(
+      'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}}\r\n\r\n',
+      "utf8",
+    ),
+  ]);
+  const rewritten = await collectBuffer(
+    Readable.from([...matching].map((byte) => Buffer.from([byte]))).pipe(
+      new NamespaceToolCallTransform(namespaces, "text/event-stream"),
+    ),
+  );
+  assert.deepEqual(rewritten.subarray(0, bom.length), bom);
+  assert.match(rewritten.toString("utf8"), /"namespace":"collaboration"/u);
+
+  const disagreement = Buffer.concat([
+    bom,
+    Buffer.from(
+      'event: response.completed\r\n' +
+        'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}}\r\n\r\n' +
+        'event: response.output_item.done\r\n' +
+        'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}}\r\n\r\n',
+      "utf8",
+    ),
+  ]);
+  const preserved = await collectBuffer(
+    Readable.from([...disagreement].map((byte) => Buffer.from([byte]))).pipe(
+      new NamespaceToolCallTransform(namespaces, "text/event-stream", undefined, {
+        pendingInterrupts: ["/root/finished"],
+      }),
+    ),
+  );
+  assert.deepEqual(preserved, disagreement);
+});
+
+test("colonless event and data fields participate in repeated-field ambiguity", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "spawn_agent" }],
+    },
+  ]);
+  const data =
+    'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}}\r\n';
+  const later = `${data}\r\n`;
+  for (const ambiguous of [
+    `data\r\n${data}\r\n`,
+    `event\r\nevent: response.output_item.done\r\n${data}\r\n`,
+  ]) {
+    const source = Buffer.from(ambiguous + later, "utf8");
+    const output = await collectBuffer(
+      Readable.from([...source].map((byte) => Buffer.from([byte]))).pipe(
+        new NamespaceToolCallTransform(namespaces, "text/event-stream"),
+      ),
+    );
+    assert.deepEqual(output, source);
+  }
+});
+
+test("duplicate embedded interrupt arguments cannot steer terminal injection state", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "interrupt_agent" }],
+    },
+  ]);
+  const ambiguousArguments =
+    '{"target":"/root/first","\\u0074arget":"/root/second"}';
+  const ambiguousCall = {
+    type: "function_call",
+    name: "interrupt_agent",
+    namespace: "collaboration",
+    call_id: "call_ambiguous",
+    arguments: ambiguousArguments,
+  };
+  const pendingInterrupts = ["/root/first", "/root/second"];
+
+  const events = [
+    {
+      type: "response.output_item.done",
+      sequence_number: 1,
+      item: ambiguousCall,
+    },
+    {
+      type: "response.completed",
+      sequence_number: 2,
+      response: { output: [ambiguousCall] },
+    },
+  ];
+  const sse = Buffer.from(
+    events
+      .map((event) => `event: ${event.type}\r\ndata: ${JSON.stringify(event)}\r\n\r\n`)
+      .join(""),
+    "utf8",
+  );
+  const streamed = await collectBuffer(
+    Readable.from([...sse].map((byte) => Buffer.from([byte]))).pipe(
+      new NamespaceToolCallTransform(namespaces, "text/event-stream", undefined, {
+        pendingInterrupts,
+      }),
+    ),
+  );
+  assert.deepEqual(streamed, sse);
+
+  const jsonBody = Buffer.from(
+    JSON.stringify({ id: "resp_ambiguous", output: [ambiguousCall] }),
+    "utf8",
+  );
+  const jsonOutput = await collectBuffer(
+    Readable.from([jsonBody]).pipe(
+      new NamespaceToolCallTransform(namespaces, "application/json", undefined, {
+        pendingInterrupts,
+      }),
+    ),
+  );
+  assert.deepEqual(jsonOutput, jsonBody);
+});
+
+test("changed SSE retains provider CRLF framing", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "spawn_agent" }],
+    },
+  ]);
+  const source = Buffer.from(
+    'event: response.output_item.done\r\n' +
+      'id: provider-id\r\n' +
+      'data: { "type": "response.output_item.done", "item": { "type": "function_call", "name": "collaboration__spawn_agent", "arguments": "{}" } }\r\n' +
+      "\r\n",
+    "utf8",
+  );
+  const output = await collectBuffer(
+    Readable.from([source.subarray(0, 13), source.subarray(13)]).pipe(
+      new NamespaceToolCallTransform(namespaces, "text/event-stream"),
+    ),
+  );
+  const text = output.toString("utf8");
+  assert.match(text, /"name":"spawn_agent"/);
+  assert.match(text, /"namespace":"collaboration"/);
+  assert.ok(text.startsWith("event: response.output_item.done\r\nid: provider-id\r\n"));
+  for (let index = 0; index < output.length; index += 1) {
+    if (output[index] === 0x0a) assert.equal(output[index - 1], 0x0d);
+  }
+});
+
+test("interrupt injection adopts the provider's CRLF framing", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "interrupt_agent" }],
+    },
+  ]);
+  const source = Buffer.from(
+    'event: response.completed\r\n' +
+      'data: {"type":"response.completed","sequence_number":7,"response":{"output":[]}}\r\n' +
+      "\r\n",
+    "utf8",
+  );
+  const output = await collectBuffer(
+    Readable.from([source]).pipe(
+      new NamespaceToolCallTransform(namespaces, "text/event-stream", undefined, {
+        pendingInterrupts: ["/root/finished"],
+      }),
+    ),
+  );
+  assert.match(output.toString("utf8"), /"name":"interrupt_agent"/);
+  for (let index = 0; index < output.length; index += 1) {
+    if (output[index] === 0x0a) assert.equal(output[index - 1], 0x0d);
+  }
+});
+
+test("oversized SSE framing releases bytes and disables later rewrites", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "spawn_agent" }],
+    },
+  ]);
+  const source = Buffer.from(
+    `data: ${"x".repeat(40)}\n\n` +
+      'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}}\n\n',
+    "utf8",
+  );
+  const output = await collectBuffer(
+    Readable.from([source]).pipe(
+      new NamespaceToolCallTransform(namespaces, "text/event-stream", undefined, {
+        maxSseFrameBytes: 32,
+      }),
+    ),
+  );
+  assert.deepEqual(output, source);
+});
+
+test("post-rewrite ambiguity errors without leaking raw custom lifecycle bytes", async () => {
+  const namespaces = new Map();
+  bridgeCustomTools([{ type: "custom", name: "apply_patch" }], [], namespaces);
+  const committed = Buffer.from(
+    'event: response.output_item.added\n' +
+      'data: {"type":"response.output_item.added","item":{"type":"function_call","id":"fc_guard","call_id":"call_guard","name":"apply_patch","arguments":""}}\n\n',
+    "utf8",
+  );
+  const marker = "flattened-done-must-not-leak";
+  const ambiguousFrames = [
+    Buffer.from(
+      'event: response.output_item.done\n' +
+        `data: {"type":"response.output_item.done","raw_marker":"${marker}","item":{"type":"function_call","name":"apply_patch"\n\n`,
+      "utf8",
+    ),
+    Buffer.from(
+      'event: response.output_item.done\n' +
+        `data: {"type":"response.output_item.done","raw_marker":"${marker}","item":{"type":"function_call","name":"ordinary","\\u006eame":"apply_patch","arguments":"{}"}}\n\n`,
+      "utf8",
+    ),
+    Buffer.concat([
+      Buffer.from(
+        'event: response.output_item.done\n' +
+          `data: {"type":"response.output_item.done","raw_marker":"${marker}","item":{"type":"function_call","name":"apply_patch","note":"`,
+        "utf8",
+      ),
+      Buffer.from([0xff]),
+      Buffer.from('","arguments":"{}"}}\n\n', "utf8"),
+    ]),
+    Buffer.from(
+      'event: response.output_item.done\n' +
+        `data: {"type":"response.output_item.done","raw_marker":"${marker}","item":{"type":"function_call","name":"apply_patch","arguments":"{}"}}\n` +
+        'data: {"competing":true}\n\n',
+      "utf8",
+    ),
+    Buffer.from(
+      `data: {"type":"response.output_item.done","raw_marker":"${marker}"`,
+      "utf8",
+    ),
+    Buffer.from(
+      'event: response.output_item.done\n' +
+        `data: {"type":"response.output_item.done","raw_marker":"${marker}","item":{"type":"function_call","name":"apply_patch","arguments":"{}"},"padding":"${"x".repeat(1024)}"}\n\n`,
+      "utf8",
+    ),
+  ];
+
+  for (const ambiguous of ambiguousFrames) {
+    const source = Buffer.concat([committed, ambiguous]);
+    const { output, error } = await collectUntilPipelineError(
+      [...source].map((byte) => Buffer.from([byte])),
+      new NamespaceToolCallTransform(namespaces, "text/event-stream", undefined, {
+        maxSseFrameBytes: 512,
+      }),
+    );
+    assert.equal(error.code, "ERR_NAMESPACE_RELAY_COMMITTED_STREAM");
+    const text = output.toString("utf8");
+    assert.match(text, /"type":"custom_tool_call"/u);
+    assert.doesNotMatch(text, new RegExp(marker, "u"));
+    assert.doesNotMatch(text, /response\.output_item\.done/u);
+  }
+});
+
+test("suppression and injection also commit the SSE safety boundary", async () => {
+  const marker = "post-commit-ambiguity-must-not-leak";
+  const ambiguous = Buffer.from(
+    'event: response.output_item.done\n' +
+      `data: {"type":"response.output_item.done","raw_marker":"${marker}"\n\n`,
+    "utf8",
+  );
+
+  const suppressionPrefix = Buffer.from(
+    'event: response.output_item.added\n' +
+      'data: {"type":"response.output_item.added","item":{"type":"custom_tool_call","id":"fc_native","call_id":"call_native","name":"apply_patch","input":""}}\n\n' +
+      'event: response.function_call_arguments.delta\n' +
+      'data: {"type":"response.function_call_arguments.delta","item_id":"fc_native","delta":"{\\"input\\":\\""}\n\n',
+    "utf8",
+  );
+  const suppressed = await collectUntilPipelineError(
+    [suppressionPrefix, ambiguous],
+    new NamespaceToolCallTransform(new Map(), "text/event-stream"),
+  );
+  assert.equal(suppressed.error.code, "ERR_NAMESPACE_RELAY_COMMITTED_STREAM");
+  assert.match(suppressed.output.toString("utf8"), /"type":"custom_tool_call"/u);
+  assert.doesNotMatch(suppressed.output.toString("utf8"), new RegExp(marker, "u"));
+  assert.doesNotMatch(
+    suppressed.output.toString("utf8"),
+    /response\.function_call_arguments\.delta/u,
+  );
+
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "interrupt_agent" }],
+    },
+  ]);
+  const injected = await collectUntilPipelineError(
+    [Buffer.from("data: [DONE]\n\n", "utf8"), ambiguous],
+    new NamespaceToolCallTransform(namespaces, "text/event-stream", undefined, {
+      pendingInterrupts: ["/root/finished"],
+    }),
+  );
+  assert.equal(injected.error.code, "ERR_NAMESPACE_RELAY_COMMITTED_STREAM");
+  assert.match(injected.output.toString("utf8"), /"name":"interrupt_agent"/u);
+  assert.doesNotMatch(injected.output.toString("utf8"), new RegExp(marker, "u"));
 });
 
 test("response transform leaves ambiguous and ordinary calls alone", async () => {

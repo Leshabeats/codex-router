@@ -1,6 +1,6 @@
+import { isUtf8 } from "node:buffer";
 import { createHash } from "node:crypto";
 import { Transform } from "node:stream";
-import { StringDecoder } from "node:string_decoder";
 
 import { HeaderlessSseDetector } from "./sse-prefix.mjs";
 import { coerceFunctionCallArguments } from "./tool-arguments.mjs";
@@ -12,7 +12,6 @@ import {
 import {
   buildInterruptAgentCall,
   filterAlreadyInterrupted,
-  formatSseBlock,
   interruptTargetFromCall,
 } from "./subagent-completion.mjs";
 
@@ -485,6 +484,7 @@ export function injectSessionModelForSpawnCalls(item, model) {
   if (!isSpawnModelCall(item)) return item;
   if (typeof model !== "string" || !model) return item;
   if (typeof item.arguments !== "string") return item;
+  if (!jsonArgumentsAreUnambiguous(item.arguments, { allowEmpty: true })) return item;
   let args;
   try {
     args = JSON.parse(item.arguments);
@@ -498,6 +498,234 @@ export function injectSessionModelForSpawnCalls(item, model) {
 }
 
 const MAX_JSON_CAPTURE_BYTES = 64 * 1024 * 1024;
+// Stop staging an undecided SSE frame before downstream response guards lose
+// sight of their own byte ceilings. Before any semantic output, crossing this
+// bound releases raw bytes and disables rewriting; after one rewrite,
+// suppression, or injection, it terminates the stream rather than mixing wire
+// representations.
+const MAX_SSE_FRAME_BYTES = 256 * 1024;
+const MAX_EXACT_JSON_NUMBER_LENGTH = 4096;
+const LINE_FEED = 0x0a;
+const CARRIAGE_RETURN = 0x0d;
+const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]);
+const JSON_NUMBER_PREFIX = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/;
+const JSON_NUMBER_PARTS =
+  /^(-?)(0|[1-9]\d*)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/;
+
+function sseFieldValue(line, prefixLength) {
+  const value = line.slice(prefixLength);
+  // The SSE grammar removes one optional U+0020 after the colon. Tabs,
+  // repeated spaces, and trailing spaces are event data, not formatting.
+  return value.startsWith(" ") ? value.slice(1) : value;
+}
+
+function isSseField(line, name) {
+  return line === name || line.startsWith(`${name}:`);
+}
+
+function sseLineFieldValue(line, name) {
+  return line === name ? "" : sseFieldValue(line, name.length + 1);
+}
+
+// Normalize a bounded JSON number as exact decimal coefficient + power. This
+// compares mathematical decimal values rather than spellings, so 1.0 and 1e3
+// can survive a rewrite when JSON.stringify emits 1 and 1000 respectively,
+// while underflow and rounded high-precision tokens cannot.
+function canonicalDecimalToken(token) {
+  if (typeof token !== "string" || token.length > MAX_EXACT_JSON_NUMBER_LENGTH) {
+    return undefined;
+  }
+  const match = JSON_NUMBER_PARTS.exec(token);
+  if (!match) return undefined;
+  const [, sign, integer, fraction = "", exponentText = "0"] = match;
+  let digits = integer + fraction;
+  if (/^0+$/u.test(digits)) return sign === "-" ? "-0" : "0";
+
+  const exponentSign = exponentText.startsWith("-") ? -1 : 1;
+  const unsignedExponent = exponentText.replace(/^[+-]/u, "");
+  const significantExponent = unsignedExponent.replace(/^0+/u, "") || "0";
+  // A non-zero finite Number cannot retain an exponent remotely this large;
+  // bounding it also prevents attacker-controlled giant integer arithmetic.
+  if (significantExponent.length > 6) return undefined;
+  let exponent = exponentSign * Number(significantExponent) - fraction.length;
+
+  digits = digits.replace(/^0+/u, "");
+  const trailingZeros = /0+$/u.exec(digits)?.[0].length || 0;
+  if (trailingZeros) {
+    digits = digits.slice(0, -trailingZeros);
+    exponent += trailingZeros;
+  }
+  return `${sign}${digits}e${exponent}`;
+}
+
+function jsonNumberIsStableForRewrite(token) {
+  if (token.length > MAX_EXACT_JSON_NUMBER_LENGTH) return false;
+  const parsed = Number(token);
+  if (
+    !Number.isFinite(parsed) ||
+    Object.is(parsed, -0) ||
+    (Number.isInteger(parsed) && !Number.isSafeInteger(parsed))
+  ) {
+    return false;
+  }
+  const original = canonicalDecimalToken(token);
+  const serialized = canonicalDecimalToken(JSON.stringify(parsed));
+  return original !== undefined && original === serialized;
+}
+
+// JSON.parse deliberately accepts duplicate object members and keeps the last
+// one. That is useful for ordinary application input, but unsafe at a rewrite
+// boundary: the bytes can name one tool first and another tool last, while a
+// downstream parser is free to make the opposite choice. Parsing also rounds
+// unsafe integers and accepts overflowing exponents that stringify as null.
+// Audit the complete JSON grammar before parsing, compare decoded key values
+// so spellings such as `"name"` and `"\u006eame"` collide, and reject numeric
+// values whose parse/stringify semantics are known to be lossy.
+function jsonIsUnambiguousForRewrite(text) {
+  if (typeof text !== "string") return false;
+  let offset = 0;
+
+  const skipWhitespace = () => {
+    while (
+      offset < text.length &&
+      (text[offset] === " " ||
+        text[offset] === "\t" ||
+        text[offset] === "\r" ||
+        text[offset] === "\n")
+    ) {
+      offset += 1;
+    }
+  };
+
+  const stringToken = () => {
+    if (text[offset] !== '"') return undefined;
+    const start = offset;
+    offset += 1;
+    while (offset < text.length) {
+      const code = text.charCodeAt(offset);
+      const character = text[offset];
+      if (character === '"') {
+        offset += 1;
+        return text.slice(start, offset);
+      }
+      if (code < 0x20) return undefined;
+      if (character !== "\\") {
+        offset += 1;
+        continue;
+      }
+      offset += 1;
+      const escape = text[offset];
+      if (escape === "u") {
+        const digits = text.slice(offset + 1, offset + 5);
+        if (digits.length !== 4 || !/^[0-9a-fA-F]{4}$/.test(digits)) return undefined;
+        offset += 5;
+        continue;
+      }
+      if (!['"', "\\", "/", "b", "f", "n", "r", "t"].includes(escape)) {
+        return undefined;
+      }
+      offset += 1;
+    }
+    return undefined;
+  };
+
+  const literal = (value) => {
+    if (!text.startsWith(value, offset)) return false;
+    offset += value.length;
+    return true;
+  };
+
+  const number = () => {
+    const match = JSON_NUMBER_PREFIX.exec(text.slice(offset));
+    if (!match) return false;
+    if (!jsonNumberIsStableForRewrite(match[0])) return false;
+    offset += match[0].length;
+    return true;
+  };
+
+  const value = () => {
+    skipWhitespace();
+    const character = text[offset];
+    if (character === "{") return object();
+    if (character === "[") return array();
+    if (character === '"') return stringToken() !== undefined;
+    if (character === "t") return literal("true");
+    if (character === "f") return literal("false");
+    if (character === "n") return literal("null");
+    return number();
+  };
+
+  const object = () => {
+    offset += 1;
+    skipWhitespace();
+    if (text[offset] === "}") {
+      offset += 1;
+      return true;
+    }
+    const keys = new Set();
+    while (offset < text.length) {
+      skipWhitespace();
+      const token = stringToken();
+      if (token === undefined) return false;
+      let key;
+      try {
+        key = JSON.parse(token);
+      } catch {
+        return false;
+      }
+      if (keys.has(key)) return false;
+      keys.add(key);
+      skipWhitespace();
+      if (text[offset] !== ":") return false;
+      offset += 1;
+      if (!value()) return false;
+      skipWhitespace();
+      if (text[offset] === "}") {
+        offset += 1;
+        return true;
+      }
+      if (text[offset] !== ",") return false;
+      offset += 1;
+    }
+    return false;
+  };
+
+  const array = () => {
+    offset += 1;
+    skipWhitespace();
+    if (text[offset] === "]") {
+      offset += 1;
+      return true;
+    }
+    while (offset < text.length) {
+      if (!value()) return false;
+      skipWhitespace();
+      if (text[offset] === "]") {
+        offset += 1;
+        return true;
+      }
+      if (text[offset] !== ",") return false;
+      offset += 1;
+    }
+    return false;
+  };
+
+  try {
+    if (!value()) return false;
+    skipWhitespace();
+    return offset === text.length;
+  } catch {
+    // Excessive nesting and any other scanner failure are ambiguity, not
+    // permission to fall back to JSON.parse's lossy interpretation.
+    return false;
+  }
+}
+
+function jsonArgumentsAreUnambiguous(value, { allowEmpty = false } = {}) {
+  if (typeof value !== "string") return true;
+  if (allowEmpty && value.trim() === "") return true;
+  return jsonIsUnambiguousForRewrite(value);
+}
 
 // Repair one tool's parameter root, or return it untouched. Providers reject a
 // union or nullable-object root by name -- xAI, DeepSeek V4, and the
@@ -1491,6 +1719,7 @@ function sanitizeSpawnAgentModel(item, lookups) {
   if (!(allowed instanceof Set) || allowed.size === 0 || typeof item.arguments !== "string") {
     return item;
   }
+  if (!jsonArgumentsAreUnambiguous(item.arguments)) return item;
   let args;
   try {
     args = JSON.parse(item.arguments);
@@ -1510,6 +1739,7 @@ function sanitizeSpawnAgentModel(item, lookups) {
 // rather than guessing which runtime owns it.
 function rewriteFunctionCallArguments(item) {
   if (!item || typeof item !== "object") return item;
+  if (!jsonArgumentsAreUnambiguous(item.arguments, { allowEmpty: true })) return item;
   const argumentsText = coerceFunctionCallArguments(item.arguments);
   if (argumentsText === item.arguments) return item;
   return { ...item, arguments: argumentsText };
@@ -1519,6 +1749,7 @@ function toolSearchArguments(value, allowPlaceholder) {
   if (plainObject(value)) return value;
   if (typeof value !== "string") return undefined;
   if (allowPlaceholder && value.trim() === "") return {};
+  if (!jsonArgumentsAreUnambiguous(value)) return undefined;
   try {
     return plainObject(JSON.parse(value));
   } catch {
@@ -1560,6 +1791,7 @@ function customToolInput(value, allowPlaceholder = false) {
   if (allowPlaceholder && (value === undefined || value === "")) return "";
   const argumentsText = coerceFunctionCallArguments(value);
   if (typeof argumentsText !== "string") return undefined;
+  if (!jsonArgumentsAreUnambiguous(argumentsText)) return undefined;
   try {
     const parsed = JSON.parse(argumentsText);
     return typeof parsed?.[CUSTOM_TOOL_INPUT_PROPERTY] === "string"
@@ -1604,6 +1836,7 @@ function rewriteNamespaceFunctionCallItem(
   { allowIncompleteToolSearch = false } = {},
 ) {
   if (!item || item.type !== "function_call") return undefined;
+  if (!jsonArgumentsAreUnambiguous(item.arguments, { allowEmpty: true })) return undefined;
   const exactPlainProviderIdentity =
     lookups.identityAliases &&
     item.namespace === undefined &&
@@ -1673,6 +1906,24 @@ function rewriteOutputItems(output, lookups, sessionModel) {
   return changed ? rewritten : undefined;
 }
 
+function embeddedFunctionArgumentsAreUnambiguous(payload) {
+  const safeItem = (item) =>
+    item?.type !== "function_call" ||
+    jsonArgumentsAreUnambiguous(item.arguments, { allowEmpty: true });
+  if (!safeItem(payload?.item)) return false;
+  if (
+    payload?.type === "response.function_call_arguments.done" &&
+    !jsonArgumentsAreUnambiguous(payload.arguments, { allowEmpty: true })
+  ) {
+    return false;
+  }
+  for (const output of [payload?.output, payload?.response?.output]) {
+    if (!Array.isArray(output)) continue;
+    if (!output.every(safeItem)) return false;
+  }
+  return true;
+}
+
 // Non-streaming Responses return completed function calls in an `output`
 // array instead of SSE `item` events. Restore both shapes through the same
 // exact request-local lookup so stream mode cannot change dispatch semantics.
@@ -1683,7 +1934,11 @@ export function rewriteNamespaceResponsePayload(payload, lookups, sessionModel) 
   let changed = rewritten !== payload;
 
   if (payload.type === "response.function_call_arguments.done") {
-    const argumentsText = coerceFunctionCallArguments(rewritten.arguments);
+    const argumentsText = jsonArgumentsAreUnambiguous(rewritten.arguments, {
+      allowEmpty: true,
+    })
+      ? coerceFunctionCallArguments(rewritten.arguments)
+      : rewritten.arguments;
     if (argumentsText !== rewritten.arguments) {
       rewritten = { ...rewritten, arguments: argumentsText };
       changed = true;
@@ -1821,15 +2076,35 @@ function customToolInputDelta(state, fragment) {
   return decoded.length ? decoded.join("") : undefined;
 }
 
+class NamespaceRelayCommittedStreamError extends Error {
+  constructor(reason) {
+    super(
+      `The provider response became unsafe to relay after namespace output was committed (${reason}).`,
+    );
+    this.name = "NamespaceRelayCommittedStreamError";
+    this.code = "ERR_NAMESPACE_RELAY_COMMITTED_STREAM";
+    this.status = 502;
+  }
+}
+
 // Rewrites LiteLLM's flattened `<namespace>__<tool>` function calls back to
 // the namespace + name shape Codex dispatches through its app runtime.
 export class NamespaceToolCallTransform extends Transform {
   #eventStream;
-  #decoder = new StringDecoder("utf8");
-  #buffer = "";
   #pending = Buffer.alloc(0);
   #released = false;
   #headerlessDetector;
+  #sseParts = [];
+  #sseBytes = 0;
+  #sseLineBytes = 0;
+  #ssePendingCr = false;
+  #ssePendingLineWasBlank = false;
+  #sseAtStreamStart = true;
+  #sseLineEnding = "\n";
+  #sseLineEndingObserved = false;
+  #maxSseFrameBytes;
+  #rewriteDisabled = false;
+  #semanticMutationCommitted = false;
   #lookups;
   #sessionModel;
   #pendingInterrupts;
@@ -1855,6 +2130,10 @@ export class NamespaceToolCallTransform extends Transform {
     // must not run the namespace rewrites (they exist for routed providers)
     // or re-serialize model-authored events it did not change.
     this.#injectOnly = Boolean(options.injectOnly);
+    this.#maxSseFrameBytes =
+      Number.isInteger(options.maxSseFrameBytes) && options.maxSseFrameBytes > 0
+        ? options.maxSseFrameBytes
+        : MAX_SSE_FRAME_BYTES;
     const declared = String(contentType).toLowerCase();
     this.#eventStream = declared.includes("text/event-stream");
     this.#headerlessDetector =
@@ -1864,29 +2143,32 @@ export class NamespaceToolCallTransform extends Transform {
   }
 
   _transform(chunk, _encoding, callback) {
-    if (this.#headerlessDetector) {
-      const detected = this.#headerlessDetector.write(chunk);
-      if (detected.decision === "pending") {
-        callback();
-        return;
+    let error;
+    try {
+      if (this.#headerlessDetector) {
+        const detected = this.#headerlessDetector.write(chunk);
+        if (detected.decision !== "pending") {
+          this.#headerlessDetector = undefined;
+          this.#eventStream = detected.decision === "event-stream";
+          for (const buffered of detected.chunks) this.#transformChunk(buffered);
+        }
+      } else {
+        this.#transformChunk(chunk);
       }
-      this.#headerlessDetector = undefined;
-      this.#eventStream = detected.decision === "event-stream";
-      for (const buffered of detected.chunks) this.#transformChunk(buffered);
-      callback();
-      return;
+    } catch (caught) {
+      error = caught;
     }
-    this.#transformChunk(chunk);
-    callback();
+    callback(error);
   }
 
   #transformChunk(chunk) {
+    const bytes = Buffer.from(chunk);
     if (!this.#eventStream) {
       if (this.#released) {
-        this.push(chunk);
+        this.push(bytes);
         return;
       }
-      this.#pending = this.#pending.length ? Buffer.concat([this.#pending, chunk]) : chunk;
+      this.#pending = this.#pending.length ? Buffer.concat([this.#pending, bytes]) : bytes;
       if (this.#pending.length > MAX_JSON_CAPTURE_BYTES) {
         this.push(this.#pending);
         this.#pending = Buffer.alloc(0);
@@ -1894,11 +2176,24 @@ export class NamespaceToolCallTransform extends Transform {
       }
       return;
     }
-    this.#buffer += this.#decoder.write(chunk);
-    this.#emitCompleteEvents();
+    if (this.#rewriteDisabled) {
+      this.push(bytes);
+      return;
+    }
+    this.#consumeSseChunk(bytes);
   }
 
   _flush(callback) {
+    let error;
+    try {
+      this.#flushTransform();
+    } catch (caught) {
+      error = caught;
+    }
+    callback(error);
+  }
+
+  #flushTransform() {
     if (this.#headerlessDetector) {
       const detected = this.#headerlessDetector.end();
       this.#headerlessDetector = undefined;
@@ -1910,82 +2205,328 @@ export class NamespaceToolCallTransform extends Transform {
       this.#pending = Buffer.alloc(0);
       if (this.#released || !body.length) {
         if (body.length) this.push(body);
-        callback();
         return;
       }
+      if (!isUtf8(body)) {
+        this.push(body);
+        return;
+      }
+      const text = body.toString("utf8");
+      if (!jsonIsUnambiguousForRewrite(text)) {
+        this.push(body);
+        return;
+      }
+      let original;
       try {
-        const original = JSON.parse(body.toString("utf8"));
-        let payload = original;
-        if (!this.#injectOnly) {
-          const rewritten = rewriteNamespaceResponsePayload(
-            payload,
-            this.#lookups,
-            this.#sessionModel,
-          );
-          if (rewritten) payload = rewritten;
-        }
-        payload = this.#injectJsonInterrupts(payload);
-        // An inject-only relay that injected nothing returns the exact bytes
-        // it was handed rather than a re-serialization of them.
-        if (this.#injectOnly && payload === original) {
-          this.push(body);
-        } else {
-          this.push(Buffer.from(JSON.stringify(payload), "utf8"));
-        }
+        original = JSON.parse(text);
       } catch {
         this.push(body);
+        return;
       }
-      callback();
+      if (!embeddedFunctionArgumentsAreUnambiguous(original)) {
+        this.push(body);
+        return;
+      }
+      let payload = original;
+      if (!this.#injectOnly) {
+        const rewritten = rewriteNamespaceResponsePayload(
+          payload,
+          this.#lookups,
+          this.#sessionModel,
+        );
+        if (rewritten) payload = rewritten;
+      }
+      payload = this.#injectJsonInterrupts(payload);
+      // Parsing is only permission to inspect. A response the transform did
+      // not semantically change retains its exact original representation.
+      if (payload !== original) this.#commitSemanticMutation();
+      this.push(payload === original ? body : Buffer.from(JSON.stringify(payload), "utf8"));
       return;
     }
-    this.#buffer += this.#decoder.end();
-    this.#emitCompleteEvents(true);
-    // Streams that omit response.completed / [DONE] still need the closes.
-    for (const piece of this.#drainInterruptBlocks()) {
-      this.push(Buffer.from(piece));
-      if (!piece.endsWith("\n\n")) this.push(Buffer.from("\n\n"));
+    if (this.#ssePendingCr && !this.#rewriteDisabled) {
+      const blankLine = this.#ssePendingLineWasBlank;
+      this.#ssePendingCr = false;
+      this.#ssePendingLineWasBlank = false;
+      this.#completeSseLine(blankLine);
     }
-    callback();
+    if (!this.#rewriteDisabled && this.#sseBytes) {
+      this.#emitSseFrame(this.#takeSseFrame());
+    }
+    // Streams that omit response.completed / [DONE] still need the closes,
+    // unless an ambiguous frame made observing prior calls unsafe.
+    if (!this.#rewriteDisabled) {
+      for (const piece of this.#drainInterruptBlocks()) this.push(piece);
+    }
   }
 
-  #emitCompleteEvents(flush = false) {
-    const blocks = this.#buffer.split(/\r?\n\r?\n/);
-    this.#buffer = flush ? "" : blocks.pop() || "";
-    for (const block of blocks) {
-      const pieces = this.#rewriteBlock(block);
-      for (const piece of pieces) {
-        this.push(Buffer.from(piece));
-        if (!piece.endsWith("\n\n")) this.push(Buffer.from("\n\n"));
+  #consumeSseChunk(chunk) {
+    let offset = 0;
+    if (this.#ssePendingCr) {
+      const followedByLf = chunk[0] === LINE_FEED;
+      if (followedByLf) {
+        if (!this.#appendSsePiece(chunk.subarray(0, 1))) {
+          if (chunk.length > 1) this.push(chunk.subarray(1));
+          return;
+        }
+        offset = 1;
+      }
+      const blankLine = this.#ssePendingLineWasBlank;
+      this.#ssePendingCr = false;
+      this.#ssePendingLineWasBlank = false;
+      this.#completeSseLine(blankLine);
+      if (this.#rewriteDisabled) {
+        if (offset < chunk.length) this.push(chunk.subarray(offset));
+        return;
+      }
+    }
+
+    while (offset < chunk.length) {
+      const nextCr = chunk.indexOf(CARRIAGE_RETURN, offset);
+      const nextLf = chunk.indexOf(LINE_FEED, offset);
+      let lineEnd;
+      if (nextCr === -1) lineEnd = nextLf;
+      else if (nextLf === -1) lineEnd = nextCr;
+      else lineEnd = Math.min(nextCr, nextLf);
+
+      if (lineEnd === -1) {
+        const content = chunk.subarray(offset);
+        this.#sseLineBytes += content.length;
+        this.#appendSsePiece(content);
+        return;
+      }
+      if (lineEnd > offset) {
+        const content = chunk.subarray(offset, lineEnd);
+        this.#sseLineBytes += content.length;
+        if (!this.#appendSsePiece(content)) {
+          this.push(chunk.subarray(lineEnd));
+          return;
+        }
+      }
+
+      const blankLine = this.#sseLineBytes === 0;
+      if (chunk[lineEnd] === CARRIAGE_RETURN) {
+        if (!this.#appendSsePiece(chunk.subarray(lineEnd, lineEnd + 1))) {
+          if (lineEnd + 1 < chunk.length) this.push(chunk.subarray(lineEnd + 1));
+          return;
+        }
+        if (lineEnd + 1 === chunk.length) {
+          this.#ssePendingCr = true;
+          this.#ssePendingLineWasBlank = blankLine;
+          this.#sseLineBytes = 0;
+          return;
+        }
+        if (chunk[lineEnd + 1] === LINE_FEED) {
+          if (!this.#appendSsePiece(chunk.subarray(lineEnd + 1, lineEnd + 2))) {
+            if (lineEnd + 2 < chunk.length) this.push(chunk.subarray(lineEnd + 2));
+            return;
+          }
+          offset = lineEnd + 2;
+        } else {
+          offset = lineEnd + 1;
+        }
+      } else {
+        if (!this.#appendSsePiece(chunk.subarray(lineEnd, lineEnd + 1))) {
+          if (lineEnd + 1 < chunk.length) this.push(chunk.subarray(lineEnd + 1));
+          return;
+        }
+        offset = lineEnd + 1;
+      }
+      this.#completeSseLine(blankLine);
+      if (this.#rewriteDisabled) {
+        if (offset < chunk.length) this.push(chunk.subarray(offset));
+        return;
       }
     }
   }
 
-  #rewriteBlock(block) {
-    const lines = block.split(/\r?\n/);
-    const eventName = lines
-      .find((line) => line.startsWith("event:"))
-      ?.slice(6)
-      .trim();
-    let dataLineIndex = -1;
-    let dataText = "";
-    for (let index = 0; index < lines.length; index += 1) {
+  #appendSsePiece(piece) {
+    if (!piece.length) return true;
+    this.#sseParts.push(piece);
+    this.#sseBytes += piece.length;
+    if (this.#sseBytes <= this.#maxSseFrameBytes) return true;
+    const buffered = this.#takeSseFrame();
+    if (this.#semanticMutationCommitted) {
+      throw new NamespaceRelayCommittedStreamError("SSE frame byte limit");
+    }
+    this.#disableSseRewriting();
+    this.push(buffered);
+    return false;
+  }
+
+  #completeSseLine(blankLine) {
+    this.#sseLineBytes = 0;
+    if (blankLine) this.#emitSseFrame(this.#takeSseFrame());
+  }
+
+  #takeSseFrame() {
+    const frame =
+      this.#sseParts.length === 1
+        ? this.#sseParts[0]
+        : Buffer.concat(this.#sseParts, this.#sseBytes);
+    this.#sseParts = [];
+    this.#sseBytes = 0;
+    this.#sseLineBytes = 0;
+    this.#ssePendingCr = false;
+    this.#ssePendingLineWasBlank = false;
+    return frame;
+  }
+
+  #sseLines(frame) {
+    const lines = [];
+    let start = 0;
+    while (start < frame.length) {
+      const nextCr = frame.indexOf(CARRIAGE_RETURN, start);
+      const nextLf = frame.indexOf(LINE_FEED, start);
+      let contentEnd;
+      if (nextCr === -1) contentEnd = nextLf;
+      else if (nextLf === -1) contentEnd = nextCr;
+      else contentEnd = Math.min(nextCr, nextLf);
+      if (contentEnd === -1) {
+        lines.push({
+          start,
+          parseStart: start,
+          contentEnd: frame.length,
+          end: frame.length,
+        });
+        break;
+      }
+      const end =
+        frame[contentEnd] === CARRIAGE_RETURN && frame[contentEnd + 1] === LINE_FEED
+          ? contentEnd + 2
+          : contentEnd + 1;
+      lines.push({ start, parseStart: start, contentEnd, end });
+      start = end;
+    }
+    return lines;
+  }
+
+  #rememberSseLineEnding(frame, lines) {
+    if (this.#sseLineEndingObserved) return;
+    for (const line of lines) {
+      if (line.end === line.contentEnd) continue;
+      const terminator = frame.subarray(line.contentEnd, line.end);
+      if (terminator.equals(Buffer.from("\r\n"))) this.#sseLineEnding = "\r\n";
+      else if (terminator.equals(Buffer.from("\n"))) this.#sseLineEnding = "\n";
+      else if (terminator.equals(Buffer.from("\r"))) this.#sseLineEnding = "\r";
+      else continue;
+      this.#sseLineEndingObserved = true;
+      return;
+    }
+  }
+
+  #emitSseFrame(frame) {
+    for (const piece of this.#rewriteSseFrame(frame)) this.push(piece);
+  }
+
+  #commitSemanticMutation() {
+    this.#semanticMutationCommitted = true;
+  }
+
+  #unsafeSseFrame(frame, reason) {
+    if (this.#semanticMutationCommitted) {
+      throw new NamespaceRelayCommittedStreamError(reason);
+    }
+    this.#disableSseRewriting();
+    return [frame];
+  }
+
+  #disableSseRewriting() {
+    this.#rewriteDisabled = true;
+    this.#injectionsDone = true;
+    this.#lastInjectedCalls = [];
+    this.#customItemIds.clear();
+    this.#customDeltaStates.clear();
+  }
+
+  #rewrittenSseFrame(frame, lines, replacements) {
+    const pieces = [];
+    let cursor = 0;
+    for (const [index, replacement] of [...replacements].sort(
+      ([left], [right]) => left - right,
+    )) {
       const line = lines[index];
-      if (!line.startsWith("data:")) continue;
-      dataLineIndex = index;
-      dataText = line.slice(5).trimStart();
-      break;
-    }
-    if (dataLineIndex === -1) return [block];
-    if (!dataText || dataText === "[DONE]") {
-      // Inject before the stream terminator so Codex still executes the calls.
-      if (dataText === "[DONE]" || eventName === "response.done") {
-        return [...this.#drainInterruptBlocks(), block];
+      if (!line) continue;
+      if (line.start > cursor) pieces.push(frame.subarray(cursor, line.start));
+      if (line.parseStart > line.start) {
+        pieces.push(frame.subarray(line.start, line.parseStart));
       }
-      return [block];
+      pieces.push(Buffer.from(replacement, "utf8"));
+      cursor = line.contentEnd;
+    }
+    if (cursor < frame.length) pieces.push(frame.subarray(cursor));
+    return Buffer.concat(pieces);
+  }
+
+  #rewriteSseFrame(frame) {
+    const atStreamStart = this.#sseAtStreamStart;
+    this.#sseAtStreamStart = false;
+    // No decoder is allowed to see an undecided frame. Its replacement
+    // character would make fail-open lossy before we knew whether to rewrite.
+    if (!isUtf8(frame)) {
+      return this.#unsafeSseFrame(frame, "invalid UTF-8");
+    }
+    const lines = this.#sseLines(frame);
+    if (atStreamStart && frame.subarray(0, UTF8_BOM.length).equals(UTF8_BOM) && lines[0]) {
+      lines[0].parseStart += UTF8_BOM.length;
+    }
+    this.#rememberSseLineEnding(frame, lines);
+    const lineTexts = lines.map((line) =>
+      frame.subarray(line.parseStart, line.contentEnd).toString("utf8"),
+    );
+    const eventLineIndexes = lineTexts
+      .map((line, index) => (isSseField(line, "event") ? index : -1))
+      .filter((index) => index !== -1);
+    const dataLineIndexes = lineTexts
+      .map((line, index) => (isSseField(line, "data") ? index : -1))
+      .filter((index) => index !== -1);
+    // SSE formally concatenates multiple data fields and gives repeated event
+    // fields ordering semantics. Rewriting just one field would create bytes
+    // whose EventSource meaning differs from the JSON we inspected. The
+    // Responses wire uses exactly one of each, so anything else is preserved
+    // and disables stateful rewriting for the remainder of this response.
+    if (eventLineIndexes.length > 1 || dataLineIndexes.length > 1) {
+      return this.#unsafeSseFrame(frame, "repeated SSE event or data field");
+    }
+    const eventLineIndex = eventLineIndexes[0] ?? -1;
+    const eventName =
+      eventLineIndex === -1
+        ? undefined
+        : sseLineFieldValue(lineTexts[eventLineIndex], "event");
+    const dataLineIndex = dataLineIndexes[0] ?? -1;
+    const dataText =
+      dataLineIndex === -1 ? "" : sseLineFieldValue(lineTexts[dataLineIndex], "data");
+    if (dataLineIndex === -1) return [frame];
+    if (!dataText || dataText === "[DONE]") {
+      if (eventName && eventName !== "message") {
+        return this.#unsafeSseFrame(
+          frame,
+          "non-generic SSE event without a matching JSON type",
+        );
+      }
+      // Inject before the stream terminator so Codex still executes the calls.
+      if (dataText === "[DONE]") {
+        return [...this.#drainInterruptBlocks(), frame];
+      }
+      return [frame];
+    }
+    if (!jsonIsUnambiguousForRewrite(dataText)) {
+      return this.#unsafeSseFrame(frame, "ambiguous or malformed JSON event");
     }
     try {
       let event = JSON.parse(dataText);
+      const payloadType = event?.type;
+      const genericEventName = !eventName || eventName === "message";
+      if (!genericEventName && payloadType !== eventName) {
+        // The event field and JSON body are two claims about the same Responses
+        // event. Do not choose whichever terminal/rewrite behavior is more
+        // convenient when both claims are present and disagree.
+        return this.#unsafeSseFrame(frame, "conflicting SSE event and JSON type");
+      }
+      if (!embeddedFunctionArgumentsAreUnambiguous(event)) {
+        return this.#unsafeSseFrame(frame, "ambiguous function arguments");
+      }
       const originalEventType = event?.type;
+      let changed = false;
       if (
         !this.#injectOnly &&
         event?.type === "response.function_call_arguments.delta" &&
@@ -1993,12 +2534,16 @@ export class NamespaceToolCallTransform extends Transform {
       ) {
         const state = this.#customDeltaStates.get(event.item_id);
         const delta = state ? customToolInputDelta(state, event.delta) : undefined;
-        if (delta === undefined) return [];
+        if (delta === undefined) {
+          this.#commitSemanticMutation();
+          return [];
+        }
         event = {
           ...event,
           type: "response.custom_tool_call_input.delta",
           delta,
         };
+        changed = true;
       }
       if (
         !this.#injectOnly &&
@@ -2013,11 +2558,15 @@ export class NamespaceToolCallTransform extends Transform {
             type: "response.custom_tool_call_input.done",
             input,
           };
+          changed = true;
         }
       }
       if (!this.#injectOnly) {
         const next = rewriteNamespaceResponsePayload(event, this.#lookups, this.#sessionModel);
-        if (next) event = next;
+        if (next) {
+          event = next;
+          changed = true;
+        }
       }
       if (
         event?.type === "response.output_item.added" &&
@@ -2042,38 +2591,48 @@ export class NamespaceToolCallTransform extends Transform {
         this.#customDeltaStates.delete(event.item.id);
       }
       this.#observeEvent(event);
-      const rebuilt = [...lines];
-      const eventLineIndex = rebuilt.findIndex((line) => line.startsWith("event:"));
+      const replacements = new Map();
       if (
         eventLineIndex !== -1 &&
         typeof event?.type === "string" &&
         event.type !== originalEventType
       ) {
-        rebuilt[eventLineIndex] = `event: ${event.type}`;
+        replacements.set(eventLineIndex, `event: ${event.type}`);
       }
-      rebuilt[dataLineIndex] = `data: ${JSON.stringify(event)}`;
       // Inject finished-child interrupts before the response closes so Codex
       // still executes them as ordinary tool calls in this turn.
       if (event?.type === "response.completed" || eventName === "response.completed") {
         const interruptBlocks = this.#drainInterruptBlocks();
         const withOutput = this.#mergeInjectedIntoCompleted(event);
-        // Nothing injected and nothing rewritten: the event goes out as it
-        // came in, not as a JSON round-trip of itself.
-        if (this.#injectOnly && !interruptBlocks.length && withOutput === event) {
-          return [block];
+        if (withOutput !== event) {
+          event = withOutput;
+          changed = true;
         }
-        rebuilt[dataLineIndex] = `data: ${JSON.stringify(withOutput)}`;
-        return [...interruptBlocks, rebuilt.join("\n")];
+        if (!changed) return [...interruptBlocks, frame];
+        this.#commitSemanticMutation();
+        replacements.set(dataLineIndex, `data: ${JSON.stringify(event)}`);
+        return [
+          ...interruptBlocks,
+          this.#rewrittenSseFrame(frame, lines, replacements),
+        ];
       }
       if (event?.type === "response.done" || eventName === "response.done") {
         const interruptBlocks = this.#drainInterruptBlocks();
-        if (this.#injectOnly) return [...interruptBlocks, block];
-        return [...interruptBlocks, rebuilt.join("\n")];
+        if (!changed) return [...interruptBlocks, frame];
+        this.#commitSemanticMutation();
+        replacements.set(dataLineIndex, `data: ${JSON.stringify(event)}`);
+        return [
+          ...interruptBlocks,
+          this.#rewrittenSseFrame(frame, lines, replacements),
+        ];
       }
-      if (this.#injectOnly) return [block];
-      return [rebuilt.join("\n")];
-    } catch {
-      return [block];
+      if (!changed) return [frame];
+      this.#commitSemanticMutation();
+      replacements.set(dataLineIndex, `data: ${JSON.stringify(event)}`);
+      return [this.#rewrittenSseFrame(frame, lines, replacements)];
+    } catch (error) {
+      if (error instanceof NamespaceRelayCommittedStreamError) throw error;
+      return this.#unsafeSseFrame(frame, "event rewrite failure");
     }
   }
 
@@ -2103,6 +2662,7 @@ export class NamespaceToolCallTransform extends Transform {
       this.#lastInjectedCalls = [];
       return [];
     }
+    this.#commitSemanticMutation();
     const blocks = [];
     const injectedCalls = [];
     for (const target of remaining) {
@@ -2136,12 +2696,24 @@ export class NamespaceToolCallTransform extends Transform {
           arguments: call.arguments,
         },
       };
-      blocks.push(formatSseBlock("response.output_item.added", added).trimEnd() + "\n");
-      blocks.push(formatSseBlock("response.output_item.done", done).trimEnd() + "\n");
+      blocks.push(
+        Buffer.from(
+          `event: response.output_item.added${this.#sseLineEnding}` +
+            `data: ${JSON.stringify(added)}${this.#sseLineEnding}${this.#sseLineEnding}`,
+          "utf8",
+        ),
+      );
+      blocks.push(
+        Buffer.from(
+          `event: response.output_item.done${this.#sseLineEnding}` +
+            `data: ${JSON.stringify(done)}${this.#sseLineEnding}${this.#sseLineEnding}`,
+          "utf8",
+        ),
+      );
     }
     this.#lastInjectedCalls = injectedCalls;
     this.#injectionsDone = true;
-    return blocks.map((block) => block.replace(/\n$/, ""));
+    return blocks;
   }
 
   #mergeInjectedIntoCompleted(event) {

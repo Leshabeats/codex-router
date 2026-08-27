@@ -7463,6 +7463,141 @@ test("router does not compact the same blank-message shape on non-DeepSeek route
   }
 });
 
+test("router response pipelines preserve ambiguous provider bytes exactly", async () => {
+  const validNamespaceEvent = Buffer.from(
+    'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}}\r\n\r\n',
+    "utf8",
+  );
+  const duplicateSse = Buffer.concat([
+    Buffer.from(
+      'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"ordinary","\\u006eame":"collaboration__spawn_agent","arguments":"{}"}}\r\n\r\n',
+      "utf8",
+    ),
+    validNamespaceEvent,
+  ]);
+  const malformedSse = Buffer.concat([
+    Buffer.from('data: {"type":\r\n\r\n', "utf8"),
+    validNamespaceEvent,
+  ]);
+  const invalidSse = Buffer.concat([
+    Buffer.from("data: ", "ascii"),
+    Buffer.from([0xff, 0xfe]),
+    Buffer.from("\r\n\r\n", "ascii"),
+    validNamespaceEvent,
+  ]);
+  const duplicateJson = Buffer.from(
+    '{"output":[{"type":"function_call","name":"ordinary","\\u006eame":"collaboration__spawn_agent","arguments":"{}"}]}',
+    "utf8",
+  );
+  const malformedJson = Buffer.from('{"output":[', "utf8");
+  const invalidJson = Buffer.concat([
+    Buffer.from(
+      '{"output":[{"type":"function_call","name":"collaboration__spawn_agent","note":"',
+      "utf8",
+    ),
+    Buffer.from([0xff]),
+    Buffer.from('","arguments":"{}"}]}', "utf8"),
+  ]);
+  const postCommitMarker = "raw-flattened-done-must-not-leak";
+  const postCommitFailure = Buffer.from(
+    'event: response.output_item.added\n' +
+      'data: {"type":"response.output_item.added","item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":""}}\n\n' +
+      'event: response.output_item.done\n' +
+      `data: {"type":"response.output_item.done","raw_marker":"${postCommitMarker}","item":{"type":"function_call","name":"collaboration__spawn_agent"\n\n`,
+    "utf8",
+  );
+  const replies = new Map([
+    ["duplicate-sse", ["text/event-stream", duplicateSse]],
+    ["malformed-sse", ["text/event-stream", malformedSse]],
+    ["invalid-sse", ["text/event-stream", invalidSse]],
+    ["duplicate-json", ["application/json", duplicateJson]],
+    ["malformed-json", ["application/json", malformedJson]],
+    ["invalid-json", ["application/json", invalidJson]],
+    ["post-commit-failure", ["text/event-stream", postCommitFailure]],
+  ]);
+  const gateway = await mockServer(async (request, response) => {
+    const body = await bodyJson(request);
+    const [contentType, source] = replies.get(body.input);
+    response.writeHead(200, { "Content-Type": contentType });
+    response.end(source);
+  });
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_QUIET: "1",
+    CODEX_ROUTER_EMPTY_COMPLETION_RETRY: "0",
+  });
+  const tools = [
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [
+        {
+          type: "function",
+          name: "spawn_agent",
+          inputSchema: { type: "object", properties: {} },
+        },
+      ],
+    },
+  ];
+  const turn = async (marker, model, stream) => {
+    const response = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model, input: marker, tools, stream }),
+    });
+    const body = Buffer.from(await response.arrayBuffer());
+    assert.equal(response.status, 200, body.toString("utf8"));
+    return body;
+  };
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    // DeepSeek installs its empty-tool-message compatibility transform ahead
+    // of namespace restoration. Malformed and duplicate frames must survive
+    // both stages, and must prevent the later ambiguous call from rewriting.
+    assert.deepEqual(
+      await turn("duplicate-sse", "deepseek/deepseek-v4-flash-vision-exp", true),
+      duplicateSse,
+    );
+    assert.deepEqual(
+      await turn("malformed-sse", "deepseek/deepseek-v4-flash-vision-exp", true),
+      malformedSse,
+    );
+    // Invalid UTF-8 and non-streaming JSON exercise the same namespace stage
+    // inside the ordinary routed pipeline without a text decoder in front.
+    assert.deepEqual(
+      await turn("invalid-sse", "opencode-go/deepseek-v4-flash", true),
+      invalidSse,
+    );
+    assert.deepEqual(
+      await turn("duplicate-json", "opencode-go/deepseek-v4-flash", false),
+      duplicateJson,
+    );
+    assert.deepEqual(
+      await turn("malformed-json", "opencode-go/deepseek-v4-flash", false),
+      malformedJson,
+    );
+    assert.deepEqual(
+      await turn("invalid-json", "opencode-go/deepseek-v4-flash", false),
+      invalidJson,
+    );
+    const failed = await turn(
+      "post-commit-failure",
+      "opencode-go/deepseek-v4-flash",
+      true,
+    );
+    const failureText = failed.toString("utf8");
+    assert.match(failureText, /"namespace":"collaboration"/u);
+    assert.match(failureText, /event: error/u);
+    assert.match(failureText, /local_router_stream_failed/u);
+    assert.doesNotMatch(failureText, new RegExp(postCommitMarker, "u"));
+  } finally {
+    await stopChild(router);
+    await closeServer(gateway.server);
+  }
+});
 
 test("router repairs malformed Z.ai message envelopes after LiteLLM Responses translation", async () => {
   const testRoot = mkdtempSync(path.join(os.tmpdir(), "zai-responses-compat-router-"));
