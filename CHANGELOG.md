@@ -14,6 +14,11 @@
   large live multimodal histories returned empty completions before the generic
   85% point of its advertised 1M window.
 
+- **OpenRouter now ships Grok 4.6 as a listed route.** The checked-in pin is
+  `openrouter/grok-4.6`, upstream id `x-ai/grok-4.6`, 500,000 context with
+  auto-compact at 440,000, text+image input, and the low/medium/high reasoning
+  ladder (matching Command Code, not Nous Research's xhigh-ladder route).
+
 - **README: Ox Alpha availability updated.** The preview was withdrawn from
   OpenCode Zen, OpenCode Go, OpenRouter, and Nous Research as of 2026-08-26.
   It remains available on Command Code and Venice. The checked-in
