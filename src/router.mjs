@@ -36,9 +36,11 @@ import {
   finishResponse,
   formatErrorChain,
   HOP_BY_HOP_HEADERS,
+  MAX_BUFFERED_RESPONSE_BYTES,
   httpErrorStatus,
   installGracefulShutdown,
   pipeResponse,
+  readResponseBody,
   readRequestBody,
   writeEventStreamHead,
   writeJson,
@@ -227,10 +229,41 @@ const MAX_DECODED_BODY_BYTES =
   Number.isFinite(configuredDecodedBodyBytes) && configuredDecodedBodyBytes > 0
     ? Math.floor(configuredDecodedBodyBytes)
     : 256 * 1024 * 1024;
-// No single Codex turn streams for this long. Anything still marked in-flight
-// past this point leaked (crashed client, half-closed socket) and would
-// otherwise inflate the tray activity count until the router restarts.
-const STALE_ACTIVITY_MS = 15 * 60_000;
+const configuredActiveRequests = Number(
+  process.env.MODEL_ROUTER_MAX_ACTIVE_REQUESTS ||
+    process.env.CODEX_ROUTER_MAX_ACTIVE_REQUESTS ||
+    64,
+);
+export const MAX_ACTIVE_REQUESTS =
+  Number.isFinite(configuredActiveRequests) && configuredActiveRequests > 0
+    ? Math.floor(configuredActiveRequests)
+    : 64;
+// This bounds only the tray's activity records. It must not cancel an operation
+// or release its admission slot: a healthy SSE turn can outlive presentation
+// bookkeeping and still retain real buffers and an upstream connection.
+const configuredActivityRecordRetentionMs = Number(
+  process.env.MODEL_ROUTER_ACTIVITY_RECORD_RETENTION_MS ||
+    process.env.CODEX_ROUTER_ACTIVITY_RECORD_RETENTION_MS ||
+    15 * 60_000,
+);
+const ACTIVITY_RECORD_RETENTION_MS =
+  Number.isFinite(configuredActivityRecordRetentionMs) &&
+  configuredActivityRecordRetentionMs > 0
+    ? Math.floor(configuredActivityRecordRetentionMs)
+    : 15 * 60_000;
+// Execution has its own deliberately conservative deadline. Keeping it
+// independent from tray retention prevents a 15-minute accounting cleanup from
+// becoming a compatibility-breaking timeout for long reasoning or SSE turns.
+const configuredRequestExecutionTimeoutMs = Number(
+  process.env.MODEL_ROUTER_REQUEST_EXECUTION_TIMEOUT_MS ||
+    process.env.CODEX_ROUTER_REQUEST_EXECUTION_TIMEOUT_MS ||
+    24 * 60 * 60_000,
+);
+const REQUEST_EXECUTION_TIMEOUT_MS =
+  Number.isFinite(configuredRequestExecutionTimeoutMs) &&
+  configuredRequestExecutionTimeoutMs > 0
+    ? Math.floor(configuredRequestExecutionTimeoutMs)
+    : 24 * 60 * 60_000;
 const NATIVE_IMAGE_PATHS = new Set([
   "/images/edits",
   "/images/generations",
@@ -239,14 +272,31 @@ const NATIVE_IMAGE_PATHS = new Set([
 ]);
 const NATIVE_SEARCH_PATHS = new Set(["/alpha/search", "/v1/alpha/search"]);
 const AGENT_PAYLOAD_RELAY_TOOL = "relay_external_agent_payload";
-const AGENT_PAYLOAD_CACHE_TTL_MS = 15 * 60 * 1_000;
+const configuredAgentPayloadCacheTtlMs = Number(
+  process.env.MODEL_ROUTER_AGENT_PAYLOAD_CACHE_TTL_MS ||
+    process.env.CODEX_ROUTER_AGENT_PAYLOAD_CACHE_TTL_MS ||
+    15 * 60 * 1_000,
+);
+const AGENT_PAYLOAD_CACHE_TTL_MS =
+  Number.isFinite(configuredAgentPayloadCacheTtlMs) && configuredAgentPayloadCacheTtlMs > 0
+    ? Math.floor(configuredAgentPayloadCacheTtlMs)
+    : 15 * 60 * 1_000;
 const AGENT_PAYLOAD_CACHE_MAX_BYTES = 8 * 1024 * 1024;
 const AGENT_PAYLOAD_CACHE_MAX_ENTRIES = 256;
 const agentPayloadCache = new Map();
+const agentPayloadCacheInFlight = new Map();
 let agentPayloadCacheBytes = 0;
+const agentPayloadCacheMetrics = {
+  hits: 0,
+  misses: 0,
+  expirations: 0,
+  evictions: 0,
+  coalesced: 0,
+};
 
 let requestSequence = 0;
-const activeRequests = new Map();
+const activityRecords = new Map();
+const inFlightRequests = new Map();
 let lastUsedProvider;
 let lastUsedModel;
 let lastUsedSessionName;
@@ -255,17 +305,17 @@ let errorStatusUntil = 0;
 if (!INTERNAL_KEY) throw new Error("CODEX_ROUTER_INTERNAL_KEY is required.");
 assertCallerSecret(CALLER_KEY);
 
-function pruneStaleActivity(now = Date.now()) {
-  for (const [requestId, entry] of activeRequests) {
-    if (now - (entry?.startedAt ?? 0) > STALE_ACTIVITY_MS) {
-      activeRequests.delete(requestId);
+function pruneExpiredActivityRecords(now = Date.now()) {
+  for (const [requestId, entry] of activityRecords) {
+    if (now - (entry?.startedAt ?? 0) > ACTIVITY_RECORD_RETENTION_MS) {
+      activityRecords.delete(requestId);
     }
   }
 }
 
 function activityPayload() {
-  pruneStaleActivity();
-  const active = [...activeRequests.values()].filter(
+  pruneExpiredActivityRecords();
+  const active = [...activityRecords.values()].filter(
     (entry) => entry && typeof entry === "object" && entry.provider,
   );
   const latest = active.at(-1);
@@ -274,12 +324,12 @@ function activityPayload() {
   const sessionName = latest?.sessionName || lastUsedSessionName;
   return {
     state:
-      activeRequests.size > 0
+      activityRecords.size > 0
         ? "generating"
         : Date.now() < errorStatusUntil
           ? "error"
           : "idle",
-    activeCount: activeRequests.size,
+    activeCount: activityRecords.size,
     active,
     ...(provider ? { provider } : {}),
     ...(model ? { model } : {}),
@@ -287,15 +337,78 @@ function activityPayload() {
   };
 }
 
-function beginRequestActivity() {
+function resourceLimitsPayload() {
+  purgeExpiredAgentPayloads();
+  return {
+    inFlightRequests: inFlightRequests.size,
+    maxActiveRequests: MAX_ACTIVE_REQUESTS,
+    activityRecordRetentionMs: ACTIVITY_RECORD_RETENTION_MS,
+    requestExecutionTimeoutMs: REQUEST_EXECUTION_TIMEOUT_MS,
+    maxDecodedBodyBytes: MAX_DECODED_BODY_BYTES,
+    maxBufferedResponseBytes: MAX_BUFFERED_RESPONSE_BYTES,
+    agentPayloadCache: {
+      entries: agentPayloadCache.size,
+      bytes: agentPayloadCacheBytes,
+      maxEntries: AGENT_PAYLOAD_CACHE_MAX_ENTRIES,
+      maxBytes: AGENT_PAYLOAD_CACHE_MAX_BYTES,
+      ttlMs: AGENT_PAYLOAD_CACHE_TTL_MS,
+      inFlight: agentPayloadCacheInFlight.size,
+      ...agentPayloadCacheMetrics,
+    },
+  };
+}
+
+function beginRequestActivity({ request, response, controller } = {}) {
+  pruneExpiredActivityRecords();
+  if (inFlightRequests.size >= MAX_ACTIVE_REQUESTS) {
+    request?.resume?.();
+    const error = new Error(
+      `The router is at its active request limit (${MAX_ACTIVE_REQUESTS}).`,
+    );
+    error.status = 429;
+    error.code = "ERR_ROUTER_ACTIVE_REQUEST_LIMIT";
+    throw error;
+  }
   const requestId = ++requestSequence;
   const startedAt = Date.now();
-  activeRequests.set(requestId, { startedAt });
   let finished = false;
+  let deadlineExceeded = false;
+  let executionTimer;
+  const finish = (status) => {
+    if (finished) return;
+    finished = true;
+    if (executionTimer) clearTimeout(executionTimer);
+    activityRecords.delete(requestId);
+    inFlightRequests.delete(requestId);
+    if (status >= 400) errorStatusUntil = Date.now() + ERROR_STATUS_DURATION_MS;
+  };
+  const abortAtExecutionDeadline = () => {
+    if (finished || deadlineExceeded) return;
+    deadlineExceeded = true;
+    const error = new Error("Router request exceeded its execution deadline.");
+    error.code = "ERR_ROUTER_REQUEST_TIMEOUT";
+    error.status = 504;
+    controller?.abort(error);
+    request?.resume?.();
+    // Keep the in-flight entry until the handler has released the upstream,
+    // buffers, and usage path. The timer marks the deadline; `finish` releases
+    // accounting only after the aborted operation has actually settled.
+  };
+  executionTimer = setTimeout(
+    abortAtExecutionDeadline,
+    REQUEST_EXECUTION_TIMEOUT_MS + 1,
+  );
+  executionTimer.unref?.();
+  inFlightRequests.set(requestId, { startedAt });
+  activityRecords.set(requestId, { startedAt });
   return {
     setRoute({ provider, model, sessionName, ...metadata } = {}) {
-      if (!provider) return;
+      if (!provider || finished) return;
+      // Once presentation bookkeeping expires, later route updates must not
+      // resurrect it. The operation remains counted in `inFlightRequests`.
+      if (!activityRecords.has(requestId)) return;
       const entry = {
+        ...(activityRecords.get(requestId) || {}),
         id: String(requestId),
         provider,
         ...(model ? { model } : {}),
@@ -303,17 +416,13 @@ function beginRequestActivity() {
         ...metadata,
         startedAt,
       };
-      activeRequests.set(requestId, entry);
+      activityRecords.set(requestId, entry);
       lastUsedProvider = provider;
       if (model) lastUsedModel = model;
       if (sessionName) lastUsedSessionName = sessionName;
     },
-    finish(status) {
-      if (finished) return;
-      finished = true;
-      activeRequests.delete(requestId);
-      if (status >= 400) errorStatusUntil = Date.now() + ERROR_STATUS_DURATION_MS;
-    },
+    finish,
+    deadlineExceeded: () => deadlineExceeded,
   };
 }
 
@@ -680,6 +789,19 @@ function responseWithBody(upstream, body) {
   });
 }
 
+async function boundedResponseText(
+  upstream,
+  maxBytes = MAX_BUFFERED_RESPONSE_BYTES,
+  signal,
+) {
+  try {
+    return (await readResponseBody(upstream, { maxBytes, signal })).toString("utf8");
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    return "";
+  }
+}
+
 // Rejected retries are still upstream requests and may be billed. Drain only
 // a complete bounded body through the ordinary usage observer; an oversized,
 // stalled, or failed body has unknowable usage and is canceled without
@@ -901,6 +1023,7 @@ async function healthPayload() {
     router: "ready",
     degraded,
     activity: activityPayload(),
+    resources: resourceLimitsPayload(),
     oauth,
     api,
     grokOauth,
@@ -1081,28 +1204,67 @@ function parseRelayedAgentPayloadSse(bytes) {
   return undefined;
 }
 
-function agentPayloadCacheKey(encrypted) {
-  return createHash("sha256").update(encrypted).digest("base64url");
+function nativeRelayContext(request) {
+  const headers = nativeHeaders(request);
+  const authorization =
+    typeof headers.authorization === "string" ? headers.authorization : "";
+  const account = nativeAccountKey(headers);
+  // The digest is an in-memory partition key only. It prevents a cache hit or
+  // coalesced relay from bypassing the native authorization check for another
+  // resolved credential/account pair without retaining either identifier.
+  const accountScope = createHash("sha256")
+    .update(authorization)
+    .update("\0")
+    .update(account)
+    .digest("base64url");
+  return { accountScope, headers };
 }
 
-function cachedAgentPayload(encrypted) {
-  const key = agentPayloadCacheKey(encrypted);
+function agentPayloadCacheKey(encrypted, accountScope) {
+  return createHash("sha256")
+    .update(accountScope)
+    .update("\0")
+    .update(encrypted)
+    .digest("base64url");
+}
+
+function evictAgentPayload(key, { expired = false, evicted = false } = {}) {
   const entry = agentPayloadCache.get(key);
-  if (!entry) return undefined;
-  if (entry.expiresAt <= Date.now()) {
-    agentPayloadCache.delete(key);
-    agentPayloadCacheBytes -= entry.bytes;
+  if (!entry) return;
+  const bytes = entry.bytes || 0;
+  // Drop the retained reference eagerly. JavaScript strings cannot be securely
+  // erased, so this is cache eviction and must never be described otherwise.
+  entry.plaintext = "";
+  entry.bytes = 0;
+  agentPayloadCache.delete(key);
+  agentPayloadCacheBytes = Math.max(0, agentPayloadCacheBytes - bytes);
+  if (expired) agentPayloadCacheMetrics.expirations += 1;
+  if (evicted) agentPayloadCacheMetrics.evictions += 1;
+}
+
+function purgeExpiredAgentPayloads(now = Date.now()) {
+  for (const [key, entry] of agentPayloadCache) {
+    if (entry.expiresAt <= now) evictAgentPayload(key, { expired: true });
+  }
+}
+
+function cachedAgentPayload(key) {
+  purgeExpiredAgentPayloads();
+  const entry = agentPayloadCache.get(key);
+  if (!entry) {
+    agentPayloadCacheMetrics.misses += 1;
     return undefined;
   }
   agentPayloadCache.delete(key);
   agentPayloadCache.set(key, entry);
+  agentPayloadCacheMetrics.hits += 1;
   return entry.plaintext;
 }
 
-function rememberAgentPayload(encrypted, plaintext) {
-  const key = agentPayloadCacheKey(encrypted);
+function rememberAgentPayload(key, plaintext) {
+  purgeExpiredAgentPayloads();
   const existing = agentPayloadCache.get(key);
-  if (existing) agentPayloadCacheBytes -= existing.bytes;
+  if (existing) evictAgentPayload(key);
   const bytes = Buffer.byteLength(plaintext, "utf8");
   agentPayloadCache.set(key, {
     plaintext,
@@ -1115,15 +1277,22 @@ function rememberAgentPayload(encrypted, plaintext) {
     agentPayloadCacheBytes > AGENT_PAYLOAD_CACHE_MAX_BYTES
   ) {
     const oldestKey = agentPayloadCache.keys().next().value;
-    const oldest = agentPayloadCache.get(oldestKey);
-    agentPayloadCache.delete(oldestKey);
-    agentPayloadCacheBytes -= oldest?.bytes || 0;
+    evictAgentPayload(oldestKey, { evicted: true });
   }
 }
 
-async function relayEncryptedAgentPayload(request, item, encrypted, signal) {
-  const cached = cachedAgentPayload(encrypted);
-  if (cached !== undefined) return cached;
+const agentPayloadCachePurgeTimer = setInterval(
+  () => purgeExpiredAgentPayloads(),
+  Math.min(AGENT_PAYLOAD_CACHE_TTL_MS, 60_000),
+);
+agentPayloadCachePurgeTimer.unref?.();
+
+async function relayEncryptedAgentPayloadOnce(
+  item,
+  cacheKey,
+  headers,
+  signal,
+) {
   const body = {
     model: nativeAgentRelayModel(),
     stream: true,
@@ -1151,11 +1320,14 @@ async function relayEncryptedAgentPayload(request, item, encrypted, signal) {
   };
   const upstream = await fetch(nativeTarget("/responses", ""), {
     method: "POST",
-    headers: { ...nativeHeaders(request), Accept: "text/event-stream" },
+    headers: { ...headers, Accept: "text/event-stream" },
     body: JSON.stringify(body),
     signal,
   });
-  const bytes = Buffer.from(await upstream.arrayBuffer());
+  const bytes = await readResponseBody(upstream, {
+    maxBytes: 4 * 1024 * 1024,
+    signal,
+  });
   if (!upstream.ok) {
     const error = new Error(
       `Native collaboration payload relay failed with HTTP ${upstream.status}.`,
@@ -1185,8 +1357,79 @@ async function relayEncryptedAgentPayload(request, item, encrypted, signal) {
     error.status = 502;
     throw error;
   }
-  rememberAgentPayload(encrypted, plaintext);
+  rememberAgentPayload(cacheKey, plaintext);
   return plaintext;
+}
+
+function relayWaiterAbortReason(signal) {
+  if (signal?.reason instanceof Error) return signal.reason;
+  const error = new Error("The relay waiter was aborted.");
+  error.name = "AbortError";
+  return error;
+}
+
+function waitForAgentPayloadRelay(pending, signal) {
+  pending.waiters += 1;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => signal?.removeEventListener("abort", onAbort);
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback(value);
+    };
+    const onAbort = () => finish(reject, relayWaiterAbortReason(signal));
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+    pending.promise.then(
+      (value) => finish(resolve, value),
+      (error) => finish(reject, error),
+    );
+  }).finally(() => {
+    pending.waiters = Math.max(0, pending.waiters - 1);
+    if (pending.waiters === 0 && !pending.settled) {
+      pending.controller.abort(new Error("Every relay waiter disconnected."));
+    }
+  });
+}
+
+async function relayEncryptedAgentPayload(request, item, encrypted, signal) {
+  const { accountScope, headers } = nativeRelayContext(request);
+  const key = agentPayloadCacheKey(encrypted, accountScope);
+  const cached = cachedAgentPayload(key);
+  if (cached !== undefined) return cached;
+  const pending = agentPayloadCacheInFlight.get(key);
+  if (pending) {
+    agentPayloadCacheMetrics.coalesced += 1;
+    return waitForAgentPayloadRelay(pending, signal);
+  }
+  const controller = new AbortController();
+  const operation = {
+    controller,
+    promise: undefined,
+    settled: false,
+    waiters: 0,
+  };
+  operation.promise = relayEncryptedAgentPayloadOnce(
+    item,
+    key,
+    headers,
+    controller.signal,
+  ).finally(() => {
+    operation.settled = true;
+    if (agentPayloadCacheInFlight.get(key) === operation) {
+      agentPayloadCacheInFlight.delete(key);
+    }
+  });
+  // If every waiter disconnects, the shared operation is aborted and may
+  // reject after nobody remains to await it. Mark that rejection observed.
+  operation.promise.catch(() => {});
+  agentPayloadCacheInFlight.set(key, operation);
+  return waitForAgentPayloadRelay(operation, signal);
 }
 
 async function normalizeRoutedAgentInput(request, input, signal) {
@@ -1908,7 +2151,23 @@ async function summarize(request, payload, route, signal) {
   for (let index = 0; index < attempts.length; index += 1) {
     const attemptRoute = attempts[index];
     const sent = await summarizeWith(request, payload, attemptRoute, aged, prepared, signal);
-    const bytes = Buffer.from(await sent.upstream.arrayBuffer());
+    let bytes;
+    try {
+      bytes = await readResponseBody(sent.upstream, {
+        maxBytes: 32 * 1024 * 1024,
+        signal,
+      });
+    } catch (error) {
+      if (error?.code === "ERR_UPSTREAM_RESPONSE_TOO_LARGE") {
+        return {
+          ok: false,
+          status: 502,
+          payload: { error: { message: "Compact response is too large." } },
+          toolResultAging: aged.stats,
+        };
+      }
+      throw error;
+    }
     if (bytes.length > 32 * 1024 * 1024) {
       return {
         ok: false,
@@ -2583,7 +2842,7 @@ async function attemptModelFailover({
     // model's own problem and not evidence about the operator's chosen one.
     const hopVerdict = classifyRoutedFailure({
       status: upstream.status,
-      bodyText: await upstream.text().catch(() => ""),
+      bodyText: await boundedResponseText(upstream, MAX_BUFFERED_RESPONSE_BYTES, signal),
       retryAfterSeconds: Number(upstream.headers.get("retry-after")),
     });
     if (hopVerdict.swap) recordProviderCooldown(model.provider, hopVerdict);
@@ -2611,7 +2870,8 @@ function writeIdleNoProviderError(response) {
 
 async function handleResponses(request, response, requestUrl) {
   const startedAt = Date.now();
-  const activity = beginRequestActivity();
+  const controller = new AbortController();
+  const activity = beginRequestActivity({ request, response, controller });
   let clientGone = false;
   let requestedModel = "";
   let route;
@@ -2643,16 +2903,16 @@ async function handleResponses(request, response, requestUrl) {
   let finalStatus;
   let activityStatus;
   let usageRecorded = false;
-  const controller = new AbortController();
   bindClientAbort(request, response, () => {
     clientGone = true;
     controller.abort();
   });
   try {
     if (!requireCodexTransport(request, response)) return;
-    const encoded = await readRequestBody(request);
+    const encoded = await readRequestBody(request, { signal: controller.signal });
     const body = decodeBody(encoded, request.headers["content-encoding"]);
     const payload = await parseBodyAsync(body);
+    controller.signal.throwIfAborted();
     requestedModel = typeof payload.model === "string" ? payload.model : "";
     let registeredRoute =
       MODEL_BY_SLUG.get(requestedModel) ??
@@ -2911,7 +3171,11 @@ async function handleResponses(request, response, requestUrl) {
     // once. Nothing is relayed either way, so reading it is free.
     let failedBodyText;
     if (route && !upstream.ok) {
-      failedBodyText = await upstream.text().catch(() => "");
+      failedBodyText = await boundedResponseText(
+        upstream,
+        MAX_BUFFERED_RESPONSE_BYTES,
+        controller.signal,
+      );
       const verdict = classifyRoutedFailure({
         status: upstream.status,
         bodyText: failedBodyText,
@@ -2978,7 +3242,7 @@ async function handleResponses(request, response, requestUrl) {
           status: upstream.status,
           // Already drained above so the failover classifier could read it; a
           // second `.text()` on the same response yields "".
-          bodyText: failedBodyText ?? (await upstream.text().catch(() => "")),
+          bodyText: failedBodyText ?? "",
           modelName: route.displayName || route.slug,
           providerName:
             provider?.transport === "ollama"
@@ -3396,6 +3660,34 @@ async function handleResponses(request, response, requestUrl) {
     }
   } catch (error) {
     upstreamLatencyMs ??= Date.now() - startedAt;
+    if (activity.deadlineExceeded()) {
+      finalStatus = 504;
+      activityStatus = 504;
+      if (!usageRecorded) {
+        recordUsageEvent({
+          model: route?.slug || requestedModel,
+          provider: route ? canonicalProviderId(route.provider) : "openai",
+          status: 504,
+          durationMs: Date.now() - startedAt,
+          responseStartMs: upstreamLatencyMs,
+          requestDeadlineExceeded: true,
+        });
+        usageRecorded = true;
+      }
+      if (!response.headersSent) {
+        writeJson(response, 504, {
+          error: {
+            type: "router_request_timeout",
+            message: "The router canceled a request that exceeded its execution deadline.",
+          },
+        });
+      } else {
+        endStreamedResponse(response, {
+          message: "The router canceled a request that exceeded its execution deadline.",
+        });
+      }
+      return;
+    }
     if (retryEmptyCompletionGuard?.hasContent()) emptyCompletion = false;
     if (usageTransform) {
       usage = mergeTokenUsage(
@@ -3516,10 +3808,10 @@ async function handleResponses(request, response, requestUrl) {
 
 async function handleNativeRequest(request, response, requestUrl, defaultModel) {
   const startedAt = Date.now();
-  const activity = beginRequestActivity();
+  const controller = new AbortController();
+  const activity = beginRequestActivity({ request, response, controller });
   let clientGone = false;
   let requestedModel = defaultModel;
-  const controller = new AbortController();
   bindClientAbort(request, response, () => {
     clientGone = true;
     controller.abort();
@@ -3542,9 +3834,10 @@ async function handleNativeRequest(request, response, requestUrl, defaultModel) 
       });
       return;
     }
-    const encoded = await readRequestBody(request);
+    const encoded = await readRequestBody(request, { signal: controller.signal });
     const body = decodeBody(encoded, request.headers["content-encoding"]);
     const payload = await parseBodyAsync(body);
+    controller.signal.throwIfAborted();
     requestedModel =
       typeof payload.model === "string" ? payload.model : defaultModel;
     activity.setRoute({
@@ -3602,6 +3895,31 @@ async function handleNativeRequest(request, response, requestUrl, defaultModel) 
       );
     }
   } catch (error) {
+    if (activity.deadlineExceeded()) {
+      const status = 504;
+      if (!response.headersSent) {
+        writeJson(response, status, {
+          error: {
+            type: "router_request_timeout",
+            message: "The router canceled a request that exceeded its execution deadline.",
+          },
+        });
+      } else {
+        endStreamedResponse(response, {
+          message: "The router canceled a request that exceeded its execution deadline.",
+        });
+      }
+      recordUsageEvent({
+        model: requestedModel,
+        provider: "openai",
+        status,
+        durationMs: Date.now() - startedAt,
+        ...(response.headersSent ? { streamAborted: true } : {}),
+        requestDeadlineExceeded: true,
+      });
+      activity.finish(status);
+      return;
+    }
     // A failure with no usage event is invisible to the diagnostic that
     // separates "the upstream failed" from "the request died inside the
     // router" — the distinction #171 turned on. Meter this path the way the
@@ -3735,7 +4053,7 @@ const server = http.createServer((request, response) => {
       writeJson(response, status, {
         error: {
           type: "local_router_error",
-          code: transport?.code,
+          code: transport?.code || error?.code,
           message: transport
             ? `The local router could not complete the request: ${transport.cause}.${transport.hint}`
             : "The local router could not complete the request.",

@@ -828,6 +828,17 @@ on the loopback socket and bytes produced after decompression. The defaults are
 `MODEL_ROUTER_MAX_BODY_BYTES` and `MODEL_ROUTER_MAX_DECODED_BODY_BYTES`
 respectively when a deliberately larger local workload requires it.
 
+The router admits at most 64 simultaneous inference requests by default. It
+keeps tray activity records for 15 minutes without releasing truthful in-flight
+accounting, and applies a separate conservative 24-hour execution deadline.
+Override those bounds with `MODEL_ROUTER_MAX_ACTIVE_REQUESTS`,
+`MODEL_ROUTER_ACTIVITY_RECORD_RETENTION_MS`, and
+`MODEL_ROUTER_REQUEST_EXECUTION_TIMEOUT_MS`; buffered upstream error bodies use
+an 8 MiB ceiling configurable through `MODEL_ROUTER_MAX_BUFFERED_RESPONSE_BYTES`.
+The caller-authenticated health endpoint reports these limits, aggregate
+in-flight counts, bounded-buffer ceilings, and encrypted-relay cache metrics;
+the public health endpoint omits that resource detail.
+
 For routed external models, old textual tool results larger than 32 KiB are
 compacted after the model has acted on them. The four newest tool results stay
 intact, and each compacted result keeps a hash, head/tail evidence, and an exact
