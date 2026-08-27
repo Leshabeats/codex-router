@@ -23,7 +23,11 @@ import {
   endpointForModel,
   resolveProviderBaseUrl,
 } from "./model-registry.mjs";
-import { cooldownUntil, parseRateLimitHeaders } from "./rate-limit-headers.mjs";
+import {
+  cooldownUntil,
+  parseRateLimitHeaders,
+  requestQuotaFromRateLimitHeaders,
+} from "./rate-limit-headers.mjs";
 import { recordRateLimitSnapshot } from "./rate-limit-state.mjs";
 import { recordProviderCooldown } from "./model-failover.mjs";
 import { canonicalProviderId, readProviderSelection } from "./provider-selection.mjs";
@@ -1175,9 +1179,13 @@ async function handleRequest(request, response) {
             recordOutcome: false,
             deferErrors: true,
           });
+          const upstreamHeaders = outcome.headers;
           return {
             ...outcome,
-            headers: outcome.responseHeaders || outcome.headers,
+            headers: outcome.responseHeaders || upstreamHeaders,
+            upstreamHeaders,
+            retryAfterSeconds: responseRetryAfterSeconds(upstreamHeaders),
+            quota: requestQuotaFromRateLimitHeaders(upstreamHeaders),
             committed: outcome.committed === true,
             route: "plan",
             credentialId,
@@ -1240,9 +1248,13 @@ async function handleRequest(request, response) {
                 recordOutcome: false,
                 deferErrors: true,
               });
+              const upstreamHeaders = outcome.headers;
               return {
                 ...outcome,
-                headers: outcome.responseHeaders || outcome.headers,
+                headers: outcome.responseHeaders || upstreamHeaders,
+                upstreamHeaders,
+                retryAfterSeconds: responseRetryAfterSeconds(upstreamHeaders),
+                quota: requestQuotaFromRateLimitHeaders(upstreamHeaders),
                 committed: outcome.committed === true,
                 route: "plan",
                 credentialId,
@@ -1254,6 +1266,7 @@ async function handleRequest(request, response) {
             ok: false,
             committed: false,
             retryAfterSeconds: responseRetryAfterSeconds(attemptResponse.headers),
+            quota: requestQuotaFromRateLimitHeaders(attemptResponse.headers),
             bodyText,
             headers: attemptResponse.headers,
             session: attemptSession,
@@ -1265,6 +1278,8 @@ async function handleRequest(request, response) {
           ok: true,
           committed: false,
           response: attemptResponse,
+          headers: attemptResponse.headers,
+          quota: requestQuotaFromRateLimitHeaders(attemptResponse.headers),
           session: attemptSession,
           target: attemptTarget,
         };

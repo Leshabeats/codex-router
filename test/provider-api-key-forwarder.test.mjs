@@ -64,11 +64,26 @@ test("configured OpenCode credential ids fail over on 429 before committing a re
     request.resume();
     request.once("end", () => {
       if (authorizations.length === 1) {
-        response.writeHead(429, { "Content-Type": "application/json", "Retry-After": "137" });
+        response.writeHead(429, {
+          "Content-Type": "application/json",
+          "Retry-After": "137",
+          "X-RateLimit-Limit-Requests": "100",
+          "X-RateLimit-Remaining-Requests": "0",
+          "X-RateLimit-Reset-Requests": "137",
+        });
         response.end(JSON.stringify({ error: { message: "rate limited" } }));
         return;
       }
-      response.writeHead(200, { "Content-Type": "application/json" });
+      response.writeHead(200, {
+        "Content-Type": "application/json",
+        "X-RateLimit-Limit-Requests": "100",
+        "X-RateLimit-Remaining-Requests": "73",
+        "X-RateLimit-Reset-Requests": "60",
+        // Token headers remain provider-level telemetry; assigning them to a
+        // pooled key would conflate a different quota unit.
+        "X-RateLimit-Limit-Tokens": "9000",
+        "X-RateLimit-Remaining-Tokens": "8000",
+      });
       response.end(JSON.stringify({
         id: "chatcmpl_pool_success",
         object: "chat.completion",
@@ -122,7 +137,17 @@ test("configured OpenCode credential ids fail over on 429 before committing a re
     assert.deepEqual(new Set(authorizations), new Set(["Bearer POOL_KEY_ONE", "Bearer POOL_KEY_TWO"]));
     const pool = readProviderApiKeyPoolState(poolStatePath).providers["opencode-go"];
     const limited = Object.values(pool.credentials).find((entry) => entry.health.lastStatus === 429);
+    const successful = Object.values(pool.credentials).find((entry) => entry.health.lastStatus === 200);
     assert.ok(limited, "the failed credential should retain its own rate-limit outcome");
+    assert.ok(successful, "the winning credential should retain its own quota outcome");
+    assert.deepEqual(
+      { unit: limited.quota.unit, limit: limited.quota.limit, remaining: limited.quota.remaining },
+      { unit: "requests", limit: 100, remaining: 0 },
+    );
+    assert.deepEqual(
+      { unit: successful.quota.unit, limit: successful.quota.limit, remaining: successful.quota.remaining },
+      { unit: "requests", limit: 100, remaining: 73 },
+    );
     const cooldownMs = Date.parse(limited.health.cooldownUntil) - Date.now();
     assert.ok(cooldownMs >= 130_000 && cooldownMs <= 140_000, `unexpected cooldown ${cooldownMs}ms`);
   } finally {

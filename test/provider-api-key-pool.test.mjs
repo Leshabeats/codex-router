@@ -104,6 +104,70 @@ test("quota and round-robin selection never returns the secret value in metadata
   assert.doesNotMatch(readFileSync(filePath, "utf8"), /HIGH|LOW/);
 });
 
+test("an expired request window becomes unknown instead of pinning a key at zero", async () => {
+  const filePath = path.join(root, "expired-quota.json");
+  const expired = metadata(credential("expired", "EXPIRED", {
+    priority: 100,
+    quota: {
+      unit: "requests",
+      limit: 100,
+      remaining: 0,
+      resetAt: new Date(NOW - 1).toISOString(),
+    },
+  }));
+  const unknown = metadata(credential("unknown", "UNKNOWN", { priority: 1 }));
+  await upsertProviderApiKey("openrouter", expired, { filePath });
+  await upsertProviderApiKey("openrouter", unknown, { filePath });
+  const selected = await selectProviderApiKey("openrouter", {
+    filePath,
+    resolveCredential: (id) => id === expired.id ? "EXPIRED" : "UNKNOWN",
+    now: NOW,
+  });
+  assert.equal(selected.credentialId, expired.id);
+});
+
+test("an attempt records only its exact credential's complete request window", async () => {
+  const filePath = path.join(root, "observed-quota.json");
+  const first = metadata(credential("quota_first", "FIRST", { priority: 2 }));
+  const second = metadata(credential("quota_second", "SECOND", { priority: 1 }));
+  await upsertProviderApiKey("openrouter", first, { filePath });
+  await upsertProviderApiKey("openrouter", second, { filePath });
+  const resetAt = new Date(NOW + 60_000).toISOString();
+  await runProviderApiKeyAttempts("openrouter", {
+    filePath,
+    resolveCredential: (id) => id === first.id ? "FIRST" : "SECOND",
+    send: async () => ({
+      status: 200,
+      ok: true,
+      committed: false,
+      quota: { unit: "requests", limit: 100, remaining: 42, resetAt },
+    }),
+    now: () => NOW,
+  });
+  let state = readProviderApiKeyPoolState(filePath, { now: NOW });
+  assert.deepEqual(state.providers.openrouter.credentials[first.id].quota, {
+    unit: "requests",
+    limit: 100,
+    remaining: 42,
+    resetAt,
+    observedAt: new Date(NOW).toISOString(),
+  });
+  assert.equal(state.providers.openrouter.credentials[second.id].quota, undefined);
+
+  await recordProviderApiKeyOutcome("openrouter", first.id, {
+    status: 200,
+    ok: true,
+    quota: { unit: "requests", limit: 100 },
+    now: NOW + 1_000,
+  }, { filePath });
+  state = readProviderApiKeyPoolState(filePath, { now: NOW + 1_000 });
+  assert.equal(
+    state.providers.openrouter.credentials[first.id].quota.remaining,
+    42,
+    "a later partial header set must preserve the complete observation",
+  );
+});
+
 test("non-sticky round-robin advances across every credential for a bound session", async () => {
   const filePath = path.join(root, "round-robin-session.json");
   const entries = ["a", "b", "c"].map((id) => metadata(credential(`round_${id}`, id.toUpperCase())));

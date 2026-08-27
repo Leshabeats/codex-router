@@ -112,11 +112,18 @@ function assertAllowedKeys(value, allowed, context) {
 
 function normalizeQuota(value) {
   if (!record(value)) return undefined;
-  assertAllowedKeys(value, new Set(["limit", "remaining", "used", "resetAt", "observedAt"]), "quota");
+  assertAllowedKeys(value, new Set(["unit", "limit", "remaining", "used", "resetAt", "observedAt"]), "quota");
   const limit = finiteNumber(value.limit);
   const remaining = finiteNumber(value.remaining);
   if (limit === undefined || limit <= 0 || remaining === undefined) return undefined;
+  const unit = value.unit === undefined
+    ? undefined
+    : text(value.unit, "quota.unit", { max: 16, required: true });
+  if (unit !== undefined && unit !== "requests" && unit !== "tokens") {
+    throw new Error(`Unsupported quota unit: ${unit}`);
+  }
   const result = {
+    ...(unit ? { unit } : {}),
     limit,
     remaining: Math.max(0, Math.min(limit, remaining)),
   };
@@ -440,8 +447,13 @@ export function providerApiKeyPoolsSnapshot({
   };
 }
 
-function quotaRatio(meta) {
+function quotaRatio(meta, at) {
   if (!meta?.quota || !(meta.quota.limit > 0) || !Number.isFinite(meta.quota.remaining)) return undefined;
+  const reset = Date.parse(meta.quota.resetAt || "");
+  // A completed window is no longer evidence that this credential is empty.
+  // Keep the historical snapshot for status, but make policy selection treat
+  // it as unknown until the provider reports the next window.
+  if (Number.isFinite(reset) && reset <= at) return undefined;
   return Math.max(0, Math.min(1, meta.quota.remaining / meta.quota.limit));
 }
 
@@ -455,7 +467,7 @@ function eligibleMeta(pool, at, exclude = new Set()) {
     if (exclude.has(meta.id) || meta.state !== "active" || meta.paused) return false;
     if (pool.policy.pausedCredentialIds.includes(meta.id)) return false;
     if (cooldownActive(meta, at) || meta.health.state === "failed") return false;
-    const ratio = quotaRatio(meta);
+    const ratio = quotaRatio(meta, at);
     const reset = Date.parse(meta.quota?.resetAt || "");
     return !(ratio !== undefined && ratio <= 0 && (!Number.isFinite(reset) || reset > at));
   });
@@ -474,21 +486,21 @@ function orderMeta(pool, candidates) {
   });
 }
 
-function chooseMeta(pool, candidates) {
+function chooseMeta(pool, candidates, at) {
   const ordered = orderMeta(pool, candidates);
   if (!ordered.length) return undefined;
   if (pool.policy.strategy === "round-robin") {
     return ordered[pool.roundRobinCursor % ordered.length];
   }
   const aboveThreshold = ordered.filter((candidate) => {
-    const ratio = quotaRatio(candidate);
+    const ratio = quotaRatio(candidate, at);
     return ratio === undefined || ratio > pool.policy.autoSwitchThreshold;
   });
   const eligible = aboveThreshold.length ? aboveThreshold : ordered;
   if (pool.policy.strategy === "fill-first") return eligible[0];
   return [...eligible].sort((left, right) => {
-    const leftRatio = quotaRatio(left);
-    const rightRatio = quotaRatio(right);
+    const leftRatio = quotaRatio(left, at);
+    const rightRatio = quotaRatio(right, at);
     if (leftRatio !== undefined && rightRatio === undefined) return -1;
     if (leftRatio === undefined && rightRatio !== undefined) return 1;
     if (leftRatio !== undefined && rightRatio !== undefined && leftRatio !== rightRatio) {
@@ -643,7 +655,7 @@ async function selectFromState(providerOrId, options = {}) {
   let selectedByPolicy = false;
   if (!selectedEntry) {
     selectedByPolicy = true;
-    selectedEntry = { meta: chooseMeta(pool, resolved.entries.map((entry) => entry.meta)) };
+    selectedEntry = { meta: chooseMeta(pool, resolved.entries.map((entry) => entry.meta), at) };
     selectedEntry.value = resolved.entries.find((entry) => entry.meta.id === selectedEntry.meta.id)?.value;
     rebound = Boolean(bound && selectedEntry.meta && selectedEntry.meta.id !== bound.credentialId);
   }
@@ -873,6 +885,15 @@ export async function recordProviderApiKeyOutcome(providerOrId, credentialOrId, 
     meta.health.lastUsedAt = isoNow(at);
     meta.requestCount += 1;
     if (Number.isFinite(outcome.tokens) && outcome.tokens >= 0) meta.tokenCount += Math.floor(outcome.tokens);
+    if (record(outcome.quota)) {
+      const quota = normalizeQuota({
+        ...outcome.quota,
+        observedAt: outcome.quota.observedAt || isoNow(at),
+      });
+      // Partial rate-limit headers are not a complete window and must not
+      // erase the last complete observation for this exact credential.
+      if (quota) meta.quota = quota;
+    }
     if (ok) {
       meta.health.state = "healthy";
       meta.health.lastSuccessAt = isoNow(at);
@@ -982,6 +1003,7 @@ export async function runProviderApiKeyAttempts(providerOrId, {
         errorCode,
         error: error?.message || result?.error,
         retryAfterSeconds: Number(result?.retryAfterSeconds),
+        quota: result?.quota,
         now: now(),
       }, { filePath });
     } catch (caught) {
