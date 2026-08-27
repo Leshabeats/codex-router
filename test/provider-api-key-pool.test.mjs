@@ -19,6 +19,7 @@ const {
   getProviderApiKeyPool,
   deleteProviderApiKeyPool,
   isRetryableProviderApiKeyFailure,
+  providerApiKeyPoolsSnapshot,
   providerApiKeyPoolStatus,
   readProviderApiKeyPoolState,
   recordProviderApiKeyOutcome,
@@ -101,6 +102,71 @@ test("quota and round-robin selection never returns the secret value in metadata
   const snapshot = getProviderApiKeyPool("openrouter", { filePath, now: NOW });
   assert.equal(snapshot.credentials[0].id.startsWith("cred_"), true);
   assert.doesNotMatch(readFileSync(filePath, "utf8"), /HIGH|LOW/);
+});
+
+test("non-sticky round-robin advances across every credential for a bound session", async () => {
+  const filePath = path.join(root, "round-robin-session.json");
+  const entries = ["a", "b", "c"].map((id) => metadata(credential(`round_${id}`, id.toUpperCase())));
+  for (const entry of entries) await upsertProviderApiKey("openrouter", entry, { filePath });
+  await setProviderApiKeyPoolPolicy("openrouter", {
+    strategy: "round-robin",
+    sticky: false,
+  }, { filePath });
+  const values = new Map(entries.map((entry, index) => [entry.id, String.fromCharCode(65 + index)]));
+  const selected = [];
+  for (let index = 0; index < 5; index += 1) {
+    const result = await selectProviderApiKeyLocked("openrouter", {
+      filePath,
+      sessionId: "same-thread",
+      resolveCredential: (id) => values.get(id),
+      now: NOW + index,
+    });
+    selected.push(result.credentialId);
+  }
+  assert.deepEqual(selected, [entries[0].id, entries[1].id, entries[2].id, entries[0].id, entries[1].id]);
+});
+
+test("diagnostic snapshots fail closed for every unusable authoritative pool without exposing secrets", async () => {
+  const emptyPath = path.join(root, "diagnostic-empty.json");
+  const emptyEntry = metadata(credential("diagnostic_empty", "EMPTY"));
+  await upsertProviderApiKey("openrouter", emptyEntry, { filePath: emptyPath });
+  await removeProviderApiKey("openrouter", emptyEntry.id, { filePath: emptyPath });
+  const empty = providerApiKeyPoolsSnapshot({
+    filePath: emptyPath,
+    resolveCredential: () => "MUST_NOT_APPEAR_EMPTY",
+  });
+  assert.equal(empty.usable, false);
+  assert.equal(empty.providers.openrouter.readiness.reason, "empty_pool");
+
+  const pausedPath = path.join(root, "diagnostic-paused.json");
+  const pausedEntry = metadata(credential("diagnostic_paused", "PAUSED"));
+  await upsertProviderApiKey("openrouter", pausedEntry, { filePath: pausedPath });
+  await setProviderApiKeyPaused("openrouter", pausedEntry.id, true, { filePath: pausedPath });
+  const paused = providerApiKeyPoolsSnapshot({
+    filePath: pausedPath,
+    resolveCredential: () => "MUST_NOT_APPEAR_PAUSED",
+  });
+  assert.equal(paused.usable, false);
+  assert.equal(paused.providers.openrouter.readiness.reason, "no_eligible_credentials");
+
+  const unresolvedPath = path.join(root, "diagnostic-unresolved.json");
+  const unresolvedEntry = metadata(credential("diagnostic_unresolved", "UNRESOLVED"));
+  await upsertProviderApiKey("openrouter", unresolvedEntry, { filePath: unresolvedPath });
+  const unresolved = providerApiKeyPoolsSnapshot({
+    filePath: unresolvedPath,
+    resolveCredential: () => undefined,
+  });
+  assert.equal(unresolved.usable, false);
+  assert.equal(unresolved.providers.openrouter.readiness.reason, "unresolvable_credentials");
+
+  const readySecret = "DIAGNOSTIC_READY_SECRET_MUST_NOT_APPEAR";
+  const ready = providerApiKeyPoolsSnapshot({
+    filePath: unresolvedPath,
+    resolveCredential: () => readySecret,
+  });
+  assert.equal(ready.usable, true);
+  assert.equal(ready.providers.openrouter.readiness.reason, "ready");
+  assert.doesNotMatch(JSON.stringify(ready), new RegExp(readySecret));
 });
 
 test("ordinary 400 and 404 responses do not disable a key", async () => {
@@ -197,6 +263,30 @@ test("runProviderApiKeyAttempts retries before relay and stops after relay begin
   assert.equal(lateCalls, 1);
   assert.equal(late.attempts[0].committed, true);
   assert.equal(late.reason, "failed");
+});
+
+test("a send error after response commit propagates the commit boundary", async () => {
+  const filePath = path.join(root, "committed-send-error.json");
+  const entry = metadata(credential("committed_throw", "COMMITTED"));
+  await upsertProviderApiKey("openrouter", entry, { filePath });
+  let committed = false;
+  let sends = 0;
+  const failure = new Error("stream failed after headers");
+  const result = await runProviderApiKeyAttempts("openrouter", {
+    filePath,
+    resolveCredential: () => "COMMITTED",
+    isResponseCommitted: () => committed,
+    send: async () => {
+      sends += 1;
+      committed = true;
+      throw failure;
+    },
+    now: () => NOW,
+  });
+  assert.equal(sends, 1);
+  assert.equal(result.error, failure);
+  assert.equal(result.committed, true);
+  assert.equal(result.attempts[0].committed, true);
 });
 
 test("duplicate resolved secrets remain blocked after a failed candidate is excluded", async () => {

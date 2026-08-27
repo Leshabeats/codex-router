@@ -14,6 +14,7 @@ process.env.MODEL_ROUTER_PROVIDER_CREDENTIAL_STORE = credentialStorePath;
 process.env.MODEL_ROUTER_PROVIDER_CREDENTIAL_MIGRATIONS = path.join(stateDir, "migrations", "provider-credentials");
 
 const { addCredentialReference, readProviderCredentialStore } = await import("../src/provider-credential-store.mjs");
+const { upsertProviderApiKey } = await import("../src/provider-api-key-pool.mjs");
 const {
   addEnvironmentCredentialToPool,
   addStoredCredentialToPool,
@@ -40,7 +41,14 @@ test("credential lifecycle control is provider-bound and never stores secret byt
   await addStoredCredentialToPool("opencode-go-messages", credential.id, { credentialStorePath, poolStatePath });
   await setStoredCredentialPoolPolicy("opencode-go", "round-robin", { poolStatePath });
   await setStoredCredentialPoolState("opencode-go", credential.id, true, { poolStatePath });
-  assert.equal(storedCredentialPoolStatus("opencode-go", { poolStatePath }).credentials[0].paused, true);
+  const paused = storedCredentialPoolStatus("opencode-go", { poolStatePath }).credentials[0];
+  assert.equal(paused.paused, true);
+  await addStoredCredentialToPool("opencode-go", credential.id, { credentialStorePath, poolStatePath });
+  assert.deepEqual(
+    storedCredentialPoolStatus("opencode-go", { poolStatePath }).credentials[0],
+    paused,
+    "re-adding an existing stored reference must not resume or reset it",
+  );
   await setStoredCredentialPoolState("opencode-go", credential.id, false, { poolStatePath });
 
   const status = storedCredentialPoolStatus("opencode-go-messages", { poolStatePath });
@@ -56,10 +64,35 @@ test("an allowed environment source can be registered and pooled in one operatio
     poolStatePath,
   };
   const result = await addEnvironmentCredentialToPool("opencode-go", "OPENCODE_API_KEY", options);
+  await upsertProviderApiKey("opencode-go", {
+    id: result.credential.id,
+    priority: 73,
+    quota: {
+      limit: 1_000,
+      remaining: 417,
+      observedAt: "2026-08-27T12:00:00.000Z",
+    },
+    health: {
+      state: "healthy",
+      lastSuccessAt: "2026-08-27T12:00:00.000Z",
+      lastStatus: 200,
+    },
+    requestCount: 29,
+    tokenCount: 31_337,
+  }, { filePath: poolStatePath });
+  await setStoredCredentialPoolState("opencode-go", result.credential.id, true, { poolStatePath });
+  const beforeRepeat = storedCredentialPoolStatus("opencode-go", { poolStatePath }).credentials
+    .find((entry) => entry.id === result.credential.id);
   const repeated = await addEnvironmentCredentialToPool("opencode-go", "OPENCODE_API_KEY", options);
   assert.match(result.credential.id, /^cred_/);
   assert.equal(result.credential.providerId, "opencode-go");
   assert.equal(repeated.credential.id, result.credential.id);
+  assert.deepEqual(
+    storedCredentialPoolStatus("opencode-go", { poolStatePath }).credentials
+      .find((entry) => entry.id === result.credential.id),
+    beforeRepeat,
+    "idempotent add-env must preserve pause, health, quota, priority, and counters",
+  );
   const matching = readProviderCredentialStore(credentialStorePath).credentials.filter(
     (entry) => entry.providerId === "opencode-go" && entry.secretRef.name === "OPENCODE_API_KEY",
   );

@@ -349,8 +349,31 @@ function poolStatus(providerOrId, filePath, now = Date.now()) {
   };
 }
 
-export function providerApiKeyPoolStatus(providerOrId, { filePath = PROVIDER_API_KEY_POOL_PATH_DEFAULT, now = Date.now() } = {}) {
-  return poolStatus(providerOrId, filePath, now);
+export function providerApiKeyPoolStatus(providerOrId, {
+  filePath = PROVIDER_API_KEY_POOL_PATH_DEFAULT,
+  now = Date.now(),
+  resolveCredential,
+} = {}) {
+  const status = poolStatus(providerOrId, filePath, now);
+  if (!status.configured) return status;
+  if (!status.valid) {
+    return {
+      ...status,
+      readiness: {
+        usable: false,
+        reason: "invalid_pool_state",
+        credentialCount: 0,
+        eligibleCredentialCount: 0,
+        resolvableCredentialCount: 0,
+      },
+    };
+  }
+  return {
+    ...status,
+    ...(typeof resolveCredential === "function"
+      ? { readiness: poolReadiness(status.pool, { now, resolveCredential }) }
+      : {}),
+  };
 }
 
 export function sanitizeProviderApiKeyPoolCredential(value) {
@@ -390,18 +413,32 @@ export function getProviderApiKeyPool(providerOrId, { filePath = PROVIDER_API_KE
   };
 }
 
-export function providerApiKeyPoolsSnapshot({ filePath = PROVIDER_API_KEY_POOL_PATH_DEFAULT, now = Date.now() } = {}) {
+export function providerApiKeyPoolsSnapshot({
+  filePath = PROVIDER_API_KEY_POOL_PATH_DEFAULT,
+  now = Date.now(),
+  resolveCredential,
+} = {}) {
   const state = readProviderApiKeyPoolState(filePath, { now });
-  if (!state.valid) return { configured: true, valid: false, providers: {} };
+  if (!state.valid) return { configured: true, valid: false, usable: false, providers: {} };
+  const providers = Object.fromEntries(
+    Object.entries(state.providers).map(([provider, pool]) => [
+      provider,
+      {
+        ...sanitizeProviderApiKeyPool(provider, pool),
+        readiness: poolReadiness(pool, {
+          now,
+          resolveCredential: typeof resolveCredential === "function"
+            ? (credential) => resolveCredential(provider, credential)
+            : undefined,
+        }),
+      },
+    ]),
+  );
   return {
-    configured: Object.keys(state.providers).length > 0,
+    configured: Object.keys(providers).length > 0,
     valid: true,
-    providers: Object.fromEntries(
-      Object.entries(state.providers).map(([provider, pool]) => [
-        provider,
-        sanitizeProviderApiKeyPool(provider, pool),
-      ]),
-    ),
+    usable: Object.values(providers).every((pool) => pool.readiness.usable),
+    providers,
   };
 }
 
@@ -480,6 +517,41 @@ function duplicateResolvedSecrets(entries) {
   return false;
 }
 
+function poolReadiness(pool, { resolveCredential, now = Date.now() } = {}) {
+  const credentials = Object.values(pool?.credentials || {});
+  const eligible = eligibleMeta(pool, nowMs(now));
+  const summary = {
+    credentialCount: credentials.length,
+    eligibleCredentialCount: eligible.length,
+    resolvableCredentialCount: 0,
+  };
+  if (!credentials.length) return { usable: false, reason: "empty_pool", ...summary };
+  if (!eligible.length) {
+    return { usable: false, reason: "no_eligible_credentials", ...summary };
+  }
+  if (typeof resolveCredential !== "function") {
+    return { usable: false, reason: "credential_resolver_required", ...summary };
+  }
+  const resolved = [];
+  for (const meta of eligible) {
+    let value;
+    try {
+      value = resolveValue(resolveCredential(meta.id));
+    } catch {
+      value = undefined;
+    }
+    if (value) resolved.push({ meta, value });
+  }
+  summary.resolvableCredentialCount = resolved.length;
+  if (!resolved.length) {
+    return { usable: false, reason: "unresolvable_credentials", ...summary };
+  }
+  if (duplicateResolvedSecrets(resolved)) {
+    return { usable: false, reason: "duplicate_secret_reference", ...summary };
+  }
+  return { usable: true, reason: "ready", ...summary };
+}
+
 async function resolvedCandidates(pool, { resolveCredential, now, exclude }) {
   if (typeof resolveCredential !== "function") return { entries: [], reason: "credential_resolver_required" };
   const entries = [];
@@ -548,7 +620,9 @@ async function selectFromState(providerOrId, options = {}) {
     ? boundEntry
     : undefined;
   let rebound = false;
+  let selectedByPolicy = false;
   if (!selectedEntry) {
+    selectedByPolicy = true;
     selectedEntry = { meta: chooseMeta(pool, resolved.entries.map((entry) => entry.meta)) };
     selectedEntry.value = resolved.entries.find((entry) => entry.meta.id === selectedEntry.meta.id)?.value;
     rebound = Boolean(bound && selectedEntry.meta && selectedEntry.meta.id !== bound.credentialId);
@@ -556,7 +630,7 @@ async function selectFromState(providerOrId, options = {}) {
   if (!selectedEntry?.meta || !selectedEntry.value) return selectedResult(provider, pool, undefined, undefined, undefined);
   if (options.commit !== false) {
     selectedEntry.meta.health.lastUsedAt = isoNow(at);
-    if (pool.policy.strategy === "round-robin" && !boundEntry) {
+    if (pool.policy.strategy === "round-robin" && selectedByPolicy) {
       pool.roundRobinCursor = (pool.roundRobinCursor + 1) % Math.max(1, resolved.entries.length);
     }
     if (session) {
@@ -668,9 +742,13 @@ export async function upsertProviderApiKey(providerOrId, credential, {
       credentials: {},
       sessions: {},
     };
-    pool.credentials[normalized.id] = normalized;
+    const existing = pool.credentials[normalized.id];
+    const next = existing
+      ? normalizeCredential({ ...existing, ...credential, providerId: provider }, provider)
+      : normalized;
+    pool.credentials[next.id] = next;
     state.providers[provider] = pool;
-    return sanitizeProviderApiKeyPoolCredential(normalized);
+    return sanitizeProviderApiKeyPoolCredential(next);
   });
 }
 
@@ -886,10 +964,10 @@ export async function runProviderApiKeyAttempts(providerOrId, {
     attempts.push(attempt);
     if (error) {
       if (!isRetryableProviderApiKeyFailure({ error, errorCode, committed: responseCommitted })) {
-        return { configured: true, valid: true, providerId: provider, credentialId: selection.credentialId, credentialValue: selection.credentialValue, result, error, attempts, reason: "failed" };
+        return { configured: true, valid: true, providerId: provider, credentialId: selection.credentialId, credentialValue: selection.credentialValue, result, error, attempts, committed: responseCommitted, reason: "failed" };
       }
     } else if (ok || responseCommitted || !isRetryableProviderApiKeyFailure({ status: statusCode, committed: responseCommitted })) {
-      return { configured: true, valid: true, providerId: provider, credentialId: selection.credentialId, credentialValue: selection.credentialValue, result, attempts, reason: ok ? "success" : "failed" };
+      return { configured: true, valid: true, providerId: provider, credentialId: selection.credentialId, credentialValue: selection.credentialValue, result, attempts, committed: responseCommitted, reason: ok ? "success" : "failed" };
     }
     if (index + 1 >= limit || now() - startedAt >= budgetMs) break;
     await sleepImpl(backoffMs * 3 ** index);
