@@ -7506,6 +7506,14 @@ test("router response pipelines preserve ambiguous provider bytes exactly", asyn
       `data: {"type":"response.output_item.done","raw_marker":"${postCommitMarker}","item":{"type":"function_call","name":"collaboration__spawn_agent"\n\n`,
     "utf8",
   );
+  const lifecycleMarker = "raw-special-lifecycle-close-must-not-leak";
+  const lifecycleFailure = Buffer.from(
+    'event: response.output_item.added\n' +
+      'data: {"type":"response.output_item.added","item":{"type":"function_call","id":"fc_lifecycle","call_id":"call_lifecycle","name":"apply_patch","arguments":""}}\n\n' +
+      'event: response.function_call_arguments.done\n' +
+      `data: {"type":"response.function_call_arguments.done","raw_marker":"${lifecycleMarker}","item_id":"fc_lifecycle","call_id":"call_lifecycle","arguments":"{\\"patch\\":\\"wrong shape\\"}"}\n\n`,
+    "utf8",
+  );
   const replies = new Map([
     ["duplicate-sse", ["text/event-stream", duplicateSse]],
     ["malformed-sse", ["text/event-stream", malformedSse]],
@@ -7514,6 +7522,7 @@ test("router response pipelines preserve ambiguous provider bytes exactly", asyn
     ["malformed-json", ["application/json", malformedJson]],
     ["invalid-json", ["application/json", invalidJson]],
     ["post-commit-failure", ["text/event-stream", postCommitFailure]],
+    ["special-lifecycle-failure", ["text/event-stream", lifecycleFailure]],
   ]);
   const gateway = await mockServer(async (request, response) => {
     const body = await bodyJson(request);
@@ -7529,6 +7538,7 @@ test("router response pipelines preserve ambiguous provider bytes exactly", asyn
     CODEX_ROUTER_EMPTY_COMPLETION_RETRY: "0",
   });
   const tools = [
+    { type: "custom", name: "apply_patch" },
     {
       type: "namespace",
       name: "collaboration",
@@ -7593,6 +7603,16 @@ test("router response pipelines preserve ambiguous provider bytes exactly", asyn
     assert.match(failureText, /event: error/u);
     assert.match(failureText, /local_router_stream_failed/u);
     assert.doesNotMatch(failureText, new RegExp(postCommitMarker, "u"));
+    const lifecycleFailed = await turn(
+      "special-lifecycle-failure",
+      "opencode-go-responses/grok-4.5",
+      true,
+    );
+    const lifecycleFailureText = lifecycleFailed.toString("utf8");
+    assert.match(lifecycleFailureText, /"type":"custom_tool_call"/u);
+    assert.match(lifecycleFailureText, /event: error/u);
+    assert.match(lifecycleFailureText, /local_router_stream_failed/u);
+    assert.doesNotMatch(lifecycleFailureText, new RegExp(lifecycleMarker, "u"));
   } finally {
     await stopChild(router);
     await closeServer(gateway.server);

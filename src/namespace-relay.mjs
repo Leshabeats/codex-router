@@ -1,6 +1,7 @@
 import { isUtf8 } from "node:buffer";
 import { createHash } from "node:crypto";
 import { Transform } from "node:stream";
+import { isDeepStrictEqual } from "node:util";
 
 import { HeaderlessSseDetector } from "./sse-prefix.mjs";
 import { coerceFunctionCallArguments } from "./tool-arguments.mjs";
@@ -498,6 +499,8 @@ export function injectSessionModelForSpawnCalls(item, model) {
 }
 
 const MAX_JSON_CAPTURE_BYTES = 64 * 1024 * 1024;
+const JSON_CAPTURE_PART_BYTES = 64 * 1024;
+const MAX_TRACKED_OUTPUT_ITEMS = 4096;
 // Stop staging an undecided SSE frame before downstream response guards lose
 // sight of their own byte ceilings. Before any semantic output, crossing this
 // bound releases raw bytes and disables rewriting; after one rewrite,
@@ -508,7 +511,7 @@ const MAX_EXACT_JSON_NUMBER_LENGTH = 4096;
 const LINE_FEED = 0x0a;
 const CARRIAGE_RETURN = 0x0d;
 const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]);
-const JSON_NUMBER_PREFIX = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/;
+const JSON_NUMBER_AT_OFFSET = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
 const JSON_NUMBER_PARTS =
   /^(-?)(0|[1-9]\d*)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/;
 
@@ -636,10 +639,11 @@ function jsonIsUnambiguousForRewrite(text) {
   };
 
   const number = () => {
-    const match = JSON_NUMBER_PREFIX.exec(text.slice(offset));
+    JSON_NUMBER_AT_OFFSET.lastIndex = offset;
+    const match = JSON_NUMBER_AT_OFFSET.exec(text);
     if (!match) return false;
     if (!jsonNumberIsStableForRewrite(match[0])) return false;
-    offset += match[0].length;
+    offset = JSON_NUMBER_AT_OFFSET.lastIndex;
     return true;
   };
 
@@ -2091,7 +2095,9 @@ class NamespaceRelayCommittedStreamError extends Error {
 // the namespace + name shape Codex dispatches through its app runtime.
 export class NamespaceToolCallTransform extends Transform {
   #eventStream;
-  #pending = Buffer.alloc(0);
+  #pendingParts = [];
+  #pendingBytes = 0;
+  #pendingTailBytes = 0;
   #released = false;
   #headerlessDetector;
   #sseParts = [];
@@ -2102,7 +2108,9 @@ export class NamespaceToolCallTransform extends Transform {
   #sseAtStreamStart = true;
   #sseLineEnding = "\n";
   #sseLineEndingObserved = false;
+  #maxJsonCaptureBytes;
   #maxSseFrameBytes;
+  #maxTrackedOutputItems;
   #rewriteDisabled = false;
   #semanticMutationCommitted = false;
   #lookups;
@@ -2115,8 +2123,13 @@ export class NamespaceToolCallTransform extends Transform {
   #injectQueue = [];
   #injectionsDone = false;
   #lastInjectedCalls = [];
-  #customItemIds = new Set();
-  #customDeltaStates = new Map();
+  // Every observed output-item identity reserves both ids. Special relays keep
+  // their source and native shapes here until terminal validation so a stream
+  // cannot change owners or fall back to raw function-call events after its
+  // opening was rewritten.
+  #callsByItemId = new Map();
+  #callsByCallId = new Map();
+  #trackedCallCount = 0;
 
   constructor(namespaces, contentType = "", sessionModel, options = {}) {
     super();
@@ -2130,10 +2143,18 @@ export class NamespaceToolCallTransform extends Transform {
     // must not run the namespace rewrites (they exist for routed providers)
     // or re-serialize model-authored events it did not change.
     this.#injectOnly = Boolean(options.injectOnly);
+    this.#maxJsonCaptureBytes =
+      Number.isInteger(options.maxJsonCaptureBytes) && options.maxJsonCaptureBytes > 0
+        ? options.maxJsonCaptureBytes
+        : MAX_JSON_CAPTURE_BYTES;
     this.#maxSseFrameBytes =
       Number.isInteger(options.maxSseFrameBytes) && options.maxSseFrameBytes > 0
         ? options.maxSseFrameBytes
         : MAX_SSE_FRAME_BYTES;
+    this.#maxTrackedOutputItems =
+      Number.isInteger(options.maxTrackedOutputItems) && options.maxTrackedOutputItems > 0
+        ? options.maxTrackedOutputItems
+        : MAX_TRACKED_OUTPUT_ITEMS;
     const declared = String(contentType).toLowerCase();
     this.#eventStream = declared.includes("text/event-stream");
     this.#headerlessDetector =
@@ -2168,12 +2189,7 @@ export class NamespaceToolCallTransform extends Transform {
         this.push(bytes);
         return;
       }
-      this.#pending = this.#pending.length ? Buffer.concat([this.#pending, bytes]) : bytes;
-      if (this.#pending.length > MAX_JSON_CAPTURE_BYTES) {
-        this.push(this.#pending);
-        this.#pending = Buffer.alloc(0);
-        this.#released = true;
-      }
+      this.#captureJsonBytes(bytes);
       return;
     }
     if (this.#rewriteDisabled) {
@@ -2201,8 +2217,7 @@ export class NamespaceToolCallTransform extends Transform {
       for (const buffered of detected.chunks) this.#transformChunk(buffered);
     }
     if (!this.#eventStream) {
-      const body = this.#pending;
-      this.#pending = Buffer.alloc(0);
+      const body = this.#takeJsonCapture();
       if (this.#released || !body.length) {
         if (body.length) this.push(body);
         return;
@@ -2249,14 +2264,90 @@ export class NamespaceToolCallTransform extends Transform {
       this.#ssePendingLineWasBlank = false;
       this.#completeSseLine(blankLine);
     }
+    let tailSeparator;
     if (!this.#rewriteDisabled && this.#sseBytes) {
-      this.#emitSseFrame(this.#takeSseFrame());
+      const tail = this.#takeSseFrame();
+      this.#emitSseFrame(tail);
+      tailSeparator = this.#separatorAfterSseTail(tail);
+    }
+    if (!this.#rewriteDisabled && this.#hasOpenSpecialCalls()) {
+      if (this.#semanticMutationCommitted) {
+        throw new NamespaceRelayCommittedStreamError("unterminated special tool call");
+      }
+      this.#disableSseRewriting();
     }
     // Streams that omit response.completed / [DONE] still need the closes,
     // unless an ambiguous frame made observing prior calls unsafe.
     if (!this.#rewriteDisabled) {
-      for (const piece of this.#drainInterruptBlocks()) this.push(piece);
+      const blocks = this.#drainInterruptBlocks();
+      if (blocks.length && tailSeparator?.length) this.push(tailSeparator);
+      for (const piece of blocks) this.push(piece);
     }
+  }
+
+  #captureJsonBytes(bytes) {
+    // Fixed-size parts keep both copies and metadata bounded even when an
+    // upstream fragments a body into one-byte chunks. Each byte is copied once
+    // while capturing and at most once more for the final JSON parse.
+    let offset = 0;
+    while (offset < bytes.length && !this.#released) {
+      let tail = this.#pendingParts.at(-1);
+      if (!tail || this.#pendingTailBytes === tail.length) {
+        const remainingUntilRelease =
+          this.#maxJsonCaptureBytes + 1 - this.#pendingBytes;
+        tail = Buffer.allocUnsafe(
+          Math.min(JSON_CAPTURE_PART_BYTES, remainingUntilRelease),
+        );
+        this.#pendingParts.push(tail);
+        this.#pendingTailBytes = 0;
+      }
+      const copied = Math.min(tail.length - this.#pendingTailBytes, bytes.length - offset);
+      bytes.copy(
+        tail,
+        this.#pendingTailBytes,
+        offset,
+        offset + copied,
+      );
+      this.#pendingTailBytes += copied;
+      this.#pendingBytes += copied;
+      offset += copied;
+      if (this.#pendingBytes > this.#maxJsonCaptureBytes) {
+        for (let index = 0; index < this.#pendingParts.length; index += 1) {
+          const part = this.#pendingParts[index];
+          this.push(
+            index === this.#pendingParts.length - 1
+              ? part.subarray(0, this.#pendingTailBytes)
+              : part,
+          );
+        }
+        this.#pendingParts = [];
+        this.#pendingBytes = 0;
+        this.#pendingTailBytes = 0;
+        this.#released = true;
+      }
+    }
+    if (offset < bytes.length) this.push(bytes.subarray(offset));
+  }
+
+  #takeJsonCapture() {
+    if (!this.#pendingParts.length) return Buffer.alloc(0);
+    const lastIndex = this.#pendingParts.length - 1;
+    const parts = this.#pendingParts.map((part, index) =>
+      index === lastIndex ? part.subarray(0, this.#pendingTailBytes) : part,
+    );
+    const body =
+      parts.length === 1 ? parts[0] : Buffer.concat(parts, this.#pendingBytes);
+    this.#pendingParts = [];
+    this.#pendingBytes = 0;
+    this.#pendingTailBytes = 0;
+    return body;
+  }
+
+  #separatorAfterSseTail(frame) {
+    if (!frame.length) return Buffer.alloc(0);
+    const last = frame[frame.length - 1];
+    const missingLineEndings = last === CARRIAGE_RETURN || last === LINE_FEED ? 1 : 2;
+    return Buffer.from(this.#sseLineEnding.repeat(missingLineEndings), "utf8");
   }
 
   #consumeSseChunk(chunk) {
@@ -2281,14 +2372,16 @@ export class NamespaceToolCallTransform extends Transform {
     }
 
     while (offset < chunk.length) {
-      const nextCr = chunk.indexOf(CARRIAGE_RETURN, offset);
-      const nextLf = chunk.indexOf(LINE_FEED, offset);
-      let lineEnd;
-      if (nextCr === -1) lineEnd = nextLf;
-      else if (nextLf === -1) lineEnd = nextCr;
-      else lineEnd = Math.min(nextCr, nextLf);
+      let lineEnd = offset;
+      while (
+        lineEnd < chunk.length &&
+        chunk[lineEnd] !== CARRIAGE_RETURN &&
+        chunk[lineEnd] !== LINE_FEED
+      ) {
+        lineEnd += 1;
+      }
 
-      if (lineEnd === -1) {
+      if (lineEnd === chunk.length) {
         const content = chunk.subarray(offset);
         this.#sseLineBytes += content.length;
         this.#appendSsePiece(content);
@@ -2375,13 +2468,15 @@ export class NamespaceToolCallTransform extends Transform {
     const lines = [];
     let start = 0;
     while (start < frame.length) {
-      const nextCr = frame.indexOf(CARRIAGE_RETURN, start);
-      const nextLf = frame.indexOf(LINE_FEED, start);
-      let contentEnd;
-      if (nextCr === -1) contentEnd = nextLf;
-      else if (nextLf === -1) contentEnd = nextCr;
-      else contentEnd = Math.min(nextCr, nextLf);
-      if (contentEnd === -1) {
+      let contentEnd = start;
+      while (
+        contentEnd < frame.length &&
+        frame[contentEnd] !== CARRIAGE_RETURN &&
+        frame[contentEnd] !== LINE_FEED
+      ) {
+        contentEnd += 1;
+      }
+      if (contentEnd === frame.length) {
         lines.push({
           start,
           parseStart: start,
@@ -2434,8 +2529,245 @@ export class NamespaceToolCallTransform extends Transform {
     this.#rewriteDisabled = true;
     this.#injectionsDone = true;
     this.#lastInjectedCalls = [];
-    this.#customItemIds.clear();
-    this.#customDeltaStates.clear();
+    this.#callsByItemId.clear();
+    this.#callsByCallId.clear();
+    this.#trackedCallCount = 0;
+  }
+
+  #specialCallKind(item) {
+    if (item?.type === "custom_tool_call") return "custom";
+    if (item?.type === "tool_search_call") return "tool_search";
+    return undefined;
+  }
+
+  #hasOpenSpecialCalls() {
+    for (const state of this.#callsByItemId.values()) {
+      if (state.kind && !state.closed) return true;
+    }
+    return false;
+  }
+
+  #openingIdentityConflict(item) {
+    const byItemId =
+      typeof item?.id === "string" ? this.#callsByItemId.get(item.id) : undefined;
+    const byCallId =
+      typeof item?.call_id === "string"
+        ? this.#callsByCallId.get(item.call_id)
+        : undefined;
+    if (byItemId || byCallId) return "duplicate output item identity";
+    return undefined;
+  }
+
+  #registerCall(sourceItem, item) {
+    const kind = this.#specialCallKind(item);
+    const itemId = typeof item?.id === "string" && item.id ? item.id : undefined;
+    const callId =
+      typeof item?.call_id === "string" && item.call_id ? item.call_id : undefined;
+    if (
+      kind &&
+      (!itemId ||
+        !callId ||
+        sourceItem?.id !== itemId ||
+        sourceItem?.call_id !== callId)
+    ) {
+      return "special tool call opening lacks stable identity";
+    }
+    if (!itemId && !callId) return undefined;
+    const conflict = this.#openingIdentityConflict(item);
+    if (conflict) return conflict;
+    if (this.#trackedCallCount >= this.#maxTrackedOutputItems) {
+      return "output item identity limit";
+    }
+    const state = {
+      kind,
+      itemId,
+      callId,
+      sourceType: sourceItem?.type,
+      sourceName: sourceItem?.name,
+      outputType: item.type,
+      outputName: item.name,
+      argumentsDone: false,
+      finalInput: undefined,
+      finalArguments: undefined,
+      sawArgumentDelta: false,
+      deltaCharacters: 0,
+      deltaHash: kind === "custom" ? createHash("sha256") : undefined,
+      closed: false,
+      deltaState:
+        kind === "custom"
+          ? {
+              opening: "",
+              opened: false,
+              escape: "",
+              closed: false,
+              invalid: false,
+            }
+          : undefined,
+    };
+    if (state.itemId) this.#callsByItemId.set(state.itemId, state);
+    if (state.callId) this.#callsByCallId.set(state.callId, state);
+    this.#trackedCallCount += 1;
+    return undefined;
+  }
+
+  #specialCallForArgumentsEvent(event) {
+    const byItemId =
+      typeof event?.item_id === "string"
+        ? this.#callsByItemId.get(event.item_id)
+        : undefined;
+    const byCallId =
+      typeof event?.call_id === "string"
+        ? this.#callsByCallId.get(event.call_id)
+        : undefined;
+    if (byItemId && byCallId && byItemId !== byCallId) {
+      return { reason: "conflicting special tool call identity" };
+    }
+    const state = byItemId || byCallId;
+    if (!state || !state.kind) return {};
+    if (event.item_id !== state.itemId) {
+      return { reason: "mismatched special tool call item id" };
+    }
+    if (event.call_id !== undefined && event.call_id !== state.callId) {
+      return { reason: "mismatched special tool call call id" };
+    }
+    if (state.closed) return { reason: "special tool call event after close" };
+    return { state };
+  }
+
+  #customDeltaMismatch(state, input) {
+    if (!state.sawArgumentDelta) return undefined;
+    if (
+      state.deltaState.invalid ||
+      !state.deltaState.opened ||
+      !state.deltaState.closed ||
+      state.deltaState.escape
+    ) {
+      return "incomplete custom tool argument delta sequence";
+    }
+    if (state.deltaCharacters !== input.length) {
+      return "custom tool argument deltas disagree with completed input";
+    }
+    const streamed = state.deltaHash.copy().digest("hex");
+    const completed = createHash("sha256")
+      .update(Buffer.from(input, "utf16le"))
+      .digest("hex");
+    return streamed === completed
+      ? undefined
+      : "custom tool argument deltas disagree with completed input";
+  }
+
+  #closeSpecialCall(sourceItem, item) {
+    const byItemId =
+      typeof sourceItem?.id === "string"
+        ? this.#callsByItemId.get(sourceItem.id)
+        : undefined;
+    const byCallId =
+      typeof sourceItem?.call_id === "string"
+        ? this.#callsByCallId.get(sourceItem.call_id)
+        : undefined;
+    if (byItemId && byCallId && byItemId !== byCallId) {
+      return "conflicting special tool call close identity";
+    }
+    const state = byItemId || byCallId;
+    const outputKind = this.#specialCallKind(item);
+    if (!state || !state.kind) {
+      return outputKind ? "special tool call close without a matching opening" : undefined;
+    }
+    if (state.closed) return "duplicate special tool call close";
+    if (sourceItem?.id !== state.itemId || sourceItem?.call_id !== state.callId) {
+      return "mismatched special tool call close identity";
+    }
+    if (sourceItem.type !== state.sourceType || sourceItem.name !== state.sourceName) {
+      return "mismatched special tool call close source";
+    }
+    if (
+      item?.id !== state.itemId ||
+      item?.call_id !== state.callId ||
+      item?.type !== state.outputType ||
+      item?.name !== state.outputName
+    ) {
+      return "special tool call close was not restored consistently";
+    }
+    if (state.kind === "custom") {
+      if (state.argumentsDone && item.input !== state.finalInput) {
+        return "custom tool call input changed before close";
+      }
+      if (!state.argumentsDone) {
+        const reason = this.#customDeltaMismatch(state, item.input);
+        if (reason) return reason;
+        state.finalInput = item.input;
+      }
+    }
+    if (
+      state.kind === "tool_search" &&
+      state.argumentsDone &&
+      !isDeepStrictEqual(item.arguments, state.finalArguments)
+    ) {
+      return "tool search arguments changed before close";
+    }
+    if (state.kind === "tool_search") state.finalArguments = item.arguments;
+    state.closed = true;
+    return undefined;
+  }
+
+  #validateSpecialSummaryItem(sourceItem, item) {
+    const byItemId =
+      typeof sourceItem?.id === "string"
+        ? this.#callsByItemId.get(sourceItem.id)
+        : undefined;
+    const byCallId =
+      typeof sourceItem?.call_id === "string"
+        ? this.#callsByCallId.get(sourceItem.call_id)
+        : undefined;
+    if (byItemId && byCallId && byItemId !== byCallId) {
+      return "conflicting special tool call summary identity";
+    }
+    const state = byItemId || byCallId;
+    const outputKind = this.#specialCallKind(item);
+    if (!state || !state.kind) {
+      return outputKind ? "special tool call summary without a matching opening" : undefined;
+    }
+    if (!state.closed) return "special tool call summary before close";
+    if (
+      sourceItem?.id !== state.itemId ||
+      sourceItem?.call_id !== state.callId ||
+      sourceItem?.type !== state.sourceType ||
+      sourceItem?.name !== state.sourceName
+    ) {
+      return "mismatched special tool call summary source";
+    }
+    if (
+      item?.id !== state.itemId ||
+      item?.call_id !== state.callId ||
+      item?.type !== state.outputType ||
+      item?.name !== state.outputName
+    ) {
+      return "special tool call summary was not restored consistently";
+    }
+    if (state.kind === "custom" && item.input !== state.finalInput) {
+      return "custom tool call summary input changed after close";
+    }
+    if (
+      state.kind === "tool_search" &&
+      !isDeepStrictEqual(item.arguments, state.finalArguments)
+    ) {
+      return "tool search arguments changed after close";
+    }
+    return undefined;
+  }
+
+  #validateSpecialOutputItems(sourceEvent, event) {
+    for (const [sourceOutput, output] of [
+      [sourceEvent?.output, event?.output],
+      [sourceEvent?.response?.output, event?.response?.output],
+    ]) {
+      if (!Array.isArray(sourceOutput) || !Array.isArray(output)) continue;
+      for (let index = 0; index < sourceOutput.length; index += 1) {
+        const reason = this.#validateSpecialSummaryItem(sourceOutput[index], output[index]);
+        if (reason) return reason;
+      }
+    }
+    return undefined;
   }
 
   #rewrittenSseFrame(frame, lines, replacements) {
@@ -2505,6 +2837,9 @@ export class NamespaceToolCallTransform extends Transform {
       }
       // Inject before the stream terminator so Codex still executes the calls.
       if (dataText === "[DONE]") {
+        if (this.#hasOpenSpecialCalls()) {
+          return this.#unsafeSseFrame(frame, "stream ended before special tool call close");
+        }
         return [...this.#drainInterruptBlocks(), frame];
       }
       return [frame];
@@ -2525,39 +2860,91 @@ export class NamespaceToolCallTransform extends Transform {
       if (!embeddedFunctionArgumentsAreUnambiguous(event)) {
         return this.#unsafeSseFrame(frame, "ambiguous function arguments");
       }
+      const sourceEvent = event;
       const originalEventType = event?.type;
       let changed = false;
-      if (
-        !this.#injectOnly &&
-        event?.type === "response.function_call_arguments.delta" &&
-        this.#customItemIds.has(event.item_id)
-      ) {
-        const state = this.#customDeltaStates.get(event.item_id);
-        const delta = state ? customToolInputDelta(state, event.delta) : undefined;
-        if (delta === undefined) {
-          this.#commitSemanticMutation();
-          return [];
-        }
-        event = {
-          ...event,
-          type: "response.custom_tool_call_input.delta",
-          delta,
-        };
-        changed = true;
+      if (sourceEvent?.type === "response.output_item.added") {
+        const conflict = this.#openingIdentityConflict(sourceEvent.item);
+        if (conflict) return this.#unsafeSseFrame(frame, conflict);
       }
       if (
         !this.#injectOnly &&
-        event?.type === "response.function_call_arguments.done" &&
-        this.#customItemIds.has(event.item_id)
+        (sourceEvent?.type === "response.custom_tool_call_input.delta" ||
+          sourceEvent?.type === "response.custom_tool_call_input.done")
       ) {
-        const input = customToolInput(event.arguments);
-        if (input !== undefined) {
+        const matched = this.#specialCallForArgumentsEvent(sourceEvent);
+        if (matched.reason) return this.#unsafeSseFrame(frame, matched.reason);
+        if (matched.state?.sourceType === "function_call") {
+          return this.#unsafeSseFrame(
+            frame,
+            "native custom input event inside a bridged function lifecycle",
+          );
+        }
+      }
+      if (
+        !this.#injectOnly &&
+        event?.type === "response.function_call_arguments.delta"
+      ) {
+        const matched = this.#specialCallForArgumentsEvent(event);
+        if (matched.reason) return this.#unsafeSseFrame(frame, matched.reason);
+        if (matched.state) {
+          if (matched.state.argumentsDone) {
+            return this.#unsafeSseFrame(frame, "special tool call delta after arguments done");
+          }
+          if (matched.state.kind === "tool_search") {
+            this.#commitSemanticMutation();
+            return [];
+          }
+          matched.state.sawArgumentDelta = true;
+          const delta = customToolInputDelta(matched.state.deltaState, event.delta);
+          if (delta === undefined) {
+            this.#commitSemanticMutation();
+            return [];
+          }
+          matched.state.deltaHash.update(Buffer.from(delta, "utf16le"));
+          matched.state.deltaCharacters += delta.length;
+          event = {
+            ...event,
+            type: "response.custom_tool_call_input.delta",
+            delta,
+          };
+          changed = true;
+        }
+      }
+      if (
+        !this.#injectOnly &&
+        event?.type === "response.function_call_arguments.done"
+      ) {
+        const matched = this.#specialCallForArgumentsEvent(event);
+        if (matched.reason) return this.#unsafeSseFrame(frame, matched.reason);
+        if (matched.state) {
+          if (matched.state.argumentsDone) {
+            return this.#unsafeSseFrame(frame, "duplicate special tool call arguments done");
+          }
+          if (matched.state.kind === "tool_search") {
+            const argumentsObject = toolSearchArguments(event.arguments, false);
+            if (!argumentsObject) {
+              return this.#unsafeSseFrame(frame, "invalid tool search arguments done");
+            }
+            matched.state.argumentsDone = true;
+            matched.state.finalArguments = argumentsObject;
+            this.#commitSemanticMutation();
+            return [];
+          }
+          const input = customToolInput(event.arguments);
+          if (input === undefined) {
+            return this.#unsafeSseFrame(frame, "invalid custom tool arguments done");
+          }
+          const deltaReason = this.#customDeltaMismatch(matched.state, input);
+          if (deltaReason) return this.#unsafeSseFrame(frame, deltaReason);
           const { arguments: _arguments, ...rest } = event;
           event = {
             ...rest,
             type: "response.custom_tool_call_input.done",
             input,
           };
+          matched.state.argumentsDone = true;
+          matched.state.finalInput = input;
           changed = true;
         }
       }
@@ -2568,27 +2955,25 @@ export class NamespaceToolCallTransform extends Transform {
           changed = true;
         }
       }
-      if (
-        event?.type === "response.output_item.added" &&
-        event.item?.type === "custom_tool_call" &&
-        typeof event.item.id === "string"
-      ) {
-        this.#customItemIds.add(event.item.id);
-        this.#customDeltaStates.set(event.item.id, {
-          opening: "",
-          opened: false,
-          escape: "",
-          closed: false,
-          invalid: false,
-        });
+      if (sourceEvent?.type === "response.output_item.added") {
+        const reason = this.#registerCall(sourceEvent.item, event.item);
+        if (reason) return this.#unsafeSseFrame(frame, reason);
       }
-      if (
-        event?.type === "response.output_item.done" &&
-        event.item?.type === "custom_tool_call" &&
-        typeof event.item.id === "string"
-      ) {
-        this.#customItemIds.delete(event.item.id);
-        this.#customDeltaStates.delete(event.item.id);
+      if (sourceEvent?.type === "response.output_item.done") {
+        const reason = this.#closeSpecialCall(sourceEvent.item, event.item);
+        if (reason) return this.#unsafeSseFrame(frame, reason);
+      }
+      const summaryReason = this.#validateSpecialOutputItems(sourceEvent, event);
+      if (summaryReason) return this.#unsafeSseFrame(frame, summaryReason);
+      const terminalEvent =
+        event?.type === "response.completed" ||
+        event?.type === "response.done" ||
+        eventName === "response.completed" ||
+        eventName === "response.done";
+      if (terminalEvent) {
+        if (this.#hasOpenSpecialCalls()) {
+          return this.#unsafeSseFrame(frame, "terminal event before special tool call close");
+        }
       }
       this.#observeEvent(event);
       const replacements = new Map();
