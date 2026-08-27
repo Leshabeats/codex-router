@@ -645,6 +645,7 @@ const NATIVE_UNSUPPORTED_PARAMS = Object.freeze([
   "user",
   "truncation",
 ]);
+const NATIVE_STATELESS_REASONING_INCLUDE = "reasoning.encrypted_content";
 
 /**
  * Make a generic Responses request acceptable to the native endpoint.
@@ -661,8 +662,27 @@ function normalizeNativeForSubstitutedCaller(payload, { compact = false } = {}) 
   // Injecting `store: false` there also makes its referenced `rs_...` items
   // look deliberately unpersisted, so omit the field rather than choosing a
   // persistence policy the compact request never exposed.
-  if (compact) delete payload.store;
-  else payload.store = false;
+  if (compact) {
+    delete payload.store;
+    // `/responses/compact` has its own narrow request schema. `include` belongs
+    // to ordinary Responses creation and must not leak across this boundary if
+    // a generic caller reuses its normal request options for compaction.
+    delete payload.include;
+  } else {
+    payload.store = false;
+    // The encrypted reasoning payload is the continuation token for a
+    // stateless Responses conversation. A caller that expected storage may not
+    // have requested it; forcing store=false without also requesting this field
+    // leaves only rs_ ids for the next turn, which cannot be retrieved.
+    if (payload.include === undefined) {
+      payload.include = [NATIVE_STATELESS_REASONING_INCLUDE];
+    } else if (
+      Array.isArray(payload.include) &&
+      !payload.include.includes(NATIVE_STATELESS_REASONING_INCLUDE)
+    ) {
+      payload.include = [...payload.include, NATIVE_STATELESS_REASONING_INCLUDE];
+    }
+  }
   for (const key of NATIVE_UNSUPPORTED_PARAMS) delete payload[key];
   return payload;
 }
@@ -1871,23 +1891,39 @@ async function bridgeVisionInput(input, route, request) {
   return result.input;
 }
 
-// OpenAI-issued reasoning `encrypted_content` is an opaque token (Fernet-style,
-// e.g. "gAAAAAB...") with no whitespace. Some local Responses providers (notably
-// Ollama) mimic the reasoning-item shape but fill `encrypted_content` with the
-// plain-text reasoning summary. Codex stores those items, and when the
-// conversation is later replayed to OpenAI's native Responses API, OpenAI
-// rejects the undecryptable blob with "Encrypted content could not be decrypted
-// or parsed." Strip the non-opaque value before sending to native; the item's
-// `summary` still carries the readable reasoning.
+// Credential-bearing callers keep the historical format repair below: they
+// can fall back to the native stored-item namespace after an unreadable
+// encrypted payload is removed. A substituted caller has no such namespace,
+// so its stateless repair must be stricter about provenance. In particular,
+// the wire contract calls `encrypted_content` opaque; a token's current shape
+// cannot prove which backend issued it.
 function isOpaqueEncryptedContent(value) {
-  return typeof value === "string" && value.length > 0 && !/\s/.test(value);
+  return isNativeEncryptedToken(value);
 }
 
-function sanitizeReasoningForNative(item) {
-  if (item?.encrypted_content === undefined) return item;
+function reasoningSummaryText(item) {
+  if (!Array.isArray(item?.summary)) return undefined;
+  const parts = item.summary
+    .filter((part) => part?.type === "summary_text" && typeof part.text === "string")
+    .map((part) => part.text);
+  return parts.length > 0 ? parts.join("") : undefined;
+}
+
+function sanitizeReasoningForNative(item, { stateless = false } = {}) {
+  if (item?.encrypted_content === undefined) return stateless ? undefined : item;
+  if (stateless) {
+    // Translated Responses providers have been observed copying the visible
+    // reasoning summary into `encrypted_content`. Exact equality is evidence
+    // local to this item that the value is a plaintext echo, not a continuation
+    // token. Drop that foreign item rather than asking native storage to resolve
+    // its `rs_` id. Preserve every other non-empty opaque value byte-identical:
+    // its format is intentionally unspecified and may evolve.
+    const summary = reasoningSummaryText(item);
+    return summary !== undefined && item.encrypted_content === summary ? undefined : item;
+  }
   if (isOpaqueEncryptedContent(item.encrypted_content)) return item;
-  const { encrypted_content, ...rest } = item;
-  return rest;
+  const { encrypted_content: _encryptedContent, ...storedItem } = item;
+  return storedItem;
 }
 
 // The mirror of normalizeRoutedAgentInput. When the parent agent is routed, its
@@ -1945,14 +1981,28 @@ function sanitizeCollaborationForNative(item) {
   };
 }
 
-function normalizeNativeInput(input) {
+function normalizeNativeInput(input, { stateless = false } = {}) {
   if (!Array.isArray(input)) return input;
-  return input.map((item) => {
-    if (item?.type === "reasoning") return sanitizeReasoningForNative(item);
-    if (item?.type !== "compaction") return sanitizeCollaborationForNative(item);
-    return isRouterCompactionValue(item.encrypted_content)
+  return input.flatMap((item) => {
+    if (item?.type === "reasoning") {
+      const reasoning = sanitizeReasoningForNative(item, { stateless });
+      return reasoning === undefined ? [] : [reasoning];
+    }
+    if (
+      stateless &&
+      item?.type === "item_reference" &&
+      typeof item.id === "string" &&
+      item.id.startsWith("rs_")
+    ) {
+      // A substituted caller has no native storage namespace to resolve an
+      // `rs_` reference against. Full reasoning items with encrypted content
+      // remain above; bare references cannot be made stateless and are dropped.
+      return [];
+    }
+    if (item?.type !== "compaction") return [sanitizeCollaborationForNative(item)];
+    return [isRouterCompactionValue(item.encrypted_content)
       ? messageItem(renderCompactionValue(item.encrypted_content))
-      : item;
+      : item];
   });
 }
 
@@ -3228,6 +3278,7 @@ async function handleResponses(request, response, requestUrl) {
       }
     } else {
       const native = { ...payload };
+      const substitutedCaller = callerBroughtNoUpstreamCredential(request);
       // An extended-window variant is the model it was derived from, published
       // under a second slug so the picker can offer a different context
       // window (`src/native-context-variants.mjs`). chatgpt.com has never
@@ -3239,7 +3290,12 @@ async function handleResponses(request, response, requestUrl) {
       if (variantBase) native.model = variantBase;
       normalizeNativePromptCacheCompatibility(native);
       if (Array.isArray(payload.input)) {
-        native.input = normalizeNativeInput(payload.input);
+        native.input = normalizeNativeInput(payload.input, {
+          // V1 compaction has its own stored-reference contract. Remote
+          // compaction V2 is an ordinary Responses request and remains
+          // stateless, so only the dedicated endpoint is exempt here.
+          stateless: substitutedCaller && !compactV1,
+        });
         // Native turns leave here as stateless full conversations (the
         // previous_response_id below is stripped), so an old tool result costs
         // its full size on every turn of this path too. Compaction turns are
@@ -3263,7 +3319,7 @@ async function handleResponses(request, response, requestUrl) {
         namespaces: flattenedNamespaces,
       });
       if (!compactV1) delete native.previous_response_id;
-      if (callerBroughtNoUpstreamCredential(request)) {
+      if (substitutedCaller) {
         normalizeNativeForSubstitutedCaller(native, { compact: compactV1 });
       }
       target = nativeTarget(requestUrl.pathname);
