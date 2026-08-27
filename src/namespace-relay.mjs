@@ -499,18 +499,23 @@ export function injectSessionModelForSpawnCalls(item, model) {
 }
 
 const MAX_JSON_CAPTURE_BYTES = 64 * 1024 * 1024;
-const JSON_CAPTURE_PART_BYTES = 64 * 1024;
+const CAPTURE_PART_BYTES = 64 * 1024;
+const INITIAL_SSE_CAPTURE_PART_BYTES = 1024;
 const MAX_TRACKED_OUTPUT_ITEMS = 4096;
-// Stop staging an undecided SSE frame before downstream response guards lose
-// sight of their own byte ceilings. Before any semantic output, crossing this
-// bound releases raw bytes and disables rewriting; after one rewrite,
+// Streaming and non-streaming Responses payloads share the same maximum
+// capturable JSON value. A terminal SSE event can carry the complete response,
+// including large custom-tool input, so it is not valid to impose the much
+// smaller pre-content guard on one frame. Before any semantic output, crossing
+// this bound releases raw bytes and disables rewriting; after one rewrite,
 // suppression, or injection, it terminates the stream rather than mixing wire
 // representations.
-const MAX_SSE_FRAME_BYTES = 256 * 1024;
+const MAX_SSE_FRAME_BYTES = MAX_JSON_CAPTURE_BYTES;
 const MAX_EXACT_JSON_NUMBER_LENGTH = 4096;
 const LINE_FEED = 0x0a;
 const CARRIAGE_RETURN = 0x0d;
 const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]);
+const SSE_EVENT_FIELD = Buffer.from("event", "ascii");
+const SSE_DATA_FIELD = Buffer.from("data", "ascii");
 const JSON_NUMBER_AT_OFFSET = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
 const JSON_NUMBER_PARTS =
   /^(-?)(0|[1-9]\d*)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/;
@@ -520,10 +525,6 @@ function sseFieldValue(line, prefixLength) {
   // The SSE grammar removes one optional U+0020 after the colon. Tabs,
   // repeated spaces, and trailing spaces are event data, not formatting.
   return value.startsWith(" ") ? value.slice(1) : value;
-}
-
-function isSseField(line, name) {
-  return line === name || line.startsWith(`${name}:`);
 }
 
 function sseLineFieldValue(line, name) {
@@ -2102,6 +2103,8 @@ export class NamespaceToolCallTransform extends Transform {
   #headerlessDetector;
   #sseParts = [];
   #sseBytes = 0;
+  #sseTailBytes = 0;
+  #sseNextPartBytes = INITIAL_SSE_CAPTURE_PART_BYTES;
   #sseLineBytes = 0;
   #ssePendingCr = false;
   #ssePendingLineWasBlank = false;
@@ -2296,7 +2299,7 @@ export class NamespaceToolCallTransform extends Transform {
         const remainingUntilRelease =
           this.#maxJsonCaptureBytes + 1 - this.#pendingBytes;
         tail = Buffer.allocUnsafe(
-          Math.min(JSON_CAPTURE_PART_BYTES, remainingUntilRelease),
+          Math.min(CAPTURE_PART_BYTES, remainingUntilRelease),
         );
         this.#pendingParts.push(tail);
         this.#pendingTailBytes = 0;
@@ -2434,8 +2437,32 @@ export class NamespaceToolCallTransform extends Transform {
 
   #appendSsePiece(piece) {
     if (!piece.length) return true;
-    this.#sseParts.push(piece);
-    this.#sseBytes += piece.length;
+    // Copy into fixed-size parts exactly as the non-streaming capture does.
+    // Retaining one view per upstream chunk would let a one-byte-fragmented
+    // frame allocate millions of Buffer objects before reaching its byte cap.
+    let offset = 0;
+    while (offset < piece.length && this.#sseBytes <= this.#maxSseFrameBytes) {
+      let tail = this.#sseParts.at(-1);
+      if (!tail || this.#sseTailBytes === tail.length) {
+        const remainingUntilRelease =
+          this.#maxSseFrameBytes + 1 - this.#sseBytes;
+        const remainingPieceBytes = piece.length - offset;
+        const partBytes = Math.min(
+          CAPTURE_PART_BYTES,
+          Math.max(this.#sseNextPartBytes, Math.min(CAPTURE_PART_BYTES, remainingPieceBytes)),
+          remainingUntilRelease,
+        );
+        tail = Buffer.allocUnsafe(partBytes);
+        this.#sseParts.push(tail);
+        this.#sseTailBytes = 0;
+        this.#sseNextPartBytes = Math.min(CAPTURE_PART_BYTES, partBytes * 2);
+      }
+      const copied = Math.min(tail.length - this.#sseTailBytes, piece.length - offset);
+      piece.copy(tail, this.#sseTailBytes, offset, offset + copied);
+      this.#sseTailBytes += copied;
+      this.#sseBytes += copied;
+      offset += copied;
+    }
     if (this.#sseBytes <= this.#maxSseFrameBytes) return true;
     const buffered = this.#takeSseFrame();
     if (this.#semanticMutationCommitted) {
@@ -2443,6 +2470,7 @@ export class NamespaceToolCallTransform extends Transform {
     }
     this.#disableSseRewriting();
     this.push(buffered);
+    if (offset < piece.length) this.push(piece.subarray(offset));
     return false;
   }
 
@@ -2452,21 +2480,29 @@ export class NamespaceToolCallTransform extends Transform {
   }
 
   #takeSseFrame() {
-    const frame =
-      this.#sseParts.length === 1
-        ? this.#sseParts[0]
-        : Buffer.concat(this.#sseParts, this.#sseBytes);
+    if (!this.#sseParts.length) return Buffer.alloc(0);
+    const lastIndex = this.#sseParts.length - 1;
+    const parts = this.#sseParts.map((part, index) =>
+      index === lastIndex ? part.subarray(0, this.#sseTailBytes) : part,
+    );
+    const frame = parts.length === 1 ? parts[0] : Buffer.concat(parts, this.#sseBytes);
     this.#sseParts = [];
     this.#sseBytes = 0;
+    this.#sseTailBytes = 0;
+    this.#sseNextPartBytes = INITIAL_SSE_CAPTURE_PART_BYTES;
     this.#sseLineBytes = 0;
     this.#ssePendingCr = false;
     this.#ssePendingLineWasBlank = false;
     return frame;
   }
 
-  #sseLines(frame) {
-    const lines = [];
+  #sseFields(frame, atStreamStart) {
+    let eventLine;
+    let dataLine;
+    let lineEndingLine;
+    let repeated = false;
     let start = 0;
+    let firstLine = true;
     while (start < frame.length) {
       let contentEnd = start;
       while (
@@ -2476,37 +2512,49 @@ export class NamespaceToolCallTransform extends Transform {
       ) {
         contentEnd += 1;
       }
-      if (contentEnd === frame.length) {
-        lines.push({
-          start,
-          parseStart: start,
-          contentEnd: frame.length,
-          end: frame.length,
-        });
-        break;
-      }
-      const end =
-        frame[contentEnd] === CARRIAGE_RETURN && frame[contentEnd + 1] === LINE_FEED
+      const end = contentEnd === frame.length
+        ? frame.length
+        : frame[contentEnd] === CARRIAGE_RETURN && frame[contentEnd + 1] === LINE_FEED
           ? contentEnd + 2
           : contentEnd + 1;
-      lines.push({ start, parseStart: start, contentEnd, end });
+      let parseStart = start;
+      if (
+        firstLine &&
+        atStreamStart &&
+        frame.subarray(start, start + UTF8_BOM.length).equals(UTF8_BOM)
+      ) {
+        parseStart += UTF8_BOM.length;
+      }
+      firstLine = false;
+      const line = { start, parseStart, contentEnd, end };
+      if (!lineEndingLine && end > contentEnd) lineEndingLine = line;
+      const lineLength = contentEnd - parseStart;
+      const fieldLine = (name) =>
+        lineLength >= name.length &&
+        frame.subarray(parseStart, parseStart + name.length).equals(name) &&
+        (lineLength === name.length || frame[parseStart + name.length] === 0x3a);
+      if (fieldLine(SSE_EVENT_FIELD)) {
+        if (eventLine) repeated = true;
+        else eventLine = line;
+      }
+      if (fieldLine(SSE_DATA_FIELD)) {
+        if (dataLine) repeated = true;
+        else dataLine = line;
+      }
+      if (repeated || contentEnd === frame.length) break;
       start = end;
     }
-    return lines;
+    return { eventLine, dataLine, lineEndingLine, repeated };
   }
 
-  #rememberSseLineEnding(frame, lines) {
-    if (this.#sseLineEndingObserved) return;
-    for (const line of lines) {
-      if (line.end === line.contentEnd) continue;
-      const terminator = frame.subarray(line.contentEnd, line.end);
-      if (terminator.equals(Buffer.from("\r\n"))) this.#sseLineEnding = "\r\n";
-      else if (terminator.equals(Buffer.from("\n"))) this.#sseLineEnding = "\n";
-      else if (terminator.equals(Buffer.from("\r"))) this.#sseLineEnding = "\r";
-      else continue;
-      this.#sseLineEndingObserved = true;
-      return;
-    }
+  #rememberSseLineEnding(frame, line) {
+    if (this.#sseLineEndingObserved || !line || line.end === line.contentEnd) return;
+    const terminator = frame.subarray(line.contentEnd, line.end);
+    if (terminator.equals(Buffer.from("\r\n"))) this.#sseLineEnding = "\r\n";
+    else if (terminator.equals(Buffer.from("\n"))) this.#sseLineEnding = "\n";
+    else if (terminator.equals(Buffer.from("\r"))) this.#sseLineEnding = "\r";
+    else return;
+    this.#sseLineEndingObserved = true;
   }
 
   #emitSseFrame(frame) {
@@ -2995,13 +3043,12 @@ export class NamespaceToolCallTransform extends Transform {
     return undefined;
   }
 
-  #rewrittenSseFrame(frame, lines, replacements) {
+  #rewrittenSseFrame(frame, replacements) {
     const pieces = [];
     let cursor = 0;
-    for (const [index, replacement] of [...replacements].sort(
-      ([left], [right]) => left - right,
+    for (const [line, replacement] of [...replacements].sort(
+      ([left], [right]) => left.start - right.start,
     )) {
-      const line = lines[index];
       if (!line) continue;
       if (line.start > cursor) pieces.push(frame.subarray(cursor, line.start));
       if (line.parseStart > line.start) {
@@ -3022,37 +3069,32 @@ export class NamespaceToolCallTransform extends Transform {
     if (!isUtf8(frame)) {
       return this.#unsafeSseFrame(frame, "invalid UTF-8");
     }
-    const lines = this.#sseLines(frame);
-    if (atStreamStart && frame.subarray(0, UTF8_BOM.length).equals(UTF8_BOM) && lines[0]) {
-      lines[0].parseStart += UTF8_BOM.length;
-    }
-    this.#rememberSseLineEnding(frame, lines);
-    const lineTexts = lines.map((line) =>
-      frame.subarray(line.parseStart, line.contentEnd).toString("utf8"),
+    const { eventLine, dataLine, lineEndingLine, repeated } = this.#sseFields(
+      frame,
+      atStreamStart,
     );
-    const eventLineIndexes = lineTexts
-      .map((line, index) => (isSseField(line, "event") ? index : -1))
-      .filter((index) => index !== -1);
-    const dataLineIndexes = lineTexts
-      .map((line, index) => (isSseField(line, "data") ? index : -1))
-      .filter((index) => index !== -1);
+    this.#rememberSseLineEnding(frame, lineEndingLine);
     // SSE formally concatenates multiple data fields and gives repeated event
     // fields ordering semantics. Rewriting just one field would create bytes
     // whose EventSource meaning differs from the JSON we inspected. The
     // Responses wire uses exactly one of each, so anything else is preserved
     // and disables stateful rewriting for the remainder of this response.
-    if (eventLineIndexes.length > 1 || dataLineIndexes.length > 1) {
+    if (repeated) {
       return this.#unsafeSseFrame(frame, "repeated SSE event or data field");
     }
-    const eventLineIndex = eventLineIndexes[0] ?? -1;
-    const eventName =
-      eventLineIndex === -1
-        ? undefined
-        : sseLineFieldValue(lineTexts[eventLineIndex], "event");
-    const dataLineIndex = dataLineIndexes[0] ?? -1;
-    const dataText =
-      dataLineIndex === -1 ? "" : sseLineFieldValue(lineTexts[dataLineIndex], "data");
-    if (dataLineIndex === -1) return [frame];
+    const eventText = eventLine
+      ? frame.subarray(eventLine.parseStart, eventLine.contentEnd).toString("utf8")
+      : undefined;
+    const eventName = eventText === undefined
+      ? undefined
+      : sseLineFieldValue(eventText, "event");
+    const dataTextLine = dataLine
+      ? frame.subarray(dataLine.parseStart, dataLine.contentEnd).toString("utf8")
+      : undefined;
+    const dataText = dataTextLine === undefined
+      ? ""
+      : sseLineFieldValue(dataTextLine, "data");
+    if (!dataLine) return [frame];
     if (!dataText || dataText === "[DONE]") {
       if (eventName && eventName !== "message") {
         return this.#unsafeSseFrame(
@@ -3203,13 +3245,13 @@ export class NamespaceToolCallTransform extends Transform {
         }
       }
       this.#observeEvent(event);
-      const replacements = new Map();
+      const replacements = [];
       if (
-        eventLineIndex !== -1 &&
+        eventLine &&
         typeof event?.type === "string" &&
         event.type !== originalEventType
       ) {
-        replacements.set(eventLineIndex, `event: ${event.type}`);
+        replacements.push([eventLine, `event: ${event.type}`]);
       }
       // Inject finished-child interrupts before the response closes so Codex
       // still executes them as ordinary tool calls in this turn.
@@ -3222,26 +3264,26 @@ export class NamespaceToolCallTransform extends Transform {
         }
         if (!changed) return [...interruptBlocks, frame];
         this.#commitSemanticMutation();
-        replacements.set(dataLineIndex, `data: ${JSON.stringify(event)}`);
+        replacements.push([dataLine, `data: ${JSON.stringify(event)}`]);
         return [
           ...interruptBlocks,
-          this.#rewrittenSseFrame(frame, lines, replacements),
+          this.#rewrittenSseFrame(frame, replacements),
         ];
       }
       if (event?.type === "response.done" || eventName === "response.done") {
         const interruptBlocks = this.#drainInterruptBlocks();
         if (!changed) return [...interruptBlocks, frame];
         this.#commitSemanticMutation();
-        replacements.set(dataLineIndex, `data: ${JSON.stringify(event)}`);
+        replacements.push([dataLine, `data: ${JSON.stringify(event)}`]);
         return [
           ...interruptBlocks,
-          this.#rewrittenSseFrame(frame, lines, replacements),
+          this.#rewrittenSseFrame(frame, replacements),
         ];
       }
       if (!changed) return [frame];
       this.#commitSemanticMutation();
-      replacements.set(dataLineIndex, `data: ${JSON.stringify(event)}`);
-      return [this.#rewrittenSseFrame(frame, lines, replacements)];
+      replacements.push([dataLine, `data: ${JSON.stringify(event)}`]);
+      return [this.#rewrittenSseFrame(frame, replacements)];
     } catch (error) {
       if (error instanceof NamespaceRelayCommittedStreamError) throw error;
       return this.#unsafeSseFrame(frame, "event rewrite failure");

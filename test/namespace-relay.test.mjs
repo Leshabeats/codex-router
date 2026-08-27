@@ -2884,6 +2884,96 @@ test("oversized SSE framing releases bytes and disables later rewrites", async (
   assert.deepEqual(output, source);
 });
 
+test("large terminal SSE frames remain valid after a namespace rewrite", async () => {
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "spawn_agent" }],
+    },
+  ]);
+  const call = {
+    type: "function_call",
+    id: "fc_large_terminal",
+    call_id: "call_large_terminal",
+    name: "collaboration__spawn_agent",
+    arguments: "{}",
+  };
+  const events = [
+    { type: "response.output_item.done", item: call },
+    {
+      type: "response.completed",
+      response: {
+        output: [
+          call,
+          {
+            type: "message",
+            id: "msg_large_terminal",
+            content: [{ type: "output_text", text: "x".repeat(320 * 1024) }],
+          },
+        ],
+      },
+    },
+  ];
+  const frames = events.map((event) =>
+    Buffer.from(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`, "utf8"),
+  );
+  assert.ok(frames[1].length > 256 * 1024);
+
+  const output = await collect(
+    Readable.from(frames).pipe(
+      new NamespaceToolCallTransform(namespaces, "text/event-stream"),
+    ),
+  );
+  const payloads = output
+    .split("\n")
+    .filter((line) => line.startsWith("data: "))
+    .map((line) => JSON.parse(line.slice(6)));
+  assert.equal(payloads.length, 2);
+  assert.equal(payloads[0].item.namespace, "collaboration");
+  assert.equal(payloads[1].response.output[0].namespace, "collaboration");
+  assert.equal(payloads[1].response.output[1].content[0].text.length, 320 * 1024);
+});
+
+test("unterminated oversized SSE frames release or fail at a fixed byte bound", async () => {
+  const limit = 64 * 1024;
+  const marker = "unterminated-oversized-frame-must-not-leak";
+  const oversized = Buffer.from(
+    `data: {"marker":"${marker}","padding":"${"x".repeat(limit * 2)}`,
+    "utf8",
+  );
+  const precommit = await collectBuffer(
+    Readable.from([oversized]).pipe(
+      new NamespaceToolCallTransform(new Map(), "text/event-stream", undefined, {
+        maxSseFrameBytes: limit,
+      }),
+    ),
+  );
+  assert.deepEqual(precommit, oversized);
+
+  const { namespaces } = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "spawn_agent" }],
+    },
+  ]);
+  const committed = Buffer.from(
+    'event: response.output_item.done\n' +
+      'data: {"type":"response.output_item.done","item":{"type":"function_call","name":"collaboration__spawn_agent","arguments":"{}"}}\n\n',
+    "utf8",
+  );
+  const { output, error } = await collectUntilPipelineError(
+    [committed, oversized],
+    new NamespaceToolCallTransform(namespaces, "text/event-stream", undefined, {
+      maxSseFrameBytes: limit,
+    }),
+  );
+  assert.equal(error.code, "ERR_NAMESPACE_RELAY_COMMITTED_STREAM");
+  assert.match(output.toString("utf8"), /"namespace":"collaboration"/u);
+  assert.doesNotMatch(output.toString("utf8"), new RegExp(marker, "u"));
+});
+
 test("post-rewrite ambiguity errors without leaking raw custom lifecycle bytes", async () => {
   const namespaces = new Map();
   bridgeCustomTools([{ type: "custom", name: "apply_patch" }], [], namespaces);
