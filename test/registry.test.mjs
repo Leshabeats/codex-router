@@ -58,6 +58,7 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "commandcode/gemini-3.7-flash",
       "commandcode/glm-5.2-fast",
       "commandcode/glm-5.2",
+      "commandcode/glm-5.3-flash",
       "commandcode/gpt-5.5",
       "commandcode/gpt-5.6-luna",
       "commandcode/gpt-5.6-sol",
@@ -81,7 +82,6 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "commandcode/minimax-m3",
       "commandcode/muse-spark-1.2",
       "commandcode/nemotron-3-ultra",
-      "commandcode/ox-alpha",
       "commandcode/qwen3.7-flash",
       "commandcode/qwen3.7-max",
       "commandcode/qwen3.7-plus",
@@ -110,6 +110,7 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "nousresearch/deepseek-v4-pro",
       "nousresearch/gemini-3.7-flash",
       "nousresearch/glm-5.2",
+      "nousresearch/glm-5.3-flash",
       "nousresearch/glm-5.3",
       "nousresearch/gpt-5.6-terra",
       "nousresearch/grok-4.6",
@@ -126,7 +127,6 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "nousresearch/minimax-m3",
       "nousresearch/muse-spark-1.2-contributor",
       "nousresearch/nemotron-3-ultra",
-      "nousresearch/ox-alpha",
       "nousresearch/qwen3.7-max",
       "nousresearch/qwen3.8-max",
       "nousresearch/solar-pro4-free",
@@ -165,8 +165,8 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "opencode-go-responses/grok-4.5",
       "opencode-go-responses/grok-4.6",
       "opencode-go-responses/muse-spark-1.2-contributor",
-      "opencode-free/ox-alpha",
-      "openrouter/ox-alpha",
+      "openrouter/glm-5.3-flash",
+      "openrouter/grok-4.6",
       "qwen-plan/deepseek-v4-flash-0731",
       "qwen-plan/deepseek-v4-pro-0813",
       "qwen-plan/deepseek-v4-pro",
@@ -176,7 +176,7 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "qwen-plan/qwen3.7-plus",
       "qwen-plan/qwen3.8-max-preview",
       "qwen-plan/qwen3.8-max",
-      "venice/ox-alpha",
+      "venice/glm-5.3-flash",
       "xiaomi-mimo/mimo-v2.5-pro",
       "xiaomi-mimo/mimo-v2.5",
       "zai-api/glm-4.7",
@@ -184,6 +184,7 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "zai-api/glm-5.3",
       "zai-coding/glm-5-turbo",
       "zai-coding/glm-5.2",
+      "zai-coding/glm-5.3-flash",
       "zai-coding/glm-5.3",
     ],
   );
@@ -330,13 +331,14 @@ test("provider registry exposes configured API and OAuth model families", () => 
   assert.equal(venice.credential.file, "venice-api-key.secret");
   assert.deepEqual(venice.credential.keychainServices, ["codex-router-venice"]);
   // Venice arrived as catalog-only, and stayed that way until Ox Alpha was
-  // checked in for it. It now ships exactly that one entry -- the picker is not
-  // empty once a key is stored, and everything else on Venice still has to be
-  // curated -- so this asserts the entry rather than merely that something is
-  // listed, which would also pass if a curation bug leaked extra models in.
+  // checked in for it. When Ox Alpha was withdrawn, GLM-5.3 Flash replaced it.
+  // Venice ships exactly that one entry -- the picker is not empty once a key
+  // is stored, and everything else on Venice still has to be curated -- so this
+  // asserts the entry rather than merely that something is listed, which would
+  // also pass if a curation bug leaked extra models in.
   assert.deepEqual(
     LISTED_MODELS.filter(({ provider }) => provider === "venice").map(({ slug }) => slug),
-    ["venice/ox-alpha"],
+    ["venice/glm-5.3-flash"],
   );
   const opencodeFree = PROVIDERS.get("opencode-free");
   const opencodeFreeResponses = PROVIDERS.get("opencode-free-responses");
@@ -1203,11 +1205,6 @@ test("Nous Research free models are tagged isFree, Hermes 4 is not", () => {
     assert.ok(model, `${slug} should exist in registry`);
     assert.notEqual(model.isFree, true, `${slug} should not be tagged isFree: true`);
   }
-
-  // ox-alpha should remain isFree: true (existing)
-  const oxAlpha = MODEL_BY_SLUG.get("nousresearch/ox-alpha");
-  assert.ok(oxAlpha);
-  assert.strictEqual(oxAlpha.isFree, true, "nousresearch/ox-alpha should remain isFree: true");
 });
 
 // A keyless provider skips the credential requirement, which is only safe
