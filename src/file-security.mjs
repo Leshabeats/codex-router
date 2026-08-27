@@ -12,12 +12,11 @@ import {
 import path from "node:path";
 
 const WINDOWS_PRIVATE_WORKER_TIMEOUT_MS = 30_000;
-// The Node test runner executes files in parallel child processes. Keeping one
-// PowerShell helper alive for a minute in every child exhausts the small
-// Windows CI runner and leaves newly spawned helpers unscheduled until their
-// request timeout. Retire test helpers as soon as the immediate write burst is
-// over; production keeps the full interval so selection and outcome writes on
-// either side of an upstream request still reuse one process.
+// The Node test runner executes files in isolated child processes. Retire test
+// helpers as soon as the immediate write burst is over so a completed fixture
+// cannot leave an unrelated PowerShell process behind; production keeps the
+// full interval so selection and outcome writes on either side of an upstream
+// request still reuse one process.
 const WINDOWS_PRIVATE_WORKER_IDLE_MS = process.env.NODE_TEST_CONTEXT ? 250 : 60_000;
 const WINDOWS_PRIVATE_WORKER_OUTPUT_LIMIT = 64 * 1024;
 

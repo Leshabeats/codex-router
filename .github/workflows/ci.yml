@@ -27,17 +27,7 @@ jobs:
         if: runner.os == 'Linux'
         run: npx playwright install --with-deps chromium
       - run: npm run check
-      - name: Run the test suite
-        if: runner.os != 'Windows'
-        run: npm test
-      # Private state is hardened by a real PowerShell ACL worker on Windows.
-      # Running hundreds of isolated test files in parallel can starve those
-      # security helpers on the hosted runner until their fail-closed timeout;
-      # keep the full suite and its real ACL assertions, but bound it to one
-      # test-file process there. Production worker behavior is unchanged.
-      - name: Run the test suite (Windows, bounded process concurrency)
-        if: runner.os == 'Windows'
-        run: npm test -- --test-concurrency=1
+      - run: npm test
       - run: npm audit --omit=dev --audit-level=high
       - name: Test the macOS tray
         if: runner.os == 'macOS'
