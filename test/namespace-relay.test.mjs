@@ -4522,6 +4522,95 @@ test("malformed, contradictory, or reused atomic special lifecycles fail safely"
   assert.deepEqual(contradictoryOutput, contradictorySource);
 });
 
+test("ordinary nonterminal snapshots reserve identities across compatible repeats", async () => {
+  const flattened = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "collaboration",
+      tools: [{ type: "function", name: "spawn_agent" }],
+    },
+  ]);
+  bridgeCustomTools(
+    [{ type: "custom", name: "apply_patch" }],
+    [],
+    flattened.namespaces,
+  );
+  const ordinary = {
+    type: "function_call",
+    id: "fc_progress_shared",
+    call_id: "call_progress_shared",
+    name: "collaboration__spawn_agent",
+    arguments: "{}",
+  };
+  const progress = {
+    type: "response.in_progress",
+    response: { id: "resp_progress", object: "response", output: [ordinary] },
+  };
+  const progressFrame = Buffer.from(
+    `event: ${progress.type}\ndata: ${JSON.stringify(progress)}\n\n`,
+    "utf8",
+  );
+  const done = { type: "response.output_item.done", item: ordinary };
+  const doneFrame = Buffer.from(
+    `event: ${done.type}\ndata: ${JSON.stringify(done)}\n\n`,
+    "utf8",
+  );
+  const completed = {
+    type: "response.completed",
+    response: { id: "resp_progress", object: "response", output: [ordinary] },
+  };
+  const completedFrame = Buffer.from(
+    `event: ${completed.type}\ndata: ${JSON.stringify(completed)}\n\n`,
+    "utf8",
+  );
+  const compatible = await collect(
+    Readable.from([progressFrame, progressFrame, doneFrame, completedFrame]).pipe(
+      new NamespaceToolCallTransform(flattened.namespaces, "text/event-stream"),
+    ),
+  );
+  const compatiblePayloads = compatible
+    .split("\n")
+    .filter((line) => line.startsWith("data: "))
+    .map((line) => JSON.parse(line.slice(6)));
+  assert.equal(compatiblePayloads.length, 4);
+  const compatibleItems = [
+    compatiblePayloads[0].response.output[0],
+    compatiblePayloads[1].response.output[0],
+    compatiblePayloads[2].item,
+    compatiblePayloads[3].response.output[0],
+  ];
+  for (const item of compatibleItems) {
+    assert.equal(item.id, "fc_progress_shared");
+    assert.equal(item.call_id, "call_progress_shared");
+    assert.equal(item.name, "spawn_agent");
+    assert.equal(item.namespace, "collaboration");
+  }
+
+  const reused = {
+    type: "response.output_item.done",
+    marker: "ordinary-progress-to-special-reuse",
+    item: {
+      type: "function_call",
+      id: "fc_progress_shared",
+      call_id: "call_progress_shared",
+      name: "apply_patch",
+      arguments: JSON.stringify({ input: "patch" }),
+    },
+  };
+  const reusedFrame = Buffer.from(
+    `event: ${reused.type}\ndata: ${JSON.stringify(reused)}\n\n`,
+    "utf8",
+  );
+  const { output, error } = await collectUntilPipelineError(
+    [progressFrame, progressFrame, reusedFrame],
+    new NamespaceToolCallTransform(flattened.namespaces, "text/event-stream"),
+  );
+  assert.equal(error.code, "ERR_NAMESPACE_RELAY_COMMITTED_STREAM");
+  assert.equal((output.toString("utf8").match(/"namespace":"collaboration"/gu) || []).length, 2);
+  assert.doesNotMatch(output.toString("utf8"), /ordinary-progress-to-special-reuse/u);
+  assert.doesNotMatch(output.toString("utf8"), /"type":"custom_tool_call"/u);
+});
+
 test("invalid or inconsistent tool_search arguments fail closed after conversion", async () => {
   const { namespaces } = flattenNamespaceTools([clientToolSearchControl()]);
   const open = {

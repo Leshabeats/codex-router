@@ -2916,15 +2916,14 @@ export class NamespaceToolCallTransform extends Transform {
     return this.#storeCallState(state);
   }
 
-  #registerAtomicOutputItem(sourceItem, item, { summarySeen = false } = {}) {
-    const sourceKind = this.#sourceSpecialCallKind(sourceItem);
-    const outputKind = this.#specialCallKind(item);
-    if (sourceKind || outputKind) {
-      return this.#registerAtomicSpecialCall(sourceItem, item, { summarySeen });
-    }
-
-    // Ordinary items reserve the same id domains. Otherwise a done-only
-    // ordinary call could donate its call_id to a later special relay.
+  #registerOrdinaryOutputItem(
+    sourceItem,
+    item,
+    { closed = true, summarySeen = false } = {},
+  ) {
+    // Ordinary items reserve the same id domains as special relays. This also
+    // covers nonterminal response snapshots, which can precede an explicit
+    // output_item.done event and therefore must not be marked closed yet.
     const itemId = typeof item?.id === "string" && item.id ? item.id : undefined;
     const callId = typeof item?.call_id === "string" && item.call_id
       ? item.call_id
@@ -2955,7 +2954,7 @@ export class NamespaceToolCallTransform extends Transform {
       (sourceHasItemId && !itemId) ||
       (sourceHasCallId && !callId)
     ) {
-      return "atomic output item lacks stable identity";
+      return "output item lacks stable identity";
     }
     if (!itemId && !callId) return undefined;
     const conflict = this.#openingIdentityConflict(item);
@@ -2978,11 +2977,23 @@ export class NamespaceToolCallTransform extends Transform {
       sawArgumentDelta: false,
       deltaCharacters: 0,
       deltaHash: undefined,
-      closed: true,
+      closed,
       summarySeen,
       deltaState: undefined,
     };
     return this.#storeCallState(state);
+  }
+
+  #registerAtomicOutputItem(sourceItem, item, { summarySeen = false } = {}) {
+    const sourceKind = this.#sourceSpecialCallKind(sourceItem);
+    const outputKind = this.#specialCallKind(item);
+    if (sourceKind || outputKind) {
+      return this.#registerAtomicSpecialCall(sourceItem, item, { summarySeen });
+    }
+    return this.#registerOrdinaryOutputItem(sourceItem, item, {
+      closed: true,
+      summarySeen,
+    });
   }
 
   #outputItemMatchesState(sourceItem, item, state) {
@@ -3133,9 +3144,13 @@ export class NamespaceToolCallTransform extends Transform {
     const outputKind = this.#specialCallKind(item);
     if (!state) {
       if (!allowAtomic) {
-        return sourceKind || outputKind
-          ? "special tool call summary without a matching opening"
-          : undefined;
+        if (sourceKind || outputKind) {
+          return "special tool call summary without a matching opening";
+        }
+        return this.#registerOrdinaryOutputItem(sourceItem, item, {
+          closed: false,
+          summarySeen: false,
+        });
       }
       return this.#registerAtomicOutputItem(sourceItem, item, { summarySeen: true });
     }
@@ -3147,8 +3162,13 @@ export class NamespaceToolCallTransform extends Transform {
         : "mismatched output item summary identity";
     }
     if (!state.kind) {
-      state.closed = true;
-      state.summarySeen = true;
+      // Progress snapshots may repeat the same ordinary item while its content
+      // grows. They reserve and validate ownership, but only a terminal output
+      // summary closes and consumes the one allowed summary transition.
+      if (allowAtomic) {
+        state.closed = true;
+        state.summarySeen = true;
+      }
       return undefined;
     }
     if (state.kind === "custom") {
@@ -3178,7 +3198,7 @@ export class NamespaceToolCallTransform extends Transform {
         return "tool search arguments changed after close";
       }
     }
-    state.summarySeen = true;
+    if (allowAtomic) state.summarySeen = true;
     return undefined;
   }
 
