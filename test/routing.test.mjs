@@ -5502,6 +5502,83 @@ test("router normalizes forced tool choices before LiteLLM for auto-tool-choice 
   }
 });
 
+test("router applies Moonshot ref repair only to the proven Console Go Kimi route", async () => {
+  const gatewayRequests = [];
+  const gateway = await mockServer(async (request, response) => {
+    gatewayRequests.push(await bodyJson(request));
+    json(response, 200, { id: "resp_test", object: "response", output: [] });
+  });
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_QUIET: "1",
+  });
+  const headers = {
+    Authorization: `Bearer ${CALLER_KEY}`,
+    "Content-Type": "application/json",
+  };
+  const decoratedRefTool = {
+    type: "function",
+    name: "review_change",
+    description: "Review one proposed change.",
+    parameters: {
+      type: "object",
+      properties: {
+        change: {
+          $ref: "#/$defs/change",
+          description: "The change to review.",
+        },
+      },
+      required: ["change"],
+      $defs: {
+        change: {
+          type: "object",
+          properties: { path: { type: "string" } },
+          required: ["path"],
+          additionalProperties: false,
+        },
+      },
+    },
+  };
+
+  async function route(model) {
+    const response = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ model, input: "test", tools: [decoratedRefTool] }),
+    });
+    assert.equal(response.status, 200, router.testErrors());
+    return gatewayRequests.at(-1);
+  }
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+
+    const kimi = await route("opencode-go/kimi-k2.7-code");
+    assert.equal(kimi.model, "opencode-go-kimi-k2-7-code");
+    assert.deepEqual(kimi.tools[0].parameters.properties.change, {
+      type: "object",
+      properties: { path: { type: "string" } },
+      required: ["path"],
+      additionalProperties: false,
+      description: "The change to review.",
+    });
+
+    // The evidence is route-specific. Another Chat model on the same provider
+    // keeps the caller's schema unchanged instead of inheriting a Kimi quirk.
+    const glm = await route("opencode-go/glm-5.2");
+    assert.equal(glm.model, "opencode-go-glm-5-2");
+    assert.deepEqual(
+      glm.tools.find((tool) => tool.name === decoratedRefTool.name),
+      decoratedRefTool,
+    );
+  } finally {
+    await stopChild(router);
+    await closeServer(gateway.server);
+  }
+});
+
 test("router redirects native background turns to the configured routed model", async () => {
   const gatewayRequests = [];
   const gateway = await mockServer(async (request, response) => {
@@ -7279,30 +7356,75 @@ test("a plain follow-up after a thinking turn replays its reasoning", async () =
   }
 });
 
-test("router removes DeepSeek's confirmed blank message before a tool call", async () => {
+test("router normalizes direct DeepSeek's live reasoning bridge and removes its blank", async () => {
+  const model = "deepseek-v4-flash";
+  const reasoningText = "Inspect the request, then call the tool exactly once.";
   const blankMessage = {
-    id: "msg_blank",
+    id: "msg_direct_live",
     type: "message",
     status: "completed",
     role: "assistant",
     content: [{ type: "output_text", text: "", annotations: [] }],
   };
   const functionCall = {
-    id: "call_list",
+    id: "call_direct_live",
     type: "function_call",
-    call_id: "call_list",
+    call_id: "call_direct_live",
     name: "exec_command",
     arguments: "{}",
     status: "completed",
+  };
+  const terminalReasoning = {
+    id: "rs_-8853496868378332836",
+    type: "reasoning",
+    status: "completed",
+    role: "assistant",
+    content: [{ type: "output_text", text: reasoningText, annotations: [] }],
+  };
+  const terminalBlank = {
+    ...blankMessage,
+    id: "04847f40-ed33-4239-80d2-d392fe38fcc3",
+    content: [{ type: "output_text", annotations: [] }],
+  };
+  const normalizedReasoning = {
+    id: terminalReasoning.id,
+    type: "reasoning",
+    status: "completed",
+    summary: [{ type: "summary_text", text: reasoningText }],
   };
   const gateway = await mockServer(async (request, response) => {
     await bodyJson(request);
     response.writeHead(200, { "Content-Type": "text/event-stream" });
     const events = [
       {
+        type: "response.created",
+        response: {
+          id: "resp_direct_live_open",
+          model,
+          object: "response",
+          status: "in_progress",
+          error: null,
+          output: [],
+        },
+        model,
+      },
+      {
+        type: "response.in_progress",
+        response: {
+          id: "resp_direct_live_open",
+          model,
+          object: "response",
+          status: "in_progress",
+          error: null,
+          output: [],
+        },
+        model,
+      },
+      {
         type: "response.output_item.added",
         output_index: 0,
         item: { ...blankMessage, status: "in_progress", content: [] },
+        model,
       },
       {
         type: "response.content_part.added",
@@ -7310,42 +7432,84 @@ test("router removes DeepSeek's confirmed blank message before a tool call", asy
         output_index: 0,
         content_index: 0,
         part: { type: "output_text", text: "", annotations: [] },
+        model,
+      },
+      {
+        type: "response.reasoning_summary_text.delta",
+        item_id: blankMessage.id,
+        output_index: 0,
+        delta: "Inspect the request, then ",
+        model,
+      },
+      {
+        type: "response.reasoning_summary_text.delta",
+        item_id: blankMessage.id,
+        output_index: 0,
+        delta: "call the tool exactly once.",
+        model,
       },
       {
         type: "response.output_item.added",
         output_index: 1,
         item: { ...functionCall, arguments: "", status: "in_progress" },
+        model,
+      },
+      {
+        type: "response.function_call_arguments.delta",
+        item_id: functionCall.id,
+        output_index: 1,
+        delta: "{}",
+        model,
       },
       {
         type: "response.function_call_arguments.done",
         item_id: functionCall.id,
         output_index: 1,
         arguments: "{}",
+        model,
       },
-      { type: "response.output_item.done", output_index: 1, item: functionCall },
+      {
+        type: "response.output_item.done",
+        output_index: 1,
+        sequence_number: 16,
+        item: functionCall,
+        model,
+      },
       {
         type: "response.output_text.done",
         item_id: blankMessage.id,
         output_index: 0,
         content_index: 0,
         text: "",
+        model,
       },
       {
         type: "response.content_part.done",
         item_id: blankMessage.id,
         output_index: 0,
         content_index: 0,
-        part: { type: "reasoning_text", reasoning: "private reasoning" },
+        part: { type: "reasoning_text", reasoning: reasoningText },
+        model,
       },
-      { type: "response.output_item.done", output_index: 0, item: blankMessage },
+      {
+        type: "response.output_item.done",
+        output_index: 0,
+        sequence_number: 1,
+        item: blankMessage,
+        model,
+      },
       {
         type: "response.completed",
         response: {
-          id: "resp_tool_only",
+          id: "resp_direct_live_closed",
+          model,
+          object: "response",
           status: "completed",
-          output: [blankMessage, functionCall],
+          error: null,
+          output: [terminalReasoning, terminalBlank, functionCall],
           usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
         },
+        model,
       },
     ];
     response.end(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""));
@@ -7374,15 +7538,35 @@ test("router removes DeepSeek's confirmed blank message before a tool call", asy
       .filter((line) => line.startsWith("data: {"))
       .map((line) => JSON.parse(line.slice(5).trim()));
     assert.equal(text.includes(blankMessage.id), false);
-    assert.equal(text.includes("private reasoning"), false);
+    assert.equal(text.includes(terminalBlank.id), false);
+    const reasoningEvents = events.filter(
+      (event) => (event.item_id ?? event.item?.id) === terminalReasoning.id,
+    );
+    assert.deepEqual(
+      reasoningEvents.map((event) => [event.type, event.output_index]),
+      [
+        ["response.output_item.added", 0],
+        ["response.reasoning_summary_part.added", 0],
+        ["response.reasoning_summary_text.delta", 0],
+        ["response.reasoning_summary_text.delta", 0],
+        ["response.reasoning_summary_text.done", 0],
+        ["response.reasoning_summary_part.done", 0],
+        ["response.output_item.done", 0],
+      ],
+    );
     const toolEvents = events.filter(
       (event) => (event.item_id ?? event.item?.id) === functionCall.id,
     );
     assert.ok(toolEvents.length >= 3);
-    assert.ok(toolEvents.every((event) => event.output_index === 0));
+    assert.ok(toolEvents.every((event) => event.output_index === 1));
+    assert.deepEqual(
+      events.filter((event) => event.sequence_number !== undefined)
+        .map((event) => event.sequence_number),
+      [16],
+    );
     assert.deepEqual(
       events.find((event) => event.type === "response.completed").response.output,
-      [functionCall],
+      [normalizedReasoning, functionCall],
     );
   } finally {
     await stopChild(router);
@@ -7390,7 +7574,7 @@ test("router removes DeepSeek's confirmed blank message before a tool call", asy
   }
 });
 
-test("router does not compact the same blank-message shape on non-DeepSeek routes", async () => {
+test("router compacts translated OpenCode routes but leaves Responses-native routes unchanged", async () => {
   const blank = {
     id: "msg_blank",
     type: "message",
@@ -7398,24 +7582,60 @@ test("router does not compact the same blank-message shape on non-DeepSeek route
     role: "assistant",
     content: [{ type: "output_text", text: "", annotations: [] }],
   };
+  const terminalBlank = {
+    ...blank,
+    id: "chatcmpl_tool_only",
+    content: [{ type: "output_text", annotations: [] }],
+  };
   const tool = {
     id: "call_list",
     type: "function_call",
     call_id: "call_id",
-    name: "exec_command",
+    name: "collaboration__spawn_agent",
     arguments: "{}",
     status: "completed",
   };
+  const restoredTool = {
+    ...tool,
+    name: "spawn_agent",
+    namespace: "collaboration",
+  };
+  const tools = [{
+    type: "namespace",
+    name: "collaboration",
+    tools: [{
+      type: "function",
+      name: "spawn_agent",
+      inputSchema: { type: "object", properties: {} },
+    }],
+  }];
   const source = [
+    {
+      type: "response.created",
+      response: {
+        id: "resp_tool_only",
+        object: "response",
+        status: "in_progress",
+        error: null,
+        output: [],
+      },
+    },
     { type: "response.output_item.added", output_index: 0, item: { ...blank, status: "in_progress", content: [] } },
-    { type: "response.output_item.added", output_index: 1, item: { ...tool, status: "in_progress" } },
+    {
+      type: "response.output_item.added",
+      output_index: 1,
+      item: { ...tool, arguments: "", status: "in_progress" },
+    },
+    { type: "response.output_item.done", output_index: 1, item: tool },
     { type: "response.output_item.done", output_index: 0, item: blank },
     {
       type: "response.completed",
       response: {
         id: "resp_tool_only",
+        object: "response",
         status: "completed",
-        output: [blank, tool],
+        error: null,
+        output: [terminalBlank, tool],
         usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
       },
     },
@@ -7434,28 +7654,63 @@ test("router does not compact the same blank-message shape on non-DeepSeek route
 
   try {
     await waitFor(`${routerBase(routerPort)}/models`, router);
-    const response = await fetch(`${routerBase(routerPort)}/responses`, {
+    const translatedResponse = await fetch(`${routerBase(routerPort)}/responses`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         model: "opencode-go/deepseek-v4-flash",
         input: "list files",
         stream: true,
+        tools,
       }),
     });
-    const text = await response.text();
-    assert.equal(response.status, 200, text);
-    const events = text.split(/\r?\n/)
+    const translatedText = await translatedResponse.text();
+    assert.equal(translatedResponse.status, 200, translatedText);
+    const translatedEvents = translatedText.split(/\r?\n/)
       .filter((line) => line.startsWith("data: {"))
       .map((line) => JSON.parse(line.slice(5).trim()));
-    assert.ok(text.includes(blank.id));
+    assert.equal(translatedText.includes(blank.id), false);
+    assert.equal(translatedText.includes(terminalBlank.id), false);
+    const translatedToolEvent = translatedEvents.find(
+      (event) => event.item?.id === tool.id,
+    );
+    assert.equal(translatedToolEvent.output_index, 0);
+    assert.deepEqual(
+      {
+        id: translatedToolEvent.item.id,
+        name: translatedToolEvent.item.name,
+        namespace: translatedToolEvent.item.namespace,
+      },
+      { id: tool.id, name: "spawn_agent", namespace: "collaboration" },
+    );
+    assert.deepEqual(
+      translatedEvents.find((event) => event.type === "response.completed").response.output,
+      [restoredTool],
+    );
+
+    const nativeResponse = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "opencode-go-responses/gpt-5.6-luna",
+        input: "list files",
+        stream: true,
+        tools,
+      }),
+    });
+    const nativeText = await nativeResponse.text();
+    assert.equal(nativeResponse.status, 200, nativeText);
+    const nativeEvents = nativeText.split(/\r?\n/)
+      .filter((line) => line.startsWith("data: {"))
+      .map((line) => JSON.parse(line.slice(5).trim()));
+    assert.ok(nativeText.includes(blank.id));
     assert.equal(
-      events.find((event) => event.item?.id === tool.id).output_index,
+      nativeEvents.find((event) => event.item?.id === tool.id).output_index,
       1,
     );
     assert.deepEqual(
-      events.find((event) => event.type === "response.completed").response.output,
-      [blank, tool],
+      nativeEvents.find((event) => event.type === "response.completed").response.output,
+      [terminalBlank, restoredTool],
     );
   } finally {
     await stopChild(router);
@@ -7613,6 +7868,221 @@ test("router response pipelines preserve ambiguous provider bytes exactly", asyn
     assert.match(lifecycleFailureText, /event: error/u);
     assert.match(lifecycleFailureText, /local_router_stream_failed/u);
     assert.doesNotMatch(lifecycleFailureText, new RegExp(lifecycleMarker, "u"));
+  } finally {
+    await stopChild(router);
+    await closeServer(gateway.server);
+  }
+});
+
+test("router enables the terminal-only bridge repair only for Messages routes", async () => {
+  const model = "opencode-go-messages-minimax-m3";
+  const blank = {
+    id: "chatcmpl_terminal_only",
+    type: "message",
+    status: "completed",
+    role: "assistant",
+    content: [{ type: "output_text", text: "", annotations: [] }],
+  };
+  const tool = {
+    id: "call_terminal_only",
+    type: "function_call",
+    call_id: "call_terminal_only",
+    name: "exec_command",
+    arguments: "{}",
+    status: "completed",
+  };
+  const inProgress = {
+    id: "resp_terminal_only_open",
+    model,
+    object: "response",
+    status: "in_progress",
+    error: null,
+    output: [],
+  };
+  const source = [
+    { type: "response.created", response: { ...inProgress }, model },
+    { type: "response.in_progress", response: { ...inProgress }, model },
+    {
+      type: "response.output_item.added",
+      output_index: 1,
+      item: { ...tool, arguments: "", status: "in_progress" },
+      model,
+    },
+    {
+      type: "response.function_call_arguments.done",
+      item_id: tool.id,
+      output_index: 1,
+      arguments: "{}",
+      model,
+    },
+    {
+      type: "response.output_item.done",
+      output_index: 1,
+      sequence_number: 8,
+      item: tool,
+      model,
+    },
+    {
+      type: "response.output_text.done",
+      item_id: blank.id,
+      output_index: 0,
+      content_index: 0,
+      text: "",
+      model,
+    },
+    {
+      type: "response.content_part.done",
+      item_id: blank.id,
+      output_index: 0,
+      content_index: 0,
+      part: { type: "output_text", text: "", annotations: [] },
+      model,
+    },
+    {
+      type: "response.output_item.done",
+      output_index: 0,
+      sequence_number: 1,
+      item: blank,
+      model,
+    },
+    {
+      type: "response.completed",
+      response: {
+        id: "resp_terminal_only_closed",
+        model,
+        object: "response",
+        status: "completed",
+        error: null,
+        output: [blank, tool],
+      },
+      model,
+    },
+  ].map((event) => `data: ${JSON.stringify(event)}\n\n`).join("");
+  const gateway = await mockServer(async (request, response) => {
+    await bodyJson(request);
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    response.end(source);
+  });
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_QUIET: "1",
+  });
+
+  const route = async (routeModel) => {
+    const response = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: routeModel,
+        input: "list files",
+        stream: true,
+      }),
+    });
+    const text = await response.text();
+    assert.equal(response.status, 200, text);
+    return {
+      text,
+      events: text.split(/\r?\n/)
+        .filter((line) => line.startsWith("data: {"))
+        .map((line) => JSON.parse(line.slice(5).trim())),
+    };
+  };
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const messages = await route("opencode-go-messages/minimax-m3");
+    assert.equal(messages.text.includes(blank.id), false);
+    assert.equal(
+      messages.events.find((event) => event.item?.id === tool.id).output_index,
+      0,
+    );
+    assert.deepEqual(
+      messages.events.find((event) => event.type === "response.completed").response.output,
+      [tool],
+    );
+
+    const openai = await route("opencode-go/deepseek-v4-flash");
+    assert.ok(openai.text.includes(blank.id));
+    assert.equal(
+      openai.events.find((event) => event.item?.id === tool.id).output_index,
+      1,
+    );
+    assert.deepEqual(
+      openai.events.find((event) => event.type === "response.completed").response.output,
+      [blank, tool],
+    );
+  } finally {
+    await stopChild(router);
+    await closeServer(gateway.server);
+  }
+});
+
+test("router applies the translated empty-message repair to bounded JSON responses", async () => {
+  const blank = {
+    id: "msg_blank_json",
+    type: "message",
+    status: "completed",
+    role: "assistant",
+    content: [{ type: "output_text", text: null, annotations: [] }],
+    phase: null,
+  };
+  const tool = {
+    id: "call_json",
+    type: "function_call",
+    call_id: "call_json",
+    name: "exec_command",
+    arguments: "{}",
+    status: "completed",
+  };
+  const payload = {
+    id: "resp_json_tool",
+    object: "response",
+    error: null,
+    status: "completed",
+    output: [blank, tool],
+    usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
+  };
+  const gateway = await mockServer(async (request, response) => {
+    await bodyJson(request);
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify(payload));
+  });
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_QUIET: "1",
+  });
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const translatedResponse = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "opencode-go/deepseek-v4-flash",
+        input: "list files",
+        stream: false,
+      }),
+    });
+    const translated = await translatedResponse.json();
+    assert.equal(translatedResponse.status, 200, JSON.stringify(translated));
+    assert.deepEqual(translated.output, [tool]);
+
+    const nativeResponse = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "opencode-go-responses/gpt-5.6-luna",
+        input: "list files",
+        stream: false,
+      }),
+    });
+    const native = await nativeResponse.json();
+    assert.equal(nativeResponse.status, 200, JSON.stringify(native));
+    assert.deepEqual(native.output, [blank, tool]);
   } finally {
     await stopChild(router);
     await closeServer(gateway.server);

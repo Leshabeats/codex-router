@@ -55,7 +55,7 @@ import {
   ZaiResponsesCompatTransform,
   zaiResponsesCompatTransform,
 } from "./zai-responses-compat.mjs";
-import { deepseekToolMessageCompatTransform } from "./deepseek-tool-message-compat.mjs";
+import { translatedToolMessageCompatTransform } from "./deepseek-tool-message-compat.mjs";
 import { exactRouteProbeRequested } from "./exact-route-probe.mjs";
 import {
   MERGED_CATALOG_PATH,
@@ -757,11 +757,19 @@ function needsStrictOpenCodeToolCompatibility(route) {
 // whole request -- not the one tool -- over any other pointer (issue #353) or a
 // definition reference carrying sibling keywords. The OAuth and platform-key
 // routes are separate products, but their first-party validators share this
-// schema flavor. Keep the rewrite off every non-Moonshot provider.
+// schema flavor. Console Go's Kimi K2.7 Code route has now returned the same
+// validator error (#488), so include that exact measured route without
+// projecting the behavior onto unrelated OpenCode Go models.
 const MOONSHOT_PROVIDER_IDS = new Set(["kimi-oauth", "kimi-api", "kimi-api-cn"]);
+const OPENCODE_GO_MOONSHOT_MODELS = new Set(["kimi-k2.7-code"]);
 
 function needsMoonshotSchemaCompatibility(route) {
-  return MOONSHOT_PROVIDER_IDS.has(providerForModel(route)?.id);
+  const providerId = providerForModel(route)?.id;
+  return (
+    MOONSHOT_PROVIDER_IDS.has(providerId) ||
+    (providerId === "opencode-go" &&
+      OPENCODE_GO_MOONSHOT_MODELS.has(route.upstreamModel))
+  );
 }
 
 function zenFreeCompatibleInput(input, route) {
@@ -3541,10 +3549,13 @@ async function handleResponses(request, response, requestUrl) {
         envelopeCompat = new ZaiResponsesCompatTransform();
       }
       if (envelopeCompat) transforms.push(envelopeCompat);
-      const deepseekToolMessageCompat = route
-        ? deepseekToolMessageCompatTransform(route.provider, contentType)
+      // LiteLLM can add blank assistant envelopes while translating either
+      // Chat Completions or Messages. The factory refuses native traffic and
+      // providers that already speak Responses, so those paths gain no stage.
+      const translatedToolMessageCompat = route
+        ? translatedToolMessageCompatTransform(providerForModel(route), contentType)
         : undefined;
-      if (deepseekToolMessageCompat) transforms.push(deepseekToolMessageCompat);
+      if (translatedToolMessageCompat) transforms.push(translatedToolMessageCompat);
       // Restore flattened namespace calls for routed chat-completions providers,
       // and inject missing finished-child interrupts for both routed and native
       // multi-agent parents (San Francisco uses native GPT).
