@@ -828,6 +828,7 @@ export class TranslatedToolMessageCompatTransform extends Transform {
   #items = new Map();
   #indexItems = new Map();
   #lastSequence = -1;
+  #usedTerminalCandidateSequenceReset = false;
   #preludeBytes = 0;
   #maxCandidateBytes;
   #maxCandidateMs;
@@ -1020,8 +1021,33 @@ export class TranslatedToolMessageCompatTransform extends Transform {
 
   #acceptSequence(event) {
     if (event.sequence_number === undefined) return true;
-    if (event.sequence_number <= this.#lastSequence) return false;
-    this.#lastSequence = event.sequence_number;
+    if (event.sequence_number > this.#lastSequence) {
+      this.#lastSequence = event.sequence_number;
+      return true;
+    }
+
+    // LiteLLM 1.96.0 hard-codes sequence_number=1 on the terminal
+    // output_item.done for the empty Chat-Completions bridge message, even
+    // after it has emitted higher-numbered tool events. Admit only that one
+    // pinned wire defect, after the active candidate and its tool evidence are
+    // already known. Keep the high-water mark so every later numbered event
+    // must still advance the real stream sequence.
+    const id = eventItemId(event);
+    const record = id ? this.#items.get(id) : undefined;
+    if (
+      this.#usedTerminalCandidateSequenceReset ||
+      event.sequence_number !== 1 ||
+      event.type !== "response.output_item.done" ||
+      !this.#capture ||
+      record?.kind !== "candidate" ||
+      record.done ||
+      !record.sawTool ||
+      !eventIndexMatches(event, record) ||
+      !exactEmptyMessage(event.item) ||
+      event.item.id !== record.id
+    ) return false;
+
+    this.#usedTerminalCandidateSequenceReset = true;
     return true;
   }
 

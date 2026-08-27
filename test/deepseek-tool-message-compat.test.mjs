@@ -220,6 +220,188 @@ function phantomToolStream(
   ].join("");
 }
 
+// LiteLLM 1.96.0 emits this non-monotonic sequence on its
+// Chat-Completions -> Responses bridge. In particular, the terminal empty
+// message item is hard-coded to sequence_number=1 after higher-numbered tool
+// events, while its output_text/content_part closes are unnumbered.
+function pinnedLiteLlmPhantomEvents() {
+  const inProgressResponse = {
+    id: "resp_pinned_litellm",
+    object: "response",
+    status: "in_progress",
+    error: null,
+    output: [],
+  };
+  return [
+    {
+      type: "response.created",
+      sequence_number: 1,
+      response: { ...inProgressResponse },
+    },
+    {
+      type: "response.in_progress",
+      sequence_number: 2,
+      response: { ...inProgressResponse },
+    },
+    {
+      type: "response.output_item.added",
+      output_index: 0,
+      sequence_number: 3,
+      item: { ...blankMessage, status: "in_progress", content: [] },
+    },
+    {
+      type: "response.content_part.added",
+      item_id: blankMessage.id,
+      output_index: 0,
+      content_index: 0,
+      sequence_number: 4,
+      part: { type: "output_text", text: "", annotations: [] },
+    },
+    {
+      type: "response.output_item.added",
+      output_index: 1,
+      sequence_number: 5,
+      item: { ...functionCall, status: "in_progress", arguments: "" },
+    },
+    {
+      type: "response.function_call_arguments.delta",
+      item_id: functionCall.id,
+      output_index: 1,
+      sequence_number: 6,
+      delta: "{}",
+    },
+    {
+      type: "response.output_item.done",
+      output_index: 1,
+      sequence_number: 7,
+      item: { ...functionCall },
+    },
+    {
+      type: "response.output_text.done",
+      item_id: blankMessage.id,
+      output_index: 0,
+      content_index: 0,
+      text: "",
+    },
+    {
+      type: "response.content_part.done",
+      item_id: blankMessage.id,
+      output_index: 0,
+      content_index: 0,
+      part: { type: "output_text", text: "", annotations: [] },
+    },
+    {
+      type: "response.output_item.done",
+      output_index: 0,
+      sequence_number: 1,
+      item: { ...blankMessage },
+    },
+    {
+      type: "response.completed",
+      response: {
+        id: inProgressResponse.id,
+        object: "response",
+        status: "completed",
+        error: null,
+        output: [{ ...blankMessage }, { ...functionCall }],
+      },
+    },
+  ];
+}
+
+function pinnedLiteLlmPhantomToolStream(mutate) {
+  const wireEvents = pinnedLiteLlmPhantomEvents();
+  if (mutate) mutate(wireEvents);
+  return `${wireEvents.map((event) => block(event)).join("")}data: [DONE]\n\n`;
+}
+
+test("repairs LiteLLM 1.96.0's pinned terminal sequence reset", async () => {
+  const source = pinnedLiteLlmPhantomToolStream();
+  const output = await transformed(source, {}, 5);
+  const seen = events(output);
+
+  assert.equal(output.includes(blankMessage.id), false);
+  assert.deepEqual(
+    seen.filter((event) => eventItem(event) === functionCall.id)
+      .map((event) => [event.type, event.output_index, event.sequence_number]),
+    [
+      ["response.output_item.added", 0, 5],
+      ["response.function_call_arguments.delta", 0, 6],
+      ["response.output_item.done", 0, 7],
+    ],
+  );
+  assert.deepEqual(
+    seen.find((event) => event.type === "response.completed").response.output,
+    [functionCall],
+  );
+});
+
+test("the pinned sequence exception fails open for every adjacent ambiguity", async () => {
+  const cases = [
+    ["a different reset value", (wireEvents) => {
+      wireEvents[9].sequence_number = 2;
+    }],
+    ["a reset before tool evidence", (wireEvents) => {
+      const [terminal] = wireEvents.splice(9, 1);
+      wireEvents.splice(4, 0, terminal);
+    }],
+    ["a mismatched output index", (wireEvents) => {
+      wireEvents[9].output_index = 1;
+    }],
+    ["a mismatched item id", (wireEvents) => {
+      wireEvents[9].item = { ...wireEvents[9].item, id: "msg_other" };
+    }],
+    ["visible terminal content", (wireEvents) => {
+      wireEvents[9].item = {
+        ...wireEvents[9].item,
+        content: [{ type: "output_text", text: "visible", annotations: [] }],
+      };
+    }],
+    ["a reset on a tool item", (wireEvents) => {
+      wireEvents[6].sequence_number = 1;
+    }],
+    ["a second terminal reset", (wireEvents) => {
+      wireEvents.splice(10, 0, {
+        ...wireEvents[9],
+        item: { ...wireEvents[9].item },
+      });
+    }],
+    ["a later event below the retained high-water mark", (wireEvents) => {
+      wireEvents[10].sequence_number = 7;
+    }],
+  ];
+
+  for (const [name, mutate] of cases) {
+    const source = pinnedLiteLlmPhantomToolStream(mutate);
+    assert.equal(await transformed(source, {}, 3), source, name);
+  }
+});
+
+test("a reasoning terminal cannot use the pinned candidate reset", async () => {
+  const reasoning = {
+    id: "rs_reset",
+    type: "reasoning",
+    status: "completed",
+    summary: [],
+  };
+  const source = [
+    responseCreated("resp_reasoning_reset", { sequenceNumber: 1 }),
+    block({
+      type: "response.output_item.added",
+      output_index: 0,
+      sequence_number: 2,
+      item: { ...reasoning, status: "in_progress" },
+    }),
+    block({
+      type: "response.output_item.done",
+      output_index: 0,
+      sequence_number: 1,
+      item: reasoning,
+    }),
+  ].join("");
+  assert.equal(await transformed(source), source);
+});
+
 test("removes DeepSeek's confirmed blank tool message and compacts indexes", async () => {
   const output = await transformed(phantomToolStream(), {}, 7);
   const seen = events(output);
