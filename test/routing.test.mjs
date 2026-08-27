@@ -7300,6 +7300,16 @@ test("router removes DeepSeek's confirmed blank message before a tool call", asy
     response.writeHead(200, { "Content-Type": "text/event-stream" });
     const events = [
       {
+        type: "response.created",
+        response: {
+          id: "resp_tool_only",
+          object: "response",
+          status: "in_progress",
+          error: null,
+          output: [],
+        },
+      },
+      {
         type: "response.output_item.added",
         output_index: 0,
         item: { ...blankMessage, status: "in_progress", content: [] },
@@ -7342,7 +7352,9 @@ test("router removes DeepSeek's confirmed blank message before a tool call", asy
         type: "response.completed",
         response: {
           id: "resp_tool_only",
+          object: "response",
           status: "completed",
+          error: null,
           output: [blankMessage, functionCall],
           usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
         },
@@ -7425,14 +7437,31 @@ test("router compacts translated OpenCode routes but leaves Responses-native rou
     }],
   }];
   const source = [
+    {
+      type: "response.created",
+      response: {
+        id: "resp_tool_only",
+        object: "response",
+        status: "in_progress",
+        error: null,
+        output: [],
+      },
+    },
     { type: "response.output_item.added", output_index: 0, item: { ...blank, status: "in_progress", content: [] } },
-    { type: "response.output_item.added", output_index: 1, item: { ...tool, status: "in_progress" } },
+    {
+      type: "response.output_item.added",
+      output_index: 1,
+      item: { ...tool, arguments: "", status: "in_progress" },
+    },
+    { type: "response.output_item.done", output_index: 1, item: tool },
     { type: "response.output_item.done", output_index: 0, item: blank },
     {
       type: "response.completed",
       response: {
         id: "resp_tool_only",
+        object: "response",
         status: "completed",
+        error: null,
         output: [terminalBlank, tool],
         usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
       },
