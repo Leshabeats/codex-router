@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Transform } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 
@@ -48,12 +49,160 @@ export const NAMESPACE_DELIMITER = "__";
 const SPAWN_AGENT_MODELS = new WeakMap();
 const TOOL_SEARCH_RELAYS = new WeakMap();
 const CUSTOM_TOOL_RELAYS = new WeakMap();
+const NAME_ALIASES = new WeakMap();
+const PLAIN_TOOL_NAMES = new WeakMap();
+// A provider-facing function reference can retain the same spelling as a
+// bridged custom/tool-search relay while a later-discovered ordinary function
+// with that native name receives an alias. Object identity is the only honest
+// discriminator after both shapes have become `type: "function"`; keep it
+// request-local and garbage-collectable rather than guessing from the name.
+const SPECIAL_FUNCTION_REFERENCES = new WeakSet();
 
 const TOOL_SEARCH_FUNCTION_NAME = "tool_search";
 const CUSTOM_TOOL_INPUT_PROPERTY = "input";
 
 function providerFunctionName(tool) {
   return tool?.name ?? tool?.function?.name;
+}
+
+function withProviderFunctionName(tool, name) {
+  if (tool?.function?.name !== undefined) {
+    return { ...tool, function: { ...tool.function, name } };
+  }
+  return { ...tool, name };
+}
+
+function nativeToolKey(namespace, name) {
+  return JSON.stringify([namespace ?? null, name]);
+}
+
+function boundedNameCandidate(wireName, identity, maxNameLength, attempt) {
+  const digest = createHash("sha256")
+    .update(`${identity}\0${attempt}`)
+    .digest("hex")
+    .slice(0, 12);
+  const suffix = `_${digest}`;
+  return `${wireName.slice(0, maxNameLength - suffix.length)}${suffix}`;
+}
+
+function assignProviderName(relay, identity, wireName, native, { forceAlias = false } = {}) {
+  const existing = relay.nativeToProvider.get(identity);
+  if (existing) return existing;
+
+  let providerName = wireName;
+  if (
+    forceAlias ||
+    wireName.length > relay.maxNameLength ||
+    relay.providerOwners.has(wireName)
+  ) {
+    let attempt = 0;
+    do {
+      providerName = boundedNameCandidate(
+        wireName,
+        identity,
+        relay.maxNameLength,
+        attempt,
+      );
+      attempt += 1;
+    } while (relay.providerOwners.has(providerName));
+  }
+
+  relay.nativeToProvider.set(identity, providerName);
+  relay.providerOwners.set(providerName, identity);
+  if (native && providerName !== wireName) relay.providerToNative.set(providerName, native);
+  if (native) {
+    if (native.namespace === undefined) relay.plainProviderNames.add(providerName);
+    if (!relay.wireOwners.has(wireName)) relay.wireOwners.set(wireName, new Set());
+    relay.wireOwners.get(wireName).add(identity);
+  }
+  return providerName;
+}
+
+function initialFunctionIdentities(tools) {
+  const identities = new Map();
+  if (!Array.isArray(tools)) return identities;
+  for (const tool of tools) {
+    if (tool?.type === "namespace" && typeof tool.name === "string" && Array.isArray(tool.tools)) {
+      for (const child of tool.tools) {
+        if (child?.type !== "function" || typeof child.name !== "string" || !child.name) continue;
+        const wireName = `${tool.name}${NAMESPACE_DELIMITER}${child.name}`;
+        const native = { namespace: tool.name, name: child.name };
+        identities.set(nativeToolKey(native.namespace, native.name), { wireName, native });
+      }
+      continue;
+    }
+    if (tool?.type !== "function") continue;
+    const name = providerFunctionName(tool);
+    if (typeof name !== "string" || !name) continue;
+    const native = { name };
+    identities.set(nativeToolKey(undefined, name), { wireName: name, native });
+  }
+  return identities;
+}
+
+function initializeNameAliases(namespaces, tools, maxNameLength) {
+  if (!Number.isInteger(maxNameLength) || maxNameLength < 16) return undefined;
+  const relay = {
+    maxNameLength,
+    nativeToProvider: new Map(),
+    providerToNative: new Map(),
+    providerOwners: new Map(),
+    plainProviderNames: new Set(),
+    wireOwners: new Map(),
+  };
+  NAME_ALIASES.set(namespaces, relay);
+
+  const identities = initialFunctionIdentities(tools);
+  const wireCounts = new Map();
+  for (const { wireName } of identities.values()) {
+    wireCounts.set(wireName, (wireCounts.get(wireName) || 0) + 1);
+  }
+
+  // Reserve every legal, unique name first. Long names and native collisions
+  // are then assigned in stable identity order, so reordering an otherwise
+  // identical tool list cannot change the aliases sent to the provider.
+  const pending = [];
+  for (const [identity, entry] of [...identities].sort(([left], [right]) =>
+    left.localeCompare(right),
+  )) {
+    if (entry.wireName.length <= maxNameLength && wireCounts.get(entry.wireName) === 1) {
+      assignProviderName(relay, identity, entry.wireName, entry.native);
+    } else {
+      pending.push([identity, entry]);
+    }
+  }
+  for (const [identity, entry] of pending) {
+    assignProviderName(relay, identity, entry.wireName, entry.native, { forceAlias: true });
+  }
+  return relay;
+}
+
+function providerNameForNative(namespaces, namespace, name) {
+  const relay = NAME_ALIASES.get(namespaces);
+  if (!relay) return namespace === undefined ? name : `${namespace}${NAMESPACE_DELIMITER}${name}`;
+  const identity = nativeToolKey(namespace, name);
+  const existing = relay.nativeToProvider.get(identity);
+  if (existing) return existing;
+  const wireName = namespace === undefined ? name : `${namespace}${NAMESPACE_DELIMITER}${name}`;
+  return assignProviderName(relay, identity, wireName, {
+    ...(namespace === undefined ? {} : { namespace }),
+    name,
+  });
+}
+
+function reserveSpecialProviderName(namespaces, identity, wireName) {
+  const relay = NAME_ALIASES.get(namespaces);
+  if (!relay) return wireName;
+  return assignProviderName(relay, identity, wireName);
+}
+
+function providerNameForWire(namespaces, wireName) {
+  const relay = NAME_ALIASES.get(namespaces);
+  if (!relay) return undefined;
+  const owners = relay.wireOwners.get(wireName);
+  if (!owners || owners.size !== 1) return undefined;
+  const [identity] = owners;
+  return relay.nativeToProvider.get(identity);
 }
 
 function providerVisibleToolNames(tools) {
@@ -122,14 +271,26 @@ export function bridgeCustomTools(
   namespaces,
   toolChoice,
   names = ["apply_patch"],
+  { maxNameLength, bridgeAll = false } = {},
 ) {
   if (!(namespaces instanceof Map)) {
     return { tools, input, toolChoice, bridged: false };
   }
+  if (Number.isInteger(maxNameLength) && !NAME_ALIASES.has(namespaces)) {
+    initializeNameAliases(namespaces, tools, maxNameLength);
+  }
   const requested = new Set(names);
+  const shouldBridge = (name) => bridgeAll || requested.has(name);
   const nativeNames = [];
   const remember = (name) => {
-    if (requested.has(name) && !nativeNames.includes(name)) nativeNames.push(name);
+    if (
+      typeof name === "string" &&
+      name &&
+      shouldBridge(name) &&
+      !nativeNames.includes(name)
+    ) {
+      nativeNames.push(name);
+    }
   };
   if (Array.isArray(tools)) {
     for (const tool of tools) if (tool?.type === "custom") remember(tool.name);
@@ -138,16 +299,28 @@ export function bridgeCustomTools(
     for (const item of input) if (item?.type === "custom_tool_call") remember(item.name);
   }
   if (toolChoice?.type === "custom") remember(toolChoice.name);
+  if (toolChoice?.type === "allowed_tools" && Array.isArray(toolChoice.tools)) {
+    for (const choice of toolChoice.tools) {
+      if (choice?.type === "custom") remember(choice.name);
+    }
+  }
   if (!nativeNames.length) return { tools, input, toolChoice, bridged: false };
 
   const ordinaryTools = Array.isArray(tools)
-    ? tools.filter((tool) => !(tool?.type === "custom" && requested.has(tool.name)))
+    ? tools.filter((tool) => !(tool?.type === "custom" && shouldBridge(tool.name)))
     : tools;
   const visibleNames = providerVisibleToolNames(ordinaryTools);
   const nativeToProvider = new Map();
   const providerToNative = new Map();
   for (const nativeName of nativeNames) {
-    const providerName = availableCustomToolName(nativeName, visibleNames);
+    const availableName = availableCustomToolName(nativeName, visibleNames);
+    const providerName = Number.isInteger(maxNameLength)
+      ? reserveSpecialProviderName(
+          namespaces,
+          `custom:${nativeName}`,
+          availableName,
+        )
+      : availableName;
     visibleNames.add(providerName);
     nativeToProvider.set(nativeName, providerName);
     providerToNative.set(providerName, nativeName);
@@ -181,11 +354,25 @@ export function bridgeCustomTools(
       })
     : tools;
 
+  let routedToolChoice = toolChoice;
   const providerChoiceName =
     toolChoice?.type === "custom" ? nativeToProvider.get(toolChoice.name) : undefined;
-  const routedToolChoice = providerChoiceName
-    ? { ...toolChoice, type: "function", name: providerChoiceName }
-    : toolChoice;
+  if (providerChoiceName) {
+    routedToolChoice = { ...toolChoice, type: "function", name: providerChoiceName };
+    SPECIAL_FUNCTION_REFERENCES.add(routedToolChoice);
+  } else if (toolChoice?.type === "allowed_tools" && Array.isArray(toolChoice.tools)) {
+    let changed = false;
+    const choices = toolChoice.tools.map((choice) => {
+      const providerName =
+        choice?.type === "custom" ? nativeToProvider.get(choice.name) : undefined;
+      if (!providerName) return choice;
+      changed = true;
+      const routedChoice = { ...choice, type: "function", name: providerName };
+      SPECIAL_FUNCTION_REFERENCES.add(routedChoice);
+      return routedChoice;
+    });
+    if (changed) routedToolChoice = { ...toolChoice, tools: choices };
+  }
   const changedToolChoice = routedToolChoice !== toolChoice;
 
   if (!Array.isArray(input)) {
@@ -207,12 +394,14 @@ export function bridgeCustomTools(
         bridgedCallIds.add(item.call_id);
       }
       changedInput = true;
-      return {
+      const routedCall = {
         ...rest,
         type: "function_call",
         name: providerName,
         arguments: JSON.stringify({ [CUSTOM_TOOL_INPUT_PROPERTY]: customInput }),
       };
+      SPECIAL_FUNCTION_REFERENCES.add(routedCall);
+      return routedCall;
     }
     if (
       item?.type === "custom_tool_call_output" &&
@@ -443,13 +632,13 @@ export function downgradeOriginalImageDetail(input) {
   return changed ? converted : input;
 }
 
-function flattenNamespaceChild(namespace, fn) {
+function flattenNamespaceChild(namespace, fn, providerName) {
   const clientSchema = fn.parameters ?? fn.inputSchema;
   const parameters =
     clientSchema === undefined ? undefined : providerToolSchema(clientSchema);
   return {
     ...fn,
-    name: `${namespace}${NAMESPACE_DELIMITER}${fn.name}`,
+    name: providerName ?? `${namespace}${NAMESPACE_DELIMITER}${fn.name}`,
     ...(parameters === undefined ? {} : { parameters }),
   };
 }
@@ -457,12 +646,24 @@ function flattenNamespaceChild(namespace, fn) {
 // Flatten every namespace entry into plain functions named
 // `<namespace>__<tool>`. Returns the set of namespaces that were flattened
 // (name -> tool names) so callers can rename history and restore calls.
-export function flattenNamespaceTools(tools, { bridgeToolSearch = true } = {}) {
+export function flattenNamespaceTools(
+  tools,
+  { bridgeToolSearch = true, maxNameLength } = {},
+) {
   if (!Array.isArray(tools)) return { tools, flattened: false, namespaces: new Map() };
   const flattened = [];
   const namespaces = new Map();
+  const plainToolNames = new Set();
+  PLAIN_TOOL_NAMES.set(namespaces, plainToolNames);
+  initializeNameAliases(namespaces, tools, maxNameLength);
   const spawnAgentModels = new Set();
-  const toolSearchName = bridgeToolSearch ? availableToolSearchName(tools) : undefined;
+  const toolSearchName = bridgeToolSearch
+    ? reserveSpecialProviderName(
+        namespaces,
+        "tool-search",
+        availableToolSearchName(tools),
+      )
+    : undefined;
   let toolSearchRelay;
   let changed = false;
   for (const tool of tools) {
@@ -509,7 +710,13 @@ export function flattenNamespaceTools(tools, { bridgeToolSearch = true } = {}) {
         // never touches automations still dies on its first message. Normalize
         // only the provider-facing copy; `inputSchema` stays exactly as the
         // client sent it.
-        flattened.push(flattenNamespaceChild(tool.name, fn));
+        flattened.push(
+          flattenNamespaceChild(
+            tool.name,
+            fn,
+            providerNameForNative(namespaces, tool.name, fn.name),
+          ),
+        );
         names.add(fn.name);
         if (tool.name === "collaboration" && fn.name === "spawn_agent") {
           schemaStringValues(fn.inputSchema?.properties?.model, spawnAgentModels);
@@ -529,7 +736,13 @@ export function flattenNamespaceTools(tools, { bridgeToolSearch = true } = {}) {
     // the flattened children left every client-declared tool to fail on the
     // provider that objects. `providerToolSchema` returns anything it does not
     // recognize unchanged, so a tool with an ordinary root is not copied.
-    const repaired = repairToolSchemaRoot(tool);
+    let repaired = repairToolSchemaRoot(tool);
+    const name = tool?.type === "function" ? providerFunctionName(repaired) : undefined;
+    if (typeof name === "string" && name) {
+      const providerName = providerNameForNative(namespaces, undefined, name);
+      if (providerName !== name) repaired = withProviderFunctionName(repaired, providerName);
+      plainToolNames.add(providerName);
+    }
     if (repaired !== tool) changed = true;
     flattened.push(repaired);
   }
@@ -550,7 +763,7 @@ function validToolSearchHistoryArguments(value) {
   return limit === undefined || (Number.isInteger(limit) && limit > 0);
 }
 
-function discoveredProviderTools(toolSpecs) {
+function discoveredProviderTools(toolSpecs, namespaces) {
   if (!Array.isArray(toolSpecs)) return [];
   const discovered = [];
   for (const tool of toolSpecs) {
@@ -558,14 +771,24 @@ function discoveredProviderTools(toolSpecs) {
       for (const fn of tool.tools) {
         if (fn?.type !== "function" || !fn.name) continue;
         discovered.push({
-          tool: flattenNamespaceChild(tool.name, fn),
+          tool: flattenNamespaceChild(
+            tool.name,
+            fn,
+            providerNameForNative(namespaces, tool.name, fn.name),
+          ),
           native: { namespace: tool.name, name: fn.name },
         });
       }
       continue;
     }
     if (tool?.type !== "function" || !providerFunctionName(tool)) continue;
-    discovered.push({ tool: repairToolSchemaRoot(tool) });
+    const nativeName = providerFunctionName(tool);
+    const providerName = providerNameForNative(namespaces, undefined, nativeName);
+    let providerTool = repairToolSchemaRoot(tool);
+    if (providerName !== nativeName) {
+      providerTool = withProviderFunctionName(providerTool, providerName);
+    }
+    discovered.push({ tool: providerTool });
   }
   return discovered;
 }
@@ -676,12 +899,14 @@ export function flattenToolSearchHistory(input, tools, namespaces) {
         arguments: searchArguments,
         ...rest
       } = item;
-      routedInput.push({
+      const routedCall = {
         ...rest,
         type: "function_call",
         name: relay.providerName,
         arguments: JSON.stringify(searchArguments),
-      });
+      };
+      SPECIAL_FUNCTION_REFERENCES.add(routedCall);
+      routedInput.push(routedCall);
       continue;
     }
 
@@ -692,12 +917,13 @@ export function flattenToolSearchHistory(input, tools, namespaces) {
     if (!outputsByIndex.has(index)) continue;
 
     const accepted = [];
-    for (const candidate of discoveredProviderTools(item.tools)) {
+    for (const candidate of discoveredProviderTools(item.tools, namespaces)) {
       const name = providerFunctionName(candidate.tool);
       if (!name || visibleNames.has(name)) continue;
       visibleNames.add(name);
       accepted.push(candidate.tool);
       addDiscoveredNamespace(namespaces, candidate.native);
+      if (!candidate.native) PLAIN_TOOL_NAMES.get(namespaces)?.add(name);
     }
     // Keep the live-name set across outputs. The first valid discovery wins;
     // later outputs omit a duplicate from both their result and the request's
@@ -736,7 +962,8 @@ export function flattenToolSearchHistory(input, tools, namespaces) {
 // and Codex answers `unsupported call` -- permanently, since every failure
 // adds another bare example. Rename the history to match the flattened tools.
 export function flattenNamespacedHistory(input, namespaces) {
-  if (!Array.isArray(input) || namespaces.size === 0) return input;
+  const nameRelay = NAME_ALIASES.get(namespaces);
+  if (!Array.isArray(input) || (namespaces.size === 0 && !nameRelay)) return input;
   const flattenedNames = new Set();
   const bareOwners = new Map();
   for (const [namespace, names] of namespaces) {
@@ -746,17 +973,50 @@ export function flattenNamespacedHistory(input, namespaces) {
       bareOwners.get(name).add(namespace);
     }
   }
+  const providerNames = new Set([
+    ...(PLAIN_TOOL_NAMES.get(namespaces) || []),
+    ...(nameRelay?.providerToNative.keys() || []),
+    ...(nameRelay?.plainProviderNames || []),
+    ...(CUSTOM_TOOL_RELAYS.get(namespaces)?.keys() || []),
+  ]);
+  const toolSearch = TOOL_SEARCH_RELAYS.get(namespaces);
+  if (toolSearch) providerNames.add(toolSearch.providerName);
   return input.map((item) => {
     if (item?.type !== "function_call") return item;
     const { name } = item;
     if (typeof name !== "string") return item;
-    // Already in the flattened form (the client stored the restored call).
-    if (flattenedNames.has(name)) return item;
     // The client stores namespaced calls as { name, namespace }.
     const namespace = item.namespace;
     if (typeof namespace === "string" && namespaces.get(namespace)?.has(name)) {
       const { namespace: _namespace, ...rest } = item;
-      return { ...rest, name: `${namespace}${NAMESPACE_DELIMITER}${name}` };
+      return { ...rest, name: providerNameForNative(namespaces, namespace, name) };
+    }
+    // A custom/tool-search call already bridged in this request owns its exact
+    // provider spelling. A later-discovered ordinary function can have the same
+    // native name but a different provider alias; object identity keeps the two
+    // histories distinct after both have become ordinary function calls.
+    if (SPECIAL_FUNCTION_REFERENCES.has(item)) return item;
+    // A plain native function may have the exact spelling a namespace child
+    // would normally flatten to (for example plain `a__b` beside namespace
+    // `a` / child `b`). Both definitions receive collision aliases. Resolve
+    // the exact plain identity before treating that spelling as a raw
+    // namespace wire name, or stored plain history would cite neither alias.
+    const plainProviderName =
+      namespace === undefined
+        ? nameRelay?.nativeToProvider.get(nativeToolKey(undefined, name))
+        : undefined;
+    if (plainProviderName && plainProviderName !== name) {
+      return { ...item, name: plainProviderName };
+    }
+    // Provider-visible plain and special-relay names take precedence only when
+    // history carries no valid native namespace or exact aliased plain identity.
+    // Otherwise a plain `read` tool could prevent `{ namespace: "mcp", name:
+    // "read" }` from being rewritten to the namespaced definition actually sent
+    // upstream.
+    if (providerNames.has(name)) return item;
+    if (flattenedNames.has(name)) {
+      const providerName = providerNameForWire(namespaces, name);
+      return providerName && providerName !== name ? { ...item, name: providerName } : item;
     }
     // Calls stored without a namespace field whose bare name belongs to
     // exactly one flattened namespace.
@@ -765,11 +1025,198 @@ export function flattenNamespacedHistory(input, namespaces) {
       if (owners && owners.size === 1) {
         const [owner] = [...owners];
         const { namespace: _namespace, ...rest } = item;
-        return { ...rest, name: `${owner}${NAMESPACE_DELIMITER}${name}` };
+        return { ...rest, name: providerNameForNative(namespaces, owner, name) };
       }
     }
     return item;
   });
+}
+
+function compactionToolIdentityInventory(input, tools) {
+  const plainNames = new Set();
+  const namespaceNames = new Map();
+  const rememberNamespace = (namespace, name) => {
+    if (typeof namespace !== "string" || !namespace || typeof name !== "string" || !name) {
+      return;
+    }
+    if (!namespaceNames.has(namespace)) namespaceNames.set(namespace, new Set());
+    namespaceNames.get(namespace).add(name);
+  };
+
+  for (const tool of Array.isArray(tools) ? tools : []) {
+    if (tool?.type === "namespace" && typeof tool.name === "string") {
+      for (const child of Array.isArray(tool.tools) ? tool.tools : []) {
+        if (child?.type === "function") rememberNamespace(tool.name, child.name);
+      }
+      continue;
+    }
+    if (tool?.type !== "function") continue;
+    const name = providerFunctionName(tool);
+    if (typeof name === "string" && name) plainNames.add(name);
+  }
+
+  const calls = (Array.isArray(input) ? input : []).filter(
+    (item) => item?.type === "function_call" && typeof item.name === "string" && item.name,
+  );
+  for (const item of calls) rememberNamespace(item.namespace, item.name);
+
+  const rawNamespaceOwners = new Map();
+  const bareNamespaceOwners = new Map();
+  for (const [namespace, names] of namespaceNames) {
+    for (const name of names) {
+      const wireName = `${namespace}${NAMESPACE_DELIMITER}${name}`;
+      if (!rawNamespaceOwners.has(wireName)) rawNamespaceOwners.set(wireName, new Set());
+      rawNamespaceOwners.get(wireName).add(namespace);
+      if (!bareNamespaceOwners.has(name)) bareNamespaceOwners.set(name, new Set());
+      bareNamespaceOwners.get(name).add(namespace);
+    }
+  }
+  for (const item of calls) {
+    if (item.namespace !== undefined) continue;
+    const rawOwners = rawNamespaceOwners.get(item.name);
+    const bareOwners = bareNamespaceOwners.get(item.name);
+    if (
+      !plainNames.has(item.name) &&
+      ((rawOwners && rawOwners.size === 1) || (bareOwners && bareOwners.size === 1))
+    ) {
+      continue;
+    }
+    plainNames.add(item.name);
+  }
+
+  return [
+    ...[...plainNames]
+      .sort((left, right) => left.localeCompare(right))
+      .map((name) => ({ type: "function", name })),
+    ...[...namespaceNames]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([name, names]) => ({
+        type: "namespace",
+        name,
+        tools: [...names]
+          .sort((left, right) => left.localeCompare(right))
+          .map((childName) => ({ type: "function", name: childName })),
+      })),
+  ];
+}
+
+// Routed compaction sends no live tools, but it still replays the complete
+// transcript to the summarizer. Console Go rejects Codex-native tool item
+// discriminators on that replay just as it does on an ordinary turn. Build a
+// names-only request-local inventory from the payload and explicit history,
+// bridge custom calls, flatten namespace history with the same bounded naming
+// contract, and remove deferred-search metadata (schemas, not tool results)
+// that cannot be consumed without a live tool_search control.
+export function strictOpenCodeCompactionInput(input, tools, { maxNameLength = 64 } = {}) {
+  if (!Array.isArray(input)) return input;
+  const inventory = compactionToolIdentityInventory(input, tools);
+  const flattened = flattenNamespaceTools(inventory, {
+    bridgeToolSearch: false,
+    maxNameLength,
+  });
+  const customNames = [
+    ...new Set(
+      input
+        .filter(
+          (item) =>
+            item?.type === "custom_tool_call" &&
+            typeof item.name === "string" &&
+            item.name,
+        )
+        .map((item) => item.name),
+    ),
+  ];
+  const custom = bridgeCustomTools(
+    [],
+    input,
+    flattened.namespaces,
+    undefined,
+    customNames,
+    { maxNameLength },
+  );
+  const withoutSearch = custom.input.filter(
+    (item) =>
+      item?.type !== "tool_search_call" &&
+      item?.type !== "tool_search_output" &&
+      item?.type !== "custom_tool_call" &&
+      item?.type !== "custom_tool_call_output",
+  );
+  return flattenNamespacedHistory(withoutSearch, flattened.namespaces);
+}
+
+function flattenToolChoiceReference(reference, namespaces) {
+  if (!reference || typeof reference !== "object" || Array.isArray(reference)) return reference;
+  const toolSearch = TOOL_SEARCH_RELAYS.get(namespaces);
+  if (reference.type === "tool_search" && toolSearch) {
+    const { execution: _execution, ...rest } = reference;
+    const routedReference = {
+      ...rest,
+      type: "function",
+      name: toolSearch.providerName,
+    };
+    SPECIAL_FUNCTION_REFERENCES.add(routedReference);
+    return routedReference;
+  }
+  if (reference.type !== "function") return reference;
+
+  const nestedName = reference.function?.name;
+  const name = typeof nestedName === "string" ? nestedName : reference.name;
+  if (typeof name !== "string" || !name) return reference;
+  const namespace =
+    typeof reference.namespace === "string" && reference.namespace
+      ? reference.namespace
+      : undefined;
+  let providerName;
+  if (namespace && namespaces.get(namespace)?.has(name)) {
+    providerName = providerNameForNative(namespaces, namespace, name);
+  } else if (!namespace) {
+    if (SPECIAL_FUNCTION_REFERENCES.has(reference)) return reference;
+    const exactPlainProviderName = NAME_ALIASES.get(namespaces)?.nativeToProvider.get(
+      nativeToolKey(undefined, name),
+    );
+    if (exactPlainProviderName && exactPlainProviderName !== name) {
+      providerName = exactPlainProviderName;
+    }
+    const alreadyProviderVisible =
+      PLAIN_TOOL_NAMES.get(namespaces)?.has(name) ||
+      NAME_ALIASES.get(namespaces)?.plainProviderNames.has(name) ||
+      CUSTOM_TOOL_RELAYS.get(namespaces)?.has(name) ||
+      TOOL_SEARCH_RELAYS.get(namespaces)?.providerName === name;
+    if (!providerName && alreadyProviderVisible) return reference;
+    providerName ||= exactPlainProviderName || providerNameForWire(namespaces, name);
+    if (!providerName) {
+      const owners = [...namespaces].filter(([, names]) => names.has(name));
+      if (owners.length === 1) {
+        providerName = providerNameForNative(namespaces, owners[0][0], name);
+      }
+    }
+  }
+  if (!providerName || (providerName === name && namespace === undefined)) return reference;
+
+  const { namespace: _namespace, ...rest } = reference;
+  if (typeof nestedName === "string") {
+    return { ...rest, function: { ...reference.function, name: providerName } };
+  }
+  return { ...rest, name: providerName };
+}
+
+// A bounded provider name is one contract across the whole request. Rewrite
+// forced references only after tool-search history has expanded the live tool
+// set, so a discovered definition and an allowed-tools choice cannot disagree.
+export function flattenToolChoice(toolChoice, namespaces) {
+  if (!toolChoice || typeof toolChoice !== "object" || Array.isArray(toolChoice)) {
+    return toolChoice;
+  }
+  if (toolChoice.type !== "allowed_tools" || !Array.isArray(toolChoice.tools)) {
+    return flattenToolChoiceReference(toolChoice, namespaces);
+  }
+  let changed = false;
+  const tools = toolChoice.tools.map((tool) => {
+    const rewritten = flattenToolChoiceReference(tool, namespaces);
+    if (rewritten !== tool) changed = true;
+    return rewritten;
+  });
+  return changed ? { ...toolChoice, tools } : toolChoice;
 }
 
 // Reverse lookups for restoring calls: flattened name -> native
@@ -777,9 +1224,13 @@ export function flattenNamespacedHistory(input, namespaces) {
 export function buildNamespaceLookups(namespaces) {
   const flatToNative = new Map();
   const bareToNamespaces = new Map();
+  const nameAliases = NAME_ALIASES.get(namespaces);
   for (const [namespace, names] of namespaces) {
     for (const name of names) {
-      flatToNative.set(`${namespace}${NAMESPACE_DELIMITER}${name}`, {
+      const providerName =
+        nameAliases?.nativeToProvider.get(nativeToolKey(namespace, name)) ||
+        `${namespace}${NAMESPACE_DELIMITER}${name}`;
+      flatToNative.set(providerName, {
         namespace,
         name,
       });
@@ -787,9 +1238,18 @@ export function buildNamespaceLookups(namespaces) {
       bareToNamespaces.get(name).add(namespace);
     }
   }
+  if (nameAliases) {
+    for (const [providerName, native] of nameAliases.providerToNative) {
+      flatToNative.set(providerName, native);
+    }
+  }
   return {
     flatToNative,
     bareToNamespaces,
+    plainToolNames: new Set([
+      ...(PLAIN_TOOL_NAMES.get(namespaces) || []),
+      ...(nameAliases?.plainProviderNames || []),
+    ]),
     spawnAgentModels: SPAWN_AGENT_MODELS.get(namespaces),
     toolSearch: TOOL_SEARCH_RELAYS.get(namespaces),
     customTools: CUSTOM_TOOL_RELAYS.get(namespaces),
@@ -930,14 +1390,18 @@ function rewriteNamespaceFunctionCallItem(
   let rewritten = item;
   const resolved = lookups.flatToNative.get(item.name);
   if (resolved) {
-    rewritten = {
-      ...item,
-      name: resolved.name,
-      namespace: resolved.namespace,
-    };
+    const { namespace: _providerNamespace, ...rest } = item;
+    rewritten = resolved.namespace === undefined
+      ? { ...rest, name: resolved.name }
+      : { ...rest, name: resolved.name, namespace: resolved.namespace };
   } else {
     const owners = lookups.bareToNamespaces.get(item.name);
-    if (item.namespace === undefined && owners && owners.size === 1) {
+    if (
+      item.namespace === undefined &&
+      !lookups.plainToolNames?.has(item.name) &&
+      owners &&
+      owners.size === 1
+    ) {
       const [namespace] = [...owners];
       rewritten = {
         ...item,

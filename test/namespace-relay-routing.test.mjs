@@ -494,6 +494,7 @@ function functionCallsFromSse(body) {
 async function scenario(
   stream = true,
   {
+    endpoint = "/responses",
     model = "opencode-go/deepseek-v4-flash",
     sseBody = gatewaySseBody,
     jsonBody = gatewayJsonBody,
@@ -506,10 +507,10 @@ async function scenario(
       const gatewayBody = await bodyJson(request);
       gatewayBodies.push(gatewayBody);
       if (gatewayBody.stream === false) {
-        json(response, 200, jsonBody());
+        json(response, 200, jsonBody(gatewayBody));
         return;
       }
-      const body = Buffer.from(sseBody(), "utf8");
+      const body = Buffer.from(sseBody(gatewayBody), "utf8");
       response.writeHead(200, {
         "Content-Type": "text/event-stream",
         "Content-Length": String(body.length),
@@ -527,7 +528,7 @@ async function scenario(
   });
   try {
     await waitFor(`${routerBase(routerPort)}/models`, router);
-    const response = await fetch(`${routerBase(routerPort)}/responses`, {
+    const response = await fetch(`${routerBase(routerPort)}${endpoint}`, {
       method: "POST",
       headers: {
         Authorization: "Bearer CODEX_CALLER_SECRET",
@@ -797,13 +798,13 @@ test("routed tool_search history declares discovered tools and restores their ca
 
 test("Responses-native routed providers inherit the model on fresh local thread calls", async () => {
   const options = {
-    model: "opencode-go-responses/gpt-5.6-luna",
+    model: "meta/muse-spark-1.2",
     sseBody: responsesProviderSseBody,
     jsonBody: responsesProviderJsonBody,
     requestPayload: routedToolSearchHistoryPayload,
   };
   const streamed = await scenario(true, options);
-  assert.equal(streamed.gatewayBodies[0].model, "opencode-go-responses-gpt-5-6-luna");
+  assert.equal(streamed.gatewayBodies[0].model, "meta-muse-spark-1-2");
   assert.ok(
     streamed.gatewayBodies[0].tools.some((tool) => tool?.type === "namespace"),
     "Responses-native tools stay namespaced",
@@ -825,7 +826,7 @@ test("Responses-native routed providers inherit the model on fresh local thread 
   assert.deepEqual(JSON.parse(streamedCall.arguments), {
     prompt: "hi",
     target: { type: "projectless" },
-    model: "opencode-go-responses/gpt-5.6-luna",
+    model: "meta/muse-spark-1.2",
   });
 
   const nonStreaming = await scenario(false, options);
@@ -833,6 +834,371 @@ test("Responses-native routed providers inherit the model on fresh local thread 
   assert.deepEqual(JSON.parse(nonStreamingCall.arguments), {
     prompt: "hi",
     target: { type: "projectless" },
-    model: "opencode-go-responses/gpt-5.6-luna",
+    model: "meta/muse-spark-1.2",
   });
+});
+
+const GO_NAMESPACE = "mcp__codex_apps__github";
+const GO_LONG_TOOL = "list_repository_pull_request_review_comments_for_branch";
+const GO_DISCOVERED_NAMESPACE = "mcp__calendar_connector_with_a_long_namespace";
+const GO_DISCOVERED_TOOL = "delete_an_event_and_notify_every_participant";
+const GO_PATCH = "*** Begin Patch\n*** End Patch";
+
+function goCompatibilityRequestPayload(
+  stream = true,
+  model = "opencode-go-responses/gpt-5.6-luna",
+) {
+  return {
+    model,
+    stream,
+    tool_choice: { type: "function", name: GO_LONG_TOOL, namespace: GO_NAMESPACE },
+    tools: [
+      {
+        type: "tool_search",
+        execution: "client",
+        description: "Search deferred tools.",
+        parameters: {
+          type: "object",
+          properties: { query: { type: "string" } },
+          required: ["query"],
+          additionalProperties: false,
+        },
+      },
+      { type: "function", name: "exec_command", parameters: { type: "object" } },
+      {
+        type: "namespace",
+        name: GO_NAMESPACE,
+        tools: [
+          {
+            type: "function",
+            name: GO_LONG_TOOL,
+            inputSchema: {
+              type: "object",
+              properties: {
+                branch: { type: "string" },
+                node: { $ref: "#/$defs/node" },
+              },
+              required: ["branch"],
+              additionalProperties: false,
+              $defs: {
+                node: {
+                  type: "object",
+                  properties: { child: { $ref: "#/$defs/node" } },
+                },
+              },
+            },
+          },
+        ],
+      },
+      {
+        type: "namespace",
+        name: "codex_app",
+        tools: [{ type: "function", name: "read_thread_terminal" }],
+      },
+      {
+        type: "custom",
+        name: "apply_patch",
+        format: { type: "grammar", syntax: "lark", definition: "start: /.+/" },
+      },
+      {
+        type: "custom",
+        name: "future_custom",
+        description: "FUTURE_CUSTOM_SENTINEL",
+      },
+      {
+        type: "web_search",
+        search_content_types: ["text", "image"],
+        search_context_size: "medium",
+      },
+    ],
+    input: [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+      {
+        type: "function_call",
+        name: GO_LONG_TOOL,
+        namespace: GO_NAMESPACE,
+        call_id: "history-long",
+        arguments: '{"branch":"main"}',
+      },
+      { type: "function_call_output", call_id: "history-long", output: "[]" },
+      {
+        type: "tool_search_call",
+        call_id: "search-long",
+        execution: "client",
+        arguments: { query: "calendar" },
+      },
+      {
+        type: "tool_search_output",
+        call_id: "search-long",
+        status: "completed",
+        execution: "client",
+        tools: [
+          {
+            type: "namespace",
+            name: GO_DISCOVERED_NAMESPACE,
+            tools: [{ type: "function", name: GO_DISCOVERED_TOOL }],
+          },
+        ],
+      },
+      {
+        type: "function_call",
+        name: GO_DISCOVERED_TOOL,
+        namespace: GO_DISCOVERED_NAMESPACE,
+        call_id: "history-discovered",
+        arguments: "{}",
+      },
+      { type: "function_call_output", call_id: "history-discovered", output: "done" },
+      {
+        type: "custom_tool_call",
+        name: "apply_patch",
+        call_id: "history-patch",
+        input: GO_PATCH,
+      },
+      { type: "custom_tool_call_output", call_id: "history-patch", output: "Done!" },
+      {
+        type: "custom_tool_call",
+        name: "future_custom",
+        call_id: "history-future-custom",
+        input: "opaque future input",
+      },
+      {
+        type: "custom_tool_call_output",
+        call_id: "history-future-custom",
+        output: "future done",
+      },
+    ],
+  };
+}
+
+function goProviderCalls(body) {
+  const patchTool = body.tools.find(
+    (tool) => tool.type === "function" && tool.parameters?.properties?.input,
+  );
+  return [
+    {
+      type: "function_call",
+      name: body.tool_choice.name,
+      call_id: "call-long",
+      arguments: '{"branch":"main"}',
+    },
+    {
+      type: "function_call",
+      name: "tool_search",
+      call_id: "call-search",
+      arguments: '{"query":"calendar"}',
+    },
+    {
+      type: "function_call",
+      name: patchTool.name,
+      call_id: "call-patch",
+      arguments: JSON.stringify({ input: GO_PATCH }),
+    },
+  ];
+}
+
+function goCompatibilitySseBody(body) {
+  const calls = goProviderCalls(body);
+  return [
+    ...calls.map((item) => sseEvent({ type: "response.output_item.done", item })),
+    sseEvent({
+      type: "response.completed",
+      response: { id: "resp-go", status: "completed", output: calls },
+    }),
+    "data: [DONE]\n\n",
+  ].join("");
+}
+
+function goCompatibilityJsonBody(body) {
+  return { id: "resp-go-json", status: "completed", output: goProviderCalls(body) };
+}
+
+test("OpenCode Go Responses uses one bounded function-tool contract in both response modes", async () => {
+  for (const stream of [true, false]) {
+    const result = await scenario(stream, {
+      model: "opencode-go-responses/gpt-5.6-luna",
+      requestPayload: goCompatibilityRequestPayload,
+      sseBody: goCompatibilitySseBody,
+      jsonBody: goCompatibilityJsonBody,
+    });
+    const outgoing = result.gatewayBodies[0];
+    assert.equal(outgoing.model, "opencode-go-responses-gpt-5-6-luna");
+    assert.ok(
+      outgoing.tools.every(
+        (tool) => !["namespace", "custom", "tool_search"].includes(tool?.type),
+      ),
+      "unsupported native tool discriminators do not reach Console Go",
+    );
+    assert.ok(
+      outgoing.tools
+        .filter((tool) => tool?.type === "function")
+        .every((tool) => tool.name.length <= 64),
+      "every provider-visible function name stays within Console Go's cap",
+    );
+    const webSearch = outgoing.tools.find((tool) => tool.type === "web_search");
+    assert.equal("search_content_types" in webSearch, false);
+    assert.equal(webSearch.search_context_size, "medium");
+    assert.ok(outgoing.tools.some((tool) => tool.type === "function" && tool.name === "tool_search"));
+    assert.ok(outgoing.tools.some((tool) => tool.name === "codex_app__read_thread_terminal"));
+    assert.equal(
+      outgoing.tools.some((tool) => tool.name === "codex_app__create_thread"),
+      false,
+      "the chat-only deferred app snapshot is not injected on Console Go Responses",
+    );
+    assert.ok(
+      outgoing.tools.some(
+        (tool) => tool.type === "function" && tool.parameters?.properties?.input,
+      ),
+      "the custom patch tool is bridged instead of dropped",
+    );
+    assert.ok(
+      outgoing.tools.some(
+        (tool) =>
+          tool.type === "function" && tool.description === "FUTURE_CUSTOM_SENTINEL",
+      ),
+      "Console Go bridges every custom discriminator present in the request",
+    );
+
+    const longAlias = outgoing.tool_choice.name;
+    assert.equal(outgoing.tool_choice.namespace, undefined);
+    assert.ok(longAlias.length <= 64);
+    assert.notEqual(longAlias, `${GO_NAMESPACE}__${GO_LONG_TOOL}`);
+    const longTool = outgoing.tools.find((tool) => tool.name === longAlias);
+    assert.equal(
+      longTool.parameters.$defs.node.properties.child.$ref,
+      "#/$defs/node",
+      "Console Go keeps recursive refs because no upstream rejection established otherwise",
+    );
+    assert.equal(
+      outgoing.input.find((item) => item.call_id === "history-long").name,
+      longAlias,
+    );
+    const discoveredHistory = outgoing.input.find(
+      (item) => item.call_id === "history-discovered",
+    );
+    assert.ok(discoveredHistory.name.length <= 64);
+    assert.equal(discoveredHistory.namespace, undefined);
+    assert.ok(outgoing.tools.some((tool) => tool.name === discoveredHistory.name));
+    assert.equal(
+      outgoing.input.find((item) => item.call_id === "search-long").type,
+      "function_call",
+    );
+    assert.equal(
+      outgoing.input.some(
+        (item) => item.type === "tool_search_call" || item.type === "tool_search_output",
+      ),
+      false,
+    );
+    assert.equal(
+      outgoing.input.find((item) => item.call_id === "history-patch").type,
+      "function_call",
+    );
+    const futureCustom = outgoing.input.find(
+      (item) => item.call_id === "history-future-custom" && item.type === "function_call",
+    );
+    assert.deepEqual(JSON.parse(futureCustom.arguments), { input: "opaque future input" });
+
+    const clientItems = stream
+      ? responseItemsFromSse(result.clientBody)
+      : JSON.parse(result.clientBody).output;
+    assert.deepEqual(clientItems[0], {
+      type: "function_call",
+      name: GO_LONG_TOOL,
+      namespace: GO_NAMESPACE,
+      call_id: "call-long",
+      arguments: '{"branch":"main"}',
+    });
+    assert.deepEqual(clientItems[1], {
+      type: "tool_search_call",
+      execution: "client",
+      call_id: "call-search",
+      arguments: { query: "calendar" },
+    });
+    assert.deepEqual(clientItems[2], {
+      type: "custom_tool_call",
+      name: "apply_patch",
+      call_id: "call-patch",
+      input: GO_PATCH,
+    });
+  }
+});
+
+test("OpenCode Go compaction removes native tool history before the strict endpoint", async () => {
+  const result = await scenario(false, {
+    endpoint: "/responses/compact",
+    model: "opencode-go-responses/gpt-5.6-luna",
+    requestPayload: (_stream, model) => {
+      const ordinary = goCompatibilityRequestPayload(false, model);
+      ordinary.input.push(
+        {
+          type: "custom_tool_call",
+          name: "another_custom_tool",
+          call_id: "history-other-custom",
+          input: "opaque input",
+        },
+        {
+          type: "custom_tool_call_output",
+          call_id: "history-other-custom",
+          output: "opaque output",
+        },
+        {
+          type: "custom_tool_call_output",
+          call_id: "orphan-custom-output",
+          output: "must not cross the strict boundary",
+        },
+      );
+      return {
+        model,
+        tools: [{ type: "custom", name: "future_custom" }],
+        tool_choice: { type: "custom", name: "future_custom" },
+        input: ordinary.input,
+      };
+    },
+    jsonBody: () => ({
+      id: "resp-go-compact",
+      status: "completed",
+      output: [
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "history compacted" }],
+        },
+      ],
+    }),
+  });
+  const outgoing = result.gatewayBodies[0];
+  assert.equal(outgoing.model, "opencode-go-responses-gpt-5-6-luna");
+  assert.deepEqual(outgoing.tools, []);
+  assert.equal(outgoing.tool_choice, undefined);
+  assert.equal(
+    outgoing.input.some(
+      (item) =>
+        ["custom_tool_call", "custom_tool_call_output", "tool_search_call", "tool_search_output"]
+          .includes(item?.type) || item?.namespace !== undefined,
+    ),
+    false,
+  );
+  assert.equal(
+    outgoing.input.some((item) => item.call_id === "search-long"),
+    false,
+    "deferred search schemas are omitted when compaction sends no live tools",
+  );
+  assert.ok(
+    outgoing.input
+      .filter((item) => item?.type === "function_call")
+      .every((item) => item.name.length <= 64),
+  );
+  const namespaced = outgoing.input.find((item) => item.call_id === "history-long");
+  assert.equal(namespaced.type, "function_call");
+  assert.equal(namespaced.namespace, undefined);
+  const custom = outgoing.input.find((item) => item.call_id === "history-patch");
+  assert.equal(custom.type, "function_call");
+  assert.deepEqual(JSON.parse(custom.arguments), { input: GO_PATCH });
+  const otherCustom = outgoing.input.find(
+    (item) => item.call_id === "history-other-custom" && item.type === "function_call",
+  );
+  assert.deepEqual(JSON.parse(otherCustom.arguments), { input: "opaque input" });
+  assert.equal(
+    outgoing.input.some((item) => item.call_id === "orphan-custom-output"),
+    false,
+  );
 });

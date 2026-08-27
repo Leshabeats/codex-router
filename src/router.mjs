@@ -87,8 +87,10 @@ import {
   downgradeOriginalImageDetail,
   flattenNamespacedHistory,
   flattenNamespaceTools,
+  flattenToolChoice,
   flattenToolSearchHistory,
   repairToolSchemaRoots,
+  strictOpenCodeCompactionInput,
   stripSearchContentTypes,
 } from "./namespace-relay.mjs";
 import { collaborationToolAvailable, pendingInterruptTargets } from "./subagent-completion.mjs";
@@ -705,6 +707,22 @@ function needsZenFreeToolCompatibility(route) {
   return (
     (providerId === "opencode-free-responses" &&
       route.upstreamModel === "muse-spark-1.2-contributor-free")
+  );
+}
+
+// Console Go's Responses endpoint is Responses-shaped but implements only the
+// ordinary function-tool subset: namespace/custom/deferred-search controls are
+// rejected, as are function names over 64 characters. Keep this exact to the
+// Go Responses variant; paid Zen and other Responses providers retain their
+// native contract until their own upstream proves otherwise.
+function needsConsoleGoResponsesToolCompatibility(route) {
+  return providerForModel(route)?.id === "opencode-go-responses";
+}
+
+function needsStrictOpenCodeToolCompatibility(route) {
+  return (
+    needsZenFreeToolCompatibility(route) ||
+    needsConsoleGoResponsesToolCompatibility(route)
   );
 }
 
@@ -2083,9 +2101,17 @@ function compactionAttempts(route, aged) {
 // conversation cannot get under its context limit without one.
 async function summarizeWith(request, payload, route, aged, prepared, signal) {
   const compatibleInput = zenFreeCompatibleInput(aged.input, route);
-  const providerInput = needsZenFreeToolCompatibility(route)
-    ? bridgeCustomTools([], compatibleInput, new Map()).input
-    : compatibleInput;
+  const providerInput = needsConsoleGoResponsesToolCompatibility(route)
+    ? strictOpenCodeCompactionInput(compatibleInput, payload.tools, {
+        maxNameLength: 64,
+      })
+    : needsZenFreeToolCompatibility(route)
+      ? bridgeCustomTools(
+        [],
+        compatibleInput,
+        new Map(),
+      ).input
+      : compatibleInput;
   const bridged = await bridgeVisionInput(
     providerInput,
     route,
@@ -2105,6 +2131,7 @@ async function summarizeWith(request, payload, route, aged, prepared, signal) {
       messageItem(COMPACTION_PROMPT),
     ],
   };
+  delete body.tool_choice;
   normalizeAutoToolChoice(body, route);
   delete body.previous_response_id;
   delete body.client_metadata;
@@ -2514,6 +2541,7 @@ async function buildRoutedRequest({ request, payload, route, agedInput, tokenMax
   const input = Array.isArray(bridged) ? [...bridged] : bridged;
   const provider = providerForModel(route);
   const chatCompletionsProvider = provider?.protocol !== "openai-responses";
+  const consoleGoResponsesCompatibility = needsConsoleGoResponsesToolCompatibility(route);
   // Thinking chat providers need the assistant's reasoning replayed, but
   // LiteLLM drops Responses `reasoning` input items. Generic providers keep
   // the established visible-content carry used for DeepSeek. GLM's native
@@ -2560,6 +2588,14 @@ async function buildRoutedRequest({ request, payload, route, agedInput, tokenMax
     if (namespacesFlattened) {
       tools = flattened.tools;
     }
+  } else if (consoleGoResponsesCompatibility) {
+    // Console Go exposes a Responses endpoint but rejects the native tool
+    // discriminators Codex sends. Translate only its tool boundary; unlike the
+    // chat-completions branch, do not inject the deferred codex_app snapshot.
+    const flattened = flattenNamespaceTools(tools, { maxNameLength: 64 });
+    namespacesFlattened = flattened.flattened;
+    flattenedNamespaces = flattened.namespaces;
+    tools = flattened.tools;
   } else {
     // Responses-native providers keep the namespace tools untouched, so nothing
     // is flattened and the list is left alone. The inventory is still built,
@@ -2569,18 +2605,19 @@ async function buildRoutedRequest({ request, payload, route, agedInput, tokenMax
     flattenedNamespaces = flattenNamespaceTools(tools, {
       bridgeToolSearch: false,
     }).namespaces;
-    // Keeping the namespace shape is not the same as keeping a root the
-    // upstream rejects. `opencode-go-responses/gpt-5.6-luna` 400s a
-    // `type: ["object","null"]` parameter root while accepting the same request
-    // with a plain or union root -- so the strict-root repair has to run here
-    // too, on the tools alone, without flattening anything.
+    // Keeping the namespace shape is not the same as keeping a parameter root
+    // strict Responses providers may reject. Run the shared root repair on the
+    // tools alone without flattening their native representation.
     tools = repairToolSchemaRoots(tools);
   }
   if (needsZenFreeToolCompatibility(route)) {
-    // Ox reaches Chat Completions after namespace flattening while Muse reaches
-    // Responses with native namespaces. Run the same recursive-ref repair
-    // after both protocol branches so neither wire shape can bypass it.
+    // Zen Free's measured schema boundary rejects recursive definition edges.
+    // Console Go's evidence establishes different tool discriminators and
+    // fields only, so it must retain recursive refs until that endpoint proves
+    // otherwise.
     tools = repairToolSchemaRoots(tools, { nonRecursive: true });
+  }
+  if (needsStrictOpenCodeToolCompatibility(route)) {
     tools = stripSearchContentTypes(tools);
   }
   if (needsMoonshotSchemaCompatibility(route)) {
@@ -2590,18 +2627,22 @@ async function buildRoutedRequest({ request, payload, route, agedInput, tokenMax
   }
   let routedInput = input;
   let routedToolChoice = payload.tool_choice;
-  if (needsZenFreeToolCompatibility(route)) {
+  if (needsStrictOpenCodeToolCompatibility(route)) {
     const customTools = bridgeCustomTools(
       tools,
       routedInput,
       flattenedNamespaces,
       routedToolChoice,
+      undefined,
+      consoleGoResponsesCompatibility
+        ? { maxNameLength: 64, bridgeAll: true }
+        : undefined,
     );
     tools = customTools.tools;
     routedInput = customTools.input;
     routedToolChoice = customTools.toolChoice;
   }
-  if (chatCompletionsProvider) {
+  if (chatCompletionsProvider || consoleGoResponsesCompatibility) {
     const searchHistory = flattenToolSearchHistory(
       routedInput,
       tools,
@@ -2609,11 +2650,17 @@ async function buildRoutedRequest({ request, payload, route, agedInput, tokenMax
     );
     routedInput = searchHistory.input;
     tools = searchHistory.tools;
+    if (needsZenFreeToolCompatibility(route)) {
+      tools = repairToolSchemaRoots(tools, { nonRecursive: true });
+    }
   }
   // The stored call history must use the same tool names as the tool list, or
   // the model copies the bare names out of its own transcript.
   if (namespacesFlattened) {
     routedInput = flattenNamespacedHistory(routedInput, flattenedNamespaces);
+  }
+  if (consoleGoResponsesCompatibility) {
+    routedToolChoice = flattenToolChoice(routedToolChoice, flattenedNamespaces);
   }
   const routed = {
     ...payload,
