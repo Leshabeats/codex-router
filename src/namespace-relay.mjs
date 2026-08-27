@@ -504,14 +504,14 @@ const INITIAL_SSE_CAPTURE_PART_BYTES = 1024;
 const MAX_TRACKED_OUTPUT_ITEMS = 4096;
 const MAX_TRACKED_STATE_BYTES = 8 * 1024 * 1024;
 const TRACKED_STATE_FIXED_BYTES = 512;
-// Streaming and non-streaming Responses payloads share the same maximum
-// capturable JSON value. A terminal SSE event can carry the complete response,
-// including large custom-tool input, so it is not valid to impose the much
-// smaller pre-content guard on one frame. Before any semantic output, crossing
-// this bound releases raw bytes and disables rewriting; after one rewrite,
-// suppression, or injection, it terminates the stream rather than mixing wire
-// representations.
-const MAX_SSE_FRAME_BYTES = MAX_JSON_CAPTURE_BYTES;
+// Before any semantic output, stop staging an undecided SSE frame before
+// downstream response guards lose sight of their own byte ceilings. Once a
+// namespace rewrite, suppression, or injection has committed the wire shape,
+// a later terminal event may carry the complete response and therefore shares
+// the non-streaming JSON capture bound. Crossing either phase's bound releases
+// raw bytes before a commit and terminates the stream after one.
+const MAX_SSE_FRAME_BYTES = 256 * 1024;
+const MAX_COMMITTED_SSE_FRAME_BYTES = MAX_JSON_CAPTURE_BYTES;
 const MAX_EXACT_JSON_NUMBER_LENGTH = 4096;
 const LINE_FEED = 0x0a;
 const CARRIAGE_RETURN = 0x0d;
@@ -2214,6 +2214,7 @@ export class NamespaceToolCallTransform extends Transform {
   #sseLineEndingObserved = false;
   #maxJsonCaptureBytes;
   #maxSseFrameBytes;
+  #maxCommittedSseFrameBytes;
   #maxTrackedOutputItems;
   #maxTrackedStateBytes;
   #rewriteDisabled = false;
@@ -2253,10 +2254,17 @@ export class NamespaceToolCallTransform extends Transform {
       Number.isInteger(options.maxJsonCaptureBytes) && options.maxJsonCaptureBytes > 0
         ? options.maxJsonCaptureBytes
         : MAX_JSON_CAPTURE_BYTES;
-    this.#maxSseFrameBytes =
+    const configuredSseFrameBytes =
       Number.isInteger(options.maxSseFrameBytes) && options.maxSseFrameBytes > 0
         ? options.maxSseFrameBytes
-        : MAX_SSE_FRAME_BYTES;
+        : undefined;
+    this.#maxSseFrameBytes = configuredSseFrameBytes ?? MAX_SSE_FRAME_BYTES;
+    this.#maxCommittedSseFrameBytes =
+      Number.isInteger(options.maxCommittedSseFrameBytes) &&
+      options.maxCommittedSseFrameBytes > 0
+        ? options.maxCommittedSseFrameBytes
+        : configuredSseFrameBytes ??
+          Math.min(this.#maxJsonCaptureBytes, MAX_COMMITTED_SSE_FRAME_BYTES);
     this.#maxTrackedOutputItems =
       Number.isInteger(options.maxTrackedOutputItems) && options.maxTrackedOutputItems > 0
         ? options.maxTrackedOutputItems
@@ -2548,11 +2556,14 @@ export class NamespaceToolCallTransform extends Transform {
     // Retaining one view per upstream chunk would let a one-byte-fragmented
     // frame allocate millions of Buffer objects before reaching its byte cap.
     let offset = 0;
-    while (offset < piece.length && this.#sseBytes <= this.#maxSseFrameBytes) {
+    const frameByteLimit = this.#semanticMutationCommitted
+      ? this.#maxCommittedSseFrameBytes
+      : this.#maxSseFrameBytes;
+    while (offset < piece.length && this.#sseBytes <= frameByteLimit) {
       let tail = this.#sseParts.at(-1);
       if (!tail || this.#sseTailBytes === tail.length) {
         const remainingUntilRelease =
-          this.#maxSseFrameBytes + 1 - this.#sseBytes;
+          frameByteLimit + 1 - this.#sseBytes;
         const remainingPieceBytes = piece.length - offset;
         const partBytes = Math.min(
           CAPTURE_PART_BYTES,
@@ -2570,7 +2581,7 @@ export class NamespaceToolCallTransform extends Transform {
       this.#sseBytes += copied;
       offset += copied;
     }
-    if (this.#sseBytes <= this.#maxSseFrameBytes) return true;
+    if (this.#sseBytes <= frameByteLimit) return true;
     const buffered = this.#takeSseFrame();
     if (this.#semanticMutationCommitted) {
       throw new NamespaceRelayCommittedStreamError("SSE frame byte limit");
