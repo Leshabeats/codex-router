@@ -142,6 +142,180 @@ test("an approved external skill satisfies the pack without becoming router-owne
   }
 });
 
+test("approving a former managed skill clears ownership and marker replay cannot delete it", () => {
+  const home = tempCodexHome();
+  const fakeSource = mkdtempSync(path.join(os.tmpdir(), "codex-skills-source-"));
+  try {
+    const name = "codex-router";
+    mkdirSync(path.join(fakeSource, name), { recursive: true });
+    writeFileSync(path.join(fakeSource, name, "SKILL.md"), "# router contract\n");
+    process.env.CODEX_ROUTER_SKILLS_DIR = fakeSource;
+    installSkills(home, { quiet: true });
+    const target = path.join(home, "skills", name);
+    const oldMarker = readFileSync(path.join(target, ".codex-router-managed"), "utf8");
+
+    rmSync(target, { recursive: true, force: true });
+    mkdirSync(target, { recursive: true });
+    writeFileSync(path.join(target, "SKILL.md"), "# independently managed\n");
+    approveExternalSkills(home, [name], { quiet: true });
+    const state = ownership(home);
+    assert.equal(state.skills[name], undefined, "approval relinquishes stale managed ownership");
+    assert.ok(state.external[name]);
+    assert.deepEqual(skillPackStatus(home).staleOwnership, []);
+
+    writeFileSync(path.join(target, ".codex-router-managed"), oldMarker);
+    assert.equal(uninstallSkills(home, { quiet: true }), 0);
+    assert.ok(existsSync(target), "a replayed old marker cannot authorize external deletion");
+  } finally {
+    delete process.env.CODEX_ROUTER_SKILLS_DIR;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(fakeSource, { recursive: true, force: true });
+  }
+});
+
+test("overlapping managed and external state fails closed", () => {
+  const home = tempCodexHome();
+  const fakeSource = mkdtempSync(path.join(os.tmpdir(), "codex-skills-source-"));
+  try {
+    const name = "codex-router";
+    mkdirSync(path.join(fakeSource, name), { recursive: true });
+    writeFileSync(path.join(fakeSource, name, "SKILL.md"), "# router contract\n");
+    mkdirSync(path.join(home, "skills", name), { recursive: true });
+    writeFileSync(path.join(home, "skills", name, "SKILL.md"), "# external\n");
+    process.env.CODEX_ROUTER_SKILLS_DIR = fakeSource;
+    approveExternalSkills(home, [name], { quiet: true });
+    const state = ownership(home);
+    state.skills[name] = { token: "a".repeat(64) };
+    writeFileSync(skillOwnershipPath(home), `${JSON.stringify(state, null, 2)}\n`);
+
+    const status = skillPackStatus(home);
+    assert.equal(status.ownershipStateValid, false);
+    assert.equal(uninstallSkills(home, { quiet: true }), 0);
+    assert.ok(existsSync(path.join(home, "skills", name)), "ambiguous state cannot delete content");
+  } finally {
+    delete process.env.CODEX_ROUTER_SKILLS_DIR;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(fakeSource, { recursive: true, force: true });
+  }
+});
+
+test("install prunes approvals for skills the router no longer ships", () => {
+  const home = tempCodexHome();
+  const fakeSource = mkdtempSync(path.join(os.tmpdir(), "codex-skills-source-"));
+  try {
+    const name = "codex-router";
+    mkdirSync(path.join(fakeSource, name), { recursive: true });
+    writeFileSync(path.join(fakeSource, name, "SKILL.md"), "# router contract\n");
+    mkdirSync(path.join(home, "skills", name), { recursive: true });
+    writeFileSync(path.join(home, "skills", name, "SKILL.md"), "# external\n");
+    process.env.CODEX_ROUTER_SKILLS_DIR = fakeSource;
+    approveExternalSkills(home, [name], { quiet: true });
+
+    rmSync(path.join(fakeSource, name), { recursive: true, force: true });
+    installSkills(home, { quiet: true });
+    assert.equal(ownership(home).external?.[name], undefined);
+    assert.ok(existsSync(path.join(home, "skills", name)), "obsolete external content is preserved");
+  } finally {
+    delete process.env.CODEX_ROUTER_SKILLS_DIR;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(fakeSource, { recursive: true, force: true });
+  }
+});
+
+test(
+  "an unreadable approved tree becomes stale instead of throwing",
+  { skip: process.platform === "win32" },
+  () => {
+    const home = tempCodexHome();
+    const fakeSource = mkdtempSync(path.join(os.tmpdir(), "codex-skills-source-"));
+    const name = "codex-router";
+    const target = path.join(home, "skills", name, "SKILL.md");
+    try {
+      mkdirSync(path.join(fakeSource, name), { recursive: true });
+      writeFileSync(path.join(fakeSource, name, "SKILL.md"), "# router contract\n");
+      mkdirSync(path.dirname(target), { recursive: true });
+      writeFileSync(target, "# external\n");
+      process.env.CODEX_ROUTER_SKILLS_DIR = fakeSource;
+      approveExternalSkills(home, [name], { quiet: true });
+
+      chmodSync(target, 0o000);
+      const status = skillPackStatus(home);
+      assert.deepEqual(status.external, []);
+      assert.deepEqual(status.staleExternal, [name]);
+      assert.deepEqual(status.collisions, [name]);
+    } finally {
+      delete process.env.CODEX_ROUTER_SKILLS_DIR;
+      if (existsSync(target)) chmodSync(target, 0o600);
+      rmSync(home, { recursive: true, force: true });
+      rmSync(fakeSource, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "external approval rejects a nested symlink",
+  { skip: process.platform === "win32" },
+  () => {
+    const home = tempCodexHome();
+    const fakeSource = mkdtempSync(path.join(os.tmpdir(), "codex-skills-source-"));
+    try {
+      const name = "codex-router";
+      mkdirSync(path.join(fakeSource, name), { recursive: true });
+      writeFileSync(path.join(fakeSource, name, "SKILL.md"), "# router contract\n");
+      mkdirSync(path.join(home, "skills", name), { recursive: true });
+      writeFileSync(path.join(home, "skills", name, "SKILL.md"), "# external\n");
+      symlinkSync(path.join(fakeSource, name, "SKILL.md"), path.join(home, "skills", name, "link"));
+      process.env.CODEX_ROUTER_SKILLS_DIR = fakeSource;
+      assert.throws(
+        () => approveExternalSkills(home, [name], { quiet: true }),
+        /unsupported entry/,
+      );
+      assert.ok(!existsSync(skillOwnershipPath(home)));
+    } finally {
+      delete process.env.CODEX_ROUTER_SKILLS_DIR;
+      rmSync(home, { recursive: true, force: true });
+      rmSync(fakeSource, { recursive: true, force: true });
+    }
+  },
+);
+
+test("external approval uses deterministic ordering and rejects over-deep trees", () => {
+  const home = tempCodexHome();
+  const fakeSource = mkdtempSync(path.join(os.tmpdir(), "codex-skills-source-"));
+  const name = "codex-router";
+  const target = path.join(home, "skills", name);
+  const originalLocaleCompare = String.prototype.localeCompare;
+  try {
+    mkdirSync(path.join(fakeSource, name), { recursive: true });
+    writeFileSync(path.join(fakeSource, name, "SKILL.md"), "# router contract\n");
+    mkdirSync(target, { recursive: true });
+    writeFileSync(path.join(target, "SKILL.md"), "# external\n");
+    writeFileSync(path.join(target, "é"), "first\n");
+    writeFileSync(path.join(target, "z"), "second\n");
+    process.env.CODEX_ROUTER_SKILLS_DIR = fakeSource;
+    String.prototype.localeCompare = () => {
+      throw new Error("digest ordering must not depend on the process locale");
+    };
+    assert.deepEqual(approveExternalSkills(home, [name], { quiet: true }), [name]);
+    revokeExternalSkills(home, [name], { quiet: true });
+
+    let nested = target;
+    for (let index = 0; index < 65; index += 1) {
+      nested = path.join(nested, "d");
+      mkdirSync(nested);
+    }
+    assert.throws(
+      () => approveExternalSkills(home, [name], { quiet: true }),
+      /unsupported entry/,
+    );
+  } finally {
+    String.prototype.localeCompare = originalLocaleCompare;
+    delete process.env.CODEX_ROUTER_SKILLS_DIR;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(fakeSource, { recursive: true, force: true });
+  }
+});
+
 test("external approval fails closed when the external skill changes", () => {
   const home = tempCodexHome();
   const fakeSource = mkdtempSync(path.join(os.tmpdir(), "codex-skills-source-"));

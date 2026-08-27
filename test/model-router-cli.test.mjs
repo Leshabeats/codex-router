@@ -22,6 +22,29 @@ test("both dispatchers accept the stop command", () => {
   assert.match(windows, /"stop"\s*\{\s*Invoke-RouterNode "src\\service\.mjs" @\("stop"\)/);
 });
 
+test("both dispatchers expose reviewed external skill management", () => {
+  const posix = readFileSync(path.join(root, "bin", "model-router"), "utf8");
+  assert.match(posix, /\|chatgpt-session\|skills\|/);
+  assert.match(readFileSync(path.join(root, "bin", "skills"), "utf8"), /skills-install\.mjs/);
+  const windows = readFileSync(path.join(root, "codex-router.ps1"), "utf8");
+  assert.match(windows, /"skills"/);
+  assert.match(windows, /"skills"\s*\{\s*Invoke-RouterNode "src\\skills-install\.mjs" \$Arguments/);
+  const doctor = readFileSync(path.join(root, "src", "doctor.mjs"), "utf8");
+  assert.match(doctor, /model-router codex skills approve-external/);
+});
+
+test(
+  "model-router rejects an incomplete skills command with a usage error",
+  { skip: process.platform === "win32" },
+  () => {
+    const result = spawnSync(path.join(root, "bin", "model-router"), ["codex", "skills"], {
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /Usage: skills-install\.mjs/);
+  },
+);
+
 for (const args of [["--version"], ["codex", "--version"]]) {
   test(
     `model-router ${args.join(" ")} reports the package version`,

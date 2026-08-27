@@ -1180,11 +1180,13 @@ if (codexTarget) {
     "./bin/install (replaces managed skills only)",
   );
   if (status.collisions.length > 0) {
+    const approvalCommand =
+      `./bin/model-router codex skills approve-external ${status.collisions.join(" ")}`;
     add(
       "warn",
       "Codex skill pack collisions",
-      `existing skills not verified as codex-router-owned: ${status.collisions.join(", ")}`,
-      `after review: node src/skills-install.mjs approve-external ${status.collisions.join(" ")}; or rename/remove conflicts, then run ./bin/install`,
+      `existing skills not verified as codex-router-owned: ${status.collisions.join(", ")}; after reviewing their exact contents, approve with: ${approvalCommand}`,
+      `${approvalCommand}; or rename/remove conflicts, then run ./bin/install`,
     );
   }
   if (!status.ownershipStateValid || status.staleOwnership.length > 0) {
@@ -1198,11 +1200,22 @@ if (codexTarget) {
     );
   }
   if (status.staleExternal.length > 0) {
+    const reapprovable = status.staleExternal.filter((name) => status.pack.includes(name));
+    const obsolete = status.staleExternal.filter((name) => !status.pack.includes(name));
+    const actions = [];
+    if (reapprovable.length > 0) {
+      actions.push(
+        `after review, re-approve with: ./bin/model-router codex skills approve-external ${reapprovable.join(" ")}`,
+      );
+    }
+    if (obsolete.length > 0) {
+      actions.push(`remove obsolete approvals with: ./bin/install (${obsolete.join(", ")})`);
+    }
     add(
       "warn",
       "Codex skill pack external approvals",
-      `external approvals require re-review: ${status.staleExternal.join(", ")}`,
-      "re-approve only after reviewing the current external and router skill contents",
+      `external approvals require re-review: ${status.staleExternal.join(", ")}; ${actions.join("; ")}`,
+      actions.join("; "),
     );
   }
   // The declaration comes from the skill itself, then is compared with the

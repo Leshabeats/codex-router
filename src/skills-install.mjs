@@ -13,11 +13,17 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
+  closeSync,
+  constants,
   chmodSync,
   cpSync,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
+  opendirSync,
+  openSync,
+  readSync,
   readdirSync,
   readFileSync,
   renameSync,
@@ -35,6 +41,10 @@ const SOURCE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const MARKER = ".codex-router-managed";
 const OWNERSHIP_VERSION = 1;
 const TOKEN_PATTERN = /^[a-f0-9]{64}$/;
+const DIGEST_MAX_ENTRIES = 4_096;
+const DIGEST_MAX_BYTES = 64 * 1024 * 1024;
+const DIGEST_MAX_DEPTH = 64;
+const DIGEST_READ_CHUNK_BYTES = 64 * 1024;
 
 // The pack source directory. Overridable for tests via the environment.
 function skillsSource() {
@@ -96,33 +106,97 @@ function lstat(target) {
   }
 }
 
+function sameFileIdentity(left, right) {
+  return (
+    Boolean(left) &&
+    Boolean(right) &&
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs &&
+    left.ctimeMs === right.ctimeMs &&
+    left.isFile() === right.isFile() &&
+    left.isDirectory() === right.isDirectory() &&
+    left.isSymbolicLink() === right.isSymbolicLink()
+  );
+}
+
 function directoryDigest(target) {
-  const hash = createHash("sha256");
-  function walk(directory, relative = "") {
-    const stat = lstat(directory);
-    if (!stat?.isDirectory() || stat.isSymbolicLink()) return false;
-    hash.update(`D\0${relative}\0`);
-    const entries = readdirSync(directory, { withFileTypes: true }).sort((a, b) =>
-      a.name.localeCompare(b.name),
-    );
-    for (const entry of entries) {
-      const full = path.join(directory, entry.name);
-      const childRelative = relative ? `${relative}/${entry.name}` : entry.name;
-      const childStat = lstat(full);
-      if (!childStat || childStat.isSymbolicLink()) return false;
-      if (childStat.isDirectory()) {
-        if (!walk(full, childRelative)) return false;
-      } else if (childStat.isFile()) {
-        const content = readFileSync(full);
-        hash.update(`F\0${childRelative}\0${content.length}\0`);
-        hash.update(content);
-      } else {
-        return false;
+  try {
+    const hash = createHash("sha256");
+    const budget = { entries: 0, bytes: 0 };
+
+    function hashFile(full, relative, before) {
+      if (before.size > DIGEST_MAX_BYTES - budget.bytes) return false;
+      let descriptor;
+      try {
+        const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
+        descriptor = openSync(full, constants.O_RDONLY | noFollow);
+        const opened = fstatSync(descriptor);
+        if (!opened.isFile() || !sameFileIdentity(before, opened)) return false;
+        hash.update(`F\0${relative}\0${opened.size}\0`);
+        const buffer = Buffer.allocUnsafe(DIGEST_READ_CHUNK_BYTES);
+        let offset = 0;
+        while (offset < opened.size) {
+          const length = Math.min(buffer.length, opened.size - offset);
+          const read = readSync(descriptor, buffer, 0, length, offset);
+          if (read <= 0) return false;
+          hash.update(buffer.subarray(0, read));
+          offset += read;
+        }
+        const afterRead = fstatSync(descriptor);
+        const afterPath = lstat(full);
+        if (!sameFileIdentity(opened, afterRead) || !sameFileIdentity(before, afterPath)) {
+          return false;
+        }
+        budget.bytes += opened.size;
+        return true;
+      } finally {
+        if (descriptor !== undefined) closeSync(descriptor);
       }
     }
-    return true;
+
+    function walk(directory, relative = "", depth = 0) {
+      if (depth > DIGEST_MAX_DEPTH) return false;
+      const before = lstat(directory);
+      if (!before?.isDirectory() || before.isSymbolicLink()) return false;
+      hash.update(`D\0${relative}\0`);
+      const entries = [];
+      const handle = opendirSync(directory);
+      try {
+        let entry;
+        while ((entry = handle.readSync())) {
+          budget.entries += 1;
+          if (budget.entries > DIGEST_MAX_ENTRIES) return false;
+          entries.push(entry);
+        }
+      } finally {
+        handle.closeSync();
+      }
+      entries.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+      for (const entry of entries) {
+        const full = path.join(directory, entry.name);
+        const childRelative = relative ? `${relative}/${entry.name}` : entry.name;
+        const childStat = lstat(full);
+        if (!childStat || childStat.isSymbolicLink()) return false;
+        if (childStat.isDirectory()) {
+          if (!walk(full, childRelative, depth + 1)) return false;
+        } else if (childStat.isFile()) {
+          if (!hashFile(full, childRelative, childStat)) return false;
+        } else {
+          return false;
+        }
+      }
+      return sameFileIdentity(before, lstat(directory));
+    }
+
+    return walk(target) ? hash.digest("hex") : undefined;
+  } catch {
+    // Unreadable or concurrently replaced trees invalidate an approval. They
+    // must never abort doctor/install or turn an unverified tree into owned
+    // content.
+    return undefined;
   }
-  return walk(target) ? hash.digest("hex") : undefined;
 }
 
 function invalidOwnership(path, exists = true) {
@@ -185,6 +259,7 @@ function readOwnership(codexHome) {
         sourceDigest: record.sourceDigest,
       };
     }
+    if (Object.keys(external).some((name) => skills[name])) valid = false;
     return {
       exists: true,
       valid,
@@ -333,6 +408,10 @@ export function approveExternalSkills(codexHome, names, { quiet = false } = {}) 
     approvals.push({ name, targetDigest, sourceDigest });
   }
   for (const { name, targetDigest, sourceDigest } of approvals) {
+    // Approval explicitly transfers responsibility away from codex-router.
+    // Keeping a stale managed token beside the approval could let a replayed
+    // marker authorize a later uninstall of the external directory.
+    delete ownership.skills[name];
     ownership.external[name] = { targetDigest, sourceDigest };
   }
   writeOwnership(ownership.path, ownership.skills, ownership.external);
@@ -527,6 +606,10 @@ export function installSkills(codexHome, { quiet = false } = {}) {
     const evidence = ownershipEvidence(codexHome, entry.name, ownership);
     const coexistence = externalEvidence(codexHome, entry.name, ownership);
     if (destStat && !evidence.owned && coexistence.approved) {
+      if (ownership.skills[entry.name]) {
+        delete ownership.skills[entry.name];
+        stateChanged = true;
+      }
       external += 1;
       if (!quiet) {
         console.error(
@@ -571,6 +654,16 @@ export function installSkills(codexHome, { quiet = false } = {}) {
     delete ownership.skills[name];
     stateChanged = true;
   }
+  for (const name of Object.keys(ownership.external)) {
+    if (sourceNames.has(name)) continue;
+    delete ownership.external[name];
+    stateChanged = true;
+    if (!quiet) {
+      console.error(
+        `codex-router: revoked obsolete external approval for "${name}"; existing content preserved.`,
+      );
+    }
+  }
   if (stateChanged || ownership.exists) {
     writeOwnership(ownership.path, ownership.skills, ownership.external);
   }
@@ -613,30 +706,35 @@ const [, , command] = process.argv;
 const invokedDirectly =
   Boolean(process.argv[1]) &&
   path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
-if (
-  invokedDirectly &&
-  ["install", "uninstall", "approve-external", "revoke-external"].includes(command)
-) {
-  try {
-    if (command === "install") {
-      const { installed, skipped, external } = installSkills(codexHome());
-      console.error(
-        `codex-router: installed ${installed} skill(s) into ${codexSkillsDir(codexHome())}${
-          external ? `, using ${external} approved external skill(s)` : ""
-        }${skipped ? `, skipped ${skipped} (existing content preserved)` : ""}.`,
-      );
-    } else if (command === "uninstall") {
-      uninstallSkills(codexHome());
-      console.error("codex-router: codex-router skills removed.");
-    } else if (command === "approve-external") {
-      approveExternalSkills(codexHome(), process.argv.slice(3));
-    } else {
-      revokeExternalSkills(codexHome(), process.argv.slice(3));
-    }
-  } catch (error) {
-    console.error(`codex-router: skill ${command} failed: ${error.message}`);
-    if (command === "approve-external" || command === "revoke-external") {
-      process.exitCode = 2;
+if (invokedDirectly) {
+  const commands = ["install", "uninstall", "approve-external", "revoke-external"];
+  if (!commands.includes(command)) {
+    console.error(
+      "Usage: skills-install.mjs install|uninstall|approve-external|revoke-external [SKILL ...]",
+    );
+    process.exitCode = 2;
+  } else {
+    try {
+      if (command === "install") {
+        const { installed, skipped, external } = installSkills(codexHome());
+        console.error(
+          `codex-router: installed ${installed} skill(s) into ${codexSkillsDir(codexHome())}${
+            external ? `, using ${external} approved external skill(s)` : ""
+          }${skipped ? `, skipped ${skipped} (existing content preserved)` : ""}.`,
+        );
+      } else if (command === "uninstall") {
+        uninstallSkills(codexHome());
+        console.error("codex-router: codex-router skills removed.");
+      } else if (command === "approve-external") {
+        approveExternalSkills(codexHome(), process.argv.slice(3));
+      } else {
+        revokeExternalSkills(codexHome(), process.argv.slice(3));
+      }
+    } catch (error) {
+      console.error(`codex-router: skill ${command} failed: ${error.message}`);
+      if (command === "approve-external" || command === "revoke-external") {
+        process.exitCode = 2;
+      }
     }
   }
 }
