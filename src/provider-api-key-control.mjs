@@ -1,6 +1,6 @@
 import { PROVIDER_CREDENTIAL_STORE_PATH } from "./paths.mjs";
 import {
-  addCredentialReference,
+  ensureCredentialReference,
   readProviderCredentialStore,
   removeCredentialReference,
 } from "./provider-credential-store.mjs";
@@ -47,11 +47,12 @@ export async function addEnvironmentCredentialToPool(
   { credentialStorePath = PROVIDER_CREDENTIAL_STORE_PATH, poolStatePath } = {},
 ) {
   const provider = canonicalProvider(providerId);
-  const credential = addCredentialReference({
+  const ensured = ensureCredentialReference({
     providerId: provider,
     kind: "api_key",
     secretRef: { type: "environment", name: environmentName },
   }, credentialStorePath);
+  const credential = ensured.credential;
   try {
     const poolCredential = await upsertProviderApiKey(
       provider,
@@ -60,7 +61,7 @@ export async function addEnvironmentCredentialToPool(
     );
     return { credential: { id: credential.id, providerId: provider }, poolCredential };
   } catch (error) {
-    removeCredentialReference(credential.id, credentialStorePath);
+    if (ensured.created) removeCredentialReference(credential.id, credentialStorePath);
     throw error;
   }
 }
