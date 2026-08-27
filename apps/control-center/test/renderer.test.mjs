@@ -14,6 +14,7 @@ const bridgeSource = String.raw`
 (() => {
   const calls = [];
   let navigationListener;
+  let usageDelayMs = 0;
   const subagents = { mode: "all", enabled: [], disabled: [], efforts: {}, proofs: {} };
   const selectedModel = {
     slug: "deepseek/deepseek-chat",
@@ -145,48 +146,54 @@ const bridgeSource = String.raw`
     getProviders: async () => providers,
     getPresence: async () => ({ mode: "always" }),
     getHealth: async () => ({ ok: true, activity: { state: "idle", active: [], activeCount: 0 } }),
-    getAccountUsage: async () => ({
-      fetchedAt: "2026-08-27T08:00:00.000Z",
-      planType: "pro",
-      primary: {
-        usedPercent: 34,
-        remainingPercent: 66,
-        windowDurationMins: 300,
-        resetsAt: 1800000000,
-      },
-      dailyUsageBuckets: [{ startDate: "2026-08-27", tokens: 24000 }],
-      summary: { lifetimeTokens: 24000, peakDailyTokens: 24000, currentStreakDays: 1 },
-    }),
-    getProviderUsage: async () => ({
-      fetchedAt: "2026-08-27T08:00:00.000Z",
-      providers: [{
-        id: "deepseek",
-        displayName: "DeepSeek",
-        credentialType: "api",
-        totalTokens: 12000,
-        requests: 8,
-        dailyUsageBuckets: [{ startDate: "2026-08-27", tokens: 12000, requests: 8 }],
-        account: {
-          status: "available",
-          metrics: [
-            {
-              kind: "quota",
-              label: "Monthly credits",
-              usedPercent: 25,
-              remainingPercent: 75,
-              resetAt: 1800000000,
-            },
-            {
-              kind: "quota",
-              label: "Rolling window",
-              usedPercent: 40,
-              remainingPercent: 60,
-              resetAt: 1790000000,
-            },
-          ],
+    getAccountUsage: async () => {
+      await new Promise((resolve) => setTimeout(resolve, usageDelayMs));
+      return {
+        fetchedAt: "2026-08-27T08:00:00.000Z",
+        planType: "pro",
+        primary: {
+          usedPercent: 34,
+          remainingPercent: 66,
+          windowDurationMins: 300,
+          resetsAt: 1800000000,
         },
-      }],
-    }),
+        dailyUsageBuckets: [{ startDate: "2026-08-27", tokens: 24000 }],
+        summary: { lifetimeTokens: 24000, peakDailyTokens: 24000, currentStreakDays: 1 },
+      };
+    },
+    getProviderUsage: async () => {
+      await new Promise((resolve) => setTimeout(resolve, usageDelayMs));
+      return {
+        fetchedAt: "2026-08-27T08:00:00.000Z",
+        providers: [{
+          id: "deepseek",
+          displayName: "DeepSeek",
+          credentialType: "api",
+          totalTokens: 12000,
+          requests: 8,
+          dailyUsageBuckets: [{ startDate: "2026-08-27", tokens: 12000, requests: 8 }],
+          account: {
+            status: "available",
+            metrics: [
+              {
+                kind: "quota",
+                label: "Monthly credits",
+                usedPercent: 25,
+                remainingPercent: 75,
+                resetAt: 1800000000,
+              },
+              {
+                kind: "quota",
+                label: "Rolling window",
+                usedPercent: 40,
+                remainingPercent: 60,
+                resetAt: 1790000000,
+              },
+            ],
+          },
+        }],
+      };
+    },
     discoverProviderModels: async (providerId) => catalog(providerId),
     addProviderModels: async (providerId, modelIds) => {
       record("addProviderModels", providerId, [...modelIds]);
@@ -209,6 +216,7 @@ const bridgeSource = String.raw`
   window.routerControlTest = Object.freeze({
     calls: () => calls.map((call) => ({ name: call.name, args: call.args })),
     navigate: (destination) => navigationListener?.(destination),
+    setUsageDelay: (milliseconds) => { usageDelayMs = milliseconds; },
   });
 })();
 `;
@@ -300,17 +308,35 @@ test("the production renderer exposes model discovery and picker actions", { tim
     const wordmark = page.locator(".router-wordmark");
     assert.equal((await wordmark.locator("strong").innerText()).trim(), "Codex Router");
     assert.equal(await wordmark.locator("img").count(), 0);
+    await page.evaluate(() => window.routerControlTest.setUsageDelay(600));
     await page.evaluate(() => window.routerControlTest.navigate({ destination: "usage", sourceId: "deepseek" }));
     await page.getByRole("heading", { name: "Usage", exact: true }).waitFor();
+    const refreshUsage = page.getByRole("button", { name: "Refresh Usage", exact: true });
+    await refreshUsage.click();
+    await page.waitForFunction(() => document.querySelector('button[aria-label="Refresh Usage"]')?.disabled);
     await page.evaluate(() => window.routerControlTest.navigate({ destination: "usage-resets", sourceId: "deepseek" }));
-    await page.getByRole("button", { name: "Refresh Usage", exact: true }).click();
+    await page.waitForTimeout(150);
+    assert.equal(await page.evaluate(() => document.activeElement?.classList.contains("us-metric-card")), false);
+    await page.waitForFunction(() => !document.querySelector('button[aria-label="Refresh Usage"]')?.disabled);
     const resetCard = page.locator(".us-metric-card.is-navigation-focus");
     await resetCard.waitFor();
-    await page.waitForFunction(() => document.activeElement?.classList.contains("us-metric-card"));
+    await page.waitForFunction(() => {
+      const active = document.activeElement;
+      return active?.isConnected
+        && active.classList.contains("us-metric-card")
+        && /DeepSeek, Rolling window.*Resets/.test(active.getAttribute("aria-label") ?? "");
+    });
     assert.match(await resetCard.getAttribute("aria-label"), /DeepSeek, Rolling window.*Resets/);
+    await refreshUsage.click();
+    await page.waitForFunction(() => document.querySelector('button[aria-label="Refresh Usage"]')?.disabled);
     await page.evaluate(() => window.routerControlTest.navigate({ destination: "usage", sourceId: "openai" }));
-    await page.getByRole("button", { name: "Refresh Usage", exact: true }).click();
-    await page.waitForFunction(() => document.activeElement?.getAttribute("aria-label") === "Usage overview");
+    await page.waitForTimeout(150);
+    assert.notEqual(await page.evaluate(() => document.activeElement?.getAttribute("aria-label")), "Usage overview");
+    await page.waitForFunction(() => !document.querySelector('button[aria-label="Refresh Usage"]')?.disabled);
+    await page.waitForFunction(() => {
+      const active = document.activeElement;
+      return active?.isConnected && active.getAttribute("aria-label") === "Usage overview";
+    });
     assert.equal(await page.getByLabel("Usage source").inputValue(), "chatgpt-subscription");
     await page.getByRole("button", { name: "Models", exact: true }).click();
 

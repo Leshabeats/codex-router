@@ -171,6 +171,9 @@ export function UsagePage({
     const preferred = navigationSourceId(focusRequest.sourceId);
     if (preferred && sources.some((entry) => entry.id === preferred)) setSelected(preferred);
     if (handledFocusRequest.current === focusRequest.id) return undefined;
+    // A refresh can replace the usage rows. Let its committed data choose the
+    // final target before marking this navigation request as handled.
+    if (refreshing) return undefined;
 
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     if (!focusRequest.allowance) {
@@ -186,16 +189,22 @@ export function UsagePage({
     const preferredSource = preferred
       ? sources.find((entry) => entry.id === preferred)
       : undefined;
-    if (preferred && !preferredSource && refreshing) return undefined;
     if (preferredSource?.metrics.length && !allowanceTargetRef.current) return undefined;
-    const focusTarget = allowanceTargetRef.current ?? allowanceRef.current;
-    if (!focusTarget) return undefined;
+    if (!allowanceTargetRef.current && !allowanceRef.current) return undefined;
+
+    const focusAllowance = () => {
+      const focusTarget = allowanceTargetRef.current ?? allowanceRef.current;
+      if (!focusTarget) return false;
+      focusTarget.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "center" });
+      focusTarget.focus({ preventScroll: true });
+      return true;
+    };
 
     setAllowanceFocused(true);
     const scrollTimer = window.setTimeout(() => {
-      focusTarget.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "center" });
-      focusTarget.focus({ preventScroll: true });
-      handledFocusRequest.current = focusRequest.id;
+      // Selection and layout changes can replace a card between scheduling and
+      // execution. Resolve the ref again rather than focusing a detached node.
+      if (focusAllowance()) handledFocusRequest.current = focusRequest.id;
     }, 80);
     return () => window.clearTimeout(scrollTimer);
   }, [allowances.length, focusRequest, refreshing, sources, targetAllowanceRowId]);
