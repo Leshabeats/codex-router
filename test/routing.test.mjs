@@ -5090,8 +5090,9 @@ test("API forwarder drops the search_content_types Meta refuses, and only for Me
       { type: "web_search_preview", search_content_types: ["text", "image"] },
     ]);
 
-    // Provider-scoped, not global: OpenAI documents search_content_types on
-    // `web_search`, so the other responses-native providers keep it.
+    // Provider-scoped at this direct forwarder boundary: OpenAI documents
+    // search_content_types on `web_search`, so non-Meta traffic keeps it here.
+    // The outer router owns Console Go's separately measured compatibility.
     const opencodeTools = await send(
       "responses/opencode-go-responses-gpt-5-6-luna",
       [CODEX_WEB_SEARCH_TOOL],
@@ -7782,14 +7783,13 @@ test("Zen Free Muse bridges custom tools across JSON, history, and errors", asyn
   }
 });
 
-test("Go, paid Zen, and other Free routes keep compatibility-sensitive wire shapes", async () => {
+test("Go Chat/Messages, paid Zen, and other Free routes keep compatibility-sensitive wire shapes", async () => {
   const testRoot = mkdtempSync(path.join(os.tmpdir(), "routing-opencode-identity-"));
   const stateDir = path.join(testRoot, "state");
   mkdirSync(stateDir, { recursive: true });
   const specs = [
     ["opencode-go", "identity-chat"],
     ["opencode-go-messages", "identity-messages"],
-    ["opencode-go-responses", "identity-responses"],
     ["opencode-zen", "identity-paid-zen"],
     ["opencode-free", "identity-other-free"],
   ].map(([provider, upstreamModel], index) => ({

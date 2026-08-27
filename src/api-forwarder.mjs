@@ -622,10 +622,11 @@ function normalizeBody(buffer, contentType, route) {
   // which is the reverse of what this endpoint enforces, so Meta is running an
   // older fork of the schema rather than being the strict reader of it.
   // Stripping the field for every provider would take a documented parameter
-  // away from the responses-native providers that do follow the current spec
-  // (github-copilot, opencode-go-responses), and neither has been observed to
-  // refuse it. A caller that does send Meta a real `web_search_preview` tool
-  // keeps the field, because that is the one tool this endpoint accepts it on.
+  // away from responses-native providers that do follow the current spec, such
+  // as GitHub Copilot. Console Go Responses has its separately measured strict
+  // tool boundary applied in the router before this hop. A caller that does send
+  // Meta a real `web_search_preview` tool keeps the field, because that is the
+  // one tool this endpoint accepts it on.
   if (provider.id === "meta" && Array.isArray(payload.tools)) {
     payload.tools = stripSearchContentTypes(payload.tools);
   }

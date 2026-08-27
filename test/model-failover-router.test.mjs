@@ -142,8 +142,16 @@ function run(
     encoding: "utf8",
     mode: 0o600,
   });
-  // The responses-native provider used by the protocol-crossing cases. It is a
-  // variant of opencode-go, so it authenticates with that family's credential.
+  // The genuinely Responses-native provider used by the protocol-crossing
+  // cases. OpenCode Go Responses has a function-only compatibility boundary,
+  // so it is no longer a valid exemplar for preserving native namespaces.
+  writeFileSync(path.join(stateDir, "meta-api-key.secret"), "test-meta-key\n", {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  // The pressure test deliberately uses Console Go's smaller context window;
+  // its request has no tools, so the provider's function-only compatibility
+  // boundary is not part of that assertion.
   writeFileSync(path.join(stateDir, "opencode-go-api-key.secret"), "test-opencode-go-key\n", {
     encoding: "utf8",
     mode: 0o600,
@@ -630,6 +638,10 @@ test("a fallback rebuild carries the full request, not a model swap", async () =
 // map, shipping plausible tools the response transform can no longer map back.
 
 const RESPONSES_MODEL = {
+  slug: "meta/muse-spark-1.2",
+  gatewayModel: "meta-muse-spark-1-2",
+};
+const PRESSURE_RESPONSES_MODEL = {
   slug: "opencode-go-responses/gpt-5.6-luna",
   gatewayModel: "opencode-go-responses-gpt-5-6-luna",
 };
@@ -653,7 +665,7 @@ test("failover recalculates token-maxxing pressure for the serving model", async
   });
   const routerPort = await openPort();
   const child = run(routerEnv(gw.port, routerPort), {
-    chain: [RESPONSES_MODEL.slug],
+    chain: [PRESSURE_RESPONSES_MODEL.slug],
     toolResultAging: true,
   });
   // The pristine request is larger than the fallback's context window. It can
@@ -677,11 +689,14 @@ test("failover recalculates token-maxxing pressure for the serving model", async
     assert.equal(seen[0].model, PRIMARY.gatewayModel);
     assert.equal(seen[0].input[1].output, value);
     assert.equal(seen[0].instructions, "Base instructions.");
-    assert.equal(seen[1].model, RESPONSES_MODEL.gatewayModel);
+    assert.equal(seen[1].model, PRESSURE_RESPONSES_MODEL.gatewayModel);
     assert.match(seen[1].input[1].output, /Tool result shaped by Codex Router token maxxing/u);
     assert.match(seen[1].instructions, /## Context pressure mode/u);
     const events = await waitForUsageEvents(child.stateDir, 2, child);
-    assert.equal(events.find((event) => event.model === RESPONSES_MODEL.slug).toolResultsShaped, 1);
+    assert.equal(
+      events.find((event) => event.model === PRESSURE_RESPONSES_MODEL.slug).toolResultsShaped,
+      1,
+    );
   } finally {
     await stopChild(child);
     await closeServer(gw.server);

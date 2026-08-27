@@ -10,6 +10,7 @@ import {
   downgradeOriginalImageDetail,
   flattenNamespacedHistory,
   flattenNamespaceTools,
+  flattenToolChoice,
   flattenToolSearchHistory,
   rewriteNamespaceFunctionCall,
   rewriteNamespaceResponsePayload,
@@ -252,6 +253,515 @@ test("flattenNamespaceTools handles non-array and empty input", () => {
   assert.equal(flattened, false);
   assert.equal(namespaces.size, 0);
   assert.equal(tools.length, 1);
+});
+
+test("bounded function names stay consistent across definitions, history, choices, and restore", () => {
+  const namespace = "mcp__codex_apps__github";
+  const nativeName = "list_repository_pull_request_review_comments_for_branch";
+  const originalName = `${namespace}__${nativeName}`;
+  assert.ok(originalName.length > 64, "fixture must exercise the provider limit");
+
+  const definition = {
+    type: "namespace",
+    name: namespace,
+    tools: [{ type: "function", name: nativeName, inputSchema: { type: "object" } }],
+  };
+  const first = flattenNamespaceTools([definition], { maxNameLength: 64 });
+  const second = flattenNamespaceTools([definition], { maxNameLength: 64 });
+  const alias = first.tools[0].name;
+  assert.equal(alias.length, 64);
+  assert.notEqual(alias, originalName);
+  assert.equal(second.tools[0].name, alias, "the same request shape gets the same alias");
+
+  const history = flattenNamespacedHistory(
+    [
+      {
+        type: "function_call",
+        name: nativeName,
+        namespace,
+        call_id: "explicit",
+        arguments: "{}",
+      },
+      {
+        type: "function_call",
+        name: originalName,
+        call_id: "already-flat",
+        arguments: "{}",
+      },
+    ],
+    first.namespaces,
+  );
+  assert.deepEqual(history.map((item) => item.name), [alias, alias]);
+  assert.ok(history.every((item) => item.namespace === undefined));
+
+  assert.deepEqual(
+    flattenToolChoice(
+      { type: "function", name: nativeName, namespace },
+      first.namespaces,
+    ),
+    { type: "function", name: alias },
+  );
+  assert.deepEqual(
+    flattenToolChoice({ type: "function", name: nativeName }, first.namespaces),
+    { type: "function", name: alias },
+  );
+  assert.deepEqual(
+    flattenToolChoice(
+      {
+        type: "allowed_tools",
+        mode: "required",
+        tools: [{ type: "function", name: nativeName, namespace }],
+      },
+      first.namespaces,
+    ).tools,
+    [{ type: "function", name: alias }],
+  );
+
+  const restored = rewriteNamespaceResponsePayload(
+    {
+      output: [
+        { type: "function_call", name: alias, call_id: "result", arguments: "{}" },
+      ],
+    },
+    buildNamespaceLookups(first.namespaces),
+  );
+  assert.deepEqual(restored.output[0], {
+    type: "function_call",
+    name: nativeName,
+    namespace,
+    call_id: "result",
+    arguments: "{}",
+  });
+});
+
+test("bounded aliases avoid request-local collisions without renaming the legal sibling", () => {
+  const namespace = "mcp__codex_apps__github";
+  const nativeName = "list_repository_pull_request_review_comments_for_branch";
+  const definition = {
+    type: "namespace",
+    name: namespace,
+    tools: [{ type: "function", name: nativeName }],
+  };
+  const initialAlias = flattenNamespaceTools([definition], { maxNameLength: 64 }).tools[0].name;
+  const tools = [{ type: "function", name: initialAlias }, definition];
+  const first = flattenNamespaceTools(tools, { maxNameLength: 64 });
+  const second = flattenNamespaceTools(tools, { maxNameLength: 64 });
+  assert.equal(first.tools[0].name, initialAlias, "the already-legal plain function wins");
+  assert.equal(first.tools[1].name.length, 64);
+  assert.notEqual(first.tools[1].name, initialAlias);
+  assert.deepEqual(
+    first.tools.map((tool) => tool.name),
+    second.tools.map((tool) => tool.name),
+    "collision fallback is deterministic",
+  );
+});
+
+test("bounded history keeps ordinary and bridged names ahead of bare namespace inference", () => {
+  const flattened = flattenNamespaceTools(
+    [
+      { type: "function", name: "read" },
+      clientToolSearchControl(),
+      {
+        type: "namespace",
+        name: "mcp__files",
+        tools: [
+          { type: "function", name: "read" },
+          { type: "function", name: "apply_patch" },
+          { type: "function", name: "tool_search" },
+        ],
+      },
+    ],
+    { maxNameLength: 64 },
+  );
+  const bridged = bridgeCustomTools(
+    [...flattened.tools, { type: "custom", name: "apply_patch" }],
+    [
+      { type: "function_call", name: "read", call_id: "plain", arguments: "{}" },
+      {
+        type: "custom_tool_call",
+        name: "apply_patch",
+        call_id: "patch",
+        input: "patch",
+      },
+      {
+        type: "function_call",
+        name: "tool_search",
+        call_id: "search",
+        arguments: '{"query":"files"}',
+      },
+    ],
+    flattened.namespaces,
+    undefined,
+    undefined,
+    { maxNameLength: 64 },
+  );
+  const history = flattenNamespacedHistory(bridged.input, flattened.namespaces);
+  assert.deepEqual(history.map((item) => item.name), ["read", "apply_patch", "tool_search"]);
+});
+
+test("later-discovered plain functions stay distinct from same-named custom relays", () => {
+  const nativeName = "future_custom";
+  const flattened = flattenNamespaceTools(
+    [clientToolSearchControl(), { type: "custom", name: nativeName }],
+    { maxNameLength: 64 },
+  );
+  const bridged = bridgeCustomTools(
+    flattened.tools,
+    [
+      {
+        type: "custom_tool_call",
+        name: nativeName,
+        call_id: "custom-call",
+        input: "opaque",
+      },
+      { type: "custom_tool_call_output", call_id: "custom-call", output: "done" },
+      {
+        type: "tool_search_call",
+        call_id: "search-call",
+        execution: "client",
+        arguments: { query: nativeName },
+      },
+      {
+        type: "tool_search_output",
+        call_id: "search-call",
+        execution: "client",
+        status: "completed",
+        tools: [{ type: "function", name: nativeName, parameters: { type: "object" } }],
+      },
+      { type: "function_call", name: nativeName, call_id: "plain-call", arguments: "{}" },
+    ],
+    flattened.namespaces,
+    { type: "function", name: nativeName },
+    undefined,
+    { maxNameLength: 64, bridgeAll: true },
+  );
+  const customChoice = bridgeCustomTools(
+    flattened.tools,
+    [],
+    flattened.namespaces,
+    { type: "custom", name: nativeName },
+    undefined,
+    { maxNameLength: 64, bridgeAll: true },
+  ).toolChoice;
+  const searched = flattenToolSearchHistory(
+    bridged.input,
+    bridged.tools,
+    flattened.namespaces,
+  );
+  const plainAlias = searched.tools.at(-1).name;
+  assert.notEqual(plainAlias, nativeName);
+
+  const history = flattenNamespacedHistory(searched.input, flattened.namespaces);
+  assert.equal(history.find((item) => item.call_id === "custom-call").name, nativeName);
+  assert.equal(history.find((item) => item.call_id === "plain-call").name, plainAlias);
+  assert.deepEqual(flattenToolChoice(bridged.toolChoice, flattened.namespaces), {
+    type: "function",
+    name: plainAlias,
+  });
+  assert.deepEqual(flattenToolChoice(customChoice, flattened.namespaces), {
+    type: "function",
+    name: nativeName,
+  });
+
+  const restored = rewriteNamespaceResponsePayload(
+    {
+      output: [
+        {
+          type: "function_call",
+          name: nativeName,
+          call_id: "custom-result",
+          arguments: '{"input":"opaque"}',
+        },
+        { type: "function_call", name: plainAlias, call_id: "plain-result", arguments: "{}" },
+      ],
+    },
+    buildNamespaceLookups(flattened.namespaces),
+  );
+  assert.equal(restored.output[0].type, "custom_tool_call");
+  assert.equal(restored.output[0].name, nativeName);
+  assert.deepEqual(restored.output[1], {
+    type: "function_call",
+    name: nativeName,
+    call_id: "plain-result",
+    arguments: "{}",
+  });
+});
+
+test("later-discovered plain functions stay distinct from the tool-search relay", () => {
+  const nativeName = "tool_search";
+  const flattened = flattenNamespaceTools([clientToolSearchControl()], {
+    maxNameLength: 64,
+  });
+  const searched = flattenToolSearchHistory(
+    [
+      {
+        type: "tool_search_call",
+        call_id: "search-call",
+        execution: "client",
+        arguments: { query: nativeName },
+      },
+      {
+        type: "tool_search_output",
+        call_id: "search-call",
+        execution: "client",
+        status: "completed",
+        tools: [{ type: "function", name: nativeName, parameters: { type: "object" } }],
+      },
+      { type: "function_call", name: nativeName, call_id: "plain-call", arguments: "{}" },
+    ],
+    flattened.tools,
+    flattened.namespaces,
+  );
+  const plainAlias = searched.tools.at(-1).name;
+  assert.notEqual(plainAlias, nativeName);
+
+  const history = flattenNamespacedHistory(searched.input, flattened.namespaces);
+  assert.equal(history.find((item) => item.call_id === "search-call").name, nativeName);
+  assert.equal(history.find((item) => item.call_id === "plain-call").name, plainAlias);
+  assert.deepEqual(
+    flattenToolChoice({ type: "function", name: nativeName }, flattened.namespaces),
+    { type: "function", name: plainAlias },
+  );
+  const nativeSearchChoice = flattenToolChoice(
+    { type: "tool_search", execution: "client" },
+    flattened.namespaces,
+  );
+  assert.deepEqual(nativeSearchChoice, { type: "function", name: nativeName });
+  assert.equal(
+    flattenToolChoice(nativeSearchChoice, flattened.namespaces),
+    nativeSearchChoice,
+    "a second pass cannot retarget the native search choice to the plain alias",
+  );
+  const allowedSearchChoice = flattenToolChoice(
+    {
+      type: "allowed_tools",
+      mode: "required",
+      tools: [{ type: "tool_search", execution: "client" }],
+    },
+    flattened.namespaces,
+  );
+  assert.deepEqual(allowedSearchChoice.tools, [{ type: "function", name: nativeName }]);
+  assert.equal(
+    flattenToolChoice(allowedSearchChoice, flattened.namespaces),
+    allowedSearchChoice,
+    "allowed-tools search references stay idempotent too",
+  );
+});
+
+test("plain functions and explicit namespace history remain distinct on name collisions", () => {
+  const flattened = flattenNamespaceTools(
+    [
+      { type: "function", name: "read" },
+      {
+        type: "namespace",
+        name: "mcp__files",
+        tools: [{ type: "function", name: "read" }],
+      },
+    ],
+    { maxNameLength: 64 },
+  );
+
+  const history = flattenNamespacedHistory(
+    [
+      {
+        type: "function_call",
+        name: "read",
+        namespace: "mcp__files",
+        call_id: "namespaced",
+        arguments: "{}",
+      },
+      { type: "function_call", name: "read", call_id: "plain", arguments: "{}" },
+    ],
+    flattened.namespaces,
+  );
+  assert.deepEqual(history.map((item) => item.name), ["mcp__files__read", "read"]);
+  assert.ok(history.every((item) => item.namespace === undefined));
+
+  assert.deepEqual(
+    flattenToolChoice({ type: "function", name: "read" }, flattened.namespaces),
+    { type: "function", name: "read" },
+  );
+  assert.deepEqual(
+    flattenToolChoice(
+      { type: "function", name: "read", namespace: "mcp__files" },
+      flattened.namespaces,
+    ),
+    { type: "function", name: "mcp__files__read" },
+  );
+
+  const plainResponse = {
+    output: [
+      { type: "function_call", name: "read", call_id: "plain-result", arguments: "{}" },
+    ],
+  };
+  assert.equal(
+    rewriteNamespaceResponsePayload(
+      plainResponse,
+      buildNamespaceLookups(flattened.namespaces),
+    ),
+    undefined,
+  );
+});
+
+test("plain names equal to namespace wire names use their own aliases everywhere", () => {
+  const plainName = "mcp__files__read";
+  const flattened = flattenNamespaceTools(
+    [
+      { type: "function", name: plainName },
+      {
+        type: "namespace",
+        name: "mcp__files",
+        tools: [{ type: "function", name: "read" }],
+      },
+    ],
+    { maxNameLength: 64 },
+  );
+  const [plainAlias, namespaceAlias] = flattened.tools.map((tool) => tool.name);
+  assert.notEqual(plainAlias, plainName);
+  assert.notEqual(namespaceAlias, plainName);
+  assert.notEqual(plainAlias, namespaceAlias);
+
+  const history = flattenNamespacedHistory(
+    [
+      { type: "function_call", name: plainName, call_id: "plain", arguments: "{}" },
+      {
+        type: "function_call",
+        name: "read",
+        namespace: "mcp__files",
+        call_id: "namespaced",
+        arguments: "{}",
+      },
+    ],
+    flattened.namespaces,
+  );
+  assert.deepEqual(history.map((item) => item.name), [plainAlias, namespaceAlias]);
+
+  assert.deepEqual(
+    flattenToolChoice({ type: "function", name: plainName }, flattened.namespaces),
+    { type: "function", name: plainAlias },
+  );
+  assert.deepEqual(
+    flattenToolChoice(
+      { type: "function", name: "read", namespace: "mcp__files" },
+      flattened.namespaces,
+    ),
+    { type: "function", name: namespaceAlias },
+  );
+
+  const restored = rewriteNamespaceResponsePayload(
+    {
+      output: [
+        { type: "function_call", name: plainAlias, call_id: "plain", arguments: "{}" },
+        {
+          type: "function_call",
+          name: namespaceAlias,
+          call_id: "namespaced",
+          arguments: "{}",
+        },
+      ],
+    },
+    buildNamespaceLookups(flattened.namespaces),
+  );
+  assert.deepEqual(restored.output, [
+    { type: "function_call", name: plainName, call_id: "plain", arguments: "{}" },
+    {
+      type: "function_call",
+      name: "read",
+      namespace: "mcp__files",
+      call_id: "namespaced",
+      arguments: "{}",
+    },
+  ]);
+});
+
+test("bounded aliases cover plain and tool-search-discovered functions", () => {
+  const plainName = "plain_function_with_a_name_that_is_deliberately_longer_than_sixty_four_characters";
+  const discoveredNamespace = "mcp__calendar_connector_with_a_long_namespace";
+  const discoveredName = "delete_an_event_and_notify_every_participant";
+  const flattened = flattenNamespaceTools(
+    [clientToolSearchControl(), { type: "function", name: plainName }],
+    { maxNameLength: 64 },
+  );
+  const plainAlias = flattened.tools.find((tool) => tool.name !== "tool_search").name;
+  assert.ok(plainAlias.length <= 64);
+  assert.notEqual(plainAlias, plainName);
+
+  const routed = flattenToolSearchHistory(
+    [
+      {
+        type: "tool_search_call",
+        call_id: "search-long",
+        execution: "client",
+        arguments: { query: "calendar" },
+      },
+      {
+        type: "tool_search_output",
+        call_id: "search-long",
+        status: "completed",
+        execution: "client",
+        tools: [
+          {
+            type: "namespace",
+            name: discoveredNamespace,
+            tools: [{ type: "function", name: discoveredName }],
+          },
+        ],
+      },
+      {
+        type: "function_call",
+        name: discoveredName,
+        namespace: discoveredNamespace,
+        call_id: "discovered-call",
+        arguments: "{}",
+      },
+      { type: "function_call", name: plainName, call_id: "plain-call", arguments: "{}" },
+    ],
+    flattened.tools,
+    flattened.namespaces,
+  );
+  const discoveredTool = routed.tools.at(-1);
+  assert.equal(discoveredTool.type, "function");
+  assert.ok(discoveredTool.name.length <= 64);
+  assert.notEqual(discoveredTool.name, `${discoveredNamespace}__${discoveredName}`);
+
+  const history = flattenNamespacedHistory(routed.input, flattened.namespaces);
+  assert.equal(
+    history.find((item) => item.call_id === "discovered-call").name,
+    discoveredTool.name,
+  );
+  assert.equal(history.find((item) => item.call_id === "plain-call").name, plainAlias);
+  assert.deepEqual(
+    flattenToolChoice({ type: "tool_search", execution: "client" }, flattened.namespaces),
+    { type: "function", name: "tool_search" },
+  );
+
+  const lookups = buildNamespaceLookups(flattened.namespaces);
+  assert.deepEqual(
+    rewriteNamespaceResponsePayload(
+      {
+        output: [
+          {
+            type: "function_call",
+            name: discoveredTool.name,
+            call_id: "result",
+            arguments: "{}",
+          },
+          { type: "function_call", name: plainAlias, call_id: "plain", arguments: "{}" },
+        ],
+      },
+      lookups,
+    ).output,
+    [
+      {
+        type: "function_call",
+        name: discoveredName,
+        namespace: discoveredNamespace,
+        call_id: "result",
+        arguments: "{}",
+      },
+      { type: "function_call", name: plainName, call_id: "plain", arguments: "{}" },
+    ],
+  );
 });
 
 test("full inventory survives merge + flatten with nothing dropped", () => {
@@ -1389,6 +1899,162 @@ test("custom-tool bridge avoids hijacking an ordinary apply_patch function", () 
     buildNamespaceLookups(namespaces).customTools.get("codex_custom_apply_patch"),
     "apply_patch",
   );
+});
+
+test("custom-tool bridge bounds its provider alias and restores the native custom call", () => {
+  const nativeName = "custom_freeform_tool_with_a_name_that_is_deliberately_longer_than_sixty_four_chars";
+  const flattened = flattenNamespaceTools([], { maxNameLength: 64 });
+  const bridged = bridgeCustomTools(
+    [{ type: "custom", name: nativeName }],
+    [
+      {
+        type: "custom_tool_call",
+        name: nativeName,
+        call_id: "custom-long",
+        input: "raw input",
+      },
+    ],
+    flattened.namespaces,
+    { type: "custom", name: nativeName },
+    [nativeName],
+    { maxNameLength: 64 },
+  );
+  const alias = bridged.tools[0].name;
+  assert.equal(alias.length, 64);
+  assert.deepEqual(bridged.toolChoice, { type: "function", name: alias });
+  assert.equal(bridged.input[0].name, alias);
+
+  const restored = rewriteNamespaceResponsePayload(
+    {
+      output: [
+        {
+          type: "function_call",
+          name: alias,
+          call_id: "custom-result",
+          arguments: '{"input":"raw input"}',
+        },
+      ],
+    },
+    buildNamespaceLookups(flattened.namespaces),
+  );
+  assert.deepEqual(restored.output[0], {
+    type: "custom_tool_call",
+    name: nativeName,
+    call_id: "custom-result",
+    input: "raw input",
+  });
+});
+
+test("custom-tool bridge rewrites native entries inside allowed_tools", () => {
+  const nativeName = "custom_freeform_tool_with_a_name_that_is_deliberately_longer_than_sixty_four_chars";
+  const flattened = flattenNamespaceTools([], { maxNameLength: 64 });
+  const bridged = bridgeCustomTools(
+    [{ type: "custom", name: nativeName }],
+    [],
+    flattened.namespaces,
+    {
+      type: "allowed_tools",
+      mode: "required",
+      tools: [
+        { type: "custom", name: nativeName },
+        { type: "function", name: "ordinary" },
+      ],
+    },
+    [nativeName],
+    { maxNameLength: 64 },
+  );
+  const alias = bridged.tools[0].name;
+  assert.equal(alias.length, 64);
+  assert.deepEqual(bridged.toolChoice, {
+    type: "allowed_tools",
+    mode: "required",
+    tools: [
+      { type: "function", name: alias },
+      { type: "function", name: "ordinary" },
+    ],
+  });
+});
+
+test("flattened custom choices cannot be retargeted to a same-named namespace child", () => {
+  const flattened = flattenNamespaceTools(
+    [
+      {
+        type: "namespace",
+        name: "mcp__files",
+        tools: [{ type: "function", name: "apply_patch" }],
+      },
+      { type: "custom", name: "apply_patch" },
+    ],
+    { maxNameLength: 64 },
+  );
+  const forced = bridgeCustomTools(
+    flattened.tools,
+    [],
+    flattened.namespaces,
+    { type: "custom", name: "apply_patch" },
+    undefined,
+    { maxNameLength: 64 },
+  );
+  assert.deepEqual(
+    flattenToolChoice(forced.toolChoice, flattened.namespaces),
+    { type: "function", name: "apply_patch" },
+  );
+
+  const allowed = bridgeCustomTools(
+    flattened.tools,
+    [],
+    flattened.namespaces,
+    {
+      type: "allowed_tools",
+      mode: "required",
+      tools: [{ type: "custom", name: "apply_patch" }],
+    },
+    undefined,
+    { maxNameLength: 64 },
+  );
+  assert.deepEqual(
+    flattenToolChoice(allowed.toolChoice, flattened.namespaces),
+    {
+      type: "allowed_tools",
+      mode: "required",
+      tools: [{ type: "function", name: "apply_patch" }],
+    },
+  );
+});
+
+test("strict custom bridging covers non-apply_patch definitions, history, and choices", () => {
+  const flattened = flattenNamespaceTools([], { maxNameLength: 64 });
+  const bridged = bridgeCustomTools(
+    [
+      {
+        type: "custom",
+        name: "future_custom",
+        description: "A future freeform tool.",
+      },
+    ],
+    [
+      {
+        type: "custom_tool_call",
+        name: "future_custom",
+        call_id: "future-call",
+        input: "opaque",
+      },
+      {
+        type: "custom_tool_call_output",
+        call_id: "future-call",
+        output: "done",
+      },
+    ],
+    flattened.namespaces,
+    { type: "custom", name: "future_custom" },
+    undefined,
+    { maxNameLength: 64, bridgeAll: true },
+  );
+  assert.deepEqual(bridged.tools[0].parameters.required, ["input"]);
+  assert.deepEqual(bridged.toolChoice, { type: "function", name: "future_custom" });
+  assert.equal(bridged.input[0].type, "function_call");
+  assert.deepEqual(JSON.parse(bridged.input[0].arguments), { input: "opaque" });
+  assert.equal(bridged.input[1].type, "function_call_output");
 });
 
 test("custom-tool bridge reserves native namespace names and restores the aliased call", () => {
