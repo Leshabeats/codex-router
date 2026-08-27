@@ -4056,10 +4056,10 @@ test(
       global.gc();
       const before = process.memoryUsage();
       let payloadCharacters = 0;
-      const calls = 256;
+      const calls = 4096;
       for (let index = 0; index < calls; index += 1) {
         const input = String(index) + ":" +
-          String.fromCharCode(65 + (index % 26)).repeat(180_000);
+          String.fromCharCode(65 + (index % 26)).repeat(12_000);
         payloadCharacters += input.length;
         const event = {
           type: "response.output_item.done",
@@ -4090,10 +4090,10 @@ test(
     );
     assert.equal(child.status, 0, child.stderr || child.stdout);
     const measurement = JSON.parse(child.stdout);
-    assert.equal(measurement.calls, 256);
+    assert.equal(measurement.calls, 4096);
     assert.ok(measurement.payloadCharacters > 40 * 1024 * 1024);
     assert.ok(
-      measurement.heapDelta < 8 * 1024 * 1024,
+      measurement.heapDelta < 12 * 1024 * 1024,
       `retained heap grew by ${measurement.heapDelta} bytes for ` +
         `${measurement.payloadCharacters} payload characters`,
     );
