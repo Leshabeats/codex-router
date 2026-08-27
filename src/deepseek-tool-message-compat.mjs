@@ -147,6 +147,20 @@ const TERMINAL_EMPTY_MESSAGE_KEYS = new Set([
   "content",
   "phase",
 ]);
+const DIRECT_MESSAGE_KEYS = new Set(["id", "type", "status", "role", "content"]);
+const DIRECT_REASONING_ITEM_KEYS = new Set([
+  "id",
+  "type",
+  "status",
+  "role",
+  "content",
+]);
+const DIRECT_REASONING_OUTPUT_PART_KEYS = new Set([
+  "type",
+  "text",
+  "annotations",
+]);
+const DIRECT_HISTORICAL_RESPONSE_KEYS = new Set(["id", "status", "output"]);
 
 const EVENT_KEYS = new Map([
   ["response.created", RESPONSE_EVENT_KEYS],
@@ -498,6 +512,14 @@ function rewrittenBlock(parsed, event, separator) {
   return Buffer.from(`${lines.join(parsed.newline)}${separator}`);
 }
 
+function rewrittenEventBlock(parsed, event, separator) {
+  const lines = parsed.lines.map((line) => (
+    line.startsWith("event:") ? `event: ${event.type}` : line
+  ));
+  lines[parsed.dataLineIndex] = `data: ${JSON.stringify(event)}`;
+  return Buffer.from(`${lines.join(parsed.newline)}${separator}`);
+}
+
 function itemId(value) {
   return typeof value === "string" && value ? value : undefined;
 }
@@ -811,6 +833,831 @@ function terminalCandidateLifecycle(event, candidateId) {
       "response.output_item.done",
     ].includes(event?.type)
   );
+}
+
+function exactOwnKeys(value, keys) {
+  const object = plainObject(value);
+  if (!object || Object.keys(object).length !== keys.length) return false;
+  return keys.every((key) => Object.prototype.hasOwnProperty.call(object, key));
+}
+
+function exactDirectEvent(event, type, keys, { model } = {}) {
+  const expected = model === undefined ? keys : [...keys, "model"];
+  return (
+    exactOwnKeys(event, expected) &&
+    event.type === type &&
+    (model === undefined ? event.model === undefined : event.model === model)
+  );
+}
+
+function exactDirectCandidateStart(item) {
+  return (
+    exactOwnKeys(item, [...DIRECT_MESSAGE_KEYS]) &&
+    candidateStart(item)
+  );
+}
+
+function exactDirectEmptyPart(part) {
+  return (
+    exactOwnKeys(part, ["type", "text", "annotations"]) &&
+    part.type === "output_text" &&
+    part.text === "" &&
+    Array.isArray(part.annotations) &&
+    part.annotations.length === 0
+  );
+}
+
+function exactDirectCompletedBlank(item, { omittedText = false } = {}) {
+  if (
+    !exactOwnKeys(item, [...DIRECT_MESSAGE_KEYS]) ||
+    item.type !== "message" ||
+    item.status !== "completed" ||
+    item.role !== "assistant" ||
+    !itemId(item.id) ||
+    !Array.isArray(item.content) ||
+    item.content.length !== 1
+  ) return false;
+  const [part] = item.content;
+  if (omittedText) {
+    return (
+      exactOwnKeys(part, ["type", "annotations"]) &&
+      part.type === "output_text" &&
+      Array.isArray(part.annotations) &&
+      part.annotations.length === 0
+    );
+  }
+  return exactDirectEmptyPart(part);
+}
+
+function exactDirectReasoningItem(item, text) {
+  if (
+    !exactOwnKeys(item, [...DIRECT_REASONING_ITEM_KEYS]) ||
+    !itemId(item.id)?.startsWith("rs_") ||
+    item.type !== "reasoning" ||
+    item.status !== "completed" ||
+    item.role !== "assistant" ||
+    !Array.isArray(item.content) ||
+    item.content.length !== 1
+  ) return false;
+  const [part] = item.content;
+  return (
+    exactOwnKeys(part, [...DIRECT_REASONING_OUTPUT_PART_KEYS]) &&
+    part.type === "output_text" &&
+    part.text === text &&
+    Array.isArray(part.annotations) &&
+    part.annotations.length === 0
+  );
+}
+
+function directToolIdentity(item) {
+  if (!exactToolCall(item)) return undefined;
+  return item.type === "function_call"
+    ? {
+        id: item.id,
+        callId: item.call_id,
+        name: item.name,
+        arguments: item.arguments,
+      }
+    : undefined;
+}
+
+function exactDirectCompletedTool(item, tool, expectedArguments) {
+  return Boolean(
+    tool &&
+    exactToolCall(item, { completed: true }) &&
+    item.type === "function_call" &&
+    item.id === tool.id &&
+    item.call_id === tool.callId &&
+    item.name === tool.name &&
+    item.arguments === expectedArguments
+  );
+}
+
+// Direct DeepSeek has produced two provider-specific bridge defects that do
+// not share the generic translated-route grammar. The historical bridge
+// omitted response.created entirely and buried private reasoning in the empty
+// message's close. The current LiteLLM 1.96.0 bridge emits a normal prelude but
+// attaches reasoning deltas to that same empty message, later synthesizing a
+// malformed reasoning item and a second blank terminal item.
+//
+// Keep both fingerprints here, behind the direct provider id. Each grammar is
+// ordered, identity-bound, model-bound where the wire supplies provenance,
+// and bounded. Any deviation releases the held bytes unchanged and disables
+// the repair for the rest of the response.
+export class DeepseekToolMessageCompatTransform extends Transform {
+  #buffer = Buffer.alloc(0);
+  #capture;
+  #disabled = false;
+  #finished = false;
+  #prelude = "start";
+  #openingResponseId;
+  #model;
+  #maxCandidateBytes;
+  #maxCandidateMs;
+  #maxFrameBytes;
+  #jsonLimits;
+  #timer;
+
+  constructor({
+    maxCandidateBytes = MAX_CANDIDATE_BYTES,
+    maxCandidateMs = MAX_CANDIDATE_MS,
+    maxFrameBytes = MAX_FRAME_BYTES,
+    maxJsonDepth,
+    maxJsonMembers,
+    maxJsonKeyCodeUnits,
+  } = {}) {
+    super();
+    this.#maxCandidateBytes = finiteLimit(
+      maxCandidateBytes,
+      MAX_CANDIDATE_BYTES,
+      { integer: true },
+    );
+    this.#maxCandidateMs = finiteLimit(maxCandidateMs, MAX_CANDIDATE_MS);
+    this.#maxFrameBytes = finiteLimit(maxFrameBytes, MAX_FRAME_BYTES, {
+      minimum: 1,
+      integer: true,
+    });
+    this.#jsonLimits = jsonScanLimits(
+      { maxJsonDepth, maxJsonMembers, maxJsonKeyCodeUnits },
+      {
+        maxMembers: MAX_FRAME_JSON_MEMBERS,
+        maxKeyCodeUnits: MAX_FRAME_JSON_KEY_CODE_UNITS,
+      },
+    );
+  }
+
+  _transform(chunk, _encoding, callback) {
+    const piece = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    this.#buffer = this.#buffer.length
+      ? Buffer.concat([this.#buffer, piece])
+      : Buffer.from(piece);
+    if (this.#disabled || this.#finished) {
+      this.#pushBuffered();
+      callback();
+      return;
+    }
+    this.#emitCompleteBlocks();
+    if (this.#disabled || this.#finished) {
+      this.#pushBuffered();
+    } else if (this.#buffer.length > this.#maxFrameBytes) {
+      this.#failOpen();
+      this.#pushBuffered();
+    }
+    callback();
+  }
+
+  _flush(callback) {
+    this.#clearTimer();
+    if (this.#disabled || this.#finished) {
+      this.#pushBuffered();
+      callback();
+      return;
+    }
+    this.#emitCompleteBlocks(true);
+    if (this.#capture?.stage === "completed") this.#repairCapture();
+    else if (this.#capture) this.#failOpen();
+    this.#pushBuffered();
+    callback();
+  }
+
+  _destroy(error, callback) {
+    this.#clearTimer();
+    callback(error);
+  }
+
+  #emitCompleteBlocks(flush = false) {
+    while (this.#buffer.length && !this.#disabled && !this.#finished) {
+      const crlf = this.#buffer.indexOf(CRLF_FRAME_SEPARATOR);
+      const lf = this.#buffer.indexOf(LF_FRAME_SEPARATOR);
+      let index = -1;
+      let separator = Buffer.alloc(0);
+      if (crlf !== -1 && (lf === -1 || crlf <= lf)) {
+        index = crlf;
+        separator = CRLF_FRAME_SEPARATOR;
+      } else if (lf !== -1) {
+        index = lf;
+        separator = LF_FRAME_SEPARATOR;
+      }
+      if (index === -1) {
+        if (!flush) return;
+        const block = Buffer.from(this.#buffer);
+        this.#buffer = Buffer.alloc(0);
+        if (block.length > this.#maxFrameBytes) {
+          this.#oversizedFrame(block);
+          return;
+        }
+        this.#handleBlock(block, Buffer.alloc(0));
+        return;
+      }
+      const end = index + separator.length;
+      const block = Buffer.from(this.#buffer.subarray(0, index));
+      const original = Buffer.from(this.#buffer.subarray(0, end));
+      this.#buffer = Buffer.from(this.#buffer.subarray(end));
+      if (original.length > this.#maxFrameBytes) {
+        this.#oversizedFrame(original);
+        return;
+      }
+      this.#handleBlock(block, separator);
+    }
+  }
+
+  #handleBlock(block, separator) {
+    const parsedResult = parsedBlock(block, this.#jsonLimits);
+    const frame = {
+      original: Buffer.concat([block, separator]),
+      parsed: parsedResult.parsed,
+      separator: separator.toString("ascii"),
+    };
+    if (parsedResult.invalidUtf8 || parsedResult.malformed) {
+      this.#failOpen(frame);
+      return;
+    }
+    if (parsedResult.done) {
+      if (this.#capture?.stage === "completed") this.#repairCapture();
+      else if (this.#capture) this.#failOpen(frame);
+      if (!this.#disabled) {
+        this.push(frame.original);
+        this.#finished = true;
+      }
+      return;
+    }
+    const event = frame.parsed?.event;
+    if (!event || eventItemReference(event).conflict) {
+      this.#failOpen(frame);
+      return;
+    }
+    if (!this.#capture) {
+      this.#handlePrelude(frame, event);
+      return;
+    }
+    const valid = this.#capture.mode === "historical"
+      ? this.#advanceHistorical(frame, event)
+      : this.#advanceCurrent(frame, event);
+    if (!valid) this.#failOpen(frame);
+  }
+
+  #handlePrelude(frame, event) {
+    if (this.#prelude === "start" && this.#acceptCurrentPrelude(event, "created")) {
+      this.#prelude = "created";
+      this.push(frame.original);
+      return;
+    }
+    if (this.#prelude === "created" && this.#acceptCurrentPrelude(event, "in_progress")) {
+      this.#prelude = "ready";
+      this.push(frame.original);
+      return;
+    }
+    if (this.#prelude === "start" && this.#historicalCandidateStart(event)) {
+      this.#startCapture(frame, event, "historical");
+      return;
+    }
+    if (this.#prelude === "ready" && this.#currentCandidateStart(event)) {
+      this.#startCapture(frame, event, "current");
+      return;
+    }
+    this.#failOpen(frame);
+  }
+
+  #acceptCurrentPrelude(event, phase) {
+    const type = phase === "created" ? "response.created" : "response.in_progress";
+    if (
+      !exactOwnKeys(event, ["type", "response", "model"]) ||
+      event.type !== type ||
+      typeof event.model !== "string" ||
+      !event.model
+    ) return false;
+    if (phase === "created") {
+      if (
+        !successfulResponseEnvelope(event.response, "in_progress") ||
+        event.response.output.length !== 0 ||
+        event.response.model !== event.model ||
+        !event.response.id.startsWith("resp_")
+      ) return false;
+      this.#openingResponseId = event.response.id;
+      this.#model = event.model;
+      return true;
+    }
+    return (
+      event.model === this.#model &&
+      successfulResponseEnvelope(event.response, "in_progress", this.#openingResponseId) &&
+      event.response.output.length === 0 &&
+      event.response.model === this.#model
+    );
+  }
+
+  #historicalCandidateStart(event) {
+    return (
+      exactDirectEvent(
+        event,
+        "response.output_item.added",
+        ["type", "output_index", "sequence_number", "item"],
+      ) &&
+      event.output_index === 0 &&
+      event.sequence_number === 1 &&
+      exactDirectCandidateStart(event.item)
+    );
+  }
+
+  #currentCandidateStart(event) {
+    return (
+      exactDirectEvent(
+        event,
+        "response.output_item.added",
+        ["type", "output_index", "item"],
+        { model: this.#model },
+      ) &&
+      event.output_index === 0 &&
+      exactDirectCandidateStart(event.item) &&
+      ![this.#openingResponseId].includes(event.item.id)
+    );
+  }
+
+  #startCapture(frame, event, mode) {
+    this.#capture = {
+      mode,
+      stage: "candidate-added",
+      candidateId: event.item.id,
+      frames: [],
+      bytes: 0,
+      reasoningFrames: [],
+      reasoningText: "",
+      toolFrames: [],
+      tool: undefined,
+      toolArguments: "",
+      sawToolDelta: false,
+      terminalTool: undefined,
+      terminalReasoning: undefined,
+      terminalBlank: undefined,
+    };
+    this.#startTimer();
+    this.#hold(frame);
+  }
+
+  #advanceHistorical(frame, event) {
+    const capture = this.#capture;
+    if (!capture) return false;
+    const id = capture.candidateId;
+    let valid = false;
+    if (capture.stage === "candidate-added") {
+      valid = exactDirectEvent(
+        event,
+        "response.content_part.added",
+        [
+          "type",
+          "item_id",
+          "output_index",
+          "content_index",
+          "sequence_number",
+          "part",
+        ],
+      ) && event.item_id === id && event.output_index === 0 &&
+        event.content_index === 0 && event.sequence_number === 2 &&
+        exactDirectEmptyPart(event.part);
+      if (valid) capture.stage = "candidate-part";
+    } else if (capture.stage === "candidate-part") {
+      const tool = directToolIdentity(event.item);
+      valid = exactDirectEvent(
+        event,
+        "response.output_item.added",
+        ["type", "output_index", "sequence_number", "item"],
+      ) && event.output_index === 1 && event.sequence_number === 3 &&
+        tool !== undefined && tool.arguments === "" &&
+        ![id].includes(tool.id);
+      if (valid) {
+        capture.tool = tool;
+        capture.toolFrames.push(frame);
+        capture.stage = "tool-added";
+      }
+    } else if (capture.stage === "tool-added") {
+      valid = exactDirectEvent(
+        event,
+        "response.function_call_arguments.delta",
+        ["type", "item_id", "output_index", "sequence_number", "delta"],
+      ) && event.item_id === capture.tool.id && event.output_index === 1 &&
+        event.sequence_number === 4 && typeof event.delta === "string" &&
+        event.delta.length > 0;
+      if (valid) {
+        capture.toolArguments = event.delta;
+        capture.sawToolDelta = true;
+        capture.toolFrames.push(frame);
+        capture.stage = "tool-delta";
+      }
+    } else if (capture.stage === "tool-delta") {
+      valid = exactDirectEvent(
+        event,
+        "response.output_item.done",
+        ["type", "output_index", "sequence_number", "item"],
+      ) && event.output_index === 1 && event.sequence_number === 5 &&
+        exactDirectCompletedTool(event.item, capture.tool, capture.toolArguments);
+      if (valid) {
+        capture.terminalTool = event.item;
+        capture.toolFrames.push(frame);
+        capture.stage = "tool-done";
+      }
+    } else if (capture.stage === "tool-done") {
+      valid = exactDirectEvent(
+        event,
+        "response.output_text.done",
+        [
+          "type",
+          "item_id",
+          "output_index",
+          "content_index",
+          "sequence_number",
+          "text",
+        ],
+      ) && event.item_id === id && event.output_index === 0 &&
+        event.content_index === 0 && event.sequence_number === 6 && event.text === "";
+      if (valid) capture.stage = "text-done";
+    } else if (capture.stage === "text-done") {
+      valid = exactDirectEvent(
+        event,
+        "response.content_part.done",
+        [
+          "type",
+          "item_id",
+          "output_index",
+          "content_index",
+          "sequence_number",
+          "part",
+        ],
+      ) && event.item_id === id && event.output_index === 0 &&
+        event.content_index === 0 && event.sequence_number === 7 &&
+        exactOwnKeys(event.part, ["type", "reasoning"]) &&
+        event.part.type === "reasoning_text" &&
+        typeof event.part.reasoning === "string" && event.part.reasoning.length > 0;
+      if (valid) capture.stage = "part-done";
+    } else if (capture.stage === "part-done") {
+      valid = exactDirectEvent(
+        event,
+        "response.output_item.done",
+        ["type", "output_index", "sequence_number", "item"],
+      ) && event.output_index === 0 && event.sequence_number === 8 &&
+        exactDirectCompletedBlank(event.item) && event.item.id === id;
+      if (valid) capture.stage = "candidate-done";
+    } else if (capture.stage === "candidate-done") {
+      valid = this.#acceptHistoricalCompleted(event);
+      if (valid) {
+        this.#hold(frame);
+        if (this.#capture) this.#capture.stage = "completed";
+        return true;
+      }
+    }
+    if (!valid) return false;
+    this.#hold(frame);
+    return true;
+  }
+
+  #acceptHistoricalCompleted(event) {
+    const capture = this.#capture;
+    if (
+      !capture ||
+      !exactDirectEvent(
+        event,
+        "response.completed",
+        ["type", "sequence_number", "response"],
+      ) ||
+      event.sequence_number !== 9 ||
+      !exactOwnKeys(event.response, [...DIRECT_HISTORICAL_RESPONSE_KEYS]) ||
+      !itemId(event.response.id)?.startsWith("resp_") ||
+      event.response.status !== "completed" ||
+      !Array.isArray(event.response.output) ||
+      event.response.output.length !== 2
+    ) return false;
+    const [blank, tool] = event.response.output;
+    if (
+      !exactDirectCompletedBlank(blank) ||
+      blank.id !== capture.candidateId ||
+      !exactDirectCompletedTool(tool, capture.tool, capture.toolArguments)
+    ) return false;
+    const ids = new Set([
+      event.response.id,
+      capture.candidateId,
+      capture.tool.id,
+    ]);
+    if (ids.size !== 3) return false;
+    capture.terminalTool = tool;
+    return true;
+  }
+
+  #advanceCurrent(frame, event) {
+    const capture = this.#capture;
+    if (!capture) return false;
+    const id = capture.candidateId;
+    let valid = false;
+    if (capture.stage === "candidate-added") {
+      valid = exactDirectEvent(
+        event,
+        "response.content_part.added",
+        ["type", "item_id", "output_index", "content_index", "part"],
+        { model: this.#model },
+      ) && event.item_id === id && event.output_index === 0 &&
+        event.content_index === 0 && exactDirectEmptyPart(event.part);
+      if (valid) capture.stage = "reasoning";
+    } else if (capture.stage === "reasoning") {
+      if (exactDirectEvent(
+        event,
+        "response.reasoning_summary_text.delta",
+        ["type", "item_id", "output_index", "delta"],
+        { model: this.#model },
+      )) {
+        valid = event.item_id === id && event.output_index === 0 &&
+          typeof event.delta === "string" && event.delta.length > 0;
+        if (valid) {
+          capture.reasoningText += event.delta;
+          capture.reasoningFrames.push(frame);
+        }
+      } else {
+        const tool = directToolIdentity(event.item);
+        valid = capture.reasoningFrames.length > 0 &&
+          exactDirectEvent(
+            event,
+            "response.output_item.added",
+            ["type", "output_index", "item"],
+            { model: this.#model },
+          ) && event.output_index === 1 && tool !== undefined &&
+          tool.arguments === "" &&
+          ![this.#openingResponseId, id].includes(tool.id);
+        if (valid) {
+          capture.tool = tool;
+          capture.toolFrames.push(frame);
+          capture.stage = "tool-added";
+        }
+      }
+    } else if (capture.stage === "tool-added") {
+      if (exactDirectEvent(
+        event,
+        "response.function_call_arguments.delta",
+        ["type", "item_id", "output_index", "delta"],
+        { model: this.#model },
+      )) {
+        valid = event.item_id === capture.tool.id && event.output_index === 1 &&
+          typeof event.delta === "string" && event.delta.length > 0;
+        if (valid) {
+          capture.toolArguments += event.delta;
+          capture.sawToolDelta = true;
+          capture.toolFrames.push(frame);
+        }
+      } else {
+        valid = capture.sawToolDelta && exactDirectEvent(
+          event,
+          "response.function_call_arguments.done",
+          ["type", "item_id", "output_index", "arguments"],
+          { model: this.#model },
+        ) && event.item_id === capture.tool.id && event.output_index === 1 &&
+          event.arguments === capture.toolArguments;
+        if (valid) {
+          capture.toolFrames.push(frame);
+          capture.stage = "arguments-done";
+        }
+      }
+    } else if (capture.stage === "arguments-done") {
+      valid = exactDirectEvent(
+        event,
+        "response.output_item.done",
+        ["type", "output_index", "sequence_number", "item"],
+        { model: this.#model },
+      ) && event.output_index === 1 && event.sequence_number === 16 &&
+        exactDirectCompletedTool(event.item, capture.tool, capture.toolArguments);
+      if (valid) {
+        capture.terminalTool = event.item;
+        capture.toolFrames.push(frame);
+        capture.stage = "tool-done";
+      }
+    } else if (capture.stage === "tool-done") {
+      valid = exactDirectEvent(
+        event,
+        "response.output_text.done",
+        ["type", "item_id", "output_index", "content_index", "text"],
+        { model: this.#model },
+      ) && event.item_id === id && event.output_index === 0 &&
+        event.content_index === 0 && event.text === "";
+      if (valid) capture.stage = "text-done";
+    } else if (capture.stage === "text-done") {
+      valid = exactDirectEvent(
+        event,
+        "response.content_part.done",
+        ["type", "item_id", "output_index", "content_index", "part"],
+        { model: this.#model },
+      ) && event.item_id === id && event.output_index === 0 &&
+        event.content_index === 0 && exactOwnKeys(event.part, ["type", "reasoning"]) &&
+        event.part.type === "reasoning_text" &&
+        event.part.reasoning === capture.reasoningText;
+      if (valid) capture.stage = "part-done";
+    } else if (capture.stage === "part-done") {
+      valid = exactDirectEvent(
+        event,
+        "response.output_item.done",
+        ["type", "output_index", "sequence_number", "item"],
+        { model: this.#model },
+      ) && event.output_index === 0 && event.sequence_number === 1 &&
+        exactDirectCompletedBlank(event.item) && event.item.id === id;
+      if (valid) capture.stage = "candidate-done";
+    } else if (capture.stage === "candidate-done") {
+      valid = this.#acceptCurrentCompleted(event);
+      if (valid) {
+        this.#hold(frame);
+        if (this.#capture) this.#capture.stage = "completed";
+        return true;
+      }
+    }
+    if (!valid) return false;
+    this.#hold(frame);
+    return true;
+  }
+
+  #acceptCurrentCompleted(event) {
+    const capture = this.#capture;
+    if (
+      !capture ||
+      !exactDirectEvent(
+        event,
+        "response.completed",
+        ["type", "response"],
+        { model: this.#model },
+      ) ||
+      !successfulResponseEnvelope(event.response, "completed") ||
+      event.response.id === this.#openingResponseId ||
+      !event.response.id.startsWith("resp_") ||
+      event.response.model !== this.#model ||
+      event.response.output.length !== 3
+    ) return false;
+    const [reasoning, blank, tool] = event.response.output;
+    if (
+      !exactDirectReasoningItem(reasoning, capture.reasoningText) ||
+      !exactDirectCompletedBlank(blank, { omittedText: true }) ||
+      blank.id === capture.candidateId ||
+      !exactDirectCompletedTool(tool, capture.tool, capture.toolArguments)
+    ) return false;
+    const ids = new Set([
+      this.#openingResponseId,
+      event.response.id,
+      capture.candidateId,
+      reasoning.id,
+      blank.id,
+      capture.tool.id,
+    ]);
+    if (ids.size !== 6) return false;
+    capture.terminalReasoning = reasoning;
+    capture.terminalBlank = blank;
+    capture.terminalTool = tool;
+    return true;
+  }
+
+  #repairCapture() {
+    if (this.#capture?.mode === "historical") this.#repairHistorical();
+    else if (this.#capture?.mode === "current") this.#repairCurrent();
+  }
+
+  #repairHistorical() {
+    const capture = this.#capture;
+    if (!capture) return;
+    this.#capture = undefined;
+    this.#clearTimer();
+    for (const frame of capture.frames) {
+      const event = frame.parsed.event;
+      const attached = eventItemId(event);
+      if (attached === capture.candidateId) continue;
+      if (event.type === "response.completed") {
+        this.push(rewrittenBlock(frame.parsed, {
+          ...event,
+          response: { ...event.response, output: [capture.terminalTool] },
+        }, frame.separator));
+        continue;
+      }
+      if (attached === capture.tool.id && event.output_index === 1) {
+        this.push(rewrittenBlock(
+          frame.parsed,
+          { ...event, output_index: 0 },
+          frame.separator,
+        ));
+      }
+    }
+    this.#finished = true;
+  }
+
+  #repairCurrent() {
+    const capture = this.#capture;
+    if (!capture) return;
+    this.#capture = undefined;
+    this.#clearTimer();
+    const reasoning = {
+      id: capture.terminalReasoning.id,
+      type: "reasoning",
+      status: "completed",
+      summary: [{ type: "summary_text", text: capture.reasoningText }],
+    };
+    const inProgressReasoning = {
+      id: reasoning.id,
+      type: "reasoning",
+      status: "in_progress",
+      summary: [],
+    };
+    const template = capture.frames[0];
+    const emit = (event) => this.push(
+      rewrittenEventBlock(template.parsed, event, template.separator),
+    );
+    emit({
+      type: "response.output_item.added",
+      output_index: 0,
+      item: inProgressReasoning,
+      model: this.#model,
+    });
+    emit({
+      type: "response.reasoning_summary_part.added",
+      item_id: reasoning.id,
+      output_index: 0,
+      summary_index: 0,
+      part: { type: "summary_text", text: "" },
+      model: this.#model,
+    });
+    for (const frame of capture.reasoningFrames) {
+      this.push(rewrittenBlock(frame.parsed, {
+        ...frame.parsed.event,
+        item_id: reasoning.id,
+        summary_index: 0,
+      }, frame.separator));
+    }
+    emit({
+      type: "response.reasoning_summary_text.done",
+      item_id: reasoning.id,
+      output_index: 0,
+      summary_index: 0,
+      text: capture.reasoningText,
+      model: this.#model,
+    });
+    emit({
+      type: "response.reasoning_summary_part.done",
+      item_id: reasoning.id,
+      output_index: 0,
+      summary_index: 0,
+      part: { type: "summary_text", text: capture.reasoningText },
+      model: this.#model,
+    });
+    emit({
+      type: "response.output_item.done",
+      output_index: 0,
+      item: reasoning,
+      model: this.#model,
+    });
+    for (const frame of capture.toolFrames) this.push(frame.original);
+    const completed = capture.frames.at(-1);
+    this.push(rewrittenBlock(completed.parsed, {
+      ...completed.parsed.event,
+      response: {
+        ...completed.parsed.event.response,
+        output: [reasoning, capture.terminalTool],
+      },
+    }, completed.separator));
+    this.#finished = true;
+  }
+
+  #hold(frame) {
+    if (!this.#capture) return;
+    if (this.#capture.bytes + frame.original.length > this.#maxCandidateBytes) {
+      this.#failOpen(frame);
+      return;
+    }
+    this.#capture.frames.push(frame);
+    this.#capture.bytes += frame.original.length;
+  }
+
+  #failOpen(extraFrame) {
+    const capture = this.#capture;
+    this.#capture = undefined;
+    this.#clearTimer();
+    if (capture) {
+      for (const frame of capture.frames) this.push(frame.original);
+    }
+    if (extraFrame) this.push(extraFrame.original);
+    this.#disabled = true;
+  }
+
+  #oversizedFrame(original) {
+    const frame = { original: Buffer.isBuffer(original) ? original : Buffer.from(original) };
+    this.#failOpen(frame);
+  }
+
+  #pushBuffered() {
+    if (!this.#buffer.length) return;
+    this.push(this.#buffer);
+    this.#buffer = Buffer.alloc(0);
+  }
+
+  #startTimer() {
+    if (this.#timer || !this.#capture) return;
+    this.#timer = setTimeout(() => {
+      this.#failOpen();
+      this.#pushBuffered();
+    }, this.#maxCandidateMs);
+    this.#timer.unref?.();
+  }
+
+  #clearTimer() {
+    if (!this.#timer) return;
+    clearTimeout(this.#timer);
+    this.#timer = undefined;
+  }
 }
 
 // LiteLLM's Chat-Completions/Anthropic -> Responses bridge can announce an
@@ -1839,6 +2686,7 @@ export function translatedToolMessageCompatTransform(provider, contentType = "")
   if (!translatedProtocol(provider)) return undefined;
   const mediaType = String(contentType).split(";", 1)[0].trim().toLowerCase();
   if (mediaType === "text/event-stream") {
+    if (provider.id === "deepseek") return new DeepseekToolMessageCompatTransform();
     return new TranslatedToolMessageCompatTransform({
       // LiteLLM's Anthropic bridge can omit the empty message's opening events
       // and reveal its index-zero slot only after the first tool has closed.
@@ -1858,11 +2706,6 @@ export function translatedToolMessageCompatTransform(provider, contentType = "")
 export function deepseekToolMessageCompatTransform(providerId, contentType = "") {
   if (String(providerId) !== "deepseek") return undefined;
   return String(contentType).toLowerCase().includes("text/event-stream")
-    ? new TranslatedToolMessageCompatTransform()
+    ? new DeepseekToolMessageCompatTransform()
     : undefined;
 }
-
-// Kept as an internal compatibility alias for code that imported the original
-// provider-specific class directly before the transform became protocol-scoped.
-export const DeepseekToolMessageCompatTransform =
-  TranslatedToolMessageCompatTransform;

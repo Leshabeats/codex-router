@@ -31,6 +31,11 @@ async function transformed(input, options = {}, chunkSize = 0) {
   return transformedBy(stream, input, chunkSize);
 }
 
+async function transformedDirect(input, options = {}, chunkSize = 0) {
+  const stream = new DeepseekToolMessageCompatTransform(options);
+  return transformedBy(stream, input, chunkSize);
+}
+
 async function transformedBy(stream, input, chunkSize = 0) {
   let output = "";
   stream.setEncoding("utf8");
@@ -344,6 +349,462 @@ function pinnedAnthropicTerminalOnlyStream(mutate) {
   if (mutate) mutate(wireEvents);
   return `${wireEvents.map((event) => block(event)).join("")}data: [DONE]\n\n`;
 }
+
+function historicalDirectDeepseekEvents() {
+  const blank = { ...blankMessage, id: "msg_direct_historical" };
+  const tool = {
+    ...functionCall,
+    id: "call_direct_historical",
+    call_id: "call_direct_historical",
+  };
+  return [
+    {
+      type: "response.output_item.added",
+      output_index: 0,
+      sequence_number: 1,
+      item: { ...blank, status: "in_progress", content: [] },
+    },
+    {
+      type: "response.content_part.added",
+      item_id: blank.id,
+      output_index: 0,
+      content_index: 0,
+      sequence_number: 2,
+      part: { type: "output_text", text: "", annotations: [] },
+    },
+    {
+      type: "response.output_item.added",
+      output_index: 1,
+      sequence_number: 3,
+      item: { ...tool, status: "in_progress", arguments: "" },
+    },
+    {
+      type: "response.function_call_arguments.delta",
+      item_id: tool.id,
+      output_index: 1,
+      sequence_number: 4,
+      delta: "{}",
+    },
+    {
+      type: "response.output_item.done",
+      output_index: 1,
+      sequence_number: 5,
+      item: tool,
+    },
+    {
+      type: "response.output_text.done",
+      item_id: blank.id,
+      output_index: 0,
+      content_index: 0,
+      sequence_number: 6,
+      text: "",
+    },
+    {
+      type: "response.content_part.done",
+      item_id: blank.id,
+      output_index: 0,
+      content_index: 0,
+      sequence_number: 7,
+      part: { type: "reasoning_text", reasoning: "private reasoning" },
+    },
+    {
+      type: "response.output_item.done",
+      output_index: 0,
+      sequence_number: 8,
+      item: blank,
+    },
+    {
+      type: "response.completed",
+      sequence_number: 9,
+      response: {
+        id: "resp_direct_historical",
+        status: "completed",
+        output: [blank, tool],
+      },
+    },
+  ];
+}
+
+function historicalDirectDeepseekStream(mutate) {
+  const wireEvents = historicalDirectDeepseekEvents();
+  if (mutate) mutate(wireEvents);
+  return `${wireEvents.map((event) => block(event)).join("")}data: [DONE]\n\n`;
+}
+
+const currentDirectReasoning =
+  "The user wants me to call codex_router_probe exactly once with value \"ok\", " +
+  "and not answer normally. Let me do that.";
+
+function currentDirectDeepseekEvents() {
+  const model = "deepseek-v4-flash";
+  const responseId = "resp_direct_live_open";
+  const candidate = { ...blankMessage, id: "msg_direct_live" };
+  const tool = {
+    ...functionCall,
+    id: "call_direct_live",
+    call_id: "call_direct_live",
+    name: "codex_router_probe",
+    arguments: "{\"value\":\"ok\"}",
+  };
+  const inProgress = {
+    id: responseId,
+    model,
+    object: "response",
+    status: "in_progress",
+    error: null,
+    output: [],
+  };
+  const events = [
+    { type: "response.created", response: { ...inProgress }, model },
+    { type: "response.in_progress", response: { ...inProgress }, model },
+    {
+      type: "response.output_item.added",
+      output_index: 0,
+      item: { ...candidate, status: "in_progress", content: [] },
+      model,
+    },
+    {
+      type: "response.content_part.added",
+      item_id: candidate.id,
+      output_index: 0,
+      content_index: 0,
+      part: { type: "output_text", text: "", annotations: [] },
+      model,
+    },
+  ];
+  for (const delta of [
+    "The user wants me to call codex_router_probe exactly once ",
+    "with value \"ok\", and not answer normally. ",
+    "Let me do that.",
+  ]) {
+    events.push({
+      type: "response.reasoning_summary_text.delta",
+      item_id: candidate.id,
+      output_index: 0,
+      delta,
+      model,
+    });
+  }
+  events.push(
+    {
+      type: "response.output_item.added",
+      output_index: 1,
+      item: { ...tool, status: "in_progress", arguments: "" },
+      model,
+    },
+    {
+      type: "response.function_call_arguments.delta",
+      item_id: tool.id,
+      output_index: 1,
+      delta: "{\"value\":",
+      model,
+    },
+    {
+      type: "response.function_call_arguments.delta",
+      item_id: tool.id,
+      output_index: 1,
+      delta: "\"ok\"}",
+      model,
+    },
+    {
+      type: "response.function_call_arguments.done",
+      item_id: tool.id,
+      output_index: 1,
+      arguments: tool.arguments,
+      model,
+    },
+    {
+      type: "response.output_item.done",
+      output_index: 1,
+      sequence_number: 16,
+      item: tool,
+      model,
+    },
+    {
+      type: "response.output_text.done",
+      item_id: candidate.id,
+      output_index: 0,
+      content_index: 0,
+      text: "",
+      model,
+    },
+    {
+      type: "response.content_part.done",
+      item_id: candidate.id,
+      output_index: 0,
+      content_index: 0,
+      part: { type: "reasoning_text", reasoning: currentDirectReasoning },
+      model,
+    },
+    {
+      type: "response.output_item.done",
+      output_index: 0,
+      sequence_number: 1,
+      item: candidate,
+      model,
+    },
+    {
+      type: "response.completed",
+      response: {
+        id: "resp_direct_live_closed",
+        model,
+        object: "response",
+        status: "completed",
+        error: null,
+        output: [
+          {
+            id: "rs_-8853496868378332836",
+            type: "reasoning",
+            status: "completed",
+            role: "assistant",
+            content: [{
+              type: "output_text",
+              text: currentDirectReasoning,
+              annotations: [],
+            }],
+          },
+          {
+            id: "04847f40-ed33-4239-80d2-d392fe38fcc3",
+            type: "message",
+            status: "completed",
+            role: "assistant",
+            content: [{ type: "output_text", annotations: [] }],
+          },
+          tool,
+        ],
+        usage: { input_tokens: 17, output_tokens: 8, total_tokens: 25 },
+      },
+      model,
+    },
+  );
+  return events;
+}
+
+function currentDirectDeepseekStream(mutate) {
+  const wireEvents = currentDirectDeepseekEvents();
+  if (mutate) mutate(wireEvents);
+  return `${wireEvents.map((event) => block(event)).join("")}data: [DONE]\n\n`;
+}
+
+test("restores the merged direct-DeepSeek historical no-prelude regression", async () => {
+  const source = historicalDirectDeepseekStream();
+  const output = await transformedDirect(source, {}, 3);
+  const seen = events(output);
+  const tool = historicalDirectDeepseekEvents()[2].item;
+
+  assert.equal(output.includes("msg_direct_historical"), false);
+  assert.equal(output.includes("private reasoning"), false);
+  assert.deepEqual(
+    seen.filter((event) => eventItem(event) === tool.id)
+      .map((event) => [event.type, event.output_index, event.sequence_number]),
+    [
+      ["response.output_item.added", 0, 3],
+      ["response.function_call_arguments.delta", 0, 4],
+      ["response.output_item.done", 0, 5],
+    ],
+  );
+  assert.deepEqual(
+    seen.find((event) => event.type === "response.completed").response.output,
+    [{ ...tool, status: "completed", arguments: "{}" }],
+  );
+});
+
+test("normalizes current direct-DeepSeek reasoning and removes only the blank slot", async () => {
+  const sourceEvents = currentDirectDeepseekEvents();
+  const source = currentDirectDeepseekStream();
+  const output = await transformedDirect(source, {}, 2);
+  const seen = events(output);
+  const terminal = sourceEvents.at(-1).response;
+  const incomingReasoning = terminal.output[0];
+  const incomingBlank = terminal.output[1];
+  const tool = terminal.output[2];
+  const normalizedReasoning = {
+    id: incomingReasoning.id,
+    type: "reasoning",
+    status: "completed",
+    summary: [{ type: "summary_text", text: currentDirectReasoning }],
+  };
+
+  assert.equal(output.includes("msg_direct_live"), false);
+  assert.equal(output.includes(incomingBlank.id), false);
+  const lifecycle = seen.filter((event) => (
+    eventItem(event) === normalizedReasoning.id || eventItem(event) === tool.id
+  ));
+  assert.deepEqual(
+    lifecycle.map((event) => [event.type, eventItem(event), event.output_index]),
+    [
+      ["response.output_item.added", normalizedReasoning.id, 0],
+      ["response.reasoning_summary_part.added", normalizedReasoning.id, 0],
+      ["response.reasoning_summary_text.delta", normalizedReasoning.id, 0],
+      ["response.reasoning_summary_text.delta", normalizedReasoning.id, 0],
+      ["response.reasoning_summary_text.delta", normalizedReasoning.id, 0],
+      ["response.reasoning_summary_text.done", normalizedReasoning.id, 0],
+      ["response.reasoning_summary_part.done", normalizedReasoning.id, 0],
+      ["response.output_item.done", normalizedReasoning.id, 0],
+      ["response.output_item.added", tool.id, 1],
+      ["response.function_call_arguments.delta", tool.id, 1],
+      ["response.function_call_arguments.delta", tool.id, 1],
+      ["response.function_call_arguments.done", tool.id, 1],
+      ["response.output_item.done", tool.id, 1],
+    ],
+  );
+  assert.equal(
+    lifecycle
+      .filter((event) => event.type === "response.reasoning_summary_text.delta")
+      .map((event) => event.delta)
+      .join(""),
+    currentDirectReasoning,
+  );
+  assert.deepEqual(
+    seen.filter((event) => event.sequence_number !== undefined)
+      .map((event) => event.sequence_number),
+    [16],
+  );
+  const completed = seen.find((event) => event.type === "response.completed").response;
+  assert.deepEqual(completed.output, [normalizedReasoning, tool]);
+  assert.deepEqual(completed.usage, terminal.usage);
+});
+
+test("current direct-DeepSeek grammar is provider-scoped", async () => {
+  const source = currentDirectDeepseekStream();
+  const direct = translatedToolMessageCompatTransform(
+    { id: "deepseek", protocol: "openai" },
+    "text/event-stream",
+  );
+  const translated = translatedToolMessageCompatTransform(
+    { id: "opencode-go", protocol: "openai" },
+    "text/event-stream",
+  );
+  const repaired = await transformedBy(direct, source, 1);
+  assert.notEqual(repaired, source);
+  assert.equal(repaired.includes("msg_direct_live"), false);
+  assert.equal(await transformedBy(translated, source, 1), source);
+});
+
+test("current direct-DeepSeek repair fails open on adjacent reasoning and identity shapes", async (t) => {
+  const mutations = new Map([
+    ["mismatched reasoning close", (wireEvents) => {
+      wireEvents.find((event) => event.type === "response.content_part.done")
+        .part.reasoning += " changed";
+    }],
+    ["mismatched terminal reasoning", (wireEvents) => {
+      wireEvents.at(-1).response.output[0].content[0].text = "different";
+    }],
+    ["missing terminal reasoning", (wireEvents) => {
+      wireEvents.at(-1).response.output.shift();
+    }],
+    ["extra terminal reasoning", (wireEvents) => {
+      wireEvents.at(-1).response.output.unshift({
+        ...wireEvents.at(-1).response.output[0],
+        id: "rs_extra",
+      });
+    }],
+    ["reasoning id collision", (wireEvents) => {
+      wireEvents.at(-1).response.output[0].id = "call_direct_live";
+    }],
+    ["terminal blank id collision", (wireEvents) => {
+      wireEvents.at(-1).response.output[1].id = "msg_direct_live";
+    }],
+    ["wrong lifecycle ordering", (wireEvents) => {
+      const done = wireEvents.findIndex(
+        (event) => event.type === "response.function_call_arguments.done",
+      );
+      [wireEvents[done], wireEvents[done + 1]] = [wireEvents[done + 1], wireEvents[done]];
+    }],
+    ["visible streamed text", (wireEvents) => {
+      wireEvents.find((event) => event.type === "response.output_text.done").text = "visible";
+    }],
+    ["visible terminal blank", (wireEvents) => {
+      wireEvents.at(-1).response.output[1].content[0].text = "visible";
+    }],
+    ["changed model provenance", (wireEvents) => {
+      wireEvents.find((event) => event.type === "response.output_text.done").model = "other";
+    }],
+    ["changed response model provenance", (wireEvents) => {
+      wireEvents.at(-1).response.model = "other";
+    }],
+    ["unexpected lifecycle field", (wireEvents) => {
+      wireEvents.find((event) => event.type === "response.output_text.done")
+        .unexpected = true;
+    }],
+    ["missing in-progress envelope", (wireEvents) => {
+      wireEvents.splice(1, 1);
+    }],
+    ["wrong terminal blank sequence", (wireEvents) => {
+      wireEvents.find((event) => (
+        event.type === "response.output_item.done" && event.output_index === 0
+      )).sequence_number = 2;
+    }],
+    ["wrong tool terminal sequence", (wireEvents) => {
+      wireEvents.find((event) => (
+        event.type === "response.output_item.done" && event.output_index === 1
+      )).sequence_number = 15;
+    }],
+    ["mismatched tool arguments", (wireEvents) => {
+      wireEvents.find((event) => event.type === "response.function_call_arguments.done")
+        .arguments = "{}";
+    }],
+    ["mismatched terminal tool identity", (wireEvents) => {
+      wireEvents.at(-1).response.output[2] = {
+        ...wireEvents.at(-1).response.output[2],
+        call_id: "other_call",
+      };
+    }],
+    ["unchanged terminal response id", (wireEvents) => {
+      wireEvents.at(-1).response.id = "resp_direct_live_open";
+    }],
+    ["extra event after terminal envelope", (wireEvents) => {
+      wireEvents.push({
+        type: "response.output_item.added",
+        output_index: 2,
+        item: {
+          id: "msg_after_terminal",
+          type: "message",
+          status: "in_progress",
+          role: "assistant",
+          content: [],
+        },
+        model: "deepseek-v4-flash",
+      });
+    }],
+  ]);
+  for (const [name, mutate] of mutations) {
+    await t.test(name, async () => {
+      const input = currentDirectDeepseekStream(mutate);
+      assert.equal(await transformedDirect(input, {}, 1), input);
+    });
+  }
+});
+
+test("historical direct-DeepSeek grammar remains exact and bounded", async () => {
+  for (const mutate of [
+    (wireEvents) => {
+      wireEvents.find((event) => event.type === "response.content_part.done")
+        .part.reasoning = "";
+    },
+    (wireEvents) => {
+      wireEvents.find((event) => event.type === "response.output_text.done").text = "visible";
+    },
+    (wireEvents) => {
+      wireEvents.at(-1).response.output[0].id = "changed_blank";
+    },
+    (wireEvents) => {
+      wireEvents.find((event) => event.type === "response.output_item.done")
+        .sequence_number = 6;
+    },
+  ]) {
+    const input = historicalDirectDeepseekStream(mutate);
+    assert.equal(await transformedDirect(input, {}, 1), input);
+  }
+  const source = historicalDirectDeepseekStream();
+  assert.equal(
+    await transformedDirect(source, {
+      maxCandidateBytes: 64,
+      maxCandidateMs: 60_000,
+    }),
+    source,
+  );
+});
 
 test("repairs LiteLLM 1.96.0's pinned terminal sequence reset", async () => {
   const source = pinnedLiteLlmPhantomToolStream();
@@ -1007,7 +1468,7 @@ test("timer expiry releases pending bytes and subsequent chunks immediately", as
     output_index: 1,
     item: { ...functionCall, status: "in_progress", arguments: "" },
   });
-  const stream = new DeepseekToolMessageCompatTransform({ maxCandidateMs: 5 });
+  const stream = new TranslatedToolMessageCompatTransform({ maxCandidateMs: 5 });
   let output = "";
   stream.setEncoding("utf8");
   stream.on("data", (chunk) => { output += chunk; });
@@ -1301,7 +1762,7 @@ test("timer expiry also releases an incomplete buffered frame", async () => {
     item: { ...blankMessage, status: "in_progress", content: [] },
   });
   const partial = "event: response.output_item.added\ndata: {\"type\":";
-  const stream = new DeepseekToolMessageCompatTransform({ maxCandidateMs: 5 });
+  const stream = new TranslatedToolMessageCompatTransform({ maxCandidateMs: 5 });
   let output = "";
   stream.setEncoding("utf8");
   stream.on("data", (chunk) => { output += chunk; });
@@ -1319,7 +1780,7 @@ test("destroying a pending stream clears its hold without later output", async (
     output_index: 0,
     item: { ...blankMessage, status: "in_progress", content: [] },
   });
-  const stream = new DeepseekToolMessageCompatTransform({ maxCandidateMs: 5 });
+  const stream = new TranslatedToolMessageCompatTransform({ maxCandidateMs: 5 });
   let output = "";
   stream.on("data", (chunk) => { output += chunk.toString("utf8"); });
   stream.write(created + start);
@@ -1932,12 +2393,13 @@ test("a failed attempt cannot poison a fresh retry transform", async () => {
   let retryOutput = "";
   retry.setEncoding("utf8");
   retry.on("data", (chunk) => { retryOutput += chunk; });
-  retry.end(phantomToolStream());
+  retry.end(historicalDirectDeepseekStream());
   await once(retry, "end");
-  assert.equal(retryOutput.includes(blankMessage.id), false);
+  const historicalTerminal = historicalDirectDeepseekEvents().at(-1).response;
+  assert.equal(retryOutput.includes(historicalTerminal.output[0].id), false);
   assert.deepEqual(
     events(retryOutput).find((event) => event.type === "response.completed").response.output,
-    [functionCall],
+    [historicalTerminal.output[1]],
   );
 });
 
@@ -2315,9 +2777,8 @@ test("factory is translated-protocol scoped and returns fresh retry transforms",
   const provider = { id: "deepseek" };
   const first = translatedToolMessageCompatTransform(provider, "text/event-stream");
   const retry = translatedToolMessageCompatTransform(provider, "text/event-stream");
-  assert.ok(first instanceof TranslatedToolMessageCompatTransform);
   assert.ok(first instanceof DeepseekToolMessageCompatTransform);
-  assert.ok(retry instanceof TranslatedToolMessageCompatTransform);
+  assert.ok(retry instanceof DeepseekToolMessageCompatTransform);
   assert.notEqual(first, retry);
   for (const translated of [
     { id: "opencode-go" },
@@ -2344,7 +2805,7 @@ test("factory is translated-protocol scoped and returns fresh retry transforms",
   assert.equal(translatedToolMessageCompatTransform(provider, "text/plain"), undefined);
   assert.ok(
     deepseekToolMessageCompatTransform("deepseek", "TEXT/EVENT-STREAM; charset=utf-8")
-      instanceof TranslatedToolMessageCompatTransform,
+      instanceof DeepseekToolMessageCompatTransform,
   );
   assert.equal(
     deepseekToolMessageCompatTransform("opencode-go", "text/event-stream"),

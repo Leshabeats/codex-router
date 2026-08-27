@@ -8,7 +8,11 @@
   completed tool lifecycle, then compacts the affected output indexes. Real
   text, reasoning, refusals, malformed or ambiguous streams, and native
   Responses routes remain untouched. Non-streaming bodies receive equivalent
-  bounded, fail-open handling under an exact terminal-output proof.
+  bounded, fail-open handling under an exact terminal-output proof. Direct
+  DeepSeek keeps its narrower provider-specific proof: the historical
+  no-prelude bridge drops its corroborated private-reasoning blank, while the
+  current bridge reconstructs candidate-attached reasoning under the terminal
+  reasoning ID and removes only the separately corroborated blank output.
 
 - **Live model certification now proves the requested route.** Compatibility
   and smoke probes disable router failover, so a healthy alternate can no

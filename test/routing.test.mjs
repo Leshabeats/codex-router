@@ -7279,21 +7279,41 @@ test("a plain follow-up after a thinking turn replays its reasoning", async () =
   }
 });
 
-test("router removes DeepSeek's confirmed blank message before a tool call", async () => {
+test("router normalizes direct DeepSeek's live reasoning bridge and removes its blank", async () => {
+  const model = "deepseek-v4-flash";
+  const reasoningText = "Inspect the request, then call the tool exactly once.";
   const blankMessage = {
-    id: "msg_blank",
+    id: "msg_direct_live",
     type: "message",
     status: "completed",
     role: "assistant",
     content: [{ type: "output_text", text: "", annotations: [] }],
   };
   const functionCall = {
-    id: "call_list",
+    id: "call_direct_live",
     type: "function_call",
-    call_id: "call_list",
+    call_id: "call_direct_live",
     name: "exec_command",
     arguments: "{}",
     status: "completed",
+  };
+  const terminalReasoning = {
+    id: "rs_-8853496868378332836",
+    type: "reasoning",
+    status: "completed",
+    role: "assistant",
+    content: [{ type: "output_text", text: reasoningText, annotations: [] }],
+  };
+  const terminalBlank = {
+    ...blankMessage,
+    id: "04847f40-ed33-4239-80d2-d392fe38fcc3",
+    content: [{ type: "output_text", annotations: [] }],
+  };
+  const normalizedReasoning = {
+    id: terminalReasoning.id,
+    type: "reasoning",
+    status: "completed",
+    summary: [{ type: "summary_text", text: reasoningText }],
   };
   const gateway = await mockServer(async (request, response) => {
     await bodyJson(request);
@@ -7302,17 +7322,32 @@ test("router removes DeepSeek's confirmed blank message before a tool call", asy
       {
         type: "response.created",
         response: {
-          id: "resp_tool_only",
+          id: "resp_direct_live_open",
+          model,
           object: "response",
           status: "in_progress",
           error: null,
           output: [],
         },
+        model,
+      },
+      {
+        type: "response.in_progress",
+        response: {
+          id: "resp_direct_live_open",
+          model,
+          object: "response",
+          status: "in_progress",
+          error: null,
+          output: [],
+        },
+        model,
       },
       {
         type: "response.output_item.added",
         output_index: 0,
         item: { ...blankMessage, status: "in_progress", content: [] },
+        model,
       },
       {
         type: "response.content_part.added",
@@ -7320,44 +7355,84 @@ test("router removes DeepSeek's confirmed blank message before a tool call", asy
         output_index: 0,
         content_index: 0,
         part: { type: "output_text", text: "", annotations: [] },
+        model,
+      },
+      {
+        type: "response.reasoning_summary_text.delta",
+        item_id: blankMessage.id,
+        output_index: 0,
+        delta: "Inspect the request, then ",
+        model,
+      },
+      {
+        type: "response.reasoning_summary_text.delta",
+        item_id: blankMessage.id,
+        output_index: 0,
+        delta: "call the tool exactly once.",
+        model,
       },
       {
         type: "response.output_item.added",
         output_index: 1,
         item: { ...functionCall, arguments: "", status: "in_progress" },
+        model,
+      },
+      {
+        type: "response.function_call_arguments.delta",
+        item_id: functionCall.id,
+        output_index: 1,
+        delta: "{}",
+        model,
       },
       {
         type: "response.function_call_arguments.done",
         item_id: functionCall.id,
         output_index: 1,
         arguments: "{}",
+        model,
       },
-      { type: "response.output_item.done", output_index: 1, item: functionCall },
+      {
+        type: "response.output_item.done",
+        output_index: 1,
+        sequence_number: 16,
+        item: functionCall,
+        model,
+      },
       {
         type: "response.output_text.done",
         item_id: blankMessage.id,
         output_index: 0,
         content_index: 0,
         text: "",
+        model,
       },
       {
         type: "response.content_part.done",
         item_id: blankMessage.id,
         output_index: 0,
         content_index: 0,
-        part: { type: "output_text", text: "", annotations: [] },
+        part: { type: "reasoning_text", reasoning: reasoningText },
+        model,
       },
-      { type: "response.output_item.done", output_index: 0, item: blankMessage },
+      {
+        type: "response.output_item.done",
+        output_index: 0,
+        sequence_number: 1,
+        item: blankMessage,
+        model,
+      },
       {
         type: "response.completed",
         response: {
-          id: "resp_tool_only",
+          id: "resp_direct_live_closed",
+          model,
           object: "response",
           status: "completed",
           error: null,
-          output: [blankMessage, functionCall],
+          output: [terminalReasoning, terminalBlank, functionCall],
           usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
         },
+        model,
       },
     ];
     response.end(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""));
@@ -7386,14 +7461,35 @@ test("router removes DeepSeek's confirmed blank message before a tool call", asy
       .filter((line) => line.startsWith("data: {"))
       .map((line) => JSON.parse(line.slice(5).trim()));
     assert.equal(text.includes(blankMessage.id), false);
+    assert.equal(text.includes(terminalBlank.id), false);
+    const reasoningEvents = events.filter(
+      (event) => (event.item_id ?? event.item?.id) === terminalReasoning.id,
+    );
+    assert.deepEqual(
+      reasoningEvents.map((event) => [event.type, event.output_index]),
+      [
+        ["response.output_item.added", 0],
+        ["response.reasoning_summary_part.added", 0],
+        ["response.reasoning_summary_text.delta", 0],
+        ["response.reasoning_summary_text.delta", 0],
+        ["response.reasoning_summary_text.done", 0],
+        ["response.reasoning_summary_part.done", 0],
+        ["response.output_item.done", 0],
+      ],
+    );
     const toolEvents = events.filter(
       (event) => (event.item_id ?? event.item?.id) === functionCall.id,
     );
     assert.ok(toolEvents.length >= 3);
-    assert.ok(toolEvents.every((event) => event.output_index === 0));
+    assert.ok(toolEvents.every((event) => event.output_index === 1));
+    assert.deepEqual(
+      events.filter((event) => event.sequence_number !== undefined)
+        .map((event) => event.sequence_number),
+      [16],
+    );
     assert.deepEqual(
       events.find((event) => event.type === "response.completed").response.output,
-      [functionCall],
+      [normalizedReasoning, functionCall],
     );
   } finally {
     await stopChild(router);
