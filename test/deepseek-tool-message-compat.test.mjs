@@ -14,6 +14,10 @@ function block(event, newline = "\n") {
   return `event: ${event.type}${newline}data: ${JSON.stringify(event)}${newline}${newline}`;
 }
 
+function rawBlock(type, json, newline = "\n") {
+  return `event: ${type}${newline}data: ${json}${newline}${newline}`;
+}
+
 function events(text) {
   return text
     .split(/\r?\n\r?\n/)
@@ -1350,6 +1354,64 @@ test("preserves real reasoning bytes, ids, and sequence numbers while compacting
   );
 });
 
+test("reasoning output-item provenance must match the terminal response", async () => {
+  const reasoningDone = {
+    id: "rs_provenance",
+    type: "reasoning",
+    status: "completed",
+    summary: [{ type: "summary_text", text: "alpha" }],
+  };
+  const terminalReasoning = {
+    ...reasoningDone,
+    summary: [{ type: "summary_text", text: "beta" }],
+  };
+  const input = [
+    responseCreated("resp_reasoning_provenance", { sequenceNumber: 0 }),
+    block({
+      type: "response.output_item.added",
+      sequence_number: 1,
+      output_index: 0,
+      item: { ...blankMessage, status: "in_progress", content: [] },
+    }),
+    block({
+      type: "response.output_item.added",
+      sequence_number: 2,
+      output_index: 1,
+      item: { ...reasoningDone, status: "in_progress", summary: [] },
+    }),
+    block({
+      type: "response.output_item.done",
+      sequence_number: 3,
+      output_index: 1,
+      item: reasoningDone,
+    }),
+    block({
+      type: "response.output_item.added",
+      sequence_number: 4,
+      output_index: 2,
+      item: { ...functionCall, status: "in_progress", arguments: "" },
+    }),
+    block({
+      type: "response.output_item.done",
+      sequence_number: 5,
+      output_index: 2,
+      item: functionCall,
+    }),
+    block({
+      type: "response.output_item.done",
+      sequence_number: 6,
+      output_index: 0,
+      item: blankMessage,
+    }),
+    responseCompleted([blankMessage, terminalReasoning, functionCall], {
+      id: "resp_reasoning_provenance",
+      sequenceNumber: 7,
+    }),
+  ].join("");
+
+  assert.equal(await transformed(input, {}, 1), input);
+});
+
 test("stops rewriting after the first bound terminal envelope", async () => {
   const first = phantomToolStream().replace("data: [DONE]\n\n", "");
   const normalizedFirst = await transformed(first, {}, 1);
@@ -1425,6 +1487,112 @@ test("a failed attempt cannot poison a fresh retry transform", async () => {
   );
 });
 
+test("duplicate SSE lifecycle members fail open before last-wins parsing", async () => {
+  const source = phantomToolStream();
+  const valid = block({
+    type: "response.output_item.added",
+    output_index: 0,
+    sequence_number: 1,
+    item: { ...blankMessage, status: "in_progress", content: [] },
+  });
+  const visible = {
+    ...blankMessage,
+    status: "in_progress",
+    content: [{ type: "output_text", text: "MUST_KEEP_LIFECYCLE" }],
+  };
+  const duplicate = rawBlock(
+    "response.output_item.added",
+    `{"type":"response.output_item.added","output_index":0,"sequence_number":1,` +
+      `"item":${JSON.stringify(visible)},` +
+      `"\\u0069tem":${JSON.stringify({
+        ...blankMessage,
+        status: "in_progress",
+        content: [],
+      })}}`,
+  );
+  const input = source.replace(valid, duplicate);
+  assert.notEqual(input, source);
+  assert.equal(await transformed(input, {}, 1), input);
+});
+
+test("duplicate terminal SSE members preserve visible and error values byte-for-byte", async () => {
+  const source = phantomToolStream();
+  const completedEvent = {
+    type: "response.completed",
+    sequence_number: 9,
+    response: {
+      id: "resp_1",
+      object: "response",
+      status: "completed",
+      error: null,
+      output: [blankMessage, functionCall],
+    },
+  };
+  const valid = responseCompleted([blankMessage, functionCall], {
+    id: "resp_1",
+    sequenceNumber: 9,
+  });
+  const visible = {
+    id: "msg_must_keep",
+    type: "message",
+    status: "completed",
+    role: "assistant",
+    content: [{ type: "output_text", text: "MUST_KEEP_OUTPUT" }],
+  };
+  const json = JSON.stringify(completedEvent);
+  const cases = [
+    json.replace(
+      `"output":${JSON.stringify(completedEvent.response.output)}`,
+      `"output":${JSON.stringify([visible])},` +
+        `"output":${JSON.stringify(completedEvent.response.output)}`,
+    ),
+    json.replace(
+      '"error":null',
+      '"error":{"message":"MUST_KEEP_ERROR"},"error":null',
+    ),
+    json.replace(
+      '"status":"completed"',
+      '"status":"failed","status":"completed"',
+    ),
+    json.replace('"text":""', '"text":"MUST_KEEP_TEXT","text":""'),
+    json.replace(
+      '"arguments":"{}"',
+      '"arguments":"MUST_KEEP_TOOL","arguments":"{}"',
+    ),
+  ];
+  for (const duplicateJson of cases) {
+    const input = source.replace(
+      valid,
+      rawBlock("response.completed", duplicateJson),
+    );
+    assert.notEqual(input, source);
+    assert.equal(await transformed(input, {}, 1), input);
+  }
+});
+
+test("bounded uniqueness scanning fails open and accepts unique escaped keys", async () => {
+  const source = phantomToolStream();
+  for (const options of [
+    { maxJsonDepth: 1 },
+    { maxJsonMembers: 1 },
+    { maxJsonKeyCodeUnits: 1 },
+  ]) {
+    assert.equal(await transformed(source, options, 1), source);
+  }
+
+  const escaped = source.replace(
+    '"sequence_number":3',
+    '"\\u0073equence_number":3',
+  );
+  assert.notEqual(escaped, source);
+  const normalized = await transformed(escaped, {}, 1);
+  assert.equal(normalized.includes(blankMessage.id), false);
+  assert.deepEqual(
+    events(normalized).find((event) => event.type === "response.completed").response.output,
+    [functionCall],
+  );
+});
+
 test("non-streaming responses remove only exact empty messages proven by tool traffic", async () => {
   const secondBlank = {
     ...blankMessage,
@@ -1454,6 +1622,80 @@ test("non-streaming responses remove only exact empty messages proven by tool tr
     ...payload,
     output: [reasoning, functionCall, secondTool, visible],
   });
+});
+
+test("duplicate non-streaming members never erase earlier output or metadata", async () => {
+  const visible = {
+    id: "msg_must_keep_json",
+    type: "message",
+    status: "completed",
+    role: "assistant",
+    content: [{ type: "output_text", text: "MUST_KEEP_OUTPUT" }],
+  };
+  const reasoning = {
+    id: "rs_duplicate_json",
+    type: "reasoning",
+    status: "completed",
+    summary: [{ type: "summary_text", text: "kept reasoning" }],
+  };
+  const base = JSON.stringify(jsonResponse([blankMessage, functionCall]));
+  const reasoningBase = JSON.stringify(
+    jsonResponse([blankMessage, reasoning, functionCall]),
+  );
+  const cases = [
+    base.replace(
+      `"output":${JSON.stringify([blankMessage, functionCall])}`,
+      `"output":${JSON.stringify([visible])},` +
+        `"output":${JSON.stringify([blankMessage, functionCall])}`,
+    ),
+    base.replace(
+      '"error":null',
+      '"error":{"message":"MUST_KEEP_ERROR"},"\\u0065rror":null',
+    ),
+    base.replace(
+      '"status":"completed"',
+      '"status":"failed","status":"completed"',
+    ),
+    base.replace('"text":""', '"text":"MUST_KEEP_TEXT","text":""'),
+    base.replace(
+      '"arguments":"{}"',
+      '"arguments":"MUST_KEEP_TOOL","arguments":"{}"',
+    ),
+    reasoningBase.replace(
+      `"summary":${JSON.stringify(reasoning.summary)}`,
+      `"summary":[{"type":"summary_text","text":"MUST_KEEP_REASONING"}],` +
+        `"summary":${JSON.stringify(reasoning.summary)}`,
+    ),
+  ];
+  for (const input of cases) {
+    assert.equal(await transformedJson(input, {}, 1), input);
+  }
+});
+
+test("non-streaming uniqueness limits fail open while unique JSON remains eligible", async () => {
+  const source = JSON.stringify(jsonResponse([blankMessage, functionCall]));
+  for (const options of [
+    { maxJsonDepth: 1 },
+    { maxJsonMembers: 1 },
+    { maxJsonKeyCodeUnits: 1 },
+  ]) {
+    assert.equal(await transformedJson(source, options, 1), source);
+  }
+
+  const unique = source.replace(
+    '"error":null',
+    '"\\u0065rror":null,"metadata":{' +
+      '"astral":"\\ud83d\\ude00","lone":"\\ud800",' +
+      '"fraction":-1.25e+3,"huge":123456789012345678901234567890}',
+  );
+  const normalized = await transformedJson(unique, {}, 1);
+  assert.notEqual(normalized, unique);
+  const payload = JSON.parse(normalized);
+  assert.deepEqual(payload.output, [functionCall]);
+  assert.equal(payload.metadata.astral, "😀");
+  assert.equal(payload.metadata.lone, "\ud800");
+  assert.equal(payload.metadata.fraction, -1250);
+  assert.equal(typeof payload.metadata.huge, "number");
 });
 
 test("non-streaming normalization requires a successful envelope and unique ids", async () => {

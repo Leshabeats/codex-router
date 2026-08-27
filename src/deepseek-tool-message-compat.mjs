@@ -1,11 +1,16 @@
 import { Transform } from "node:stream";
-import { TextDecoder } from "node:util";
+import { isDeepStrictEqual, TextDecoder } from "node:util";
 
 const MAX_CANDIDATE_BYTES = 64 * 1024;
 const MAX_CANDIDATE_MS = 1_000;
 const MAX_FRAME_BYTES = 256 * 1024;
 const MAX_JSON_BYTES = 8 * 1024 * 1024;
 const MAX_JSON_MS = 1_000;
+const MAX_JSON_DEPTH = 256;
+const MAX_FRAME_JSON_MEMBERS = 8 * 1024;
+const MAX_BODY_JSON_MEMBERS = 64 * 1024;
+const MAX_FRAME_JSON_KEY_CODE_UNITS = 128 * 1024;
+const MAX_BODY_JSON_KEY_CODE_UNITS = 1024 * 1024;
 const LF_FRAME_SEPARATOR = Buffer.from("\n\n");
 const CRLF_FRAME_SEPARATOR = Buffer.from("\r\n\r\n");
 const RESPONSE_EVENT_KEYS = new Set(["type", "sequence_number", "response"]);
@@ -196,7 +201,250 @@ function fatalUtf8(buffer) {
   return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(buffer);
 }
 
-function parsedBlock(blockBytes) {
+// JSON.parse silently keeps only the last occurrence of a duplicate object
+// member. That is unsafe here because a later stringify could then erase an
+// earlier visible/error value. Scan the bounded source first, decoding only
+// object keys so equivalent escape spellings compare as the same member while
+// value strings and number spellings remain JSON.parse's responsibility.
+function uniqueJsonObjectMembers(source, limits) {
+  let offset = 0;
+  let rootState = "value";
+  let memberCount = 0;
+  let keyCodeUnits = 0;
+  const stack = [];
+
+  const whitespace = (code) => (
+    code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0d
+  );
+  const hexValue = (code) => {
+    if (code >= 0x30 && code <= 0x39) return code - 0x30;
+    if (code >= 0x41 && code <= 0x46) return code - 0x41 + 10;
+    if (code >= 0x61 && code <= 0x66) return code - 0x61 + 10;
+    return -1;
+  };
+  const scanString = (decodeKey = false) => {
+    if (source.charCodeAt(offset) !== 0x22) return undefined;
+    offset += 1;
+    let segmentStart = offset;
+    let decodedLength = 0;
+    const parts = decodeKey ? [] : undefined;
+    const appendRawSegment = (end) => {
+      if (!decodeKey || end === segmentStart) return true;
+      decodedLength += end - segmentStart;
+      if (keyCodeUnits + decodedLength > limits.maxKeyCodeUnits) return false;
+      parts.push(source.slice(segmentStart, end));
+      return true;
+    };
+    while (offset < source.length) {
+      const code = source.charCodeAt(offset);
+      if (code === 0x22) {
+        if (!appendRawSegment(offset)) return undefined;
+        offset += 1;
+        return decodeKey
+          ? { key: parts.join(""), codeUnits: decodedLength }
+          : { codeUnits: 0 };
+      }
+      if (code < 0x20) return undefined;
+      if (code !== 0x5c) {
+        offset += 1;
+        continue;
+      }
+      if (!appendRawSegment(offset)) return undefined;
+      offset += 1;
+      if (offset >= source.length) return undefined;
+      const escape = source[offset];
+      let decoded;
+      if (escape === "u") {
+        if (offset + 4 >= source.length) return undefined;
+        let value = 0;
+        for (let index = 1; index <= 4; index += 1) {
+          const hex = hexValue(source.charCodeAt(offset + index));
+          if (hex < 0) return undefined;
+          value = (value * 16) + hex;
+        }
+        decoded = String.fromCharCode(value);
+        offset += 5;
+      } else {
+        const escapes = {
+          '"': '"',
+          "\\": "\\",
+          "/": "/",
+          b: "\b",
+          f: "\f",
+          n: "\n",
+          r: "\r",
+          t: "\t",
+        };
+        decoded = escapes[escape];
+        if (decoded === undefined) return undefined;
+        offset += 1;
+      }
+      if (decodeKey) {
+        decodedLength += 1;
+        if (keyCodeUnits + decodedLength > limits.maxKeyCodeUnits) return undefined;
+        parts.push(decoded);
+      }
+      segmentStart = offset;
+    }
+    return undefined;
+  };
+  const scanNumber = () => {
+    if (source[offset] === "-") offset += 1;
+    if (source[offset] === "0") {
+      offset += 1;
+    } else {
+      const first = source.charCodeAt(offset);
+      if (first < 0x31 || first > 0x39) return false;
+      offset += 1;
+      while (source.charCodeAt(offset) >= 0x30 && source.charCodeAt(offset) <= 0x39) {
+        offset += 1;
+      }
+    }
+    if (source[offset] === ".") {
+      offset += 1;
+      const first = source.charCodeAt(offset);
+      if (first < 0x30 || first > 0x39) return false;
+      while (source.charCodeAt(offset) >= 0x30 && source.charCodeAt(offset) <= 0x39) {
+        offset += 1;
+      }
+    }
+    if (source[offset] === "e" || source[offset] === "E") {
+      offset += 1;
+      if (source[offset] === "+" || source[offset] === "-") offset += 1;
+      const first = source.charCodeAt(offset);
+      if (first < 0x30 || first > 0x39) return false;
+      while (source.charCodeAt(offset) >= 0x30 && source.charCodeAt(offset) <= 0x39) {
+        offset += 1;
+      }
+    }
+    return true;
+  };
+  const completeValue = () => {
+    const parent = stack.at(-1);
+    if (!parent) {
+      if (rootState !== "value") return false;
+      rootState = "done";
+      return true;
+    }
+    if (parent.state !== "value") return false;
+    parent.state = "commaOrEnd";
+    return true;
+  };
+  const beginContainer = (kind) => {
+    if (stack.length >= limits.maxDepth) return false;
+    stack.push(kind === "object"
+      ? { kind, state: "keyOrEnd", keys: new Set() }
+      : { kind, state: "valueOrEnd" });
+    return true;
+  };
+  const scanValue = () => {
+    const token = source[offset];
+    if (token === "{") {
+      offset += 1;
+      return beginContainer("object");
+    }
+    if (token === "[") {
+      offset += 1;
+      return beginContainer("array");
+    }
+    if (token === '"') {
+      if (!scanString()) return false;
+      return completeValue();
+    }
+    for (const literal of ["true", "false", "null"]) {
+      if (source.startsWith(literal, offset)) {
+        offset += literal.length;
+        return completeValue();
+      }
+    }
+    if (token === "-" || (token >= "0" && token <= "9")) {
+      if (!scanNumber()) return false;
+      return completeValue();
+    }
+    return false;
+  };
+
+  while (offset < source.length) {
+    while (offset < source.length && whitespace(source.charCodeAt(offset))) offset += 1;
+    if (offset >= source.length) break;
+    const frame = stack.at(-1);
+    if (!frame) {
+      if (rootState !== "value" || !scanValue()) return false;
+      continue;
+    }
+    const token = source[offset];
+    if (frame.kind === "object") {
+      if (frame.state === "keyOrEnd" || frame.state === "key") {
+        if (frame.state === "keyOrEnd" && token === "}") {
+          offset += 1;
+          stack.pop();
+          if (!completeValue()) return false;
+          continue;
+        }
+        const parsed = scanString(true);
+        if (!parsed) return false;
+        memberCount += 1;
+        keyCodeUnits += parsed.codeUnits;
+        if (
+          memberCount > limits.maxMembers ||
+          keyCodeUnits > limits.maxKeyCodeUnits ||
+          frame.keys.has(parsed.key)
+        ) return false;
+        frame.keys.add(parsed.key);
+        frame.state = "colon";
+        continue;
+      }
+      if (frame.state === "colon") {
+        if (token !== ":") return false;
+        offset += 1;
+        frame.state = "value";
+        continue;
+      }
+      if (frame.state === "value") {
+        if (!scanValue()) return false;
+        continue;
+      }
+      if (token === ",") {
+        offset += 1;
+        frame.state = "key";
+        continue;
+      }
+      if (token === "}") {
+        offset += 1;
+        stack.pop();
+        if (!completeValue()) return false;
+        continue;
+      }
+      return false;
+    }
+    if (frame.state === "valueOrEnd" && token === "]") {
+      offset += 1;
+      stack.pop();
+      if (!completeValue()) return false;
+      continue;
+    }
+    if (frame.state === "valueOrEnd" || frame.state === "value") {
+      frame.state = "value";
+      if (!scanValue()) return false;
+      continue;
+    }
+    if (token === ",") {
+      offset += 1;
+      frame.state = "value";
+      continue;
+    }
+    if (token === "]") {
+      offset += 1;
+      stack.pop();
+      if (!completeValue()) return false;
+      continue;
+    }
+    return false;
+  }
+  return rootState === "done" && stack.length === 0;
+}
+
+function parsedBlock(blockBytes, jsonLimits) {
   let block;
   try {
     block = fatalUtf8(blockBytes);
@@ -226,6 +474,7 @@ function parsedBlock(blockBytes) {
     return eventLines.length === 0 ? { done: true } : { malformed: true };
   }
   try {
+    if (!uniqueJsonObjectMembers(dataText, jsonLimits)) return { malformed: true };
     const event = JSON.parse(dataText);
     if (
       eventLines.length === 1 &&
@@ -281,6 +530,21 @@ function candidateStart(item) {
 function finiteLimit(value, fallback, { minimum = 0, integer = false } = {}) {
   if (!Number.isFinite(value) || value < minimum) return fallback;
   return integer ? Math.floor(value) : value;
+}
+
+function jsonScanLimits(
+  { maxJsonDepth, maxJsonMembers, maxJsonKeyCodeUnits },
+  { maxMembers, maxKeyCodeUnits },
+) {
+  const capped = (value, maximum) => Math.min(
+    finiteLimit(value, maximum, { minimum: 1, integer: true }),
+    maximum,
+  );
+  return {
+    maxDepth: capped(maxJsonDepth, MAX_JSON_DEPTH),
+    maxMembers: capped(maxJsonMembers, maxMembers),
+    maxKeyCodeUnits: capped(maxJsonKeyCodeUnits, maxKeyCodeUnits),
+  };
 }
 
 function exactEmptyPart(part) {
@@ -568,12 +832,16 @@ export class TranslatedToolMessageCompatTransform extends Transform {
   #maxCandidateBytes;
   #maxCandidateMs;
   #maxFrameBytes;
+  #jsonLimits;
   #timer;
 
   constructor({
     maxCandidateBytes = MAX_CANDIDATE_BYTES,
     maxCandidateMs = MAX_CANDIDATE_MS,
     maxFrameBytes = MAX_FRAME_BYTES,
+    maxJsonDepth,
+    maxJsonMembers,
+    maxJsonKeyCodeUnits,
   } = {}) {
     super();
     this.#maxCandidateBytes = finiteLimit(
@@ -586,6 +854,13 @@ export class TranslatedToolMessageCompatTransform extends Transform {
       minimum: 1,
       integer: true,
     });
+    this.#jsonLimits = jsonScanLimits(
+      { maxJsonDepth, maxJsonMembers, maxJsonKeyCodeUnits },
+      {
+        maxMembers: MAX_FRAME_JSON_MEMBERS,
+        maxKeyCodeUnits: MAX_FRAME_JSON_KEY_CODE_UNITS,
+      },
+    );
   }
 
   _transform(chunk, _encoding, callback) {
@@ -663,7 +938,7 @@ export class TranslatedToolMessageCompatTransform extends Transform {
   }
 
   #handleBlock(block, separator) {
-    const parsedResult = parsedBlock(block);
+    const parsedResult = parsedBlock(block, this.#jsonLimits);
     const frame = {
       original: Buffer.concat([block, separator]),
       parsed: parsedResult.parsed,
@@ -799,6 +1074,7 @@ export class TranslatedToolMessageCompatTransform extends Transform {
         textDeltas: new Set(),
         textValues: new Map(),
         doneTexts: new Map(),
+        terminalItem: undefined,
       };
     } else if (exactToolCall(event.item)) {
       const valueField = toolValueField(event.item.type);
@@ -1001,10 +1277,12 @@ export class TranslatedToolMessageCompatTransform extends Transform {
     if (event.type === "response.output_item.done") {
       if (
         event.item?.id !== record.id ||
-        !exactReasoningItem(event.item, { completed: true })
+        !exactReasoningItem(event.item, { completed: true }) ||
+        !this.#reasoningLifecycleMatchesTerminal(event.item, record)
       ) return false;
       for (const key of record.parts) if (!record.partDones.has(key)) return false;
       for (const key of record.textDeltas) if (!record.textDones.has(key)) return false;
+      record.terminalItem = event.item;
       record.done = true;
       return true;
     }
@@ -1058,6 +1336,28 @@ export class TranslatedToolMessageCompatTransform extends Transform {
       return true;
     }
     return false;
+  }
+
+  #reasoningLifecycleMatchesTerminal(item, record) {
+    for (const [prefix, field, type] of [
+      ["summary", "summary", "summary_text"],
+      ["content", "content", "reasoning_text"],
+    ]) {
+      const keys = [...record.parts].filter((key) => key.startsWith(`${prefix}:`));
+      if (!keys.length) continue;
+      const parts = item[field];
+      if (!Array.isArray(parts) || parts.length !== keys.length) return false;
+      for (let index = 0; index < parts.length; index += 1) {
+        const key = `${prefix}:${index}`;
+        const text = record.doneTexts.get(key) ?? record.textValues.get(key);
+        if (
+          !record.parts.has(key) ||
+          !record.partDones.has(key) ||
+          !isDeepStrictEqual(parts[index], { type, text })
+        ) return false;
+      }
+    }
+    return true;
   }
 
   #handleCompleted(frame, event) {
@@ -1118,7 +1418,11 @@ export class TranslatedToolMessageCompatTransform extends Transform {
       }
       if (id !== record.id) return false;
       if (record.kind === "reasoning") {
-        if (!exactReasoningItem(item, { completed: true })) return false;
+        if (
+          !exactReasoningItem(item, { completed: true }) ||
+          !record.terminalItem ||
+          !isDeepStrictEqual(item, record.terminalItem)
+        ) return false;
         continue;
       }
       if (!matchesToolCallIdentity(item, {
@@ -1237,15 +1541,29 @@ export class TranslatedToolMessageJsonCompatTransform extends Transform {
   #released = false;
   #maxBytes;
   #maxMs;
+  #jsonLimits;
   #timer;
 
-  constructor({ maxBytes = MAX_JSON_BYTES, maxMs = MAX_JSON_MS } = {}) {
+  constructor({
+    maxBytes = MAX_JSON_BYTES,
+    maxMs = MAX_JSON_MS,
+    maxJsonDepth,
+    maxJsonMembers,
+    maxJsonKeyCodeUnits,
+  } = {}) {
     super();
     this.#maxBytes = finiteLimit(maxBytes, MAX_JSON_BYTES, {
       minimum: 1,
       integer: true,
     });
     this.#maxMs = finiteLimit(maxMs, MAX_JSON_MS);
+    this.#jsonLimits = jsonScanLimits(
+      { maxJsonDepth, maxJsonMembers, maxJsonKeyCodeUnits },
+      {
+        maxMembers: MAX_BODY_JSON_MEMBERS,
+        maxKeyCodeUnits: MAX_BODY_JSON_KEY_CODE_UNITS,
+      },
+    );
   }
 
   _transform(chunk, _encoding, callback) {
@@ -1281,6 +1599,11 @@ export class TranslatedToolMessageJsonCompatTransform extends Transform {
     }
     try {
       const source = fatalUtf8(body);
+      if (!uniqueJsonObjectMembers(source, this.#jsonLimits)) {
+        this.push(body);
+        callback();
+        return;
+      }
       const payload = JSON.parse(source);
       const output = jsonResponseOutput(payload);
       const indexes = removableJsonMessageIndexes(output);
