@@ -9,6 +9,11 @@ import {
   deepseekToolMessageCompatTransform,
   translatedToolMessageCompatTransform,
 } from "../src/deepseek-tool-message-compat.mjs";
+import {
+  NamespaceToolCallTransform,
+  bridgeCustomTools,
+  flattenNamespaceTools,
+} from "../src/namespace-relay.mjs";
 
 function block(event, newline = "\n") {
   return `event: ${event.type}${newline}data: ${JSON.stringify(event)}${newline}${newline}`;
@@ -68,6 +73,34 @@ async function transformedBytes(input, options = {}, chunkSize = 0) {
   stream.end();
   await once(stream, "end");
   return Buffer.concat(output);
+}
+
+async function transformedThroughNamespace(
+  input,
+  namespaces,
+  options = {},
+  chunkSize = 0,
+) {
+  const compat = new TranslatedToolMessageCompatTransform(options);
+  const namespace = new NamespaceToolCallTransform(
+    namespaces,
+    "text/event-stream",
+  );
+  let output = "";
+  namespace.setEncoding("utf8");
+  namespace.on("data", (chunk) => { output += chunk; });
+  compat.pipe(namespace);
+  const bytes = Buffer.isBuffer(input) ? input : Buffer.from(input);
+  if (chunkSize > 0) {
+    for (let at = 0; at < bytes.length; at += chunkSize) {
+      compat.write(bytes.subarray(at, at + chunkSize));
+    }
+  } else {
+    compat.write(bytes);
+  }
+  compat.end();
+  await once(namespace, "end");
+  return output;
 }
 
 async function transformedJson(input, options = {}, chunkSize = 0) {
@@ -2006,6 +2039,74 @@ test("delimiter-terminated frames and single-frame cap crossings are bounded", a
   );
 });
 
+test("one-byte fragmented frames use bounded concatenation in both SSE paths", async () => {
+  const source = `event: opaque\ndata: ${"x".repeat(128 * 1024)}`;
+  const options = {
+    maxFrameBytes: Buffer.byteLength(source) + 1,
+    maxCandidateMs: 60_000,
+  };
+  const originalConcat = Buffer.concat;
+  let concatenations = 0;
+  Buffer.concat = function countedConcat(...args) {
+    concatenations += 1;
+    return originalConcat.apply(this, args);
+  };
+  try {
+    assert.equal(await transformed(source, options, 1), source);
+    assert.equal(await transformedDirect(source, options, 1), source);
+  } finally {
+    Buffer.concat = originalConcat;
+  }
+  assert.ok(
+    concatenations <= 4,
+    `fragment accumulation performed ${concatenations} Buffer.concat calls`,
+  );
+});
+
+test("dense one-byte fragmented tool frames compact in one transaction", async () => {
+  const argumentText = `{"dense":"${"x".repeat(2_000)}"}`;
+  const wireEvents = pinnedLiteLlmPhantomEvents();
+  const deltaAt = wireEvents.findIndex(
+    (event) => event.type === "response.function_call_arguments.delta",
+  );
+  const deltaTemplate = wireEvents[deltaAt];
+  wireEvents.splice(
+    deltaAt,
+    1,
+    ...[...argumentText].map((delta) => ({ ...deltaTemplate, delta })),
+  );
+  for (const event of wireEvents) {
+    if (event.type === "response.function_call_arguments.done") {
+      event.arguments = argumentText;
+    } else if (
+      event.type === "response.output_item.done" &&
+      event.item?.type === "function_call"
+    ) {
+      event.item.arguments = argumentText;
+    } else if (event.type === "response.completed") {
+      event.response.output.find((item) => item.type === "function_call").arguments =
+        argumentText;
+    }
+  }
+  const source = `${wireEvents.map((event) => block(event)).join("")}data: [DONE]\n\n`;
+  const output = await transformed(source, {
+    maxCandidateBytes: Buffer.byteLength(source) + 1,
+    maxCandidateMs: 60_000,
+  }, 1);
+  const seen = events(output);
+
+  assert.equal(output.includes(blankMessage.id), false);
+  assert.equal(
+    seen.filter((event) => event.type === "response.function_call_arguments.delta").length,
+    argumentText.length,
+  );
+  assert.equal(
+    seen.find((event) => event.type === "response.completed")
+      .response.output[0].arguments,
+    argumentText,
+  );
+});
+
 test("timer expiry also releases an incomplete buffered frame", async () => {
   const created = responseCreated();
   const start = block({
@@ -2415,6 +2516,148 @@ test("compacts a strictly confirmed custom-tool lifecycle without changing its i
   );
 });
 
+test("blank compaction composes with ordinary, custom, and tool_search restoration", async () => {
+  const flattened = flattenNamespaceTools([
+    {
+      type: "namespace",
+      name: "mcp__files",
+      tools: [{
+        type: "function",
+        name: "read_file",
+        inputSchema: {
+          type: "object",
+          properties: { path: { type: "string" } },
+          required: ["path"],
+          additionalProperties: false,
+        },
+      }],
+    },
+    { type: "custom", name: "apply_patch" },
+    {
+      type: "tool_search",
+      execution: "client",
+      parameters: {
+        type: "object",
+        properties: { query: { type: "string" } },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+  ]);
+  const bridged = bridgeCustomTools(
+    flattened.tools,
+    [],
+    flattened.namespaces,
+  );
+  const providerNames = new Set(bridged.tools.map((tool) => tool.name));
+  assert.deepEqual(
+    providerNames,
+    new Set(["mcp__files__read_file", "apply_patch", "tool_search"]),
+  );
+
+  const tools = [
+    {
+      id: "call_namespace",
+      type: "function_call",
+      call_id: "call_namespace",
+      name: "mcp__files__read_file",
+      arguments: '{"path":"README.md"}',
+      status: "completed",
+    },
+    {
+      id: "call_custom",
+      type: "function_call",
+      call_id: "call_custom",
+      name: "apply_patch",
+      arguments: '{"input":"*** Begin Patch\\n*** End Patch"}',
+      status: "completed",
+    },
+    {
+      id: "call_search",
+      type: "function_call",
+      call_id: "call_search",
+      name: "tool_search",
+      arguments: '{"query":"calendar"}',
+      status: "completed",
+    },
+  ];
+  const wireEvents = pinnedLiteLlmPhantomEvents();
+  const model = wireEvents[0].model;
+  const lifecycle = (tool, outputIndex, sequenceNumber) => [
+    {
+      type: "response.output_item.added",
+      output_index: outputIndex,
+      item: { ...tool, status: "in_progress", arguments: "" },
+      model,
+    },
+    {
+      type: "response.function_call_arguments.delta",
+      item_id: tool.id,
+      output_index: outputIndex,
+      delta: tool.arguments,
+      model,
+    },
+    {
+      type: "response.function_call_arguments.done",
+      item_id: tool.id,
+      output_index: outputIndex,
+      arguments: tool.arguments,
+      model,
+    },
+    {
+      type: "response.output_item.done",
+      output_index: outputIndex,
+      sequence_number: sequenceNumber,
+      item: tool,
+      model,
+    },
+  ];
+  wireEvents.splice(4, 4, ...lifecycle(tools[0], 1, 9));
+  const candidateCloseAt = wireEvents.findIndex(
+    (event) => event.type === "response.output_text.done",
+  );
+  wireEvents.splice(
+    candidateCloseAt,
+    0,
+    ...lifecycle(tools[1], 2, 10),
+    ...lifecycle(tools[2], 3, 11),
+  );
+  wireEvents.find((event) => event.type === "response.completed")
+    .response.output = [
+      { ...blankMessage, id: "chatcmpl-pinned-terminal" },
+      ...tools,
+    ];
+  const source = `${wireEvents.map((event) => block(event)).join("")}data: [DONE]\n\n`;
+  const output = await transformedThroughNamespace(
+    source,
+    flattened.namespaces,
+    { maxCandidateMs: 60_000 },
+    1,
+  );
+  const seen = events(output);
+  const added = seen.filter((event) => event.type === "response.output_item.added");
+  const completed = seen.find((event) => event.type === "response.completed");
+
+  assert.equal(output.includes(blankMessage.id), false);
+  assert.deepEqual(added.map((event) => event.output_index), [0, 1, 2]);
+  assert.deepEqual(
+    added.map((event) => [event.item.type, event.item.name, event.item.namespace]),
+    [
+      ["function_call", "read_file", "mcp__files"],
+      ["custom_tool_call", "apply_patch", undefined],
+      ["tool_search_call", undefined, undefined],
+    ],
+  );
+  assert.deepEqual(
+    completed.response.output.map((item) => item.type),
+    ["function_call", "custom_tool_call", "tool_search_call"],
+  );
+  assert.equal(completed.response.output[0].namespace, "mcp__files");
+  assert.equal(completed.response.output[0].name, "read_file");
+  assert.equal(completed.response.output[1].input, "*** Begin Patch\n*** End Patch");
+  assert.deepEqual(completed.response.output[2].arguments, { query: "calendar" });
+});
+
 test("preserves real reasoning bytes, ids, and sequence numbers while compacting", async () => {
   const reasoningDone = {
     id: "rs_real",
@@ -2754,13 +2997,22 @@ test("bounded uniqueness scanning fails open and accepts unique escaped keys", a
   );
 });
 
+const lossyJsonNumbers = [
+  "1e400",
+  "-0",
+  "9007199254740993",
+  "1e-324",
+  "1.0000000000000001",
+  "0.10000000000000001",
+];
+
 test("SSE rewrites reject lossy outer and nested argument numbers", async () => {
   const source = phantomToolStream();
   const terminal = responseCompleted([blankMessage, functionCall], {
     id: "resp_1",
     sequenceNumber: 9,
   });
-  for (const literal of ["1e400", "-0", "9007199254740993"]) {
+  for (const literal of lossyJsonNumbers) {
     const unsafeTerminal = terminal.replace(
       '"error":null',
       `"error":null,"numeric_provenance":${literal}`,
@@ -2809,6 +3061,19 @@ test("SSE rewrites reject lossy outer and nested argument numbers", async () => 
     }
   });
   assert.equal((await transformed(safe, {}, 1)).includes(blankMessage.id), false);
+});
+
+test("direct DeepSeek terminal JSON keeps lossy numeric provenance byte-identical", async () => {
+  const source = currentDirectDeepseekStream();
+  for (const literal of [
+    "1e-324",
+    "1.0000000000000001",
+    "0.10000000000000001",
+  ]) {
+    const input = source.replace('"input_tokens":17', `"input_tokens":${literal}`);
+    assert.notEqual(input, source);
+    assert.equal(await transformedDirect(input, {}, 1), input, literal);
+  }
 });
 
 test("non-streaming responses remove only exact empty messages proven by tool traffic", async () => {
@@ -2918,7 +3183,7 @@ test("non-streaming uniqueness limits fail open while unique JSON remains eligib
 
 test("non-streaming rewrites reject lossy outer and nested argument numbers", async () => {
   const base = JSON.stringify(jsonResponse([blankMessage, functionCall]));
-  for (const literal of ["1e400", "-0", "9007199254740993"]) {
+  for (const literal of lossyJsonNumbers) {
     const outer = base.replace(
       '"error":null',
       `"error":null,"metadata":{"numeric_provenance":${literal}}`,

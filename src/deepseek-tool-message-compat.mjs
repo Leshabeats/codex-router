@@ -1,6 +1,8 @@
 import { Transform } from "node:stream";
 import { isDeepStrictEqual, TextDecoder } from "node:util";
 
+import { jsonNumberIsStableForRewrite } from "./json-number-rewrite.mjs";
+
 const MAX_CANDIDATE_BYTES = 64 * 1024;
 const MAX_CANDIDATE_MS = 1_000;
 const MAX_DIRECT_CAPTURE_MS = 60_000;
@@ -162,6 +164,101 @@ const DIRECT_REASONING_OUTPUT_PART_KEYS = new Set([
   "annotations",
 ]);
 const DIRECT_HISTORICAL_RESPONSE_KEYS = new Set(["id", "status", "output"]);
+
+// Keep an undecided SSE frame in one reusable, geometrically grown buffer.
+// Every input byte is copied and scanned once; completing a frame makes the
+// one independent copy its lifecycle may need to retain. This avoids both the
+// repeated Buffer.concat of a fragmented frame and the repeated whole-buffer
+// delimiter scans that otherwise make one-byte upstream chunks quadratic.
+class SseFrameAccumulator {
+  #storage = Buffer.alloc(0);
+  #length = 0;
+  #maxFrameBytes;
+
+  constructor(maxFrameBytes) {
+    this.#maxFrameBytes = maxFrameBytes;
+  }
+
+  write(value, onFrame) {
+    const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value);
+    for (let index = 0; index < bytes.length; index += 1) {
+      this.#append(bytes[index]);
+      const separator = this.#separator();
+      if (separator) {
+        const original = this.take();
+        if (original.length > this.#maxFrameBytes) {
+          return {
+            oversized: original,
+            remainder: Buffer.from(bytes.subarray(index + 1)),
+          };
+        }
+        const block = original.subarray(0, original.length - separator.length);
+        if (onFrame(block, separator, original) === false) {
+          return {
+            stopped: true,
+            remainder: Buffer.from(bytes.subarray(index + 1)),
+          };
+        }
+        continue;
+      }
+      if (this.#length > this.#maxFrameBytes) {
+        const original = this.take();
+        return {
+          oversized: original,
+          remainder: Buffer.from(bytes.subarray(index + 1)),
+        };
+      }
+    }
+    return undefined;
+  }
+
+  flush(onFrame) {
+    if (!this.#length) return;
+    const original = this.take();
+    onFrame(original, Buffer.alloc(0), original);
+  }
+
+  take() {
+    if (!this.#length) return Buffer.alloc(0);
+    const value = Buffer.from(this.#storage.subarray(0, this.#length));
+    this.#length = 0;
+    return value;
+  }
+
+  #append(byte) {
+    const required = this.#length + 1;
+    if (required > this.#storage.length) {
+      const maximum = this.#maxFrameBytes + 1;
+      const doubled = this.#storage.length ? this.#storage.length * 2 : 1024;
+      const capacity = Math.min(maximum, Math.max(required, doubled));
+      const next = Buffer.allocUnsafe(capacity);
+      if (this.#length) this.#storage.copy(next, 0, 0, this.#length);
+      this.#storage = next;
+    }
+    this.#storage[this.#length] = byte;
+    this.#length = required;
+  }
+
+  #separator() {
+    if (
+      this.#length >= LF_FRAME_SEPARATOR.length &&
+      this.#storage[this.#length - 2] === 0x0a &&
+      this.#storage[this.#length - 1] === 0x0a
+    ) {
+      return LF_FRAME_SEPARATOR;
+    }
+    if (
+      this.#length >= CRLF_FRAME_SEPARATOR.length &&
+      this.#storage[this.#length - 4] === 0x0d &&
+      this.#storage[this.#length - 3] === 0x0a &&
+      this.#storage[this.#length - 2] === 0x0d &&
+      this.#storage[this.#length - 1] === 0x0a
+    ) {
+      return CRLF_FRAME_SEPARATOR;
+    }
+    return undefined;
+  }
+}
 
 const EVENT_KEYS = new Map([
   ["response.created", RESPONSE_EVENT_KEYS],
@@ -339,12 +436,7 @@ function strictJsonPreflight(source, limits) {
         offset += 1;
       }
     }
-    const value = Number(source.slice(start, offset));
-    return (
-      Number.isFinite(value) &&
-      !Object.is(value, -0) &&
-      (!Number.isInteger(value) || Number.isSafeInteger(value))
-    );
+    return jsonNumberIsStableForRewrite(source.slice(start, offset));
   };
   const completeValue = () => {
     const parent = stack.at(-1);
@@ -998,7 +1090,7 @@ function exactDirectCompletedTool(item, tool, expectedArguments) {
 // and bounded. Any deviation releases the held bytes unchanged and disables
 // the repair for the rest of the response.
 export class DeepseekToolMessageCompatTransform extends Transform {
-  #buffer = Buffer.alloc(0);
+  #frames;
   #capture;
   #disabled = false;
   #finished = false;
@@ -1034,6 +1126,7 @@ export class DeepseekToolMessageCompatTransform extends Transform {
       minimum: 1,
       integer: true,
     });
+    this.#frames = new SseFrameAccumulator(this.#maxFrameBytes);
     this.#jsonLimits = jsonScanLimits(
       { maxJsonDepth, maxJsonMembers, maxJsonKeyCodeUnits },
       {
@@ -1045,36 +1138,34 @@ export class DeepseekToolMessageCompatTransform extends Transform {
 
   _transform(chunk, _encoding, callback) {
     const piece = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    this.#buffer = this.#buffer.length
-      ? Buffer.concat([this.#buffer, piece])
-      : Buffer.from(piece);
     if (this.#disabled || this.#finished) {
-      this.#pushBuffered();
+      this.push(Buffer.from(piece));
       callback();
       return;
     }
-    this.#emitCompleteBlocks();
-    if (this.#disabled || this.#finished) {
-      this.#pushBuffered();
-    } else if (this.#buffer.length > this.#maxFrameBytes) {
-      this.#failOpen();
-      this.#pushBuffered();
-    }
+    const outcome = this.#frames.write(piece, (block, separator, original) => {
+      this.#handleBlock(block, separator, original);
+      return !this.#disabled && !this.#finished;
+    });
+    if (outcome?.oversized) this.#oversizedFrame(outcome.oversized);
+    if (outcome?.remainder?.length) this.push(outcome.remainder);
     callback();
   }
 
   _flush(callback) {
     this.#clearTimers();
     if (this.#disabled || this.#finished) {
-      this.#pushBuffered();
+      this.#pushPendingFrameBytes();
       callback();
       return;
     }
-    this.#emitCompleteBlocks(true);
+    this.#frames.flush((block, separator, original) => {
+      this.#handleBlock(block, separator, original);
+    });
     if (["completed", "sentinel"].includes(this.#capture?.stage)) {
       this.#finishAtEof();
     } else if (this.#capture) this.#failOpen();
-    this.#pushBuffered();
+    this.#pushPendingFrameBytes();
     callback();
   }
 
@@ -1083,46 +1174,10 @@ export class DeepseekToolMessageCompatTransform extends Transform {
     callback(error);
   }
 
-  #emitCompleteBlocks(flush = false) {
-    while (this.#buffer.length && !this.#disabled && !this.#finished) {
-      const crlf = this.#buffer.indexOf(CRLF_FRAME_SEPARATOR);
-      const lf = this.#buffer.indexOf(LF_FRAME_SEPARATOR);
-      let index = -1;
-      let separator = Buffer.alloc(0);
-      if (crlf !== -1 && (lf === -1 || crlf <= lf)) {
-        index = crlf;
-        separator = CRLF_FRAME_SEPARATOR;
-      } else if (lf !== -1) {
-        index = lf;
-        separator = LF_FRAME_SEPARATOR;
-      }
-      if (index === -1) {
-        if (!flush) return;
-        const block = Buffer.from(this.#buffer);
-        this.#buffer = Buffer.alloc(0);
-        if (block.length > this.#maxFrameBytes) {
-          this.#oversizedFrame(block);
-          return;
-        }
-        this.#handleBlock(block, Buffer.alloc(0));
-        return;
-      }
-      const end = index + separator.length;
-      const block = Buffer.from(this.#buffer.subarray(0, index));
-      const original = Buffer.from(this.#buffer.subarray(0, end));
-      this.#buffer = Buffer.from(this.#buffer.subarray(end));
-      if (original.length > this.#maxFrameBytes) {
-        this.#oversizedFrame(original);
-        return;
-      }
-      this.#handleBlock(block, separator);
-    }
-  }
-
-  #handleBlock(block, separator) {
+  #handleBlock(block, separator, original = Buffer.concat([block, separator])) {
     const parsedResult = parsedBlock(block, this.#jsonLimits);
     const frame = {
-      original: Buffer.concat([block, separator]),
+      original,
       parsed: parsedResult.parsed,
       separator: separator.toString("ascii"),
     };
@@ -1722,10 +1777,9 @@ export class DeepseekToolMessageCompatTransform extends Transform {
     this.#failOpen(frame);
   }
 
-  #pushBuffered() {
-    if (!this.#buffer.length) return;
-    this.push(this.#buffer);
-    this.#buffer = Buffer.alloc(0);
+  #pushPendingFrameBytes() {
+    const pending = this.#frames.take();
+    if (pending.length) this.push(pending);
   }
 
   #resetWatchdog() {
@@ -1733,7 +1787,7 @@ export class DeepseekToolMessageCompatTransform extends Transform {
     if (!this.#capture) return;
     this.#watchdogTimer = setTimeout(() => {
       this.#failOpen();
-      this.#pushBuffered();
+      this.#pushPendingFrameBytes();
     }, this.#maxCandidateMs);
     this.#watchdogTimer.unref?.();
   }
@@ -1742,7 +1796,7 @@ export class DeepseekToolMessageCompatTransform extends Transform {
     if (this.#deadlineTimer || !this.#capture) return;
     this.#deadlineTimer = setTimeout(() => {
       this.#failOpen();
-      this.#pushBuffered();
+      this.#pushPendingFrameBytes();
     }, this.#maxCaptureMs);
     this.#deadlineTimer.unref?.();
   }
@@ -1771,7 +1825,7 @@ export class DeepseekToolMessageCompatTransform extends Transform {
 // byte and time budgets. Every ambiguous, malformed, large, or slow shape fails
 // open byte-for-byte and permanently disables the repair for that response.
 export class TranslatedToolMessageCompatTransform extends Transform {
-  #buffer = Buffer.alloc(0);
+  #frames;
   #capture;
   #disabled = false;
   #finished = false;
@@ -1814,6 +1868,7 @@ export class TranslatedToolMessageCompatTransform extends Transform {
       minimum: 1,
       integer: true,
     });
+    this.#frames = new SseFrameAccumulator(this.#maxFrameBytes);
     this.#jsonLimits = jsonScanLimits(
       { maxJsonDepth, maxJsonMembers, maxJsonKeyCodeUnits },
       {
@@ -1826,36 +1881,34 @@ export class TranslatedToolMessageCompatTransform extends Transform {
 
   _transform(chunk, _encoding, callback) {
     const piece = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    this.#buffer = this.#buffer.length
-      ? Buffer.concat([this.#buffer, piece])
-      : Buffer.from(piece);
     if (this.#disabled || this.#finished) {
-      this.#pushBuffered();
+      this.push(Buffer.from(piece));
       callback();
       return;
     }
-    this.#emitCompleteBlocks();
-    if (this.#disabled || this.#finished) {
-      this.#pushBuffered();
-    } else if (this.#buffer.length > this.#maxFrameBytes) {
-      this.#failOpen();
-      this.#pushBuffered();
-    }
+    const outcome = this.#frames.write(piece, (block, separator, original) => {
+      this.#handleBlock(block, separator, original);
+      return !this.#disabled && !this.#finished;
+    });
+    if (outcome?.oversized) this.#oversizedFrame(outcome.oversized);
+    if (outcome?.remainder?.length) this.push(outcome.remainder);
     callback();
   }
 
   _flush(callback) {
     this.#clearTimer();
     if (this.#disabled || this.#finished) {
-      this.#pushBuffered();
+      this.#pushPendingFrameBytes();
       callback();
       return;
     }
-    this.#emitCompleteBlocks(true);
+    this.#frames.flush((block, separator, original) => {
+      this.#handleBlock(block, separator, original);
+    });
     if (["completed", "sentinel"].includes(this.#capture?.stage)) {
       this.#suppress();
     } else if (this.#capture) this.#failOpen();
-    this.#pushBuffered();
+    this.#pushPendingFrameBytes();
     callback();
   }
 
@@ -1864,46 +1917,10 @@ export class TranslatedToolMessageCompatTransform extends Transform {
     callback(error);
   }
 
-  #emitCompleteBlocks(flush = false) {
-    while (this.#buffer.length && !this.#disabled && !this.#finished) {
-      const crlf = this.#buffer.indexOf(CRLF_FRAME_SEPARATOR);
-      const lf = this.#buffer.indexOf(LF_FRAME_SEPARATOR);
-      let index = -1;
-      let separator = Buffer.alloc(0);
-      if (crlf !== -1 && (lf === -1 || crlf <= lf)) {
-        index = crlf;
-        separator = CRLF_FRAME_SEPARATOR;
-      } else if (lf !== -1) {
-        index = lf;
-        separator = LF_FRAME_SEPARATOR;
-      }
-      if (index === -1) {
-        if (!flush) return;
-        const block = Buffer.from(this.#buffer);
-        this.#buffer = Buffer.alloc(0);
-        if (block.length > this.#maxFrameBytes) {
-          this.#oversizedFrame(block);
-          return;
-        }
-        this.#handleBlock(block, Buffer.alloc(0));
-        return;
-      }
-      const end = index + separator.length;
-      const block = Buffer.from(this.#buffer.subarray(0, index));
-      const original = Buffer.from(this.#buffer.subarray(0, end));
-      this.#buffer = Buffer.from(this.#buffer.subarray(end));
-      if (original.length > this.#maxFrameBytes) {
-        this.#oversizedFrame(original);
-        return;
-      }
-      this.#handleBlock(block, separator);
-    }
-  }
-
-  #handleBlock(block, separator) {
+  #handleBlock(block, separator, original = Buffer.concat([block, separator])) {
     const parsedResult = parsedBlock(block, this.#jsonLimits);
     const frame = {
-      original: Buffer.concat([block, separator]),
+      original,
       parsed: parsedResult.parsed,
       separator: separator.toString("ascii"),
     };
@@ -2666,17 +2683,16 @@ export class TranslatedToolMessageCompatTransform extends Transform {
     }
   }
 
-  #pushBuffered() {
-    if (!this.#buffer.length) return;
-    this.push(this.#buffer);
-    this.#buffer = Buffer.alloc(0);
+  #pushPendingFrameBytes() {
+    const pending = this.#frames.take();
+    if (pending.length) this.push(pending);
   }
 
   #startTimer() {
     if (this.#timer || !this.#capture) return;
     this.#timer = setTimeout(() => {
       this.#failOpen();
-      this.#pushBuffered();
+      this.#pushPendingFrameBytes();
     }, this.#maxCandidateMs);
     this.#timer.unref?.();
   }
