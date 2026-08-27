@@ -315,6 +315,8 @@ function dereferenceAntigravitySchema(schema, root = schema, stack = new Set(), 
 const UNSUPPORTED_SCHEMA_KEYWORDS = Object.freeze([
   "$schema",
   "$id",
+  "id",
+  "discriminator",
   "$anchor",
   "$dynamicAnchor",
   "$dynamicRef",
@@ -368,7 +370,8 @@ const UNSUPPORTED_SCHEMA_KEYWORDS = Object.freeze([
 // Antigravity's protobuf-backed schema layer rejects annotations and
 // validation keywords that ordinary JSON Schema permits. This pass is pure:
 // tool schemas are caller-owned objects and must never be mutated in place.
-function cleanAntigravitySchema(schema, depth = 0) {
+function cleanAntigravitySchema(schema, depth = 0, { sanitizeClaude = false } = {}) {
+  if (schema === true || schema === false) return {};
   if (!isPlainObject(schema) || depth > MAX_SCHEMA_DEPTH) return schema;
   const next = {};
   for (const [key, value] of Object.entries(schema)) {
@@ -381,17 +384,21 @@ function cleanAntigravitySchema(schema, depth = 0) {
       next[key] = Object.fromEntries(
         Object.entries(value).map(([name, child]) => [
           name,
-          cleanAntigravitySchema(child, depth + 1),
+          cleanAntigravitySchema(child, depth + 1, { sanitizeClaude }),
         ]),
       );
       continue;
     }
-    if (["items"].includes(key) && isPlainObject(value)) {
-      next[key] = cleanAntigravitySchema(value, depth + 1);
+    if (key === "items" && (isPlainObject(value) || typeof value === "boolean")) {
+      next[key] = cleanAntigravitySchema(value, depth + 1, { sanitizeClaude });
       continue;
     }
     if (["anyOf", "oneOf", "allOf"].includes(key) && Array.isArray(value)) {
-      next[key] = value.map((child) => cleanAntigravitySchema(child, depth + 1));
+      const branches = value
+        .filter((child) => !(sanitizeClaude && child?.type === "null"))
+        .map((child) => cleanAntigravitySchema(child, depth + 1, { sanitizeClaude }));
+      if (branches.length === 1) next[key] = branches;
+      else if (branches.length > 1 && !sanitizeClaude) next[key] = branches;
       continue;
     }
     next[key] = value;
@@ -399,17 +406,29 @@ function cleanAntigravitySchema(schema, depth = 0) {
   if (Array.isArray(next.type)) {
     next.type = next.type.find((type) => type !== "null") || next.type[0];
   }
+  if (sanitizeClaude) {
+    for (const key of ["anyOf", "oneOf", "allOf"]) {
+      if (!Array.isArray(next[key]) || next[key].length !== 1) continue;
+      const branch = next[key][0];
+      delete next[key];
+      if (isPlainObject(branch)) {
+        for (const [branchKey, branchValue] of Object.entries(branch)) {
+          if (!(branchKey in next)) next[branchKey] = branchValue;
+        }
+      }
+    }
+  }
   return next;
 }
 
-function antigravityToolSchema(schema) {
+function antigravityToolSchema(schema, options) {
   const normalized = normalizeSchemaLiterals(schema);
   if (!isPlainObject(normalized)) return { type: "object", properties: {} };
   const dereferenced = dereferenceAntigravitySchema(normalized);
   // Flatten while definitions are still present and references are already
   // materialized; stripping first is what used to erase ref-heavy tools.
   const objectRoot = objectRootToolSchema(dereferenced);
-  return cleanAntigravitySchema(objectRoot);
+  return cleanAntigravitySchema(objectRoot, 0, options);
 }
 
 function antigravityToolName(name) {
@@ -419,7 +438,7 @@ function antigravityToolName(name) {
   return cleaned || "tool";
 }
 
-function functionDeclarations(chat) {
+function functionDeclarations(chat, options) {
   return (Array.isArray(chat.tools) ? chat.tools : [])
     .filter((tool) => tool?.type === "function" && tool.function?.name)
     .map((tool) => ({
@@ -427,6 +446,7 @@ function functionDeclarations(chat) {
       description: tool.function.description,
       parameters: antigravityToolSchema(
         tool.function.parameters || { type: "object", properties: {} },
+        options,
       ),
     }));
 }
@@ -511,7 +531,9 @@ export function toAntigravityRequest(chat, { projectId = "", requestId = undefin
       includeThoughts: true,
     };
   }
-  const declarations = functionDeclarations(chat);
+  const declarations = functionDeclarations(chat, {
+    sanitizeClaude: String(chat?.model || "").startsWith("claude-"),
+  });
   if (declarations.length) {
     request.tools = [{ functionDeclarations: declarations }];
     const choice = chat?.tool_choice;

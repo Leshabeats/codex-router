@@ -139,6 +139,35 @@ test("sanitizes unsupported JSON Schema constructs for Antigravity", () => {
   assert.equal("$schema" in declaration.parameters, false);
 });
 
+test("sanitizes Codex tool schemas accepted by Claude Antigravity", () => {
+  const request = toAntigravityRequest({
+    model: "claude-opus-4-6-thinking",
+    messages: [{ role: "user", content: "inspect" }],
+    tools: [{
+      type: "function",
+      function: {
+        name: "inspect",
+        parameters: {
+          type: "object",
+          id: "legacy-root",
+          discriminator: { propertyName: "kind" },
+          properties: {
+            optional: { anyOf: [{ type: "string" }, { type: "null" }] },
+            flexible: { anyOf: [{ type: "string" }, { type: "number" }] },
+            metadata: { type: "array", items: true },
+          },
+        },
+      },
+    }],
+  });
+  const schema = request.request.tools[0].functionDeclarations[0].parameters;
+  assert.equal("id" in schema, false);
+  assert.equal("discriminator" in schema, false);
+  assert.deepEqual(schema.properties.optional, { type: "string" });
+  assert.deepEqual(schema.properties.flexible, {});
+  assert.deepEqual(schema.properties.metadata.items, {});
+});
+
 test("accumulates Gemini SSE parts into an OpenAI-style turn", () => {
   const state = createAntigravityTurnState();
   applyAntigravitySsePayload(state, {
