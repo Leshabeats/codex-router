@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   closeWindowsPrivateFileWorker,
@@ -14,6 +15,17 @@ import {
   writePrivateFile,
   windowsPrivateFileWorkerSpawnCount,
 } from "../src/file-security.mjs";
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+test("Windows CI runs every ACL test without parallel PowerShell worker starvation", () => {
+  const workflow = readFileSync(path.join(root, ".github", "workflows", "ci.yml"), "utf8");
+  assert.match(workflow, /if: runner\.os != 'Windows'\s+run: npm test/);
+  assert.match(
+    workflow,
+    /if: runner\.os == 'Windows'\s+run: npm test -- --test-concurrency=1/,
+  );
+});
 
 test("private JSON state uses one owner-only atomic writer", () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), "codex-router-private-json-"));
