@@ -50,6 +50,13 @@ if [ "$configured_group" != "group.io.github.codex-router" ]; then
     "$configured_group" >&2
   exit 1
 fi
+configured_mode=$(/usr/libexec/PlistBuddy -c 'Print :ModelRouterWidgetStorageMode' \
+  "$built_extension/Contents/Info.plist")
+if [ "$configured_mode" != "app-group" ]; then
+  printf 'The unsigned macOS WidgetKit extension has an invalid storage mode: %s\n' \
+    "$configured_mode" >&2
+  exit 1
+fi
 
 rm -rf "$output_dir"
 mkdir -p "$(dirname -- "$output_dir")"

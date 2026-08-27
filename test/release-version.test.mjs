@@ -22,8 +22,8 @@ test("unknown prerelease channels fail closed", () => {
   assert.throws(() => nextBetaVersion("main"), /Cannot automatically advance/);
 });
 
-test("the widget needs no broad filesystem exception", () => {
-  const entitlements = readFileSync(
+test("the widget keeps production App Group and local-source read-only contracts separate", () => {
+  const productionEntitlements = readFileSync(
     path.join(
       root,
       "apps",
@@ -34,8 +34,31 @@ test("the widget needs no broad filesystem exception", () => {
     ),
     "utf8",
   );
-  assert.match(entitlements, /com\.apple\.security\.application-groups/);
-  assert.doesNotMatch(entitlements, /temporary-exception\.files/);
+  const localEntitlements = readFileSync(
+    path.join(
+      root,
+      "apps",
+      "macos",
+      "RouterUsageWidget",
+      "RouterUsageWidget",
+      "RouterUsageWidget.local.entitlements",
+    ),
+    "utf8",
+  );
+  assert.match(productionEntitlements, /com\.apple\.security\.application-groups/);
+  assert.match(productionEntitlements, /group\.io\.github\.codex-router/);
+  assert.doesNotMatch(productionEntitlements, /temporary-exception\.files/);
+  assert.match(localEntitlements, /com\.apple\.security\.app-sandbox/);
+  assert.match(
+    localEntitlements,
+    /com\.apple\.security\.temporary-exception\.files\.home-relative-path\.read-only/,
+  );
+  assert.match(
+    localEntitlements,
+    /\/Library\/Application Support\/Codex Router Widget\//,
+  );
+  assert.doesNotMatch(localEntitlements, /com\.apple\.security\.application-groups/);
+  assert.doesNotMatch(localEntitlements, /home-relative-path\.read-write|absolute-path/);
 });
 
 test("releases are tag-driven and validate every asset before publishing", () => {
@@ -105,7 +128,10 @@ test("releases are tag-driven and validate every asset before publishing", () =>
     /lipo "\$widget\/Contents\/MacOS\/RouterUsageWidget" -verify_arch x86_64 arm64/,
   );
   assert.match(ci, /widget-entitlements\.plist/);
-  assert.match(ci, /com\.apple\.security\.application-groups:0/);
+  assert.match(ci, /ModelRouterWidgetStorageMode/);
+  assert.match(ci, /temporary-exception\.files\.home-relative-path\.read-only:0/);
+  assert.match(ci, /production_entitlements=.*RouterUsageWidget\.entitlements/);
+  assert.match(ci, /local_entitlements=.*RouterUsageWidget\.local\.entitlements/);
   assert.match(
     ci,
     /lipo "\$app\/Contents\/Resources\/Control Center\.app\/Contents\/MacOS\/Codex Router" -verify_arch x86_64 arm64/,

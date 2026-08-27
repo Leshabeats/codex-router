@@ -5,6 +5,14 @@ repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 tray_dir="$repo_dir/apps/macos/ModelRouterTray"
 widget_dir="$repo_dir/apps/macos/RouterUsageWidget"
 control_center_dir="$repo_dir/apps/control-center"
+signing_identity=${MODEL_ROUTER_CODESIGN_IDENTITY:--}
+if [ "$signing_identity" = "-" ]; then
+  widget_storage_mode=local
+  widget_entitlements="$widget_dir/RouterUsageWidget/RouterUsageWidget.local.entitlements"
+else
+  widget_storage_mode=app-group
+  widget_entitlements="$widget_dir/RouterUsageWidget/RouterUsageWidget.entitlements"
+fi
 # One companion per user, not one per checkout. A default inside the
 # repository built a separate bundle for every clone and left launchd pointing
 # at whichever one installed last; ~/Applications is also a LaunchServices
@@ -118,26 +126,36 @@ MODEL_ROUTER_WIDGET_ARCH="$widget_arch" \
 rm -rf "$bundle_dir/Contents/Resources/Control Center.app"
 cp -R "$control_center_bundle" "$bundle_dir/Contents/Resources/Control Center.app"
 printf '%s\n' "$repo_dir" > "$bundle_dir/Contents/Resources/Control Center.app/Contents/Resources/router-root"
-/usr/bin/codesign --force --deep --sign - "$bundle_dir/Contents/Resources/Control Center.app"
 # Seal the checkout relationship into Info.plist itself. An external symlink is
 # invalid inside a strict macOS code-signed bundle; a loose text resource would
 # be executable-path input. This value is covered by the final signature, so
 # changing the selected checkout also invalidates verification.
 /usr/libexec/PlistBuddy -c "Add :ModelRouterSourceRoot string $repo_dir" \
   "$bundle_dir/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :ModelRouterWidgetStorageMode $widget_storage_mode" \
+  "$bundle_dir/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :ModelRouterWidgetStorageMode $widget_storage_mode" \
+  "$bundle_dir/Contents/PlugIns/RouterUsageWidget.appex/Contents/Info.plist"
 
-# Nested code must be signed before the containing app. The shared App Group
-# entitlement is the only capability the widget needs; neither side receives
-# router credentials or a command-execution surface.
-/usr/bin/codesign --force --sign - \
-  --entitlements "$widget_dir/RouterUsageWidget/RouterUsageWidget.entitlements" \
+# Every bundle mutation is complete before signing starts. Nested code must be
+# signed before the containing app. Ad-hoc builds use one narrow, read-only
+# exception for the local-source snapshot; provisioned builds use only the App
+# Group contract.
+/usr/bin/codesign --force --deep --sign "$signing_identity" \
+  "$bundle_dir/Contents/Resources/Control Center.app"
+/usr/bin/codesign --force --sign "$signing_identity" \
+  --entitlements "$widget_entitlements" \
   "$bundle_dir/Contents/PlugIns/RouterUsageWidget.appex"
 # The copied SwiftPM executable carries an ad-hoc signature. Sign only after
 # every executable, resource, and link is in its final location; mutating the
 # live signed bundle is what produced taskgated "Invalid Page" terminations.
-/usr/bin/codesign --force --sign - \
-  --entitlements "$tray_dir/Resources/ModelRouterTray.entitlements" \
-  "$bundle_dir"
+if [ "$signing_identity" = "-" ]; then
+  /usr/bin/codesign --force --sign "$signing_identity" "$bundle_dir"
+else
+  /usr/bin/codesign --force --sign "$signing_identity" \
+    --entitlements "$tray_dir/Resources/ModelRouterTray.entitlements" \
+    "$bundle_dir"
+fi
 /usr/bin/codesign --verify --deep --strict "$bundle_dir"
 
 trap - EXIT HUP INT TERM

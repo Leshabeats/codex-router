@@ -1,6 +1,8 @@
 name: RouterUsageWidget
 options:
   minimumXcodeGenVersion: 2.40.0
+  projectFormat: xcode15_0
+  xcodeVersion: "15.0"
   deploymentTarget:
     macOS: "14.0"
 settings:

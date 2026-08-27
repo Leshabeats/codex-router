@@ -3932,7 +3932,7 @@ enum TokenDisplayUnit: String, CaseIterable, Identifiable {
     let normalized = value.isFinite ? max(0, value) : 0
     switch self {
     case .full:
-      return Int64(normalized.rounded()).formatted(.number.grouping(.automatic))
+      return RouterWidgetTokenCount.from(normalized).formatted(.number.grouping(.automatic))
     case .millions:
       return "\(String(format: "%.1f", normalized / 1_000_000))M"
     }

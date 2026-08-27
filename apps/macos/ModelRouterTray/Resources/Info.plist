@@ -33,5 +33,7 @@
   <true/>
   <key>ModelRouterWidgetAppGroup</key>
   <string>group.io.github.codex-router</string>
+  <key>ModelRouterWidgetStorageMode</key>
+  <string>app-group</string>
 </dict>
 </plist>

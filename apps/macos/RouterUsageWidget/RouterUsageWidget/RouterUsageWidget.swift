@@ -161,68 +161,60 @@ struct RouterUsageProvider: AppIntentTimelineProvider {
   }
 
   static func readSnapshot() -> RouterWidgetSnapshot? {
+    let rawMode = Bundle.main.object(
+      forInfoDictionaryKey: RouterWidgetSnapshot.storageModeInfoKey
+    ) as? String
+    guard let mode = rawMode.flatMap(RouterWidgetStorageMode.init(rawValue:)) else {
+      Self.logger.error("Widget storage mode is missing or unexpected")
+      return nil
+    }
     let configured = Bundle.main.object(forInfoDictionaryKey: "ModelRouterWidgetAppGroup") as? String
     let group = configured?.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard let group, group == RouterWidgetSnapshot.defaultAppGroup else {
+    if mode == .appGroup && group != RouterWidgetSnapshot.defaultAppGroup {
       Self.logger.error("Widget App Group is missing or unexpected")
       return nil
     }
 
-    let registeredContainer = FileManager.default.containerURL(
-      forSecurityApplicationGroupIdentifier: group
-    )
-    let urls = Self.snapshotURLs(
+    let registeredContainer = mode == .appGroup
+      ? group.flatMap(FileManager.default.containerURL(forSecurityApplicationGroupIdentifier:))
+      : nil
+    guard let url = Self.snapshotURL(
+      mode: mode,
       configuredGroup: group,
-      registeredContainer: registeredContainer
-    )
-    var lastFailure = "No widget snapshot location was available"
-    var snapshots: [RouterWidgetSnapshot] = []
-    for url in urls {
-      do {
-        let data = try Data(contentsOf: url)
-        if let snapshot = Self.decodeSnapshot(data) {
-          snapshots.append(snapshot)
-        } else {
-          lastFailure = "Snapshot has an unsupported schema or invalid payload"
-        }
-      } catch {
-        lastFailure = error.localizedDescription
-      }
+      registeredContainer: registeredContainer,
+      actualHomeDirectory: RouterWidgetSnapshotStore.actualUserHomeDirectory
+    ) else {
+      Self.logger.error("No widget snapshot location was available")
+      return nil
     }
-    if let newest = Self.newestSnapshot(snapshots) { return newest }
-    Self.logger.error("Could not read the widget snapshot: \(lastFailure, privacy: .public)")
+    do {
+      let data = try RouterWidgetSnapshotStore.readData(at: url)
+      if let snapshot = Self.decodeSnapshot(data) { return snapshot }
+      Self.logger.error("Snapshot has an unsupported schema or invalid payload")
+    } catch {
+      Self.logger.error(
+        "Could not read the widget snapshot: \(error.localizedDescription, privacy: .public)"
+      )
+    }
     return nil
   }
 
-  static func snapshotURLs(
+  static func snapshotURL(
+    mode: RouterWidgetStorageMode,
     configuredGroup: String?,
     registeredContainer: URL?,
-    sandboxHomeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
-  ) -> [URL] {
-    guard configuredGroup == RouterWidgetSnapshot.defaultAppGroup else { return [] }
-    let localSnapshot = RouterWidgetSnapshotStore.widgetSandboxSnapshotURL(
-      sandboxDataDirectory: sandboxHomeDirectory
+    actualHomeDirectory: URL?
+  ) -> URL? {
+    RouterWidgetSnapshotStore.snapshotURL(
+      mode: mode,
+      configuredAppGroup: configuredGroup,
+      registeredContainer: registeredContainer,
+      localHomeDirectory: actualHomeDirectory
     )
-    var urls = registeredContainer.map {
-      [$0.appendingPathComponent(RouterWidgetSnapshot.fileName, isDirectory: false)]
-    } ?? []
-    if !urls.contains(localSnapshot) {
-      urls.append(localSnapshot)
-    }
-    return urls
   }
 
   static func decodeSnapshot(_ data: Data) -> RouterWidgetSnapshot? {
-    let decoder = JSONDecoder()
-    decoder.dateDecodingStrategy = .iso8601
-    guard let snapshot = try? decoder.decode(RouterWidgetSnapshot.self, from: data),
-          snapshot.schemaVersion == RouterWidgetSnapshot.schemaVersion
-    else { return nil }
-    return snapshot
-  }
-
-  static func newestSnapshot(_ snapshots: [RouterWidgetSnapshot]) -> RouterWidgetSnapshot? {
-    snapshots.max { $0.generatedAt < $1.generatedAt }
+    RouterWidgetSnapshotStore.decode(data)
   }
 
   static func snapshotPayload(
@@ -629,8 +621,8 @@ private struct RouterWidgetQuotaRow: View {
   let now: Date
 
   private var tint: Color {
-    if quota.remainingPercent < 15 { return widgetCritical }
-    if quota.remainingPercent < 35 { return widgetWarning }
+    if quota.boundedRemainingPercent < 15 { return widgetCritical }
+    if quota.boundedRemainingPercent < 35 { return widgetWarning }
     return widgetAccent
   }
 
@@ -641,7 +633,7 @@ private struct RouterWidgetQuotaRow: View {
           .font(.caption.weight(.medium))
           .lineLimit(1)
         Spacer(minLength: 4)
-        Text("\(Int(quota.remainingPercent.rounded()))%")
+        Text("\(quota.roundedRemainingPercent)%")
           .font(.caption.weight(.semibold))
           .monospacedDigit()
           .foregroundStyle(tint)
@@ -651,7 +643,7 @@ private struct RouterWidgetQuotaRow: View {
           Capsule().fill(Color.secondary.opacity(0.14))
           Capsule()
             .fill(tint)
-            .frame(width: geometry.size.width * CGFloat(max(0, min(100, quota.remainingPercent)) / 100))
+            .frame(width: geometry.size.width * CGFloat(quota.boundedRemainingPercent / 100))
         }
       }
       .frame(height: 3)
@@ -675,7 +667,7 @@ private struct RouterWidgetQuotaRow: View {
 
   private var accessibilityLabel: String {
     let reset = quota.resetAt.map { ", resets \(Self.resetLabel($0, now: now))" } ?? ""
-    return "\(quota.providerName), \(quota.label), \(Int(quota.remainingPercent.rounded())) percent left\(reset)"
+    return "\(quota.providerName), \(quota.label), \(quota.roundedRemainingPercent) percent left\(reset)"
   }
 
   static func resetLabel(_ date: Date, now: Date) -> String {

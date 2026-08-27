@@ -2052,8 +2052,7 @@ enum DesktopWidgetQuotaSeverity: Equatable {
 
 enum DesktopWidgetPresentation {
   nonisolated static func tokenCountLabel(_ value: Double) -> String {
-    let normalized = value.isFinite ? max(0, value) : 0
-    return Int64(normalized.rounded()).formatted(.number.grouping(.automatic))
+    RouterWidgetTokenCount.from(value).formatted(.number.grouping(.automatic))
   }
 
   nonisolated static func quotaSeverity(_ remainingPercent: Double) -> DesktopWidgetQuotaSeverity {

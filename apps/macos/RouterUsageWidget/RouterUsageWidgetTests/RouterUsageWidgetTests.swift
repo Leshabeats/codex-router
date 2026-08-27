@@ -17,6 +17,33 @@ final class RouterUsageWidgetTests: XCTestCase {
     )
   }
 
+  func testUntrustedTokenExtremesSaturateWithoutOverflow() {
+    XCTAssertEqual(RouterWidgetTokenCount.from(Double(Int64.max)), Int64.max)
+    let now = Date()
+    let source = RouterWidgetUsageSource(
+      id: "bounded",
+      name: "Bounded",
+      todayTokens: Int64.max,
+      daily: [
+        RouterWidgetDailyPoint(date: now, tokens: Int64.max),
+        RouterWidgetDailyPoint(date: now.addingTimeInterval(86_400), tokens: Int64.max),
+      ]
+    )
+    XCTAssertEqual(source.periodTokens, Int64.max)
+    XCTAssertEqual(source.cumulativeDaily.map(\.tokens), [Int64.max, Int64.max])
+
+    let hugeQuota = RouterWidgetQuota(
+      id: "huge",
+      providerID: "provider",
+      providerName: "Provider",
+      label: "Window",
+      remainingPercent: 1e300,
+      resetAt: nil
+    )
+    XCTAssertEqual(hugeQuota.boundedRemainingPercent, 100)
+    XCTAssertEqual(hugeQuota.roundedRemainingPercent, 100)
+  }
+
   func testSampleDataIsRestrictedToTheWidgetGallery() {
     let stored = RouterWidgetSnapshot.preview
     XCTAssertEqual(
@@ -29,40 +56,45 @@ final class RouterUsageWidgetTests: XCTestCase {
     XCTAssertEqual(gallery?.daily.count, 7)
   }
 
-  func testSnapshotURLUsesRegisteredContainerFirstAndLocalFallbackSecond() {
+  func testSnapshotURLUsesOnlyTheLocationSelectedBySignedMode() {
     let registered = URL(fileURLWithPath: "/registered/group", isDirectory: true)
-    let sandbox = URL(fileURLWithPath: "/sandbox/Data", isDirectory: true)
+    let home = URL(fileURLWithPath: "/Users/example", isDirectory: true)
     XCTAssertEqual(
-      RouterUsageProvider.snapshotURLs(
+      RouterUsageProvider.snapshotURL(
+        mode: .appGroup,
         configuredGroup: RouterWidgetSnapshot.defaultAppGroup,
         registeredContainer: registered,
-        sandboxHomeDirectory: sandbox
+        actualHomeDirectory: home
       ),
-      [
-        registered.appendingPathComponent(RouterWidgetSnapshot.fileName),
-        sandbox
-          .appendingPathComponent("Library/Application Support", isDirectory: true)
-          .appendingPathComponent(RouterWidgetSnapshot.supportDirectoryName, isDirectory: true)
-          .appendingPathComponent(RouterWidgetSnapshot.fileName),
-      ]
+      registered.appendingPathComponent(RouterWidgetSnapshot.fileName)
     )
-  }
-
-  func testSnapshotURLRejectsUnexpectedGroupAndDeduplicatesContainer() {
-    let sandbox = URL(fileURLWithPath: "/sandbox/Data", isDirectory: true)
-    XCTAssertTrue(RouterUsageProvider.snapshotURLs(
+    XCTAssertEqual(
+      RouterUsageProvider.snapshotURL(
+        mode: .local,
+        configuredGroup: "group.example.invalid",
+        registeredContainer: registered,
+        actualHomeDirectory: home
+      )?.path,
+      "/Users/example/Library/Application Support/Codex Router Widget/usage-widget.json"
+    )
+    XCTAssertNil(RouterUsageProvider.snapshotURL(
+      mode: .appGroup,
       configuredGroup: "group.example.invalid",
-      registeredContainer: URL(fileURLWithPath: "/tmp/invalid"),
-      sandboxHomeDirectory: sandbox
-    ).isEmpty)
-    let local = RouterWidgetSnapshotStore.widgetSandboxSnapshotURL(
-      sandboxDataDirectory: sandbox
-    )
-    XCTAssertEqual(RouterUsageProvider.snapshotURLs(
+      registeredContainer: registered,
+      actualHomeDirectory: home
+    ))
+    XCTAssertNil(RouterUsageProvider.snapshotURL(
+      mode: .appGroup,
       configuredGroup: RouterWidgetSnapshot.defaultAppGroup,
-      registeredContainer: local.deletingLastPathComponent(),
-      sandboxHomeDirectory: sandbox
-    ).count, 1)
+      registeredContainer: nil,
+      actualHomeDirectory: home
+    ))
+    XCTAssertNil(RouterUsageProvider.snapshotURL(
+      mode: .local,
+      configuredGroup: RouterWidgetSnapshot.defaultAppGroup,
+      registeredContainer: registered,
+      actualHomeDirectory: nil
+    ))
   }
 
   func testSnapshotDecoderAcceptsCurrentSchemaAndRejectsOtherSchemas() throws {
@@ -77,31 +109,15 @@ final class RouterUsageWidgetTests: XCTestCase {
     XCTAssertEqual(decoded?.quotas.first?.providerName, "Codex")
     let invalid = "{\"schemaVersion\":999}".data(using: .utf8)!
     XCTAssertNil(RouterUsageProvider.decodeSnapshot(invalid))
-  }
 
-  func testNewestSnapshotWinsAcrossRegisteredAndFallbackLocations() {
-    let preview = RouterWidgetSnapshot.preview
-    let older = RouterWidgetSnapshot(
-      schemaVersion: preview.schemaVersion,
-      generatedAt: preview.generatedAt.addingTimeInterval(-60),
-      activityState: preview.activityState,
-      activeChatCount: preview.activeChatCount,
-      selectedProviderID: preview.selectedProviderID,
-      selectedProviderName: preview.selectedProviderName,
-      todayTokens: preview.todayTokens,
-      daily: preview.daily,
-      quotas: preview.quotas,
-      usageSources: preview.usageSources
+    var object = try XCTUnwrap(
+      JSONSerialization.jsonObject(with: encoder.encode(RouterWidgetSnapshot.preview))
+        as? [String: Any]
     )
-    XCTAssertEqual(
-      RouterUsageProvider.newestSnapshot([preview, older])?.generatedAt,
-      preview.generatedAt
-    )
-    XCTAssertEqual(
-      RouterUsageProvider.newestSnapshot([older, preview])?.generatedAt,
-      preview.generatedAt
-    )
-    XCTAssertNil(RouterUsageProvider.newestSnapshot([]))
+    object["selectedProviderID"] = "OpenAI"
+    XCTAssertNil(RouterUsageProvider.decodeSnapshot(
+      try JSONSerialization.data(withJSONObject: object)
+    ))
   }
 
   func testUsageSourcePickerDefaultsToCodexAndListsConnectedSources() {
@@ -111,7 +127,7 @@ final class RouterUsageWidgetTests: XCTestCase {
     XCTAssertEqual(RouterWidgetSnapshot.preview.usageSource(id: "deepseek").name, "DeepSeek")
   }
 
-  func testLegacySingleSourceSnapshotRemainsSelectable() {
+  func testLegacySingleSourceSnapshotRemainsSelectable() throws {
     let preview = RouterWidgetSnapshot.preview
     let legacy = RouterWidgetSnapshot(
       schemaVersion: preview.schemaVersion,
@@ -127,6 +143,10 @@ final class RouterUsageWidgetTests: XCTestCase {
     )
     XCTAssertEqual(legacy.availableUsageSources.map(\.id), ["openai"])
     XCTAssertEqual(legacy.usageSource(id: "missing").id, "openai")
+    let decoded = RouterUsageProvider.decodeSnapshot(
+      try JSONEncoder.routerWidget.encode(legacy)
+    )
+    XCTAssertNil(decoded?.usageSources)
   }
 
   func testRemovedConfiguredSourceUsesTheDisplayedFallbackForDeepLinks() {

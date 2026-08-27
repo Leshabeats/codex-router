@@ -29,16 +29,23 @@ Control-click a widget, choose **Edit Widget**, and select its **Usage Source**.
 The picker is populated from the router's current connected providers, so it
 does not offer an account the host cannot measure.
 
-The native host publishes a small, secret-free JSON snapshot to its shared App
-Group after normal status and usage polls. The WidgetKit extension only reads
-that snapshot: it does not run router commands and never receives provider
+The native host publishes a small, size-bounded, secret-free JSON snapshot
+after normal status and usage polls. The WidgetKit extension only reads that
+snapshot: it does not run router commands and never receives provider
 credentials, API keys, prompts, model output, or caller capabilities. A stale
 snapshot is called out after 45 minutes instead of presenting old data as live.
 
-Local source builds use ad-hoc signing and are suitable for visual and build
-verification. A redistributable build needs both the host app and extension to
-be signed by the same Apple team with the `group.io.github.codex-router` App
-Group provisioned for both bundle identifiers.
+Local source builds use ad-hoc signing. Their signed storage mode writes one
+private file at
+`~/Library/Application Support/Codex Router Widget/usage-widget.json` and the
+extension receives only the matching home-relative, read-only temporary
+filesystem exception. That exception is local-source-only: it is not present in
+production entitlements, and neither process reads or writes the extension's
+`~/Library/Containers` directory. Set `MODEL_ROUTER_CODESIGN_IDENTITY` to a
+non-ad-hoc signing identity for a provisioned build; that selects the production
+storage mode, where both sides use only the `group.io.github.codex-router` App
+Group. A redistributable build still needs the host app and extension signed by
+the same Apple team with that App Group provisioned for both bundle identifiers.
 
 ## Opening it like an app
 

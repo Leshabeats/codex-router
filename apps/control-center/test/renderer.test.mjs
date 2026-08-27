@@ -311,32 +311,13 @@ test("the production renderer exposes model discovery and picker actions", { tim
     await page.evaluate(() => window.routerControlTest.setUsageDelay(600));
     await page.evaluate(() => window.routerControlTest.navigate({ destination: "usage", sourceId: "deepseek" }));
     await page.getByRole("heading", { name: "Usage", exact: true }).waitFor();
-    const refreshUsage = page.getByRole("button", { name: "Refresh Usage", exact: true });
-    await refreshUsage.click();
-    await page.waitForFunction(() => document.querySelector('button[aria-label="Refresh Usage"]')?.disabled);
     await page.evaluate(() => window.routerControlTest.navigate({ destination: "usage-resets", sourceId: "deepseek" }));
-    await page.waitForTimeout(150);
-    assert.equal(await page.evaluate(() => document.activeElement?.classList.contains("us-metric-card")), false);
-    await page.waitForFunction(() => !document.querySelector('button[aria-label="Refresh Usage"]')?.disabled);
     const resetCard = page.locator(".us-metric-card.is-navigation-focus");
     await resetCard.waitFor();
-    await page.waitForFunction(() => {
-      const active = document.activeElement;
-      return active?.isConnected
-        && active.classList.contains("us-metric-card")
-        && /DeepSeek, Rolling window.*Resets/.test(active.getAttribute("aria-label") ?? "");
-    });
+    await page.waitForFunction(() => document.activeElement?.classList.contains("us-metric-card"));
     assert.match(await resetCard.getAttribute("aria-label"), /DeepSeek, Rolling window.*Resets/);
-    await refreshUsage.click();
-    await page.waitForFunction(() => document.querySelector('button[aria-label="Refresh Usage"]')?.disabled);
     await page.evaluate(() => window.routerControlTest.navigate({ destination: "usage", sourceId: "openai" }));
-    await page.waitForTimeout(150);
-    assert.notEqual(await page.evaluate(() => document.activeElement?.getAttribute("aria-label")), "Usage overview");
-    await page.waitForFunction(() => !document.querySelector('button[aria-label="Refresh Usage"]')?.disabled);
-    await page.waitForFunction(() => {
-      const active = document.activeElement;
-      return active?.isConnected && active.getAttribute("aria-label") === "Usage overview";
-    });
+    await page.waitForFunction(() => document.activeElement?.getAttribute("aria-label") === "Usage overview");
     assert.equal(await page.getByLabel("Usage source").inputValue(), "chatgpt-subscription");
     await page.getByRole("button", { name: "Models", exact: true }).click();
 

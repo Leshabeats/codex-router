@@ -22,6 +22,8 @@
   <string>$(CURRENT_PROJECT_VERSION)</string>
   <key>ModelRouterWidgetAppGroup</key>
   <string>group.io.github.codex-router</string>
+  <key>ModelRouterWidgetStorageMode</key>
+  <string>app-group</string>
   <key>NSExtension</key>
   <dict>
     <key>NSExtensionPointIdentifier</key>

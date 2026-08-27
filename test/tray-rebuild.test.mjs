@@ -81,6 +81,18 @@ function installCompleteMacosTrayBundle(bundle, { includeWidget = true } = {}) {
       "RouterUsageWidget",
     );
     mkdirSync(path.dirname(widgetBinary), { recursive: true });
+    writeFileSync(
+      path.join(
+        bundle,
+        "Contents",
+        "PlugIns",
+        "RouterUsageWidget.appex",
+        "Contents",
+        "Info.plist",
+      ),
+      "<plist><dict><key>CFBundleIdentifier</key><string>io.github.codex-router.tray.widget</string></dict></plist>",
+      "utf8",
+    );
     writeFileSync(widgetBinary, "widget", "utf8");
     chmodSync(widgetBinary, 0o755);
   }
@@ -444,6 +456,8 @@ test("one companion location: the Node and shell sides name the same directory",
 test("the macOS tray is signed only after its resources are assembled", () => {
   const script = readFileSync(path.join(root, "scripts", "build-macos-tray-app.sh"), "utf8");
   const resource = script.indexOf('Add :ModelRouterSourceRoot string $repo_dir');
+  const storageMode = script.indexOf('Set :ModelRouterWidgetStorageMode $widget_storage_mode');
+  const firstSign = script.indexOf('/usr/bin/codesign --force --deep --sign "$signing_identity"');
   const sign = script.indexOf('--entitlements "$tray_dir/Resources/ModelRouterTray.entitlements"');
   const verify = script.indexOf('/usr/bin/codesign --verify --deep --strict "$bundle_dir"');
   assert.ok(resource >= 0, "the checkout link must be placed in the bundle");
@@ -455,6 +469,13 @@ test("the macOS tray is signed only after its resources are assembled", () => {
   assert.match(script, /Contents\/Resources\/Control Center\.app/);
   assert.match(script, /electron-builder[\s\S]*--mac dir/);
   assert.match(script, /Control Center\.app\/Contents\/Resources\/router-root/);
+  assert.match(script, /MODEL_ROUTER_CODESIGN_IDENTITY/);
+  assert.match(script, /widget_storage_mode=local/);
+  assert.match(script, /RouterUsageWidget\.local\.entitlements/);
+  assert.match(script, /widget_storage_mode=app-group/);
+  assert.match(script, /RouterUsageWidget\.entitlements/);
+  assert.ok(storageMode > resource, "the signed storage mode must follow bundle assembly");
+  assert.ok(firstSign > storageMode, "no nested signature may precede the final plist mutation");
   assert.ok(sign > resource, "signing must happen after the final resource write");
   assert.ok(verify > sign, "the completed signature must be verified");
   assert.doesNotMatch(
@@ -620,10 +641,12 @@ test("committed macOS recovery keeps rollback until every versioned bundle artif
   const fixture = macosTransactionFixture({ phase: "committed", artifactSet: "widget-v1" });
   const artifacts = [
     "Contents/MacOS/ModelRouterTray",
+    "Contents/PlugIns/RouterUsageWidget.appex/Contents/Info.plist",
     "Contents/PlugIns/RouterUsageWidget.appex/Contents/MacOS/RouterUsageWidget",
     "Contents/Resources/Control Center.app/Contents/MacOS/Codex Router",
     "Contents/Resources/Control Center.app/Contents/Resources/app.asar",
   ];
+  const executableArtifacts = [artifacts[0], artifacts[2], artifacts[3]];
   try {
     installCompleteMacosTrayBundle(fixture.bundle);
     const transaction = await inspectMacosTrayTransaction(fixture.transaction);
@@ -652,7 +675,7 @@ test("committed macOS recovery keeps rollback until every versioned bundle artif
       writeFileSync(artifact, "complete");
     }
 
-    for (const relative of artifacts.slice(0, 3)) {
+    for (const relative of executableArtifacts) {
       const executable = path.join(fixture.bundle, relative);
       chmodSync(executable, 0o644);
       await assert.rejects(
@@ -661,6 +684,32 @@ test("committed macOS recovery keeps rollback until every versioned bundle artif
       );
       chmodSync(executable, 0o755);
     }
+
+    const widgetInfo = path.join(fixture.bundle, artifacts[1]);
+    rmSync(widgetInfo);
+    assert.equal(await inspectMacosTrayCommittedBundle(fixture.bundle), false);
+    const missingInfoPlan = spawnSync(
+      process.execPath,
+      [transactionCli, "plan", fixture.transaction, fixture.bundle],
+      { encoding: "utf8" },
+    );
+    assert.notEqual(missingInfoPlan.status, 0);
+    assert.match(missingInfoPlan.stderr, /committed live bundle is incomplete/);
+    const externalInfo = path.join(fixture.parent, "external-widget-info.plist");
+    writeFileSync(externalInfo, "outside");
+    symlinkSync(externalInfo, widgetInfo);
+    await assert.rejects(
+      inspectMacosTrayCommittedBundle(fixture.bundle),
+      /RouterUsageWidget\.appex\/Contents\/Info\.plist is not a regular file/,
+    );
+    rmSync(widgetInfo);
+    writeFileSync(widgetInfo, "complete");
+    chmodSync(widgetInfo, 0o666);
+    await assert.rejects(
+      inspectMacosTrayCommittedBundle(fixture.bundle),
+      /RouterUsageWidget\.appex\/Contents\/Info\.plist has unsafe permissions 666/,
+    );
+    chmodSync(widgetInfo, 0o644);
 
     const archive = path.join(fixture.bundle, artifacts.at(-1));
     rmSync(archive);

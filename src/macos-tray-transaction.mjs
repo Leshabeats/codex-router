@@ -235,10 +235,13 @@ export async function inspectMacosTrayCommittedBundle(
     ["Contents/Resources/Control Center.app/Contents/Resources/app.asar", false],
   ];
   if (requireWidget) {
-    requiredFiles.splice(2, 0, [
-      "Contents/PlugIns/RouterUsageWidget.appex/Contents/MacOS/RouterUsageWidget",
-      true,
-    ]);
+    requiredFiles.splice(2, 0,
+      ["Contents/PlugIns/RouterUsageWidget.appex/Contents/Info.plist", false],
+      [
+        "Contents/PlugIns/RouterUsageWidget.appex/Contents/MacOS/RouterUsageWidget",
+        true,
+      ],
+    );
   }
   for (const [relative, executable] of requiredFiles) {
     const stats = await statOrNull(path.join(bundleDirectory, relative));
