@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import {
   closeSync,
   constants as fsConstants,
@@ -556,12 +555,13 @@ function resolveValue(result) {
 }
 
 function duplicateResolvedSecrets(entries) {
-  const seen = new Map();
+  // The resolved candidates already exist in this short-lived request scope.
+  // Comparing those values directly avoids creating a reusable verifier for
+  // every provider secret.
+  const seen = new Set();
   for (const entry of entries) {
-    const digest = createHash("sha256").update(entry.value).digest("hex");
-    const previous = seen.get(digest);
-    if (previous && previous !== entry.meta.id) return true;
-    seen.set(digest, entry.meta.id);
+    if (seen.has(entry.value)) return true;
+    seen.add(entry.value);
   }
   return false;
 }

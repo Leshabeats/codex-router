@@ -14,7 +14,7 @@
 // case where the plan changes under the same key.
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { scryptSync } from "node:crypto";
 import path from "node:path";
 
 import { STATE_DIR } from "./paths.mjs";
@@ -25,13 +25,27 @@ export const COMMANDCODE_PLAN_PATH = path.join(STATE_DIR, "commandcode-plan.json
 // a working day, short enough that an upgrade is noticed the same afternoon.
 export const ROUTE_RECHECK_MS = 6 * 60 * 60 * 1000;
 const MAX_CREDENTIAL_ROUTES = 256;
-const FINGERPRINT_PATTERN = /^[0-9a-f]{16}$/;
+const FINGERPRINT_PATTERN = /^[0-9a-f]{64}$/;
+const FINGERPRINT_SALT = "codex-router/commandcode-plan/credential/v2";
+const FINGERPRINT_SCRYPT_OPTIONS = Object.freeze({
+  N: 16_384,
+  r: 8,
+  p: 1,
+  maxmem: 32 * 1024 * 1024,
+});
 
-// Never the key itself, and never enough of it to be one: this file is state,
-// not a credential store, and a fingerprint answers the only question asked of
-// it -- "is this still the same key".
+// Never the key itself: this file is state, not a credential store, and a
+// verifier answers the only question asked of it -- "is this still the same
+// key". The memory-hard derivation also avoids persisting a fast offline
+// verifier. Version-one SHA-256 prefixes intentionally miss after this change;
+// the only cost is re-learning one entitlement response for that credential.
 export function credentialFingerprint(value) {
-  return createHash("sha256").update(String(value ?? "")).digest("hex").slice(0, 16);
+  return scryptSync(
+    String(value ?? ""),
+    FINGERPRINT_SALT,
+    32,
+    FINGERPRINT_SCRYPT_OPTIONS,
+  ).toString("hex");
 }
 
 function readDocument() {

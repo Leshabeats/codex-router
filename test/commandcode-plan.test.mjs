@@ -79,7 +79,7 @@ test("the state file records a fingerprint and never the key", () => {
   assert.doesNotMatch(raw, /supersecret/);
   const fingerprint = credentialFingerprint("user_supersecret_value");
   const entry = readCommandCodePlanState().commandcode.credentials[fingerprint];
-  assert.match(entry.credential, /^[0-9a-f]{16}$/);
+  assert.match(entry.credential, /^[0-9a-f]{64}$/);
   assert.equal(entry.providerApi, false);
   assert.equal(entry.observedAt, new Date(AT).toISOString());
 });
