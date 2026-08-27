@@ -3,6 +3,7 @@ import { isDeepStrictEqual, TextDecoder } from "node:util";
 
 const MAX_CANDIDATE_BYTES = 64 * 1024;
 const MAX_CANDIDATE_MS = 1_000;
+const MAX_DIRECT_CAPTURE_MS = 60_000;
 const MAX_FRAME_BYTES = 256 * 1024;
 const MAX_JSON_BYTES = 8 * 1024 * 1024;
 const MAX_JSON_MS = 1_000;
@@ -220,11 +221,13 @@ function fatalUtf8(buffer) {
 }
 
 // JSON.parse silently keeps only the last occurrence of a duplicate object
-// member. That is unsafe here because a later stringify could then erase an
-// earlier visible/error value. Scan the bounded source first, decoding only
-// object keys so equivalent escape spellings compare as the same member while
-// value strings and number spellings remain JSON.parse's responsibility.
-function uniqueJsonObjectMembers(source, limits) {
+// member and accepts numbers that JSON.stringify cannot reproduce faithfully.
+// Either is unsafe here because a later stringify could erase an earlier
+// visible/error value or change numeric provenance. Scan the bounded source
+// first, decoding object keys so equivalent escape spellings compare as the
+// same member and rejecting the parsed-number classes that are lossy on the
+// return trip.
+function strictJsonPreflight(source, limits) {
   let offset = 0;
   let rootState = "value";
   let memberCount = 0;
@@ -307,6 +310,7 @@ function uniqueJsonObjectMembers(source, limits) {
     return undefined;
   };
   const scanNumber = () => {
+    const start = offset;
     if (source[offset] === "-") offset += 1;
     if (source[offset] === "0") {
       offset += 1;
@@ -335,7 +339,12 @@ function uniqueJsonObjectMembers(source, limits) {
         offset += 1;
       }
     }
-    return true;
+    const value = Number(source.slice(start, offset));
+    return (
+      Number.isFinite(value) &&
+      !Object.is(value, -0) &&
+      (!Number.isInteger(value) || Number.isSafeInteger(value))
+    );
   };
   const completeValue = () => {
     const parent = stack.at(-1);
@@ -462,6 +471,43 @@ function uniqueJsonObjectMembers(source, limits) {
   return rootState === "done" && stack.length === 0;
 }
 
+// Function-call arguments are JSON carried inside a JSON string. When an
+// eligible lifecycle is reserialized, validate the complete argument strings
+// with the same numeric and duplicate-member preflight instead of treating the
+// inner document as opaque trusted evidence. Empty opening arguments and
+// partial delta strings are deliberately excluded.
+function strictFunctionArgumentJson(value, limits) {
+  const pending = [value];
+  while (pending.length) {
+    const current = pending.pop();
+    if (Array.isArray(current)) {
+      for (const entry of current) pending.push(entry);
+      continue;
+    }
+    const object = plainObject(current);
+    if (!object) continue;
+    let source;
+    if (object.type === "function_call" && typeof object.arguments === "string") {
+      source = object.arguments;
+    } else if (
+      object.type === "response.function_call_arguments.done" &&
+      typeof object.arguments === "string"
+    ) {
+      source = object.arguments;
+    }
+    if (source) {
+      try {
+        if (!strictJsonPreflight(source, limits)) return false;
+        JSON.parse(source);
+      } catch {
+        return false;
+      }
+    }
+    for (const entry of Object.values(object)) pending.push(entry);
+  }
+  return true;
+}
+
 function parsedBlock(blockBytes, jsonLimits) {
   let block;
   try {
@@ -497,8 +543,9 @@ function parsedBlock(blockBytes, jsonLimits) {
     return eventLines.length === 0 ? { done: true } : { malformed: true };
   }
   try {
-    if (!uniqueJsonObjectMembers(dataText, jsonLimits)) return { malformed: true };
+    if (!strictJsonPreflight(dataText, jsonLimits)) return { malformed: true };
     const event = JSON.parse(dataText);
+    if (!strictFunctionArgumentJson(event, jsonLimits)) return { malformed: true };
     if (eventLines.length === 1) {
       const eventValue = eventLines[0].slice(6);
       const declaredType = eventValue.startsWith(" ")
@@ -960,13 +1007,16 @@ export class DeepseekToolMessageCompatTransform extends Transform {
   #model;
   #maxCandidateBytes;
   #maxCandidateMs;
+  #maxCaptureMs;
   #maxFrameBytes;
   #jsonLimits;
-  #timer;
+  #watchdogTimer;
+  #deadlineTimer;
 
   constructor({
     maxCandidateBytes = MAX_CANDIDATE_BYTES,
     maxCandidateMs = MAX_CANDIDATE_MS,
+    maxCaptureMs = MAX_DIRECT_CAPTURE_MS,
     maxFrameBytes = MAX_FRAME_BYTES,
     maxJsonDepth,
     maxJsonMembers,
@@ -979,6 +1029,7 @@ export class DeepseekToolMessageCompatTransform extends Transform {
       { integer: true },
     );
     this.#maxCandidateMs = finiteLimit(maxCandidateMs, MAX_CANDIDATE_MS);
+    this.#maxCaptureMs = finiteLimit(maxCaptureMs, MAX_DIRECT_CAPTURE_MS);
     this.#maxFrameBytes = finiteLimit(maxFrameBytes, MAX_FRAME_BYTES, {
       minimum: 1,
       integer: true,
@@ -1013,7 +1064,7 @@ export class DeepseekToolMessageCompatTransform extends Transform {
   }
 
   _flush(callback) {
-    this.#clearTimer();
+    this.#clearTimers();
     if (this.#disabled || this.#finished) {
       this.#pushBuffered();
       callback();
@@ -1028,7 +1079,7 @@ export class DeepseekToolMessageCompatTransform extends Transform {
   }
 
   _destroy(error, callback) {
-    this.#clearTimer();
+    this.#clearTimers();
     callback(error);
   }
 
@@ -1199,6 +1250,7 @@ export class DeepseekToolMessageCompatTransform extends Transform {
       terminalBlank: undefined,
       sentinel: undefined,
     };
+    this.#startDeadline();
     this.#hold(frame);
   }
 
@@ -1528,7 +1580,7 @@ export class DeepseekToolMessageCompatTransform extends Transform {
     const capture = this.#capture;
     if (!capture) return;
     this.#capture = undefined;
-    this.#clearTimer();
+    this.#clearTimers();
     for (const frame of capture.frames) {
       const event = frame.parsed.event;
       const attached = eventItemId(event);
@@ -1555,7 +1607,7 @@ export class DeepseekToolMessageCompatTransform extends Transform {
     const capture = this.#capture;
     if (!capture) return;
     this.#capture = undefined;
-    this.#clearTimer();
+    this.#clearTimers();
     const reasoning = {
       id: capture.terminalReasoning.id,
       type: "reasoning",
@@ -1656,7 +1708,7 @@ export class DeepseekToolMessageCompatTransform extends Transform {
   #failOpen(extraFrame) {
     const capture = this.#capture;
     this.#capture = undefined;
-    this.#clearTimer();
+    this.#clearTimers();
     if (capture) {
       for (const frame of capture.frames) this.push(frame.original);
       if (capture.sentinel) this.push(capture.sentinel.original);
@@ -1677,19 +1729,35 @@ export class DeepseekToolMessageCompatTransform extends Transform {
   }
 
   #resetWatchdog() {
-    this.#clearTimer();
+    this.#clearWatchdog();
     if (!this.#capture) return;
-    this.#timer = setTimeout(() => {
+    this.#watchdogTimer = setTimeout(() => {
       this.#failOpen();
       this.#pushBuffered();
     }, this.#maxCandidateMs);
-    this.#timer.unref?.();
+    this.#watchdogTimer.unref?.();
   }
 
-  #clearTimer() {
-    if (!this.#timer) return;
-    clearTimeout(this.#timer);
-    this.#timer = undefined;
+  #startDeadline() {
+    if (this.#deadlineTimer || !this.#capture) return;
+    this.#deadlineTimer = setTimeout(() => {
+      this.#failOpen();
+      this.#pushBuffered();
+    }, this.#maxCaptureMs);
+    this.#deadlineTimer.unref?.();
+  }
+
+  #clearWatchdog() {
+    if (!this.#watchdogTimer) return;
+    clearTimeout(this.#watchdogTimer);
+    this.#watchdogTimer = undefined;
+  }
+
+  #clearTimers() {
+    this.#clearWatchdog();
+    if (!this.#deadlineTimer) return;
+    clearTimeout(this.#deadlineTimer);
+    this.#deadlineTimer = undefined;
   }
 }
 
@@ -1784,7 +1852,9 @@ export class TranslatedToolMessageCompatTransform extends Transform {
       return;
     }
     this.#emitCompleteBlocks(true);
-    if (this.#capture) this.#failOpen();
+    if (["completed", "sentinel"].includes(this.#capture?.stage)) {
+      this.#suppress();
+    } else if (this.#capture) this.#failOpen();
     this.#pushBuffered();
     callback();
   }
@@ -1842,8 +1912,11 @@ export class TranslatedToolMessageCompatTransform extends Transform {
       return;
     }
     if (parsedResult.done) {
-      if (this.#capture) this.#failOpen(frame);
-      else {
+      if (this.#capture?.stage === "completed") {
+        this.#holdSentinel(frame);
+      } else if (this.#capture) {
+        this.#failOpen(frame);
+      } else {
         this.push(frame.original);
         this.#finished = true;
       }
@@ -1854,6 +1927,10 @@ export class TranslatedToolMessageCompatTransform extends Transform {
       return;
     }
     const event = frame.parsed.event;
+    if (["completed", "sentinel"].includes(this.#capture?.stage)) {
+      this.#failOpen(frame);
+      return;
+    }
     if (
       !exactEventKeys(event) ||
       eventItemReference(event).conflict ||
@@ -2069,6 +2146,8 @@ export class TranslatedToolMessageCompatTransform extends Transform {
           frames: [],
           bytes: 0,
           candidates: [],
+          stage: "active",
+          sentinel: undefined,
         };
         this.#startTimer();
       }
@@ -2110,6 +2189,8 @@ export class TranslatedToolMessageCompatTransform extends Transform {
       frames: [],
       bytes: 0,
       candidates: [candidate],
+      stage: "active",
+      sentinel: undefined,
     };
     this.#indexItems.set(0, TERMINAL_ONLY_CANDIDATE_SLOT);
     this.#startTimer();
@@ -2402,7 +2483,7 @@ export class TranslatedToolMessageCompatTransform extends Transform {
       return;
     }
     this.#hold(frame);
-    if (this.#capture) this.#suppress();
+    if (this.#capture) this.#capture.stage = "completed";
   }
 
   #acceptTerminalResponseId(terminalResponseId) {
@@ -2452,6 +2533,21 @@ export class TranslatedToolMessageCompatTransform extends Transform {
     }
     this.#capture.frames.push(frame);
     this.#capture.bytes += bytes;
+  }
+
+  #holdSentinel(frame) {
+    if (!this.#capture || this.#capture.sentinel) {
+      this.#failOpen(frame);
+      return;
+    }
+    const bytes = frame.original.length;
+    if (this.#capture.bytes + bytes > this.#maxCandidateBytes) {
+      this.#failOpen(frame);
+      return;
+    }
+    this.#capture.sentinel = frame;
+    this.#capture.bytes += bytes;
+    this.#capture.stage = "sentinel";
   }
 
   #terminalMatchesCapture(output, terminalResponseId = this.#responseId) {
@@ -2508,6 +2604,7 @@ export class TranslatedToolMessageCompatTransform extends Transform {
     };
     this.#clearTimer();
     for (const frame of capture.frames) this.#pushCompacted(frame, suppressed);
+    if (capture.sentinel) this.push(capture.sentinel.original);
     this.#finished = true;
   }
 
@@ -2517,6 +2614,7 @@ export class TranslatedToolMessageCompatTransform extends Transform {
     this.#clearTimer();
     if (capture) {
       for (const frame of capture.frames) this.push(frame.original);
+      if (capture.sentinel) this.push(capture.sentinel.original);
     }
     if (extraFrame) this.push(extraFrame.original);
     this.#disabled = true;
@@ -2658,12 +2756,17 @@ export class TranslatedToolMessageJsonCompatTransform extends Transform {
     }
     try {
       const source = fatalUtf8(body);
-      if (!uniqueJsonObjectMembers(source, this.#jsonLimits)) {
+      if (!strictJsonPreflight(source, this.#jsonLimits)) {
         this.push(body);
         callback();
         return;
       }
       const payload = JSON.parse(source);
+      if (!strictFunctionArgumentJson(payload, this.#jsonLimits)) {
+        this.push(body);
+        callback();
+        return;
+      }
       const output = jsonResponseOutput(payload);
       const indexes = removableJsonMessageIndexes(output);
       if (!indexes.length) {

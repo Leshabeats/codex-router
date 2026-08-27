@@ -350,6 +350,53 @@ function pinnedAnthropicTerminalOnlyStream(mutate) {
   return `${wireEvents.map((event) => block(event)).join("")}data: [DONE]\n\n`;
 }
 
+function pinnedAnthropicTerminalOnlyMultiToolStream() {
+  const secondTool = {
+    ...functionCall,
+    id: "call_second",
+    call_id: "call_second",
+    name: "second_tool",
+  };
+  const source = pinnedAnthropicTerminalOnlyStream((wireEvents) => {
+    const model = wireEvents[0].model;
+    const firstCandidateClose = wireEvents.findIndex(
+      (event) => event.type === "response.output_text.done",
+    );
+    wireEvents.splice(firstCandidateClose, 0,
+      {
+        type: "response.output_item.added",
+        output_index: 2,
+        item: { ...secondTool, status: "in_progress", arguments: "" },
+        model,
+      },
+      {
+        type: "response.function_call_arguments.delta",
+        item_id: secondTool.id,
+        output_index: 2,
+        delta: "{}",
+        model,
+      },
+      {
+        type: "response.function_call_arguments.done",
+        item_id: secondTool.id,
+        output_index: 2,
+        arguments: "{}",
+        model,
+      },
+      {
+        type: "response.output_item.done",
+        output_index: 2,
+        sequence_number: 10,
+        item: secondTool,
+        model,
+      },
+    );
+    const terminal = wireEvents.find((event) => event.type === "response.completed");
+    terminal.response.output.push(secondTool);
+  });
+  return { source, secondTool };
+}
+
 function historicalDirectDeepseekEvents() {
   const blank = { ...blankMessage, id: "msg_direct_historical" };
   const tool = {
@@ -875,6 +922,50 @@ test("direct DeepSeek watchdog measures inactivity rather than total capture tim
   assert.notEqual(output, source);
 });
 
+test("direct DeepSeek absolute deadline bounds an otherwise active capture", async () => {
+  const absoluteTimeout = 1_000;
+  const frames = currentDirectDeepseekEvents().slice(0, 5).map((event) => block(event));
+  const stream = new DeepseekToolMessageCompatTransform({
+    maxCandidateMs: 5_000,
+    maxCaptureMs: absoluteTimeout,
+  });
+  let input = frames.join("");
+  let output = "";
+  stream.setEncoding("utf8");
+  stream.on("data", (chunk) => { output += chunk; });
+  stream.write(input);
+
+  let interval;
+  const released = new Promise((resolve, reject) => {
+    const guard = setTimeout(
+      () => reject(new Error("absolute capture deadline did not release the stream")),
+      absoluteTimeout * 3,
+    );
+    stream.on("data", () => {
+      if (!output.includes("msg_direct_live")) return;
+      clearTimeout(guard);
+      resolve();
+    });
+  });
+  const deltaTemplate = currentDirectDeepseekEvents()[4];
+  interval = setInterval(() => {
+    const next = block({ ...deltaTemplate, delta: "still active" });
+    input += next;
+    stream.write(next);
+  }, 100);
+
+  try {
+    await released;
+  } finally {
+    clearInterval(interval);
+  }
+  const tail = "opaque bytes after absolute release";
+  input += tail;
+  stream.end(tail);
+  await once(stream, "end");
+  assert.equal(output, input);
+});
+
 test("direct DeepSeek watchdog fails open after one inactive gap", async () => {
   const frames = historicalDirectDeepseekEvents().map((event) => block(event));
   const source = `${frames.join("")}data: [DONE]\n\n`;
@@ -904,16 +995,26 @@ test("direct DeepSeek watchdog releases an incomplete frame byte-for-byte", asyn
   assert.equal(output, start + partial);
 });
 
-test("destroying a pending direct DeepSeek capture cancels its watchdog", async () => {
+test("destroying a pending direct DeepSeek capture cancels both timers", async () => {
   const start = block(historicalDirectDeepseekEvents()[0]);
-  const stream = new DeepseekToolMessageCompatTransform({ maxCandidateMs: 20 });
+  const stream = new DeepseekToolMessageCompatTransform({
+    maxCandidateMs: 20,
+    maxCaptureMs: 25,
+  });
   let output = "";
+  let latePushes = 0;
+  const push = stream.push.bind(stream);
+  stream.push = (...args) => {
+    latePushes += 1;
+    return push(...args);
+  };
   stream.on("data", (chunk) => { output += chunk.toString("utf8"); });
   stream.write(start);
   stream.destroy();
   await once(stream, "close");
   await new Promise((resolve) => setTimeout(resolve, 60));
   assert.equal(output, "");
+  assert.equal(latePushes, 0);
 });
 
 test("SSE field parsing removes only one optional ASCII space", async () => {
@@ -1001,49 +1102,7 @@ test("only the Anthropic factory path admits a terminal-only phantom slot", asyn
 });
 
 test("the terminal-only slot compacts multiple corroborated tool calls", async () => {
-  const secondTool = {
-    ...functionCall,
-    id: "call_second",
-    call_id: "call_second",
-    name: "second_tool",
-  };
-  const source = pinnedAnthropicTerminalOnlyStream((wireEvents) => {
-    const model = wireEvents[0].model;
-    const firstCandidateClose = wireEvents.findIndex(
-      (event) => event.type === "response.output_text.done",
-    );
-    wireEvents.splice(firstCandidateClose, 0,
-      {
-        type: "response.output_item.added",
-        output_index: 2,
-        item: { ...secondTool, status: "in_progress", arguments: "" },
-        model,
-      },
-      {
-        type: "response.function_call_arguments.delta",
-        item_id: secondTool.id,
-        output_index: 2,
-        delta: "{}",
-        model,
-      },
-      {
-        type: "response.function_call_arguments.done",
-        item_id: secondTool.id,
-        output_index: 2,
-        arguments: "{}",
-        model,
-      },
-      {
-        type: "response.output_item.done",
-        output_index: 2,
-        sequence_number: 10,
-        item: secondTool,
-        model,
-      },
-    );
-    const terminal = wireEvents.find((event) => event.type === "response.completed");
-    terminal.response.output.push(secondTool);
-  });
+  const { source, secondTool } = pinnedAnthropicTerminalOnlyMultiToolStream();
   const output = await transformed(source, { allowTerminalOnlyCandidate: true }, 5);
   const seen = events(output);
   assert.deepEqual(
@@ -1055,6 +1114,65 @@ test("the terminal-only slot compacts multiple corroborated tool calls", async (
     seen.find((event) => event.type === "response.completed").response.output,
     [functionCall, secondTool],
   );
+});
+
+test("translated repairs commit only at EOF and every trailer fails open", async () => {
+  const multiTool = pinnedAnthropicTerminalOnlyMultiToolStream();
+  const fixtures = [
+    ["classic", phantomToolStream(), {}, blankMessage.id],
+    ["current OpenAI", pinnedLiteLlmPhantomToolStream(), {}, blankMessage.id],
+    [
+      "current terminal-only Anthropic",
+      pinnedAnthropicTerminalOnlyStream(),
+      { allowTerminalOnlyCandidate: true },
+      blankMessage.id,
+    ],
+    [
+      "terminal-only Anthropic with multiple tools",
+      multiTool.source,
+      { allowTerminalOnlyCandidate: true },
+      blankMessage.id,
+    ],
+  ];
+  const trailingEvent = block({
+    type: "response.output_item.added",
+    output_index: 9,
+    item: {
+      id: "msg_after_completed",
+      type: "message",
+      status: "in_progress",
+      role: "assistant",
+      content: [],
+    },
+  });
+  const malformed = "event: response.created\ndata: {not-json}\n\n";
+
+  for (const [name, source, options, blankId] of fixtures) {
+    const stream = new TranslatedToolMessageCompatTransform(options);
+    let held = "";
+    stream.setEncoding("utf8");
+    stream.on("data", (chunk) => { held += chunk; });
+    stream.write(source);
+    assert.equal(held.includes("response.completed"), false, `${name}: held terminal`);
+    stream.end();
+    await once(stream, "end");
+    assert.equal(held.includes(blankId), false, `${name}: repaired blank`);
+    assert.match(held, /data: \[DONE\]\n\n$/, `${name}: preserved sentinel`);
+
+    const withoutSentinel = source.replace(/data: \[DONE\]\n\n$/, "");
+    const eofOutput = await transformed(withoutSentinel, options, 3);
+    assert.equal(eofOutput.includes(blankId), false, `${name}: EOF repair`);
+
+    for (const input of [
+      `${source}data: [DONE]\n\n`,
+      source + trailingEvent,
+      source + malformed,
+      source + "opaque trailing byte",
+      withoutSentinel + trailingEvent,
+    ]) {
+      assert.equal(await transformed(input, options, 1), input, `${name}: trailer`);
+    }
+  }
 });
 
 test("the terminal-only candidate exception fails open on adjacent shapes", async () => {
@@ -1924,10 +2042,10 @@ test("destroying a pending stream clears its hold without later output", async (
   assert.equal(output, created);
 });
 
-test("post-suppression frames without shifted indexes remain byte-identical", async () => {
+test("a post-completion event prevents suppression byte-for-byte", async () => {
   const untouched = "event: response.done\ndata:  {\"type\":\"response.done\",\"response\":{\"id\":\"r1\"}}\n\n";
-  const output = await transformed(phantomToolStream().replace("data: [DONE]\n\n", untouched));
-  assert.ok(output.endsWith(untouched));
+  const input = phantomToolStream().replace("data: [DONE]\n\n", untouched);
+  assert.equal(await transformed(input), input);
 });
 
 test("binds the response id and requires an exact successful terminal envelope", async () => {
@@ -2461,9 +2579,8 @@ test("reasoning output-item provenance must match the terminal response", async 
   assert.equal(await transformed(input, {}, 1), input);
 });
 
-test("stops rewriting after the first bound terminal envelope", async () => {
+test("a second response after a terminal envelope cancels the pending rewrite", async () => {
   const first = phantomToolStream().replace("data: [DONE]\n\n", "");
-  const normalizedFirst = await transformed(first, {}, 1);
   const second = phantomToolStream()
     .replaceAll("resp_1", "resp_second")
     .replaceAll("msg_blank", "msg_second")
@@ -2474,13 +2591,7 @@ test("stops rewriting after the first bound terminal envelope", async () => {
     Buffer.from(second),
     invalidTrailingBytes,
   ]);
-  const expected = Buffer.concat([
-    Buffer.from(normalizedFirst),
-    Buffer.from(second),
-    invalidTrailingBytes,
-  ]);
-
-  assert.deepEqual(await transformedBytes(input, {}, 1), expected);
+  assert.deepEqual(await transformedBytes(input, {}, 1), input);
 });
 
 test("invalid fragmented UTF-8 during a held candidate fails open byte-for-byte", async () => {
@@ -2643,6 +2754,63 @@ test("bounded uniqueness scanning fails open and accepts unique escaped keys", a
   );
 });
 
+test("SSE rewrites reject lossy outer and nested argument numbers", async () => {
+  const source = phantomToolStream();
+  const terminal = responseCompleted([blankMessage, functionCall], {
+    id: "resp_1",
+    sequenceNumber: 9,
+  });
+  for (const literal of ["1e400", "-0", "9007199254740993"]) {
+    const unsafeTerminal = terminal.replace(
+      '"error":null',
+      `"error":null,"numeric_provenance":${literal}`,
+    );
+    const input = source.replace(terminal, unsafeTerminal);
+    assert.notEqual(input, source);
+    assert.equal(await transformed(input, {}, 1), input, `outer ${literal}`);
+
+    const argumentsJson = `{"numeric_provenance":${literal}}`;
+    const nested = pinnedLiteLlmPhantomToolStream((wireEvents) => {
+      for (const event of wireEvents) {
+        if (event.type === "response.function_call_arguments.delta") {
+          event.delta = argumentsJson;
+        } else if (event.type === "response.function_call_arguments.done") {
+          event.arguments = argumentsJson;
+        } else if (
+          event.type === "response.output_item.done" &&
+          event.item?.type === "function_call"
+        ) {
+          event.item.arguments = argumentsJson;
+        } else if (event.type === "response.completed") {
+          event.response.output.find((item) => item.type === "function_call").arguments =
+            argumentsJson;
+        }
+      }
+    });
+    assert.equal(await transformed(nested, {}, 1), nested, `nested ${literal}`);
+  }
+
+  const safeArguments = `{"numeric_provenance":${Number.MAX_SAFE_INTEGER}}`;
+  const safe = pinnedLiteLlmPhantomToolStream((wireEvents) => {
+    for (const event of wireEvents) {
+      if (event.type === "response.function_call_arguments.delta") {
+        event.delta = safeArguments;
+      } else if (event.type === "response.function_call_arguments.done") {
+        event.arguments = safeArguments;
+      } else if (
+        event.type === "response.output_item.done" &&
+        event.item?.type === "function_call"
+      ) {
+        event.item.arguments = safeArguments;
+      } else if (event.type === "response.completed") {
+        event.response.output.find((item) => item.type === "function_call").arguments =
+          safeArguments;
+      }
+    }
+  });
+  assert.equal((await transformed(safe, {}, 1)).includes(blankMessage.id), false);
+});
+
 test("non-streaming responses remove only exact empty messages proven by tool traffic", async () => {
   const secondBlank = {
     ...blankMessage,
@@ -2736,7 +2904,7 @@ test("non-streaming uniqueness limits fail open while unique JSON remains eligib
     '"error":null',
     '"\\u0065rror":null,"metadata":{' +
       '"astral":"\\ud83d\\ude00","lone":"\\ud800",' +
-      '"fraction":-1.25e+3,"huge":123456789012345678901234567890}',
+      `"fraction":-1.25e+3,"safe":${Number.MAX_SAFE_INTEGER}}`,
   );
   const normalized = await transformedJson(unique, {}, 1);
   assert.notEqual(normalized, unique);
@@ -2745,7 +2913,25 @@ test("non-streaming uniqueness limits fail open while unique JSON remains eligib
   assert.equal(payload.metadata.astral, "😀");
   assert.equal(payload.metadata.lone, "\ud800");
   assert.equal(payload.metadata.fraction, -1250);
-  assert.equal(typeof payload.metadata.huge, "number");
+  assert.equal(payload.metadata.safe, Number.MAX_SAFE_INTEGER);
+});
+
+test("non-streaming rewrites reject lossy outer and nested argument numbers", async () => {
+  const base = JSON.stringify(jsonResponse([blankMessage, functionCall]));
+  for (const literal of ["1e400", "-0", "9007199254740993"]) {
+    const outer = base.replace(
+      '"error":null',
+      `"error":null,"metadata":{"numeric_provenance":${literal}}`,
+    );
+    assert.equal(await transformedJson(outer, {}, 1), outer, `outer ${literal}`);
+
+    const nestedTool = {
+      ...functionCall,
+      arguments: `{"numeric_provenance":${literal}}`,
+    };
+    const nested = JSON.stringify(jsonResponse([blankMessage, nestedTool]));
+    assert.equal(await transformedJson(nested, {}, 1), nested, `nested ${literal}`);
+  }
 });
 
 test("non-streaming normalization requires a successful envelope and unique ids", async () => {
