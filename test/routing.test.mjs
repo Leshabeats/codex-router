@@ -623,15 +623,16 @@ test("native tool-result aging is opt-in and rewrites only consumed old results"
       output: `small result ${n}`,
     })),
   ];
-  const send = async (routerPort) =>
+  const sendInput = async (routerPort, input) =>
     fetch(`${routerBase(routerPort)}/responses`, {
       method: "POST",
       headers: {
         Authorization: "Bearer CODEX_CALLER_SECRET",
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ model: "gpt-5.6-sol", input: agableInput }),
+      body: JSON.stringify({ model: "gpt-5.6-sol", input }),
     });
+  const send = async (routerPort) => sendInput(routerPort, agableInput);
 
   // Default state: the native path forwards the blob untouched.
   const defaultPort = await openPort();
@@ -670,6 +671,15 @@ test("native tool-result aging is opt-in and rewrites only consumed old results"
     assert.match(forwarded[1].output, /^\[Older tool result compacted by Codex Router/);
     assert.match(forwarded[1].output, /sha256:[0-9a-f]{64}/);
     assert.equal(forwarded.at(-1).output, "small result 4");
+
+    // Remote compaction V2 arrives on the ordinary Responses endpoint. Even
+    // when the operator opted native turns into aging, the summary must read
+    // the original tool output rather than the router's compact receipt.
+    const compactInput = [...agableInput, { type: "compaction_trigger" }];
+    assert.equal((await sendInput(agingPort, compactInput)).status, 200);
+    const compactForwarded = nativeRequests.at(-1).body.input;
+    assert.equal(compactForwarded[1].output, bigOutput);
+    assert.deepEqual(compactForwarded.at(-1), { type: "compaction_trigger" });
     // The usage event is appended after the response is relayed; give the
     // router a moment to flush it rather than racing the write.
     const eventsPath = path.join(stateDir, "usage-events.jsonl");
@@ -805,7 +815,11 @@ test("router preserves native auth and isolates every external route", async () 
 test("substituted native compaction omits the ordinary Responses store policy", async () => {
   const nativeRequests = [];
   const native = await mockServer(async (request, response) => {
-    nativeRequests.push({ url: request.url, headers: request.headers, body: await bodyJson(request) });
+    nativeRequests.push({
+      url: request.url,
+      headers: request.headers,
+      body: await bodyJson(request),
+    });
     json(response, 200, { id: "native-ok", output: [] });
   });
   const testRoot = mkdtempSync(path.join(os.tmpdir(), "native-compact-store-"));
@@ -845,6 +859,32 @@ test("substituted native compaction omits the ordinary Responses store policy", 
     });
     assert.equal(ordinary.status, 200, await ordinary.text());
 
+    const ordinaryWithInclude = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: "gpt-5.6-sol",
+        input: "hello again",
+        include: ["web_search_call.action.sources"],
+      }),
+    });
+    assert.equal(ordinaryWithInclude.status, 200, await ordinaryWithInclude.text());
+
+    const ordinaryWithReasoningInclude = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: "gpt-5.6-sol",
+        input: "one more time",
+        include: ["reasoning.encrypted_content", "web_search_call.action.sources"],
+      }),
+    });
+    assert.equal(
+      ordinaryWithReasoningInclude.status,
+      200,
+      await ordinaryWithReasoningInclude.text(),
+    );
+
     const compact = await fetch(`${routerBase(routerPort)}/responses/compact`, {
       method: "POST",
       headers,
@@ -852,16 +892,27 @@ test("substituted native compaction omits the ordinary Responses store policy", 
         model: "gpt-5.6-sol",
         input: [{ type: "item_reference", id: "rs_not-persisted-by-prior-turn" }],
         store: true,
+        include: ["reasoning.encrypted_content"],
       }),
     });
     assert.equal(compact.status, 200, await compact.text());
 
-    assert.equal(nativeRequests.length, 2);
+    assert.equal(nativeRequests.length, 4);
     assert.equal(nativeRequests[0].url, "/backend-api/codex/responses");
     assert.equal(nativeRequests[0].body.store, false);
-    assert.equal(nativeRequests[1].url, "/backend-api/codex/responses/compact");
-    assert.equal("store" in nativeRequests[1].body, false);
-    assert.deepEqual(nativeRequests[1].body.input, [
+    assert.deepEqual(nativeRequests[0].body.include, ["reasoning.encrypted_content"]);
+    assert.deepEqual(nativeRequests[1].body.include, [
+      "web_search_call.action.sources",
+      "reasoning.encrypted_content",
+    ]);
+    assert.deepEqual(nativeRequests[2].body.include, [
+      "reasoning.encrypted_content",
+      "web_search_call.action.sources",
+    ]);
+    assert.equal(nativeRequests[3].url, "/backend-api/codex/responses/compact");
+    assert.equal("store" in nativeRequests[3].body, false);
+    assert.equal("include" in nativeRequests[3].body, false);
+    assert.deepEqual(nativeRequests[3].body.input, [
       { type: "item_reference", id: "rs_not-persisted-by-prior-turn" },
     ]);
     for (const request of nativeRequests) {
@@ -1917,20 +1968,36 @@ test("compaction never treats reasoning as final text and falls back to chat con
   }
 });
 
-test("router strips non-OpenAI reasoning encrypted_content before replaying to native", async () => {
+test("router drops foreign reasoning items before stateless native replay", async () => {
   const nativeRequests = [];
   const native = await mockServer(async (request, response) => {
-    nativeRequests.push({ headers: request.headers, body: await bodyJson(request) });
+    nativeRequests.push({ url: request.url, headers: request.headers, body: await bodyJson(request) });
     json(response, 200, { route: "native" });
   });
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "native-stateless-reasoning-"));
+  const authPath = path.join(testRoot, "auth.json");
+  writeFileSync(
+    authPath,
+    JSON.stringify({
+      auth_mode: "chatgpt",
+      tokens: {
+        access_token: "test-native-session-token",
+        account_id: "test-native-account",
+      },
+    }),
+    { mode: 0o600 },
+  );
   const routerPort = await openPort();
   const router = run("router.mjs", {
     CODEX_ROUTER_PORT: String(routerPort),
     CODEX_NATIVE_BASE_URL: `http://127.0.0.1:${native.port}/backend-api/codex`,
+    CODEX_ROUTER_NATIVE_SESSION_FALLBACK: "1",
+    MODEL_ROUTER_CODEX_AUTH: authPath,
+    MODEL_ROUTER_STATE_DIR: path.join(testRoot, "state"),
     CODEX_ROUTER_QUIET: "1",
   });
   const headers = {
-    Authorization: "Bearer CODEX_CALLER_SECRET",
+    Authorization: `Bearer ${CALLER_KEY}`,
     "Content-Type": "application/json",
   };
 
@@ -1945,9 +2012,43 @@ test("router strips non-OpenAI reasoning encrypted_content before replaying to n
       content: null,
       encrypted_content: "The user is frustrated.",
     };
-    const genuineReasoning = {
+    const unknownOpaqueReasoning = {
       type: "reasoning",
-      id: "rs_real",
+      id: "rs_unknown_opaque",
+      summary: [{ type: "summary_text", text: "draft" }],
+      content: null,
+      encrypted_content: "not-a-native-ciphertext",
+    };
+    const missingStatelessPayload = {
+      type: "reasoning",
+      id: "rs_unstored_without_ciphertext",
+      summary: [],
+      content: null,
+    };
+    const invalidStatelessPayloads = [
+      { id: "rs_null_ciphertext", encrypted_content: null },
+      { id: "rs_empty_ciphertext", encrypted_content: "" },
+      { id: "rs_non_string_ciphertext", encrypted_content: 42 },
+    ].map(({ id, encrypted_content }) => ({
+      type: "reasoning",
+      id,
+      summary: [],
+      content: null,
+      encrypted_content,
+    }));
+    const mixedSummaryReasoning = {
+      type: "reasoning",
+      id: "rs_mixed_summary",
+      summary: [
+        { type: "summary_text", text: "draft" },
+        { type: "future_summary", text: "must not be ignored" },
+      ],
+      content: null,
+      encrypted_content: "draft",
+    };
+    const futureOpaqueReasoning = {
+      type: "reasoning",
+      id: "rs_future_opaque",
       summary: [],
       content: null,
       encrypted_content: "gAAAAABkZmtM7cT9w_XY_zThisIsAnOpaqueBlobWithNoWhitespace",
@@ -1957,25 +2058,188 @@ test("router strips non-OpenAI reasoning encrypted_content before replaying to n
       role: "user",
       content: [{ type: "input_text", text: "continue" }],
     };
+    const staleReasoningReference = {
+      type: "item_reference",
+      id: "rs_external_reference",
+    };
+    const nonReasoningReference = {
+      type: "item_reference",
+      id: "msg_native_reference",
+    };
     const replay = await fetch(`${routerBase(routerPort)}/responses`, {
       method: "POST",
       headers,
       body: JSON.stringify({
         model: "gpt-5.6-sol",
-        input: [bogusReasoning, genuineReasoning, userMessage],
+        input: [
+          bogusReasoning,
+          unknownOpaqueReasoning,
+          missingStatelessPayload,
+          ...invalidStatelessPayloads,
+          mixedSummaryReasoning,
+          futureOpaqueReasoning,
+          staleReasoningReference,
+          nonReasoningReference,
+          userMessage,
+        ],
       }),
     });
     assert.equal(replay.status, 200);
     const sent = nativeRequests[0].body.input;
-    const sentBogus = sent.find((item) => item?.id === "rs_518653");
-    const sentGenuine = sent.find((item) => item?.id === "rs_real");
-    assert.equal(sentBogus.type, "reasoning");
-    assert.equal(sentBogus.encrypted_content, undefined);
-    assert.deepEqual(sentBogus.summary, bogusReasoning.summary);
-    assert.equal(sentGenuine.encrypted_content, genuineReasoning.encrypted_content);
+    const sentUnknown = sent.find((item) => item?.id === "rs_unknown_opaque");
+    const sentFuture = sent.find((item) => item?.id === "rs_future_opaque");
+    // A foreign rs_ id without a valid stateless payload makes OpenAI try to
+    // retrieve an item the translated provider never stored. The draft is not
+    // a model-visible answer, so remove the whole item instead of manufacturing
+    // a broken reference.
+    assert.equal(sent.some((item) => item?.id === "rs_518653"), false);
+    assert.equal(sent.some((item) => item?.id === "rs_unstored_without_ciphertext"), false);
+    for (const item of invalidStatelessPayloads) {
+      assert.equal(sent.some((candidate) => candidate?.id === item.id), false);
+    }
+    assert.equal(sent.some((item) => item?.id === "rs_external_reference"), false);
+    assert.deepEqual(sent.find((item) => item?.id === "msg_native_reference"), nonReasoningReference);
+    // Opaque means opaque: neither a current Fernet-like prefix nor its
+    // absence proves provenance. Unknown non-echo values are retained exactly
+    // so a future native encoding is not destroyed by this compatibility path.
+    assert.deepEqual(sentUnknown, unknownOpaqueReasoning);
+    assert.deepEqual(sentFuture, futureOpaqueReasoning);
+    assert.deepEqual(
+      sent.find((item) => item?.id === mixedSummaryReasoning.id),
+      mixedSummaryReasoning,
+    );
+    assert.deepEqual(sent.at(-1), userMessage);
+    assert.deepEqual(nativeRequests[0].body.include, ["reasoning.encrypted_content"]);
+
+    // Remote compaction V2 uses the ordinary Responses endpoint and appends a
+    // trigger. It must receive the same stateless-safe history; otherwise the
+    // stale rs_ id is looked up before compaction can run.
+    const compactV2 = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: "gpt-5.6-sol",
+        input: [
+          bogusReasoning,
+          staleReasoningReference,
+          userMessage,
+          { type: "compaction_trigger" },
+        ],
+        store: true,
+      }),
+    });
+    assert.equal(compactV2.status, 200);
+    assert.equal(nativeRequests[1].url, "/backend-api/codex/responses");
+    assert.equal(nativeRequests[1].body.store, false);
+    assert.deepEqual(nativeRequests[1].body.include, ["reasoning.encrypted_content"]);
+    assert.equal(nativeRequests[1].body.input.some((item) => item?.id === "rs_518653"), false);
+    assert.equal(
+      nativeRequests[1].body.input.some((item) => item?.id === "rs_external_reference"),
+      false,
+    );
+    assert.deepEqual(nativeRequests[1].body.input.at(-1), { type: "compaction_trigger" });
+
+    // V1 compaction keeps its valid stored-reference contract, but a full
+    // foreign reasoning item still needs substituted-caller provenance cleanup
+    // before it can make native compaction fail by its rs_ id.
+    const compactV1 = await fetch(`${routerBase(routerPort)}/responses/compact`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: "gpt-5.6-sol",
+        input: [
+          bogusReasoning,
+          missingStatelessPayload,
+          ...invalidStatelessPayloads,
+          mixedSummaryReasoning,
+          staleReasoningReference,
+          userMessage,
+        ],
+        store: true,
+        include: ["reasoning.encrypted_content"],
+      }),
+    });
+    assert.equal(compactV1.status, 200);
+    const compactV1Body = nativeRequests[2].body;
+    assert.equal(nativeRequests[2].url, "/backend-api/codex/responses/compact");
+    assert.equal("store" in compactV1Body, false);
+    assert.equal("include" in compactV1Body, false);
+    assert.equal(compactV1Body.input.some((item) => item?.id === bogusReasoning.id), false);
+    assert.equal(
+      compactV1Body.input.some((item) => item?.id === missingStatelessPayload.id),
+      false,
+    );
+    for (const item of invalidStatelessPayloads) {
+      assert.equal(compactV1Body.input.some((candidate) => candidate?.id === item.id), false);
+    }
+    assert.deepEqual(
+      compactV1Body.input.find((item) => item?.id === mixedSummaryReasoning.id),
+      mixedSummaryReasoning,
+    );
+    assert.deepEqual(
+      compactV1Body.input.find((item) => item?.id === staleReasoningReference.id),
+      staleReasoningReference,
+    );
+
+    // A caller that supplies its own native credential can still rely on the
+    // backend's stored-item namespace. Preserve bare rs_ references and the
+    // reasoning item itself. Preserve unknown non-whitespace opaque formats;
+    // only the historical whitespace-bearing plaintext repair is applied.
+    const storedReplay = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer DIRECT_NATIVE_CALLER_TOKEN",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "gpt-5.6-sol",
+        input: [
+          bogusReasoning,
+          unknownOpaqueReasoning,
+          futureOpaqueReasoning,
+          mixedSummaryReasoning,
+          missingStatelessPayload,
+          staleReasoningReference,
+          userMessage,
+        ],
+        store: true,
+        include: ["web_search_call.action.sources"],
+      }),
+    });
+    assert.equal(storedReplay.status, 200);
+    const stored = nativeRequests[3].body;
+    assert.equal(stored.store, true);
+    assert.deepEqual(stored.include, ["web_search_call.action.sources"]);
+    assert.deepEqual(stored.input.find((item) => item?.id === "rs_518653"), {
+      type: "reasoning",
+      id: "rs_518653",
+      summary: bogusReasoning.summary,
+      content: null,
+    });
+    assert.deepEqual(
+      stored.input.find((item) => item?.id === "rs_unstored_without_ciphertext"),
+      missingStatelessPayload,
+    );
+    assert.deepEqual(
+      stored.input.find((item) => item?.id === "rs_external_reference"),
+      staleReasoningReference,
+    );
+    assert.deepEqual(
+      stored.input.find((item) => item?.id === unknownOpaqueReasoning.id),
+      unknownOpaqueReasoning,
+    );
+    assert.deepEqual(
+      stored.input.find((item) => item?.id === futureOpaqueReasoning.id),
+      futureOpaqueReasoning,
+    );
+    assert.deepEqual(
+      stored.input.find((item) => item?.id === mixedSummaryReasoning.id),
+      mixedSummaryReasoning,
+    );
   } finally {
     await stopChild(router);
     await closeServer(native.server);
+    rmSync(testRoot, { recursive: true, force: true });
   }
 });
 
