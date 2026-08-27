@@ -166,7 +166,6 @@ const CURATION_ROUTES = Object.freeze({
       "zai-org/GLM-5.2",
       "zai-org/GLM-5.2-Fast",
       "zai-org/GLM-5.3",
-      "z-ai/glm-5.3-flash",
     ]),
     models: Object.freeze({}),
   }),

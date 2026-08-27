@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **Live model certification now proves the requested route.** Compatibility
+  and smoke probes disable router failover, so a healthy alternate can no
+  longer certify a broken preset. Direct probes retained GLM-5.3-Flash on
+  OpenCode Go, OpenRouter, and Z.ai Coding; the unproved Command Code, Nous
+  Research, and Venice Flash presets were withdrawn. Command Code's Ox Alpha
+  id returned `model_unavailable` on every exact surface, while the available
+  Venice account was billing-blocked before its Ox route could be certified,
+  so neither Ox preset ships. Provider discovery remains available for explicit
+  per-machine curation without presenting catalog presence as wire proof.
+  Curated models now inherit a request profile only when every checked-in route
+  in that provider family has the same non-empty profile, so a model-specific
+  repair such as OpenRouter Flash's `ox-alpha` profile cannot leak onto an
+  unrelated model selected from the same catalog.
+
 - **Router retention and concurrency now stay bounded without crossing native accounts.**
   Request bodies and buffered upstream errors have explicit byte ceilings,
   active turns retain truthful accounting after tray records expire, and a
@@ -37,10 +51,12 @@
   auto-compact at 440,000, text+image input, and the low/medium/high reasoning
   ladder (matching Command Code, not Nous Research's xhigh-ladder route).
 
-- **README: Ox Alpha availability updated.** The preview was withdrawn from
-  OpenCode Zen, OpenCode Go, OpenRouter, and Nous Research as of 2026-08-26.
-  It remains available on Command Code and Venice. The checked-in
-  `opencode-free/ox-alpha` pin is now stale versus the live catalog.
+- **README: Ox Alpha availability updated.** No checked-in Ox Alpha preset
+  remains. The withdrawn OpenCode Free, OpenRouter, and Nous routes are gone;
+  Command Code directly reported its id unavailable, and Venice could not be
+  wire-certified through the available account's billing gate. OpenCode Go,
+  OpenRouter, and Z.ai Coding retain their direct-proven named
+  GLM-5.3-Flash routes.
 
 ## 0.5.0
 

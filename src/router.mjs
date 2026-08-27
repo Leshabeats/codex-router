@@ -56,6 +56,7 @@ import {
   zaiResponsesCompatTransform,
 } from "./zai-responses-compat.mjs";
 import { deepseekToolMessageCompatTransform } from "./deepseek-tool-message-compat.mjs";
+import { exactRouteProbeRequested } from "./exact-route-probe.mjs";
 import {
   MERGED_CATALOG_PATH,
   NATIVE_CATALOG_PATH,
@@ -2150,7 +2151,8 @@ function extractResponseText(payload) {
 // The models a compaction may be tried on, best first, without sending
 // anything. The conversation's own model leads unless it has already said it
 // is empty, in which case asking it again only buys the same rejection.
-function compactionAttempts(route, aged) {
+function compactionAttempts(route, aged, { allowFailover = true } = {}) {
+  if (!allowFailover) return [route];
   const settings = readFailoverSettings();
   if (!settings.enabled) return [route];
   const candidates = rankFailoverCandidates(
@@ -2225,7 +2227,7 @@ async function summarizeWith(request, payload, route, aged, prepared, signal) {
   return { upstream, bridged, bytes: Buffer.byteLength(serialized, "utf8") };
 }
 
-async function summarize(request, payload, route, signal) {
+async function summarize(request, payload, route, signal, { allowFailover = true } = {}) {
   const originalInput = Array.isArray(payload.input) ? payload.input : [];
   // Compaction replays the whole conversation, so any image still in it would
   // reach the text-only model unbridged and fail the compaction rather than
@@ -2254,7 +2256,7 @@ async function summarize(request, payload, route, signal) {
   // the conversation is on. A provider already known to be empty is dropped
   // rather than asked, exactly as on the turn path. Nothing is sent while this
   // list is built.
-  const attempts = compactionAttempts(route, aged);
+  const attempts = compactionAttempts(route, aged, { allowFailover });
   // Attempts that were sent and rejected, kept so the caller can meter each one.
   const failed = [];
   let last;
@@ -2336,6 +2338,7 @@ async function summarize(request, payload, route, signal) {
       bodyText: bytes.toString("utf8"),
       retryAfterSeconds: Number(sent.upstream.headers.get("retry-after")),
     });
+    if (!allowFailover) return { ...last, failed };
     if (!verdict.swap) return { ...last, failed };
     recordProviderCooldown(attemptRoute.provider, verdict);
     if (index + 1 < attempts.length) {
@@ -2410,8 +2413,16 @@ function writeCompactionSse(response, model, checkpoint) {
 
 // Returns what the request path needs to meter and log the compaction, so a
 // routed compaction leaves the same telemetry trail as any other routed turn.
-async function handleRoutedCompaction(request, response, payload, route, signal, v2) {
-  const result = await summarize(request, payload, route, signal);
+async function handleRoutedCompaction(
+  request,
+  response,
+  payload,
+  route,
+  signal,
+  v2,
+  { allowFailover = true } = {},
+) {
+  const result = await summarize(request, payload, route, signal, { allowFailover });
   // A compaction moved to another model is metered against the model that
   // actually produced the summary, the same as any other turn.
   const served = {
@@ -3105,6 +3116,7 @@ async function handleResponses(request, response, requestUrl) {
   });
   try {
     if (!requireCodexTransport(request, response)) return;
+    const exactRouteProbe = exactRouteProbeRequested(request.headers);
     const encoded = await readRequestBody(request, { signal: controller.signal });
     const body = decodeBody(encoded, request.headers["content-encoding"]);
     const payload = await parseBodyAsync(body);
@@ -3168,6 +3180,7 @@ async function handleResponses(request, response, requestUrl) {
         route,
         controller.signal,
         compactV2,
+        { allowFailover: !exactRouteProbe },
       );
       const compacted = compaction.route || route;
       recordCompactionUsage(compaction, route, startedAt);
@@ -3255,7 +3268,9 @@ async function handleResponses(request, response, requestUrl) {
       // less than the request it avoids. The cooldown expires by itself, so
       // the operator's chosen model comes back without anyone doing anything.
       const settings = readFailoverSettings();
-      const cooled = settings.enabled ? providerCooldown(route.provider) : undefined;
+      const cooled = !exactRouteProbe && settings.enabled
+        ? providerCooldown(route.provider)
+        : undefined;
       if (cooled) {
         const candidates = failoverCandidates({
           route,
@@ -3400,7 +3415,7 @@ async function handleResponses(request, response, requestUrl) {
         bodyText: failedBodyText,
         retryAfterSeconds: Number(upstream.headers.get("retry-after")),
       });
-      if (verdict.swap) {
+      if (verdict.swap && !exactRouteProbe) {
         // Believe the provider about when it will be back before trying anyone
         // else, so the next turn skips it instead of paying for the same
         // rejection again.

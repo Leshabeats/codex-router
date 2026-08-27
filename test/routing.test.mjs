@@ -8194,14 +8194,117 @@ test("Go Chat/Messages, paid Zen, and other Free routes keep compatibility-sensi
   }
 });
 
+test("canceling a Zen Free Muse custom-tool stream stops the transformed pipeline", async () => {
+  const curated = curatedMuseCompatibilityModel();
+  const { muse } = curated;
+  const stateDir = path.join(curated.dir, "state");
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(
+    path.join(stateDir, "enabled-providers.json"),
+    `${JSON.stringify({ version: 1, providers: ["opencode-free"] })}\n`,
+  );
+  let gatewayRequests = 0;
+  let gatewayClosed = false;
+  let terminalWritten = false;
+  const gateway = await mockServer(async (request, response) => {
+    if (request.method === "GET") {
+      json(response, 200, { ok: true, credential_present: true });
+      return;
+    }
+    await bodyJson(request);
+    gatewayRequests += 1;
+    response.once("close", () => {
+      gatewayClosed = true;
+    });
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    response.write(
+      `event: response.output_item.added\ndata: ${JSON.stringify({
+        type: "response.output_item.added",
+        output_index: 0,
+        item: {
+          type: "function_call",
+          id: "fc_cancel",
+          call_id: "call_cancel",
+          name: "codex_custom_apply_patch",
+          arguments: "",
+        },
+      })}\n\n`,
+    );
+    await Promise.race([
+      new Promise((resolve) => response.once("close", resolve)),
+      new Promise((resolve) => setTimeout(resolve, 1_000)),
+    ]);
+    if (!response.destroyed) {
+      terminalWritten = true;
+      response.end(
+        `event: response.function_call_arguments.done\ndata: ${JSON.stringify({
+          type: "response.function_call_arguments.done",
+          item_id: "fc_cancel",
+          arguments: JSON.stringify({ input: "*** Begin Patch\n*** End Patch" }),
+        })}\n\n`,
+      );
+    }
+  });
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_STATE_DIR: stateDir,
+    CODEX_ROUTER_SHOW_ALL_MODELS: "0",
+    MODEL_ROUTER_USER_MODELS: curated.file,
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_GATEWAY_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_API_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_GROK_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_QUIET: "1",
+  });
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const canceler = new AbortController();
+    const routed = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: muse.slug,
+        stream: true,
+        tools: zenFreeCompatibilityTools(),
+        input: [{ type: "message", role: "user", content: "Begin, then wait." }],
+      }),
+      signal: canceler.signal,
+    });
+    assert.equal(routed.status, 200, router.testErrors());
+    const reader = routed.body.getReader();
+    let received = "";
+    while (!received.includes("response.output_item.added")) {
+      const { done, value } = await reader.read();
+      assert.equal(done, false);
+      received += Buffer.from(value).toString("utf8");
+    }
+    assert.match(received, /"type":"custom_tool_call"/);
+    canceler.abort();
+    await reader.read().catch(() => undefined);
+    const closeDeadline = Date.now() + 1_200;
+    while (!gatewayClosed && Date.now() < closeDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal(gatewayClosed, true);
+    assert.equal(terminalWritten, false);
+    assert.equal(gatewayRequests, 1);
+    assert.doesNotMatch(received, /custom_tool_call_input\.done/);
+  } finally {
+    await stopChild(router);
+    await closeServer(gateway.server);
+    rmSync(curated.dir, { recursive: true, force: true });
+  }
+});
 
-// GLM-5.3-Flash (and older Ox Alpha) rejects an off-ladder reasoning_effort with
+
+// The direct-proven GLM-5.3-Flash routes reject an off-ladder reasoning_effort with
 // HTTP 400 rather than ignoring it -- its upstream answers "[1210] This model
 // always engages in thinking and cannot be disabled; please use low, high, or max".
 // Codex can send any rung it knows, and an installation older than 0.143 has no
 // `max` in its enum at all: the catalog clamps the model's default down to `xhigh`
 // for those, so `xhigh` is what arrives here and must land back on `max`.
-test("API forwarder clamps GLM-5.3-Flash efforts onto the ladder the model accepts", async () => {
+test("API forwarder clamps proven Flash routes onto the ladder the model accepts", async () => {
   const upstreamRequests = [];
   const upstream = await mockServer(async (request, response) => {
     upstreamRequests.push({ headers: request.headers, body: await bodyJson(request) });
@@ -8214,12 +8317,6 @@ test("API forwarder clamps GLM-5.3-Flash efforts onto the ladder the model accep
     OPENCODE_API_KEY: "TEST_OPENCODE_OX_KEY",
     OPENROUTER_API_BASE_URL: `http://127.0.0.1:${upstream.port}`,
     OPENROUTER_API_KEY: "TEST_OPENROUTER_OX_KEY",
-    COMMANDCODE_BASE_URL: `http://127.0.0.1:${upstream.port}`,
-    COMMAND_CODE_API_KEY: "TEST_COMMANDCODE_OX_KEY",
-    NOUS_API_BASE_URL: `http://127.0.0.1:${upstream.port}`,
-    NOUS_API_KEY: "TEST_NOUS_OX_KEY",
-    VENICE_API_BASE_URL: `http://127.0.0.1:${upstream.port}`,
-    VENICE_API_KEY: "TEST_VENICE_OX_KEY",
     CODEX_ROUTER_QUIET: "1",
   });
 
@@ -8238,6 +8335,10 @@ test("API forwarder clamps GLM-5.3-Flash efforts onto the ladder the model accep
       // Rungs the route does not publish take the nearest one at or below.
       ["opencode-go-glm-5-3-flash", "glm-5.3-flash", "TEST_OPENCODE_OX_KEY", "medium", "low"],
       ["opencode-go-glm-5-3-flash", "glm-5.3-flash", "TEST_OPENCODE_OX_KEY", "minimal", "low"],
+      // The OpenRouter Flash route carries the same measured ladder and must
+      // repair the pre-0.143 xhigh catalog clamp too.
+      ["openrouter-glm-5-3-flash", "z-ai/glm-5.3-flash", "TEST_OPENROUTER_OX_KEY", "xhigh", "max"],
+      ["openrouter-glm-5-3-flash", "z-ai/glm-5.3-flash", "TEST_OPENROUTER_OX_KEY", "medium", "low"],
     ]) {
       const response = await fetch(
         `http://127.0.0.1:${forwarderPort}/v1/chat/completions`,
@@ -8280,22 +8381,27 @@ test("API forwarder clamps GLM-5.3-Flash efforts onto the ladder the model accep
     });
     assert.equal(upstreamRequests.at(-1).body.reasoning_effort, undefined);
 
-    // Forcing a tool choice is observed to work on GLM-5.3-Flash, so the
-    // profile must not quietly downgrade it the way the thinking providers do.
-    await fetch(`http://127.0.0.1:${forwarderPort}/v1/chat/completions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${INTERNAL_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "opencode-go-glm-5-3-flash",
-        reasoning_effort: "low",
-        tool_choice: "required",
-        messages: [{ role: "user", content: "test" }],
-      }),
-    });
-    assert.equal(upstreamRequests.at(-1).body.tool_choice, "required");
+    // Forcing a tool choice was observed on each certified route, so the
+    // profile must not quietly downgrade it the way thinking-only providers do.
+    for (const gatewayModel of [
+      "opencode-go-glm-5-3-flash",
+      "openrouter-glm-5-3-flash",
+    ]) {
+      await fetch(`http://127.0.0.1:${forwarderPort}/v1/chat/completions`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${INTERNAL_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: gatewayModel,
+          reasoning_effort: "low",
+          tool_choice: "required",
+          messages: [{ role: "user", content: "test" }],
+        }),
+      });
+      assert.equal(upstreamRequests.at(-1).body.tool_choice, "required");
+    }
   } finally {
     await stopChild(forwarder);
     await closeServer(upstream.server);

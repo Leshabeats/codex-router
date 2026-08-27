@@ -58,7 +58,6 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "commandcode/gemini-3.7-flash",
       "commandcode/glm-5.2-fast",
       "commandcode/glm-5.2",
-      "commandcode/glm-5.3-flash",
       "commandcode/glm-5.3",
       "commandcode/gpt-5.5",
       "commandcode/gpt-5.6-luna",
@@ -112,7 +111,6 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "nousresearch/deepseek-v4-pro",
       "nousresearch/gemini-3.7-flash",
       "nousresearch/glm-5.2",
-      "nousresearch/glm-5.3-flash",
       "nousresearch/glm-5.3",
       "nousresearch/gpt-5.6-terra",
       "nousresearch/grok-4.6",
@@ -182,7 +180,6 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "qwen-plan/qwen3.8-flash",
       "qwen-plan/qwen3.8-max-preview",
       "qwen-plan/qwen3.8-max",
-      "venice/glm-5.3-flash",
       "venice/glm-5.3",
       "xiaomi-mimo/mimo-v2.5-pro",
       "xiaomi-mimo/mimo-v2.5",
@@ -338,15 +335,11 @@ test("provider registry exposes configured API and OAuth model families", () => 
   assert.deepEqual(venice.credential.environment, ["VENICE_API_KEY"]);
   assert.equal(venice.credential.file, "venice-api-key.secret");
   assert.deepEqual(venice.credential.keychainServices, ["codex-router-venice"]);
-  // Venice arrived as catalog-only, and stayed that way until Ox Alpha was
-  // checked in for it. When Ox Alpha was withdrawn, GLM-5.3 Flash replaced it.
-  // Venice ships exactly that one entry -- the picker is not empty once a key
-  // is stored, and everything else on Venice still has to be curated -- so this
-  // asserts the entry rather than merely that something is listed, which would
-  // also pass if a curation bug leaked extra models in.
+  // Only the directly certified full GLM-5.3 route ships checked in. Venice's
+  // other catalog entries remain available for explicit operator curation.
   assert.deepEqual(
     LISTED_MODELS.filter(({ provider }) => provider === "venice").map(({ slug }) => slug),
-    ["venice/glm-5.3-flash", "venice/glm-5.3"],
+    ["venice/glm-5.3"],
   );
   const opencodeFree = PROVIDERS.get("opencode-free");
   const opencodeFreeResponses = PROVIDERS.get("opencode-free-responses");

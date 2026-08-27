@@ -273,16 +273,20 @@ async function closeServer(server) {
   await new Promise((resolve) => server.close(resolve));
 }
 
-function readRouted(port, body) {
+function readRouted(port, body, { endpoint = "/responses", headers = {} } = {}) {
   return new Promise((resolve, reject) => {
-    const base = new URL(`${callerBaseUrl(port, CALLER_KEY)}/responses`);
+    const base = new URL(`${callerBaseUrl(port, CALLER_KEY)}${endpoint}`);
     const request = http.request(
       {
         host: "127.0.0.1",
         port,
         path: base.pathname,
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: "Bearer codex-caller-auth" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer codex-caller-auth",
+          ...headers,
+        },
       },
       (response) => {
         let text = "";
@@ -367,6 +371,77 @@ test("a turn whose provider is out of usage is served by the next model", async 
     assert.match(child.testErrors(), /failover model=deepseek\/deepseek-v4-pro/);
     assert.match(child.testErrors(), /reason=out_of_usage/);
     assert.match(child.testErrors(), /-> zai-api\/glm-5\.2 outcome=200/);
+  } finally {
+    await stopChild(child);
+    await closeServer(gw.server);
+  }
+});
+
+test("an exact-route probe never certifies a turn or compaction served by failover", async () => {
+  const seen = [];
+  const gw = await gateway(async (request, response) => {
+    assert.equal(
+      request.headers["x-codex-router-exact-route"],
+      undefined,
+      "the router leaked its local probe control header to the gateway",
+    );
+    const body = await bodyJson(request);
+    seen.push(body);
+    if (body.model === PRIMARY.gatewayModel) {
+      const payload = Buffer.from(QUOTA_BODY, "utf8");
+      response.writeHead(429, {
+        "Content-Type": "application/json",
+        "Content-Length": String(payload.length),
+      });
+      response.end(payload);
+      return;
+    }
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    response.end(contentSse("fallback-must-not-run"));
+  });
+  const routerPort = await openPort();
+  const child = run(routerEnv(gw.port, routerPort), {
+    cooldowns: {
+      deepseek: {
+        until: new Date(Date.now() + 30 * 60_000).toISOString(),
+        reason: "out_of_usage",
+      },
+    },
+  });
+  const exactHeaders = { "x-codex-router-exact-route": "1" };
+  try {
+    await waitFor(`http://127.0.0.1:${routerPort}/health`, child);
+
+    const turn = await readRouted(routerPort, TURN_BODY, { headers: exactHeaders });
+    assert.equal(turn.status, 429);
+    assert.match(turn.body, /quota|usage|billing/i);
+
+    const compact = await readRouted(
+      routerPort,
+      {
+        model: PRIMARY.slug,
+        input: [
+          {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "Remember 42." }],
+          },
+        ],
+      },
+      { endpoint: "/responses/compact", headers: exactHeaders },
+    );
+    assert.equal(compact.status, 429);
+    assert.match(compact.body, /quota|usage|billing/i);
+
+    assert.deepEqual(
+      seen.map((body) => body.model),
+      [PRIMARY.gatewayModel, PRIMARY.gatewayModel],
+      "the exact-route marker still contacted a fallback model",
+    );
+    const events = await waitForUsageEvents(child.stateDir, 2, child);
+    assert.equal(events.every((event) => event.model === PRIMARY.slug), true);
+    assert.equal(events.every((event) => event.failoverFrom === undefined), true);
+    assert.doesNotMatch(child.testErrors(), /failover model=/);
   } finally {
     await stopChild(child);
     await closeServer(gw.server);
