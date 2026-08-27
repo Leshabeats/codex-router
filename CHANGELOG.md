@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Router retention and concurrency now stay bounded without crossing native accounts.**
+  Request bodies and buffered upstream errors have explicit byte ceilings,
+  active turns retain truthful accounting after tray records expire, and a
+  separate 24-hour execution deadline protects abandoned work. Encrypted
+  collaboration relays coalesce only within the same resolved native account;
+  one canceled waiter cannot stop another, while the shared read is aborted
+  when every waiter leaves. Aggregate limits and cache counters are visible
+  only through caller-authenticated health.
+
 - **OpenCode Go's Ox Alpha preview has graduated to GLM-5.3-Flash.** The
   authenticated catalog now publishes `glm-5.3-flash` and reports the old
   `ox-alpha-free` ID unavailable, matching OpenCode's current Chat Completions
