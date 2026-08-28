@@ -108,9 +108,12 @@ export async function waitForServiceReadiness({
           // it runs -- the poll race above gave up a tick ago. The counter
           // never overrides a verdict health has already reached, so the
           // crash-loop finding is reported only after one last bounded look.
+          // That grace still belongs to the original readiness budget; a
+          // threshold reached near the deadline must not add a fresh poll.
+          const finalGraceMs = Math.max(0, Math.min(pollMs, deadline - Date.now()));
           const finalWinner = await Promise.race([
             healthWinner,
-            sleep(pollMs).then(() => null),
+            sleep(finalGraceMs).then(() => null),
           ]);
           if (finalWinner) {
             if (finalWinner.outcome.healthy) return finalWinner.outcome.health;
