@@ -27,6 +27,7 @@ const bridgeSource = String.raw`
   const rejectAccountUsageRead = Number(searchParams.get("rejectAccountUsageRead")) || 0;
   const staleAccountFailure = searchParams.get("staleAccountFailure") === "1";
   const staleProviderUsage = searchParams.get("staleProviderUsage") === "1";
+  const fallbackUsage = searchParams.get("fallbackUsage") === "1";
   const pollOnceMs = Number(searchParams.get("pollOnceMs")) || 0;
   const healthPollOnceMs = Number(searchParams.get("healthPollOnceMs")) || 0;
   const staleHealth = searchParams.get("staleHealth") === "1";
@@ -246,35 +247,54 @@ const bridgeSource = String.raw`
       const totalTokens = staleProviderUsage && read > 1 ? 24000 : 12000;
       return {
         fetchedAt: "2026-08-27T08:00:00.000Z",
-        providers: [{
-          id: "deepseek",
-          displayName: "DeepSeek",
-          credentialType: "api",
-          totalTokens,
-          requests: 8,
-          last24hTokens: totalTokens,
-          last24hRequests: 8,
-          dailyUsageBuckets: [{ startDate: "2026-08-27", tokens: totalTokens, requests: 8 }],
-          account: {
-            status: "available",
-            metrics: [
-              {
-                kind: "quota",
-                label: "Monthly credits",
-                usedPercent: 25,
-                remainingPercent: 75,
-                resetAt: 1800000000,
-              },
-              {
-                kind: "quota",
-                label: "Rolling window",
-                usedPercent: 40,
-                remainingPercent: 60,
-                resetAt: 1790000000,
-              },
-            ],
+        providers: [
+          ...(fallbackUsage ? [{
+            id: "openai",
+            displayName: "OpenAI",
+            credentialType: "oauth",
+            totalTokens: 31_000,
+            requests: 3,
+            last24hTokens: 31_000,
+            last24hRequests: 3,
+            dailyUsageBuckets: [{
+              startDate: "2026-08-28",
+              tokens: 31_000,
+              requests: 3,
+              inputTokens: 25_000,
+              cachedInputTokens: 7_000,
+              outputTokens: 6_000,
+            }],
+          }] : []),
+          {
+            id: "deepseek",
+            displayName: "DeepSeek",
+            credentialType: "api",
+            totalTokens,
+            requests: 8,
+            last24hTokens: totalTokens,
+            last24hRequests: 8,
+            dailyUsageBuckets: [{ startDate: "2026-08-27", tokens: totalTokens, requests: 8 }],
+            account: {
+              status: "available",
+              metrics: [
+                {
+                  kind: "quota",
+                  label: "Monthly credits",
+                  usedPercent: 25,
+                  remainingPercent: 75,
+                  resetAt: 1800000000,
+                },
+                {
+                  kind: "quota",
+                  label: "Rolling window",
+                  usedPercent: 40,
+                  remainingPercent: 60,
+                  resetAt: 1790000000,
+                },
+              ],
+            },
           },
-        }],
+        ],
       };
     },
     discoverProviderModels: async (providerId) => catalog(providerId),
@@ -561,6 +581,59 @@ test("the production renderer exposes model discovery and picker actions", { tim
       await page.getByRole("textbox", { name: "Model tag or Ollama URL" }).inputValue(),
       "hf.co/unsloth/GLM-5.3-Flash-GGUF:UD-IQ1_S",
     );
+    assert.deepEqual(pageErrors, [], `renderer errors: ${pageErrors.join("; ")}`);
+  } finally {
+    await browser.close();
+    await close();
+  }
+});
+
+test("fallback-only splits do not claim account breakdown or a complete range mix", { timeout: 120_000 }, async () => {
+  assert.equal(existsSync(path.join(dist, "index.html")), true, "npm test must build the renderer first");
+  assert.ok(chromiumPath, "No Chromium executable is available for the Control Center renderer test.");
+
+  const { url, close } = await serveRenderer();
+  const browser = await chromium.launch({
+    executablePath: chromiumPath,
+    headless: true,
+    args: process.platform === "linux" ? ["--no-sandbox"] : [],
+  });
+  const pageErrors = [];
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 840 } });
+    page.setDefaultTimeout(10_000);
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    page.on("console", (message) => {
+      if (message.type() === "error") pageErrors.push(message.text());
+    });
+
+    await page.goto(`${url}?fallbackUsage=1`, { waitUntil: "domcontentloaded", timeout: 30_000 });
+    await page.waitForFunction(() => window.routerControlTest.navigationReady());
+    assert.equal(
+      await page.evaluate(() => window.routerControlTest.navigate({ destination: "usage", sourceId: "openai" })),
+      true,
+    );
+    await page.getByRole("heading", { name: "Usage", exact: true }).waitFor();
+    await page.waitForFunction(() => document.querySelector('select[aria-label="Usage source"]')?.value === "chatgpt-subscription");
+    await page.locator(".us-chart-token-bars rect.router-fallback").first().waitFor();
+    await page.getByText(/1 date uses local router fallback\.$/).waitFor();
+    await page.getByText(/1 date is filled from this router's local ChatGPT meter/).waitFor();
+    assert.equal(
+      await page.locator(".us-chart-wrap").getAttribute("aria-label"),
+      "Daily account token usage with local router fallback on 1 date",
+    );
+    assert.doesNotMatch(await page.locator("body").innerText(), /\b1 dates\b/i);
+
+    assert.equal(
+      await page.getByText("The account API supplied the input/cache/output split for this 30-day range.", { exact: true }).count(),
+      0,
+    );
+    await page.getByText(
+      "OpenAI supplies daily account totals only here; use “This router · all providers” for regular input, cached input, and output.",
+      { exact: true },
+    ).waitFor();
+    assert.equal(await page.locator('.us-token-mix[aria-label="Token mix for selected 30-day range"]').count(), 0);
+    assert.equal(await page.locator(".us-token-mix").count(), 0);
     assert.deepEqual(pageErrors, [], `renderer errors: ${pageErrors.join("; ")}`);
   } finally {
     await browser.close();
