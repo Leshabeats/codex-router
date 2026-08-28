@@ -14,7 +14,7 @@
 // case where the plan changes under the same key.
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { scryptSync } from "node:crypto";
+import { randomBytes, scryptSync } from "node:crypto";
 import path from "node:path";
 
 import { STATE_DIR } from "./paths.mjs";
@@ -25,27 +25,35 @@ export const COMMANDCODE_PLAN_PATH = path.join(STATE_DIR, "commandcode-plan.json
 // a working day, short enough that an upgrade is noticed the same afternoon.
 export const ROUTE_RECHECK_MS = 6 * 60 * 60 * 1000;
 const MAX_CREDENTIAL_ROUTES = 256;
-const FINGERPRINT_PATTERN = /^[0-9a-f]{64}$/;
-const FINGERPRINT_SALT = "codex-router/commandcode-plan/credential/v2";
-const FINGERPRINT_SCRYPT_OPTIONS = Object.freeze({
-  N: 16_384,
-  r: 8,
-  p: 1,
-  maxmem: 32 * 1024 * 1024,
-});
+const VERIFIER_VERSION = "scrypt-v1";
+const VERIFIER_BYTES = 32;
 
 // Never the key itself: this file is state, not a credential store, and a
 // verifier answers the only question asked of it -- "is this still the same
 // key". The memory-hard derivation also avoids persisting a fast offline
 // verifier. Version-one SHA-256 prefixes intentionally miss after this change;
 // the only cost is re-learning one entitlement response for that credential.
-export function credentialFingerprint(value) {
-  return scryptSync(
-    String(value ?? ""),
-    FINGERPRINT_SALT,
-    32,
-    FINGERPRINT_SCRYPT_OPTIONS,
-  ).toString("hex");
+export function commandCodeCredentialVerifier(value, { salt = randomBytes(16) } = {}) {
+  const saltBytes = Buffer.isBuffer(salt) ? salt : Buffer.from(String(salt), "base64url");
+  return {
+    version: VERIFIER_VERSION,
+    salt: saltBytes.toString("base64url"),
+    verifier: scryptSync(String(value ?? ""), saltBytes, VERIFIER_BYTES).toString("base64url"),
+  };
+}
+
+function validDerivation(derivation) {
+  if (derivation?.version !== VERIFIER_VERSION || typeof derivation.salt !== "string") return false;
+  try {
+    return Buffer.from(derivation.salt, "base64url").length === 16;
+  } catch {
+    return false;
+  }
+}
+
+function verifierFor(value, derivation) {
+  if (!validDerivation(derivation)) return undefined;
+  return commandCodeCredentialVerifier(value, { salt: derivation.salt }).verifier;
 }
 
 function readDocument() {
@@ -75,48 +83,46 @@ function writeDocument(document) {
   }
 }
 
-function routeRecord(value, fingerprint) {
+function routeRecord(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  if (!FINGERPRINT_PATTERN.test(fingerprint)) return undefined;
-  if (value.credential !== undefined && value.credential !== fingerprint) return undefined;
   if (typeof value.providerApi !== "boolean") return undefined;
   const observed = Date.parse(value.observedAt || "");
   if (!Number.isFinite(observed)) return undefined;
   return {
-    credential: fingerprint,
     providerApi: value.providerApi,
     observedAt: new Date(observed).toISOString(),
   };
 }
 
-// Version-one builds stored one answer directly under the provider id. Read
-// that shape indefinitely, but migrate it into the per-credential map on the
-// next write so adding key B can never erase the known route for key A.
+// Fast version-one SHA-256 fingerprints are deliberately ignored. A miss costs
+// one entitlement request and replaces the old entry with memory-hard state.
 function credentialRoutes(providerEntry) {
   const routes = {};
   if (!providerEntry || typeof providerEntry !== "object" || Array.isArray(providerEntry)) {
     return routes;
   }
   if (providerEntry.credentials && typeof providerEntry.credentials === "object" && !Array.isArray(providerEntry.credentials)) {
-    for (const [fingerprint, raw] of Object.entries(providerEntry.credentials)) {
-      const route = routeRecord(raw, fingerprint);
-      if (route) routes[fingerprint] = route;
+    for (const [id, raw] of Object.entries(providerEntry.credentials)) {
+      const route = routeRecord(raw);
+      if (route) routes[id] = route;
     }
   }
-  if (typeof providerEntry.credential === "string") {
-    const legacy = routeRecord(providerEntry, providerEntry.credential);
-    if (legacy) routes[legacy.credential] = legacy;
-  }
   return routes;
+}
+
+function providerDerivation(providerEntry) {
+  return validDerivation(providerEntry?.credentialDerivation)
+    ? { ...providerEntry.credentialDerivation }
+    : undefined;
 }
 
 function boundedCredentialRoutes(routes) {
   return Object.fromEntries(
     Object.entries(routes)
-      .sort(([leftFingerprint, left], [rightFingerprint, right]) => {
+      .sort(([leftVerifier, left], [rightVerifier, right]) => {
         const time = Date.parse(right.observedAt) - Date.parse(left.observedAt);
         if (time !== 0) return time;
-        return leftFingerprint < rightFingerprint ? -1 : leftFingerprint > rightFingerprint ? 1 : 0;
+        return leftVerifier < rightVerifier ? -1 : leftVerifier > rightVerifier ? 1 : 0;
       })
       .slice(0, MAX_CREDENTIAL_ROUTES),
   );
@@ -134,8 +140,9 @@ function boundedCredentialRoutes(routes) {
  * turn to say what it already said.
  */
 export function commandCodeRoute(providerId, credentialValue, { at = Date.now() } = {}) {
-  const fingerprint = credentialFingerprint(credentialValue);
-  const entry = credentialRoutes(readDocument()[String(providerId || "")])[fingerprint];
+  const providerEntry = readDocument()[String(providerId || "")];
+  const verifier = verifierFor(credentialValue, providerDerivation(providerEntry));
+  const entry = verifier ? credentialRoutes(providerEntry)[verifier] : undefined;
   const known = entry?.providerApi === false;
   if (!known) return { route: "provider-api", recheck: false };
   const observed = Date.parse(entry.observedAt || "");
@@ -161,14 +168,17 @@ export function recordCommandCodeRoute(
   const id = String(providerId || "").trim();
   if (!id || typeof providerApi !== "boolean") return;
   const document = readDocument();
-  const fingerprint = credentialFingerprint(credentialValue);
+  const credentialDerivation = providerDerivation(document[id]) || {
+    version: VERIFIER_VERSION,
+    salt: randomBytes(16).toString("base64url"),
+  };
   const credentials = credentialRoutes(document[id]);
-  credentials[fingerprint] = {
-    credential: fingerprint,
+  const verifier = verifierFor(credentialValue, credentialDerivation);
+  credentials[verifier] = {
     providerApi,
     observedAt: new Date(at).toISOString(),
   };
-  document[id] = { credentials: boundedCredentialRoutes(credentials) };
+  document[id] = { credentialDerivation, credentials: boundedCredentialRoutes(credentials) };
   writeDocument(document);
 }
 

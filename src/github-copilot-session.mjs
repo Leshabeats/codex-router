@@ -148,7 +148,7 @@ export async function ensureFreshGitHubCopilotSession(
   ) {
     return cached;
   }
-  if (pending?.sourceToken === token) return pending.promise;
+  if (pending?.token === token) return pending.promise;
   const promise = resolveSession(token, fetchImpl, now).then((session) => {
     cached = session;
     return session;
@@ -158,7 +158,7 @@ export async function ensureFreshGitHubCopilotSession(
   // The resolved session already has to retain this token for inference. Keep
   // the in-flight comparison equally short-lived instead of deriving and
   // retaining a fast verifier for a credential.
-  pending = { sourceToken: token, promise };
+  pending = { token, promise };
   return promise;
 }
 

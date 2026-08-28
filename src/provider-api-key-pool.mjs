@@ -495,6 +495,29 @@ function quotaRatio(meta, at) {
   return Math.max(0, Math.min(1, meta.quota.remaining / meta.quota.limit));
 }
 
+export function providerApiKeyPoolsSupportSnapshot(options = {}) {
+  const snapshot = providerApiKeyPoolsSnapshot(options);
+  return {
+    configured: snapshot.configured,
+    valid: snapshot.valid,
+    usable: snapshot.usable,
+    providers: Object.fromEntries(
+      Object.entries(snapshot.providers).map(([provider, pool]) => {
+        const readiness = pool.readiness || {};
+        return [provider, {
+          readiness: {
+            usable: readiness.usable === true,
+            reason: String(readiness.reason || "unknown"),
+          },
+          credentialCount: Number(readiness.credentialCount || 0),
+          eligibleCredentialCount: Number(readiness.eligibleCredentialCount || 0),
+          resolvableCredentialCount: Number(readiness.resolvableCredentialCount || 0),
+        }];
+      }),
+    ),
+  };
+}
+
 function cooldownActive(meta, at) {
   const until = Date.parse(meta?.health?.cooldownUntil || "");
   return Number.isFinite(until) && until > at;
@@ -555,13 +578,11 @@ function resolveValue(result) {
 }
 
 function duplicateResolvedSecrets(entries) {
-  // The resolved candidates already exist in this short-lived request scope.
-  // Comparing those values directly avoids creating a reusable verifier for
-  // every provider secret.
-  const seen = new Set();
+  const seen = new Map();
   for (const entry of entries) {
-    if (seen.has(entry.value)) return true;
-    seen.add(entry.value);
+    const previous = seen.get(entry.value);
+    if (previous && previous !== entry.meta.id) return true;
+    seen.set(entry.value, entry.meta.id);
   }
   return false;
 }
