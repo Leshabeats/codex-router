@@ -592,6 +592,26 @@ test("a sibling-property ref is inlined with the target's constraints", () => {
   assert.deepEqual(schema, flightsSearchSchema());
 });
 
+// A foreign `$ref` plus a validation sibling is a conjunction. Blind object
+// spread is only lossless when overlapping keywords agree: replacing the
+// target's tighter maxLength with the sibling's looser value would widen what
+// the caller's tool accepts. When that conjunction cannot be represented by a
+// simple inline, keep the original ref and let the strict provider fail closed.
+test("a conflicting foreign ref validation sibling is not widened", () => {
+  const schema = {
+    type: "object",
+    properties: {
+      base: { type: "string", maxLength: 5 },
+      alias: { $ref: "#/properties/base", maxLength: 10 },
+    },
+  };
+  const inlined = inlineForeignRefs(schema);
+  assert.equal(inlined, schema);
+  assert.deepEqual(inlined.properties.alias, {
+    $ref: "#/properties/base",
+    maxLength: 10,
+  });
+});
 test("a $defs ref is the form Moonshot asks for and survives untouched", () => {
   const schema = {
     type: "object",

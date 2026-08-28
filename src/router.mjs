@@ -63,7 +63,11 @@ import {
   PORTS,
   loopback,
 } from "./paths.mjs";
-import { MODEL_BY_SLUG, PROVIDERS, providerForModel } from "./model-registry.mjs";
+import {
+  MODEL_BY_SLUG,
+  RUNTIME_PROVIDERS,
+  providerForModel,
+} from "./model-registry.mjs";
 import { createHealthCache } from "./health-cache.mjs";
 import { discoveryDisabled } from "./discovery-mode.mjs";
 import { readNativeAliases } from "./native-alias.mjs";
@@ -1045,8 +1049,10 @@ async function probeService(url) {
 
 async function healthPayload() {
   const enabled = new Set(readProviderSelection());
-  const apiEnabled = [...PROVIDERS.values()].some(
-    (provider) => enabled.has(provider.id) && provider.kind === "openai-compatible",
+  const apiEnabled = [...RUNTIME_PROVIDERS.values()].some(
+    (provider) => provider.kind === "openai-compatible" && (
+      provider.generic === true || enabled.has(provider.id)
+    ),
   );
   const [oauth, api, grokOauth, gateway] = await Promise.all([
     enabled.has("kimi-oauth")
@@ -1088,6 +1094,17 @@ async function healthPayload() {
     grokOauth,
     gateway,
   };
+}
+
+// Generic providers are enabled by their own explicit descriptor and never
+// enter the built-in provider-selection document. The runtime registry
+// contains only descriptors whose enabled flag is true, so presence there is
+// the generic equivalent of a selected built-in provider. Credential
+// readiness remains the API forwarder's boundary, where an unavailable bound
+// reference produces the promised 503 instead of being mislabeled as hidden.
+function routeProviderEnabled(providerId) {
+  const provider = RUNTIME_PROVIDERS.get(providerId);
+  return provider?.generic === true || readProviderSelection().includes(providerId);
 }
 
 function messageItem(text) {
@@ -1730,7 +1747,10 @@ function carryReasoningThroughInput(input, { nativeThinking = false } = {}) {
 // endpoint has proved that it rejects a prefilled model turn.
 function requiresTrailingUserTurn(route) {
   const provider = providerForModel(route);
-  if (provider?.id === "gemini-api" || provider?.ownedBy?.toLowerCase?.() === "google") {
+  if (
+    provider?.generic !== true &&
+    (provider?.id === "gemini-api" || provider?.ownedBy?.toLowerCase?.() === "google")
+  ) {
     return true;
   }
   return route?.requiresTrailingUserTurn === true;
@@ -3141,11 +3161,11 @@ async function handleResponses(request, response, requestUrl) {
     // failure for a routing error.
     if (!registeredRoute && requestedModel) {
       const redirect = MODEL_BY_SLUG.get(readNativeRedirect());
-      if (redirect && readProviderSelection().includes(redirect.provider)) {
+      if (redirect && routeProviderEnabled(redirect.provider)) {
         registeredRoute = redirect;
       }
     }
-    route = registeredRoute && readProviderSelection().includes(registeredRoute.provider)
+    route = registeredRoute && routeProviderEnabled(registeredRoute.provider)
       ? registeredRoute
       : undefined;
     if (registeredRoute && !route) {

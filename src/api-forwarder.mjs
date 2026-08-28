@@ -352,8 +352,10 @@ function stripEncryptedToolSchemaAnnotations(payload, protocol) {
 // endpoint has proved that it rejects a prefilled model turn.
 function requiresTrailingUserTurn(provider, model) {
   return (
-    provider?.id === "gemini-api" ||
-    provider?.ownedBy?.toLowerCase?.() === "google" ||
+    (provider?.generic !== true && (
+      provider?.id === "gemini-api" ||
+      provider?.ownedBy?.toLowerCase?.() === "google"
+    )) ||
     model?.requiresTrailingUserTurn === true
   );
 }
