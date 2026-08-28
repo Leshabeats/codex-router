@@ -1041,7 +1041,20 @@ wire_api = "responses"
 ```
 
 The generated path is local caller authentication. Do not paste the complete
-managed URL into an issue.
+managed URL into an issue. If that capability may have been exposed, rotate it
+through the supported transaction instead of deleting state files by hand:
+
+```sh
+./bin/model-router codex caller-key rotate
+```
+
+On Windows use `./codex-router.ps1 caller-key rotate`. Rotation republishes only
+client integrations that are already installed. When the router service is
+installed, rotation restarts it and verifies that the previous capability is
+rejected; otherwise the new capability becomes authoritative on the next service
+start. Neither key is printed. Fully quit and reopen Codex (and restart a running
+Gemini CLI session) after a successful rotation so cached client configuration
+cannot keep using the previous route.
 
 ### Run GPT-5.6 Sol at its documented 1M context window
 

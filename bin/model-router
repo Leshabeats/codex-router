@@ -17,7 +17,7 @@ one provider selection. The target chooses which client's configuration a
 command writes, not which router it talks to.
 
 Commands:
-  setup, install, doctor, status, provider-key, key-pool, providers, enable, disable,
+  setup, install, doctor, status, provider-key, caller-key, key-pool, providers, enable, disable,
   chatgpt-session, skills, multi-agent, media, panel, local-mlx, uninstall, smoke-test,
   start, stop, update, rollback, shim, subagent-preset (dsh only)
 
@@ -65,7 +65,7 @@ case "$target" in
 esac
 
 case "$command" in
-  setup|install|doctor|status|provider-key|key-pool|providers|enable|disable|chatgpt-session|skills|multi-agent|media|panel|local-mlx|uninstall|smoke-test|start|stop|update|rollback|subagent-preset|shim) ;;
+  setup|install|doctor|status|provider-key|caller-key|key-pool|providers|enable|disable|chatgpt-session|skills|multi-agent|media|panel|local-mlx|uninstall|smoke-test|start|stop|update|rollback|subagent-preset|shim) ;;
   *) echo "Unknown command: $command" >&2; usage >&2; exit 2 ;;
 esac
 
