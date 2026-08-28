@@ -52,3 +52,28 @@ test("router health rejects a different service on the configured port", async (
   assert.equal(health.ok, false);
   assert.match(health.error, /different service/);
 });
+
+test("router health bounds a request by the remaining overall deadline", async () => {
+  const startedAt = Date.now();
+  const health = await waitForRouterHealth({
+    target: "codex",
+    timeoutMs: 80,
+    requestTimeoutMs: 500,
+    intervalMs: 1,
+    fetchImpl: (_url, { signal }) =>
+      new Promise((resolve, reject) => {
+        const fallback = setTimeout(() => reject(new Error("request was never aborted")), 1_000);
+        signal.addEventListener(
+          "abort",
+          () => {
+            clearTimeout(fallback);
+            reject(signal.reason);
+          },
+          { once: true },
+        );
+      }),
+  });
+
+  assert.equal(health.ok, false);
+  assert.ok(Date.now() - startedAt < 250, "health request exceeded the overall timeout budget");
+});
