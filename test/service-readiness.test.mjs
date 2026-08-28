@@ -188,6 +188,25 @@ test("health that settles as the restart threshold is reached wins over the cras
   assert.deepEqual(health, { ok: true });
 });
 
+test("the final crash-loop health grace stays inside the readiness deadline", async () => {
+  let queries = 0;
+  const startedAt = Date.now();
+  await assert.rejects(
+    waitForServiceReadiness({
+      platform: "linux",
+      timeoutMs: 80,
+      pollMs: 200,
+      getServiceRestarts: () => (queries++ === 0 ? 0 : 3),
+      waitForHealth: () => new Promise(() => {}),
+    }),
+    /crash-looping/,
+  );
+  assert.ok(
+    Date.now() - startedAt < 180,
+    "the final health grace must not add a fresh poll interval after the deadline",
+  );
+});
+
 test("a restart-count query is given the remaining budget and cannot stretch the wait", async () => {
   const budgets = [];
   const startedAt = Date.now();
