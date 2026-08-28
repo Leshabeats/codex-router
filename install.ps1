@@ -464,7 +464,11 @@ try {
 
   if ($PrepareOnly) {
     Write-Host "Dependencies and generated files are prepared; application configuration was not changed."
-    exit 0
+    # Return from the script instead of terminating the caller's PowerShell
+    # host. The outer finally still has to restore the caller environment, and
+    # an invoked prepare-only install must hand control back so its caller can
+    # observe that restoration.
+    return
   }
 
   $ConfigEnabled = $true

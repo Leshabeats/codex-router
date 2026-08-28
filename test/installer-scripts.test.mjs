@@ -850,3 +850,88 @@ test("the foreign-state override is scoped to a full ownership-transferring inst
     "the environment restore belongs in the same finally as the location restore",
   );
 });
+
+test("Windows prepare-only restores the caller foreign-state override live", {
+  skip: process.platform !== "win32" && "requires Windows PowerShell",
+}, () => {
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-windows-env-"));
+  try {
+    const shimDir = path.join(testRoot, "shims");
+    mkdirSync(shimDir, { recursive: true });
+    writeFileSync(
+      path.join(shimDir, "node.cmd"),
+      [
+        "@echo off",
+        'if /I "%~1"=="-p" (',
+        "  echo 24.0.0",
+        "  exit /b 0",
+        ")",
+        'if defined CODEX_ROUTER_TEST_FAIL_LEGACY if /I "%~1"=="src\\legacy-migration.mjs" exit /b 17',
+        'if defined CODEX_ROUTER_TEST_FAIL_LEGACY if /I "%~1"=="src/legacy-migration.mjs" exit /b 17',
+        'if /I "%~1"=="src/install-plan.mjs" if /I "%~2"=="status" (',
+        "  echo skip",
+        "  exit /b 0",
+        ")",
+        "exit /b 0",
+        "",
+      ].join("\r\n"),
+    );
+    writeFileSync(path.join(shimDir, "npm.cmd"), "@echo off\r\nexit /b 0\r\n");
+
+    const harnessPath = path.join(testRoot, "assert-restore.ps1");
+    writeFileSync(
+      harnessPath,
+      [
+        "param([string] $Installer, [string] $FixtureRoot, [string] $ShimDir)",
+        '$env:PATH = "$ShimDir;$env:PATH"',
+        '$env:CODEX_HOME = Join-Path $FixtureRoot "codex-home"',
+        '$env:CODEX_ROUTER_STATE_DIR = Join-Path $FixtureRoot "router-state"',
+        '$env:MODEL_ROUTER_STATE_DIR = Join-Path $FixtureRoot "router-state"',
+        '$env:MODEL_ROUTER_ALLOW_FOREIGN_STATE = "caller-value"',
+        "& $Installer -CheckoutInstall -PrepareOnly",
+        'if ($env:MODEL_ROUTER_ALLOW_FOREIGN_STATE -ne "caller-value") {',
+        '  throw "prepare-only did not preserve the caller override"',
+        "}",
+        "Remove-Item Env:\\MODEL_ROUTER_ALLOW_FOREIGN_STATE",
+        "& $Installer -CheckoutInstall -PrepareOnly",
+        "if (Test-Path Env:\\MODEL_ROUTER_ALLOW_FOREIGN_STATE) {",
+        '  throw "prepare-only introduced an override the caller did not have"',
+        "}",
+        '$env:MODEL_ROUTER_ALLOW_FOREIGN_STATE = "early-failure-value"',
+        '$env:CODEX_ROUTER_TEST_FAIL_LEGACY = "1"',
+        "$SawExpectedFailure = $false",
+        "try {",
+        "  & $Installer -CheckoutInstall -PrepareOnly",
+        "} catch {",
+        "  $SawExpectedFailure = $true",
+        "} finally {",
+        "  Remove-Item Env:\\CODEX_ROUTER_TEST_FAIL_LEGACY",
+        "}",
+        'if (-not $SawExpectedFailure) { throw "expected the legacy probe to fail" }',
+        'if ($env:MODEL_ROUTER_ALLOW_FOREIGN_STATE -ne "early-failure-value") {',
+        '  throw "early failure did not restore the caller override"',
+        "}",
+        "",
+      ].join("\r\n"),
+    );
+
+    const result = spawnSync(
+      "powershell.exe",
+      [
+        "-NoLogo",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        harnessPath,
+        path.join(root, "install.ps1"),
+        testRoot,
+        shimDir,
+      ],
+      { cwd: root, encoding: "utf8" },
+    );
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  } finally {
+    rmSync(testRoot, { recursive: true, force: true });
+  }
+});
