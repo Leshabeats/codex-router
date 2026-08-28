@@ -1242,6 +1242,11 @@ test("the model directory combines provider setup with de-duplicated model-famil
   assert.doesNotMatch(models, /<select[\s\S]{0,200}subagent thinking effort/);
   assert.match(models, /<dt>Model id<\/dt>/);
   assert.match(providerModelsCss, /\.pm-model-details\s*\{/);
+  assert.match(models, /<dd className="pm-model-details-controls">/);
+  assert.match(
+    providerModelsCss,
+    /\.pm-model-details dd\.pm-model-details-controls\s*\{[^}]*overflow:\s*visible/,
+  );
 
   // Adding republishes the whole catalog to every installed client and is the
   // slowest thing this page starts. Placeholder rows carrying the chosen slugs
@@ -1345,7 +1350,7 @@ test("the model directory combines provider setup with de-duplicated model-famil
   }
   assert.match(branding, /"lmstudio": "lmstudio"/);
   assert.match(branding, /ornith[^\n]+BRANDS\.deepreinforce/);
-  assert.match(branding, /hy3[^\n]+BRANDS\.tencent/);
+  assert.match(branding, /hy\(\?:3\|4\)[^\n]+BRANDS\.tencent/);
   assert.match(branding, /laguna[^\n]+BRANDS\.poolside/);
   assert.match(branding, /export function brandForLocalModel/);
   const sources = await readFile(new URL("../apps/control-center/src/assets/providers/SOURCES.md", import.meta.url), "utf8");

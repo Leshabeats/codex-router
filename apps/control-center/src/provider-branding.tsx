@@ -177,7 +177,7 @@ export function brandForModel(model: BrandableModel): ProviderBrand {
   if (/\b(?:gpt|codex)\b/.test(identity) || /^openai\//.test(model.slug.toLowerCase())) return BRANDS.openai;
   if (/\bmimo(?:-|\b)/.test(identity)) return BRANDS.xiaomi;
   if (/\bstep(?:-|\s)/.test(identity)) return BRANDS.stepfun;
-  if (/\bhy3(?:-|\b)/.test(identity)) return BRANDS.tencent;
+  if (/\bhy(?:3|4)(?:-|\b)/.test(identity)) return BRANDS.tencent;
   if (/\blaguna(?:-|\b)/.test(identity)) return BRANDS.poolside;
   if (/\b(?:llama|muse spark)\b/.test(identity)) return BRANDS.meta;
   if (/\b(?:mistral|mixtral|codestral)\b/.test(identity)) return BRANDS.mistral;
