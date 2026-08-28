@@ -124,19 +124,25 @@ export default function App() {
   const downloadPollInFlight = useRef(false);
   const healthPollInFlight = useRef(false);
   const previousActivityState = useRef<string | undefined>(undefined);
+  const readGenerations = useRef<Partial<Record<keyof RouterDataReady, number>>>({});
 
   const settleRead = useCallback(async <T,>(
     key: keyof RouterDataReady,
     request: Promise<T>,
     commit: (value: T) => void,
   ) => {
+    const generation = (readGenerations.current[key] ?? 0) + 1;
+    readGenerations.current[key] = generation;
     try {
-      commit(await request);
+      const value = await request;
+      if (readGenerations.current[key] === generation) commit(value);
     } finally {
-      // "Ready" means the first attempt settled, not necessarily succeeded.
-      // Errors are rendered separately, while this prevents an unreachable
-      // optional source from leaving its skeleton on screen forever.
-      setDataReady((current) => current[key] ? current : { ...current, [key]: true });
+      if (readGenerations.current[key] === generation) {
+        // "Ready" means the latest attempt settled, not necessarily succeeded.
+        // Errors are rendered separately, while this prevents an unreachable
+        // optional source from leaving its skeleton on screen forever.
+        setDataReady((current) => current[key] ? current : { ...current, [key]: true });
+      }
     }
   }, []);
 
@@ -178,7 +184,10 @@ export default function App() {
       settleRead("providerUsage", api.getProviderUsage(), setProviderUsage),
     ]);
     const failure = results.find((result) => result.status === "rejected") as PromiseRejectedResult | undefined;
-    if (failure) throw failure.reason;
+    // Background polling deliberately starts this callback without awaiting it.
+    // Surface a partial usage failure here so every caller, including the timer,
+    // receives a settled promise instead of producing an unhandled rejection.
+    if (failure) setLoadError(readableError(failure.reason));
   }, [api, settleRead]);
 
   const refreshDownloadProgress = useCallback(async () => {

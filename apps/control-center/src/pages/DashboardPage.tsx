@@ -157,8 +157,9 @@ export function DashboardPage({
   const healthPending = !dataReady.health && !health;
   const snapshotPending = !dataReady.snapshot && !target;
   const routesPending = !dataReady.snapshot && !dashboard;
-  const usagePending = (!dataReady.accountUsage && !account)
-    || (!dataReady.providerUsage && !providerUsage);
+  const accountPending = !dataReady.accountUsage && !account;
+  const providerUsagePending = !dataReady.providerUsage && !providerUsage;
+  const quotaPending = !account && !providerUsage && (accountPending || providerUsagePending);
   // Every prop can be undefined on first paint and after a failed refresh, so
   // each tile below separates three cases: still loading, reported-but-absent,
   // and a genuine zero. A missing field must never render as 0.
@@ -293,7 +294,7 @@ export function DashboardPage({
           : "No connected account exposed a reset timestamp",
       view: "usage",
       viewLabel: "Usage",
-      pending: usagePending,
+      pending: quotaPending,
     },
     {
       id: "allowance",
@@ -311,7 +312,7 @@ export function DashboardPage({
       meter: lowestAllowance ? lowestAllowance.percent : undefined,
       view: "usage",
       viewLabel: "Usage",
-      pending: usagePending,
+      pending: quotaPending,
     },
   ];
 
@@ -447,7 +448,7 @@ export function DashboardPage({
               </Button>
             )}
           />
-          {usagePending ? (
+          {providerUsagePending ? (
             <PanelSkeleton label="Loading provider and model usage" count={4} />
           ) : <div className="db-breakdown-stack">
             <BreakdownGroup

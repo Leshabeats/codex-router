@@ -431,6 +431,56 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, dat
     setManagedProviderId((current) => (current === providerId ? null : providerId));
   };
 
+  const renderConnections = () => !dataReady.providers && !setup ? (
+    <section className="pm-connections pm-connections-loading" aria-label="Loading provider connections" aria-busy="true">
+      <SkeletonBlock />
+      <SkeletonBlock />
+      <SkeletonBlock />
+    </section>
+  ) : (
+    <ConnectionsBar
+      directory={directory}
+      enabledProviders={enabledProviders}
+      usageById={usageById}
+      apiAvailable={Boolean(api)}
+      platform={api?.platform}
+      openProviderId={managedProviderId}
+      onOpenProvider={openProviderMenu}
+      onCloseProvider={() => setManagedProviderId(null)}
+      connectMenuOpen={connectMenuOpen}
+      onConnectMenuOpen={setConnectMenuOpen}
+      isEnabled={(entry) => optimisticProviders.value(entry.id, enabledProviders.has(entry.id) || entry.models.some((model) => model.native))}
+      onEnabledChange={(entry, checked) => {
+        if (!api) return;
+        void optimisticProviders.mutate(entry.id, checked, `${checked ? "Enable" : "Disable"} ${entry.displayName}`, () => api.setProviderEnabled(entry.id, checked));
+      }}
+      onSignIn={(entry) => {
+        if (!api || !entry.setup) return;
+        void runProviderCredentialAction(entry.setup, `Start ${entry.displayName} sign-in`, () => api.connectProvider(entry.id));
+      }}
+      onKey={(entry) => entry.setup && setCredentialProvider(entry.setup)}
+      onRemove={(entry) => entry.setup && setRemoveProvider(entry.setup)}
+    />
+  );
+  const renderConnectionDialogs = () => (
+    <>
+      <CredentialDialog
+        provider={credentialProvider}
+        onSave={(provider, secret) => api
+          ? runProviderCredentialAction(provider, `Save ${provider.displayName} credential`, () => api.saveProviderCredential(provider.id, secret))
+          : Promise.resolve()}
+        onClose={() => setCredentialProvider(null)}
+      />
+      <Dialog open={Boolean(removeProvider)} title="Disconnect provider" description="The provider is withdrawn from installed clients before its managed credential is deleted." onClose={() => setRemoveProvider(null)}>
+        <div className="pm-credential-warning"><ShieldCheck aria-hidden size={17} strokeWidth={1.7} /><p>If a credential also exists in the environment or Keychain, the router will still report it as connected.</p></div>
+        <div className="dialog-actions">
+          <Button variant="secondary" onClick={() => setRemoveProvider(null)}>Cancel</Button>
+          <Button variant="danger" onClick={() => { const provider = removeProvider; setRemoveProvider(null); if (provider && api) void runProviderCredentialAction(provider, `Remove ${provider.displayName} credential`, () => api.removeProviderCredential(provider.id)); }}><Trash2 aria-hidden size={14} strokeWidth={1.7} /> Disconnect</Button>
+        </div>
+      </Dialog>
+    </>
+  );
+
   const filteredFamilies = useMemo(() => {
     const needle = modelSearch.trim().toLowerCase();
     if (!needle && activeProviderFilter === "all") return families;
@@ -469,22 +519,26 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, dat
 
   if (!target) {
     return (
-      <div className="providers-models-page models-page">
-        <PageHeader
-          eyebrow="Models"
-          title="Models"
-          description="Choose which models your installed clients can use, and connect the accounts that serve them."
-          onRefresh={onRefresh}
-          refreshing={refreshing}
-        />
-        {!dataReady.snapshot ? (
-          <section className="panel-section pm-models-loading" aria-label="Loading models" aria-busy="true">
-            <PanelSkeleton label="Loading model routes" count={6} />
-          </section>
-        ) : (
-          <EmptyState icon={<SearchX size={22} />} title="Router snapshot unavailable" body="Start the router or refresh after setup completes." />
-        )}
-      </div>
+      <>
+        <div className="providers-models-page models-page">
+          <PageHeader
+            eyebrow="Models"
+            title="Models"
+            description="Choose which models your installed clients can use, and connect the accounts that serve them."
+            onRefresh={onRefresh}
+            refreshing={refreshing}
+          />
+          {renderConnections()}
+          {!dataReady.snapshot ? (
+            <section className="panel-section pm-models-loading" aria-label="Loading models" aria-busy="true">
+              <PanelSkeleton label="Loading model routes" count={6} />
+            </section>
+          ) : (
+            <EmptyState icon={<SearchX size={22} />} title="Router snapshot unavailable" body="Start the router or refresh after setup completes." />
+          )}
+        </div>
+        {renderConnectionDialogs()}
+      </>
     );
   }
 
@@ -567,35 +621,7 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, dat
           refreshing={refreshing}
         />
 
-        {!dataReady.providers && !setup ? (
-          <section className="pm-connections pm-connections-loading" aria-label="Loading provider connections" aria-busy="true">
-            <SkeletonBlock />
-            <SkeletonBlock />
-            <SkeletonBlock />
-          </section>
-        ) : <ConnectionsBar
-          directory={directory}
-          enabledProviders={enabledProviders}
-          usageById={usageById}
-          apiAvailable={Boolean(api)}
-          platform={api?.platform}
-          openProviderId={managedProviderId}
-          onOpenProvider={openProviderMenu}
-          onCloseProvider={() => setManagedProviderId(null)}
-          connectMenuOpen={connectMenuOpen}
-          onConnectMenuOpen={setConnectMenuOpen}
-          isEnabled={(entry) => optimisticProviders.value(entry.id, enabledProviders.has(entry.id) || entry.models.some((model) => model.native))}
-          onEnabledChange={(entry, checked) => {
-            if (!api) return;
-            void optimisticProviders.mutate(entry.id, checked, `${checked ? "Enable" : "Disable"} ${entry.displayName}`, () => api.setProviderEnabled(entry.id, checked));
-          }}
-          onSignIn={(entry) => {
-            if (!api || !entry.setup) return;
-            void runProviderCredentialAction(entry.setup, `Start ${entry.displayName} sign-in`, () => api.connectProvider(entry.id));
-          }}
-          onKey={(entry) => entry.setup && setCredentialProvider(entry.setup)}
-          onRemove={(entry) => entry.setup && setRemoveProvider(entry.setup)}
-        />}
+        {renderConnections()}
 
         <section className="panel-section pm-model-catalog" id="model-catalog-controls">
           <div className="pm-model-toolbar">
@@ -775,20 +801,7 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, dat
         onAdd={(selection) => void addCatalogModels(selection)}
         onClose={() => setAddModelsOpen(false)}
       />
-      <CredentialDialog
-        provider={credentialProvider}
-        onSave={(provider, secret) => api
-          ? runProviderCredentialAction(provider, `Save ${provider.displayName} credential`, () => api.saveProviderCredential(provider.id, secret))
-          : Promise.resolve()}
-        onClose={() => setCredentialProvider(null)}
-      />
-      <Dialog open={Boolean(removeProvider)} title="Disconnect provider" description="The provider is withdrawn from installed clients before its managed credential is deleted." onClose={() => setRemoveProvider(null)}>
-        <div className="pm-credential-warning"><ShieldCheck aria-hidden size={17} strokeWidth={1.7} /><p>If a credential also exists in the environment or Keychain, the router will still report it as connected.</p></div>
-        <div className="dialog-actions">
-          <Button variant="secondary" onClick={() => setRemoveProvider(null)}>Cancel</Button>
-          <Button variant="danger" onClick={() => { const provider = removeProvider; setRemoveProvider(null); if (provider && api) void runProviderCredentialAction(provider, `Remove ${provider.displayName} credential`, () => api.removeProviderCredential(provider.id)); }}><Trash2 aria-hidden size={14} strokeWidth={1.7} /> Disconnect</Button>
-        </div>
-      </Dialog>
+      {renderConnectionDialogs()}
     </>
   );
 }
