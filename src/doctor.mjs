@@ -14,6 +14,7 @@ import {
   MODEL_BY_SLUG,
   MODELS,
   PROVIDERS,
+  providerNeedsNoKey,
   RUNTIME_PROVIDERS,
   RUNTIME_PROVIDER_WARNINGS,
 } from "./model-registry.mjs";
@@ -53,11 +54,17 @@ import {
   skillRequiredFields,
 } from "./skills-install.mjs";
 import { discoveryDisabled } from "./discovery-mode.mjs";
-import { credentialLabel, credentialStatus } from "./provider-credentials.mjs";
+import { credentialLabel } from "./provider-credentials.mjs";
+import { providerApiKeyPoolsSnapshot } from "./provider-api-key-pool.mjs";
+import {
+  effectiveProviderCredentialStatus,
+  resolveStoredCredential,
+} from "./provider-api-key-routing.mjs";
 import { genericProviderConfigured } from "./generic-provider-readiness.mjs";
 import { providerNeedsCuration } from "./provider-onboarding.mjs";
 import { stateOwnershipStatus } from "./state-owner.mjs";
 import {
+  canonicalProviderId,
   providerSelectionStatus,
   selectedConfiguredListedModels,
 } from "./provider-selection.mjs";
@@ -851,6 +858,82 @@ if (!credentialDiscoveryOff) {
   );
 }
 
+const apiKeyPools = providerApiKeyPoolsSnapshot(credentialDiscoveryOff
+  ? {}
+  : {
+      resolveCredential: (providerId, credentialId) => {
+        const provider = PROVIDERS.get(providerId);
+        return provider ? resolveStoredCredential(provider, credentialId) : undefined;
+      },
+    });
+if (apiKeyPools.configured) {
+  const poolCount = Object.keys(apiKeyPools.providers).length;
+  const credentialCount = Object.values(apiKeyPools.providers)
+    .reduce((total, pool) => total + pool.credentials.length, 0);
+  const unusable = Object.entries(apiKeyPools.providers)
+    .filter(([, pool]) => pool.readiness?.usable !== true)
+    .map(([providerId, pool]) => ({
+      providerId,
+      detail: `${providerId} (${pool.readiness?.reason || "invalid_pool_state"})`,
+    }));
+  const selectedApiProviders = new Set(
+    selection.providers
+      .map((providerId) => PROVIDERS.get(providerId))
+      .filter((provider) =>
+        provider?.kind === "openai-compatible" && !providerNeedsNoKey(provider))
+      .map((provider) => canonicalProviderId(provider.id)),
+  );
+  const selectedUnusable = unusable.filter(({ providerId }) =>
+    selectedApiProviders.has(providerId),
+  );
+  const summarize = (entries) => {
+    const details = entries.map(({ detail }) => detail);
+    return details.length > 8
+      ? `${details.slice(0, 8).join(", ")}, and ${details.length - 8} more`
+      : details.join(", ");
+  };
+  let poolStatus;
+  let poolDetail;
+  if (credentialDiscoveryOff) {
+    poolStatus = "warn";
+    poolDetail = apiKeyPools.valid
+      ? `${poolCount} authoritative pool(s) not evaluated while credential discovery is disabled`
+      : "authoritative pool state is invalid but is advisory while credential discovery is disabled";
+  } else if (!apiKeyPools.valid) {
+    poolStatus = selectedApiProviders.size ? "fail" : "warn";
+    poolDetail = "authoritative pool state is invalid; provider fallback is disabled";
+  } else if (selectedUnusable.length) {
+    poolStatus = "fail";
+    poolDetail = `selected authoritative pool unavailable: ${summarize(selectedUnusable)}; provider fallback is disabled`;
+  } else if (unusable.length) {
+    poolStatus = "warn";
+    poolDetail = `unselected authoritative pool unavailable: ${summarize(unusable)}; selected providers are unaffected`;
+  } else {
+    poolStatus = "ok";
+    poolDetail = `${poolCount} pool(s), ${credentialCount} credential reference(s)`;
+  }
+  add(
+    poolStatus,
+    "Provider API-key pools",
+    poolDetail,
+    "Restore an eligible resolvable credential, or delete the pool to return to the legacy single-key path.",
+  );
+}
+const poolAuthoritySnapshot = {
+  configured: apiKeyPools.configured,
+  valid: apiKeyPools.valid,
+  providers: Object.fromEntries(
+    Object.entries(apiKeyPools.providers).map(([providerId, pool]) => [
+      providerId,
+      {
+        configured: true,
+        valid: true,
+        readiness: pool.readiness,
+      },
+    ]),
+  ),
+};
+
 for (const warning of RUNTIME_PROVIDER_WARNINGS) {
   add(
     "fail",
@@ -887,7 +970,10 @@ for (const provider of RUNTIME_PROVIDERS.values()) {
 for (const provider of PROVIDERS.values()) {
   if (provider.kind !== "openai-compatible") continue;
   if (credentialDiscoveryOff) continue;
-  const status = credentialStatus(provider, { persistent: true });
+  const status = effectiveProviderCredentialStatus(provider, {
+    persistent: true,
+    poolAuthoritySnapshot,
+  });
   const credentialType = credentialLabel(provider);
   const credentialNoun = credentialType === "API key" ? "key" : credentialType.toLowerCase();
   // A keyless provider has no key to name, so calling its row a "key" and

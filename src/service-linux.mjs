@@ -21,6 +21,7 @@ import {
   TARGET_DISPLAY_NAME,
 } from "./paths.mjs";
 import { antigravityClientSecretEnvironment } from "./antigravity-oauth-constants.mjs";
+import { providerApiKeyServiceEnvironment } from "./provider-api-key-service-environment.mjs";
 import { serviceProxyEnvironment } from "./proxy-environment.mjs";
 import {
   skipServiceManagerCall,
@@ -81,6 +82,7 @@ function unit() {
     CODEX_ROUTER_API_PORT: String(PORTS.api),
     ...serviceProxyEnvironment(),
     ...antigravityClientSecretEnvironment(),
+    ...providerApiKeyServiceEnvironment(),
     ...(process.env.KIMI_CODE_HOME ? { KIMI_CODE_HOME: process.env.KIMI_CODE_HOME } : {}),
     ...(process.env.CODEX_ROUTER_SOURCE_ROOT
       ? { CODEX_ROUTER_SOURCE_ROOT: SOURCE_ROOT }

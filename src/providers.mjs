@@ -6,7 +6,10 @@ import { devinCliStatus } from "./devin-cli-status.mjs";
 import { grokOAuthStatus } from "./grok-oauth-status.mjs";
 import { antigravityOAuthStatus } from "./antigravity-oauth-status.mjs";
 import { kimiOAuthStatus } from "./oauth-status.mjs";
-import { credentialStatus } from "./provider-credentials.mjs";
+import {
+  effectiveProviderCredentialStatus,
+  providerApiKeyAuthoritySnapshot,
+} from "./provider-api-key-routing.mjs";
 import {
   loginOauthProvider,
   providerNeedsCuration,
@@ -60,17 +63,21 @@ const SIGN_IN_STATUS = Object.freeze({
   "devin-cli": { status: devinCliStatus, setup: "run `devin auth login`" },
 });
 
-function configured(provider) {
+function configured(provider, poolAuthoritySnapshot) {
   if (provider.kind === "oauth") {
     return Boolean(SIGN_IN_STATUS[provider.id]?.status().configured);
   }
   return providerNeedsNoKey(provider)
     ? true
-    : credentialStatus(provider, { persistent: true }).configured;
+    : effectiveProviderCredentialStatus(provider, {
+        persistent: true,
+        poolAuthoritySnapshot,
+      }).configured;
 }
 
 function list() {
   const selected = new Set(readProviderSelection());
+  const poolAuthoritySnapshot = providerApiKeyAuthoritySnapshot();
   // Protocol variants follow their parent's selection and credential, so the
   // catalog shows one row per family instead of three opencode Go entries.
   return [...PROVIDERS.values()]
@@ -79,7 +86,7 @@ function list() {
       id: provider.id,
       name: provider.displayName,
       visible: selected.has(provider.id),
-      configured: configured(provider),
+      configured: configured(provider, poolAuthoritySnapshot),
     }));
 }
 

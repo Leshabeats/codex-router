@@ -11,7 +11,7 @@ import { ensureNodeDependencies, isNodeDependencyFailure } from "./node-dependen
 import { effectiveVisibleModels, setModelSelection } from "./model-picker-state.mjs";
 import { kimiOAuthStatus } from "./oauth-status.mjs";
 import { SOURCE_ROOT, TARGET } from "./paths.mjs";
-import { credentialStatus } from "./provider-credentials.mjs";
+import { effectiveProviderCredentialStatus } from "./provider-api-key-routing.mjs";
 import {
   installOauthCli,
   oauthCliPath,
@@ -219,7 +219,7 @@ function providerConfigured(provider) {
   }
   return providerNeedsNoKey(provider)
     ? true
-    : credentialStatus(provider, { persistent: true }).configured;
+    : effectiveProviderCredentialStatus(provider, { persistent: true }).configured;
 }
 
 const colorEnabled = Boolean(process.stdout.isTTY) && !process.env.NO_COLOR;

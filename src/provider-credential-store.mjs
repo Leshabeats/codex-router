@@ -509,6 +509,35 @@ export function addCredentialReference(input, filePath = PROVIDER_CREDENTIAL_STO
   return addCredentialReferenceWith(input, filePath, createCredentialReference);
 }
 
+function sameSecretReference(left, right) {
+  return ["type", "providerId", "target", "service", "name"]
+    .every((field) => left?.[field] === right?.[field]);
+}
+
+export function ensureCredentialReference(input, filePath = PROVIDER_CREDENTIAL_STORE_PATH) {
+  const target = managedStatePath(filePath, "credential store path");
+  return withAtomicStateLock(target, () => {
+    const store = readProviderCredentialStoreStrict(target);
+    const credential = createCredentialReference(input);
+    const existing = store.credentials.find(
+      (entry) =>
+        entry.state === "active" &&
+        entry.providerId === credential.providerId &&
+        entry.kind === credential.kind &&
+        sameSecretReference(entry.secretRef, credential.secretRef),
+    );
+    if (existing) return { credential: existing, created: false };
+    if (store.credentials.some((entry) => entry.id === credential.id)) {
+      throw new Error(`Credential id already exists: ${credential.id}`);
+    }
+    store.credentials.push(credential);
+    return {
+      credential: writeProviderCredentialStore(store, target).credentials.at(-1),
+      created: true,
+    };
+  });
+}
+
 export function addGenericProviderCredentialReference(input, filePath = PROVIDER_CREDENTIAL_STORE_PATH) {
   return addCredentialReferenceWith(input, filePath, createGenericProviderCredentialReference);
 }
