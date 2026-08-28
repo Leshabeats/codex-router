@@ -69,6 +69,7 @@ import {
 import { stripCodexEncryptedSchemaAnnotation } from "./tool-schema-root.mjs";
 import { requestGenericProvider } from "./generic-providers.mjs";
 import { genericProviderConfigured } from "./generic-provider-readiness.mjs";
+import { providerTransportError } from "./transport-failure.mjs";
 
 installStableFetchTransport();
 
@@ -1527,6 +1528,7 @@ async function handleRequest(request, response) {
 const server = http.createServer((request, response) => {
   handleRequest(request, response).catch((error) => {
     const status = httpErrorStatus(error);
+    const transport = providerTransportError(error);
     // Names and codes only: a forwarder failure can wrap upstream response
     // text in its message, and bodies never belong in the log. The code chain
     // is what distinguishes a dead socket from a refused connect (#171).
@@ -1535,7 +1537,7 @@ const server = http.createServer((request, response) => {
     );
     if (!response.headersSent) {
       writeJson(response, status, {
-        error: {
+        error: transport || {
           type: "provider_api_proxy_error",
           message: "The API-provider forwarder could not complete the request.",
         },
