@@ -279,3 +279,31 @@ test("verified recovery preserves rollback material when live capability privacy
     assert.equal(existsSync(journalPath), true);
   } finally { rmSync(stateDir, { recursive: true, force: true }); }
 });
+
+test("recovery refuses an unprotected rollback generation and preserves the journal", async () => {
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "caller-key-unprotected-backup-"));
+  const secretPath = path.join(stateDir, "caller-secret");
+  const journalPath = path.join(stateDir, "caller-key-rotation.json");
+  writeFileSync(secretPath, `${oldKey}\n`, { mode: 0o600 });
+  try {
+    let state = journal.beginCallerKeyRotationJournal({
+      targets: ["codex"], serviceWasRunning: false,
+      operationId: "9".repeat(32), previousSecretSha256: digest(oldKey), journalPath,
+    });
+    const swapped = rotation.swapCallerCapability({
+      secretPath, operationId: state.operationId, generateSecret: () => newKey, protect: () => {},
+    });
+    state = journal.updateCallerKeyRotationJournal(state, "secret-swapped", {
+      journalPath, patch: { currentSecretSha256: digest(swapped.currentSecret) },
+    });
+    const backup = rotation.callerCapabilityBackupPath(secretPath, state.operationId);
+    await assert.rejects(cli.recoverPendingCallerKeyRotation({
+      secretPath,
+      readJournal: () => journal.readCallerKeyRotationJournal({ journalPath }),
+      secretIsProtected: (target) => target !== backup,
+    }), /rollback generation is not private/i);
+    assert.equal(readFileSync(secretPath, "utf8").trim(), newKey);
+    assert.equal(existsSync(backup), true);
+    assert.equal(journal.readCallerKeyRotationJournal({ journalPath }).phase, "secret-swapped");
+  } finally { rmSync(stateDir, { recursive: true, force: true }); }
+});
