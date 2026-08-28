@@ -22,11 +22,11 @@
         }
       ],
       "contextWindow": 262144,
-      "autoCompact": 235000,
+      "autoCompact": 223000,
       "inputModalities": [
         "text"
       ],
-      "compHash": "opencode-go-hy3-v1"
+      "compHash": "opencode-go-hy3-v2"
     }
   ]
 }

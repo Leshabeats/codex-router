@@ -787,17 +787,18 @@ test("GLM-5.3-Flash replaces OpenCode Go's withdrawn Ox Alpha route", () => {
 
 test("OpenCode Go routes retain upstream windows instead of the generic fallback", () => {
   const expected = new Map([
-    ["opencode-go/mimo-v2.5", [1_000_000, 900_000]],
-    ["opencode-go/mimo-v2.5-pro", [1_000_000, 900_000]],
-    ["opencode-go/hy3", [262_144, 235_000]],
-    ["opencode-go-messages/minimax-m2.5", [200_000, 180_000]],
-    ["opencode-go-messages/minimax-m2.7", [200_000, 180_000]],
+    ["opencode-go/mimo-v2.5", [1_000_000, 850_000, "opencode-go-mimo-v2-5-v2"]],
+    ["opencode-go/mimo-v2.5-pro", [1_000_000, 850_000, "opencode-go-mimo-v2-5-pro-v2"]],
+    ["opencode-go/hy3", [262_144, 223_000, "opencode-go-hy3-v2"]],
+    ["opencode-go-messages/minimax-m2.5", [204_800, 174_000, "opencode-go-messages-minimax-m2-5-v2"]],
+    ["opencode-go-messages/minimax-m2.7", [204_800, 174_000, "opencode-go-messages-minimax-m2-7-v2"]],
   ]);
 
-  for (const [slug, [contextWindow, autoCompact]] of expected) {
+  for (const [slug, [contextWindow, autoCompact, compHash]] of expected) {
     const model = MODEL_BY_SLUG.get(slug);
     assert.equal(model?.contextWindow, contextWindow, slug);
     assert.equal(model?.autoCompact, autoCompact, slug);
+    assert.equal(model?.compHash, compHash, slug);
     assert.ok(autoCompact < contextWindow, slug);
   }
   assert.match(
