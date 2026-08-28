@@ -1091,6 +1091,10 @@
   font-size: 9.5px !important;
 }
 
+.pm-model-details dd.pm-model-details-controls {
+  overflow: visible;
+}
+
 .pm-model-details .pm-subagent-controls {
   margin-top: -2px;
 }

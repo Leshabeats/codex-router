@@ -1155,7 +1155,10 @@ function ModelDetails({
       {routeUsable(model) ? (
         <div>
           <dt>Subagents</dt>
-          <dd>
+          {/* The effort popup extends below this definition-list cell. Keep
+              this cell visibly overflowing; the generic text cells still
+              ellipsize long ids and route descriptions. */}
+          <dd className="pm-model-details-controls">
             <div className="pm-subagent-controls">
               <SubagentToggle
                 model={model}

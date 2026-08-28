@@ -23,8 +23,8 @@ const bridgeSource = String.raw`
     provider: "deepseek",
     enabled: true,
     visible: true,
-    multiAgentVersion: "v1",
-    subagentCertification: "v1",
+    multiAgentVersion: "v2",
+    subagentCertification: "v2",
     reasoningLevels: ["low", "medium", "high"],
     contextWindow: 128000,
     inputModalities: ["text"],
@@ -362,6 +362,31 @@ test("the production renderer exposes model discovery and picker actions", { tim
     assert.match(await connectMenu.innerText(), /Kilo Free/);
     assert.equal(await connectMenu.getByRole("menuitem").count(), 5);
     await page.keyboard.press("Escape");
+
+    // A single-route model's thinking menu opens below its definition-list
+    // cell. The menu used to be clipped by that cell's generic text-overflow
+    // rule, leaving only its top edge visible.
+    const selectedFamily = page.locator(".pm-family-row").filter({ hasText: "DeepSeek Chat" });
+    await selectedFamily.locator(".pm-family-open").click();
+    const thinkingTrigger = selectedFamily.getByRole("button", {
+      name: "DeepSeek Chat DeepSeek subagent thinking effort",
+    });
+    await thinkingTrigger.click();
+    const thinkingMenu = selectedFamily.locator(".pm-effort-menu");
+    await thinkingMenu.waitFor();
+    const detailsCell = selectedFamily.locator(".pm-model-details-controls");
+    assert.equal(await detailsCell.evaluate((element) => getComputedStyle(element).overflow), "visible");
+    const [cellBox, menuBox] = await Promise.all([detailsCell.boundingBox(), thinkingMenu.boundingBox()]);
+    assert.ok(cellBox && menuBox);
+    assert.ok(menuBox.y + menuBox.height > cellBox.y + cellBox.height);
+    assert.equal(await page.evaluate(({ x, y }) => (
+      Boolean(document.elementFromPoint(x, y)?.closest(".pm-effort-menu"))
+    ), {
+      x: menuBox.x + menuBox.width / 2,
+      y: menuBox.y + menuBox.height - 2,
+    }), true);
+    await page.keyboard.press("Escape");
+    await selectedFamily.locator(".pm-family-open").click();
 
     // A route that is only known to the registry still has to be findable, and
     // has to say which connection it is waiting for.
