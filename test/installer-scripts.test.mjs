@@ -777,6 +777,26 @@ test("both installers record the manifest before waiting on health", () => {
 test("the foreign-state override is scoped to a full ownership-transferring install", () => {
   const posix = readFileSync(path.join(root, "bin", "install"), "utf8");
   const windows = readFileSync(path.join(root, "install.ps1"), "utf8");
+  // Snapshot the caller environment before any installer step can fail. A
+  // prepare-only run never sets the override, but its finally still restores
+  // this snapshot, so capturing it only inside the full-install branch would
+  // delete a value the caller already had.
+  const pushIndex = windows.indexOf("Push-Location $ScriptDirectory");
+  const outerTryIndex = windows.indexOf("try {", pushIndex);
+  const hadSnapshotIndex = windows.indexOf(
+    "$HadForeignStateOverride = $null -ne (Get-Item Env:\\MODEL_ROUTER_ALLOW_FOREIGN_STATE",
+  );
+  const valueSnapshotIndex = windows.indexOf(
+    "$SavedForeignStateOverride = $env:MODEL_ROUTER_ALLOW_FOREIGN_STATE",
+  );
+  assert.ok(
+    hadSnapshotIndex !== -1 && hadSnapshotIndex < outerTryIndex,
+    "Windows must snapshot whether the caller had the override before the installer can fail",
+  );
+  assert.ok(
+    valueSnapshotIndex !== -1 && valueSnapshotIndex < outerTryIndex,
+    "Windows must snapshot the caller's override value before the installer can fail",
+  );
 
   // POSIX: exported only after the arguments are known, and only for a full
   // install -- a prepare-only run must meet the guard like any other writer.
