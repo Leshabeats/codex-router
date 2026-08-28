@@ -17,6 +17,25 @@ delete process.env.CHUTES_API_KEY;
 delete process.env.KIMI_API_KEY;
 delete process.env.MOONSHOT_API_KEY;
 
+mkdirSync(process.env.CODEX_ROUTER_STATE_DIR, { recursive: true, mode: 0o700 });
+const genericHeaderSentinel = "TEST_SUPPORT_GENERIC_HEADER_MUST_NOT_APPEAR";
+writeFileSync(
+  path.join(process.env.CODEX_ROUTER_STATE_DIR, "generic-providers.json"),
+  `${JSON.stringify({
+    version: 1,
+    providers: [{
+      id: "support-generic",
+      displayName: "Support Generic",
+      baseUrl: "https://support-generic.example.test/v1",
+      adapter: "openai-chat",
+      headers: { "X-Private-Routing": genericHeaderSentinel },
+      allowPrivate: false,
+      enabled: true,
+    }],
+  }, null, 2)}\n`,
+  { mode: 0o600 },
+);
+
 const { createSupportBundle } = await import("../src/support-bundle.mjs");
 
 test("support bundle reports credential presence without including values", async () => {
@@ -89,6 +108,11 @@ model_catalog_json = ${JSON.stringify(path.join(stateDir, "merged-models.json"))
     assert.equal(bundle.credentialSources.chutes.configured, true);
     assert.equal(bundle.credentialSources["github-copilot"].configured, true);
     assert.equal(bundle.apiKeyPools.providers["opencode-go"].readiness.usable, false);
+    assert.deepEqual(bundle.credentialSources["support-generic"], {
+      configured: true,
+      source: "not required",
+      persistent: false,
+    });
     assert.doesNotMatch(contents, new RegExp(sentinel));
     assert.doesNotMatch(contents, new RegExp(chutesSentinel));
     assert.doesNotMatch(contents, new RegExp(copilotSentinel));
@@ -103,6 +127,7 @@ model_catalog_json = ${JSON.stringify(path.join(stateDir, "merged-models.json"))
       "readiness",
       "resolvableCredentialCount",
     ]);
+    assert.doesNotMatch(contents, new RegExp(genericHeaderSentinel));
     assert.match(bundle.config.openai_base_url, /\[REDACTED\]/);
     assert.equal("redactedLogTail" in bundle, false);
   } finally {

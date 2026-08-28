@@ -11,8 +11,14 @@ import { fileURLToPath } from "node:url";
 
 import { discoveryDisabled } from "./discovery-mode.mjs";
 import { protectPrivateFile } from "./file-security.mjs";
+import { genericProviderConfigured } from "./generic-provider-readiness.mjs";
 import { PROVIDER_SELECTION_PATH, STATE_DIR, TARGET } from "./paths.mjs";
-import { LISTED_MODELS, PROVIDERS, providerNeedsNoKey } from "./model-registry.mjs";
+import {
+  LISTED_MODELS,
+  PROVIDERS,
+  RUNTIME_PROVIDERS,
+  providerNeedsNoKey,
+} from "./model-registry.mjs";
 import { targetCli } from "./target-integration.mjs";
 import { kimiOAuthStatus } from "./oauth-status.mjs";
 import { grokOAuthStatus } from "./grok-oauth-status.mjs";
@@ -92,8 +98,10 @@ export function configuredProviderIds() {
   if (discoveryDisabled()) return [];
   const poolAuthoritySnapshot = providerApiKeyAuthoritySnapshot();
   const configured = [];
-  for (const provider of PROVIDERS.values()) {
-    if (provider.kind === "oauth") {
+  for (const provider of RUNTIME_PROVIDERS.values()) {
+    if (provider.generic === true) {
+      if (genericProviderConfigured(provider.id)) configured.push(provider.id);
+    } else if (provider.kind === "oauth") {
       if (provider.id === "kimi-oauth" && kimiOAuthStatus().configured) {
         configured.push(provider.id);
       } else if (provider.id === "grok-oauth" && grokOAuthStatus().configured) {
@@ -131,7 +139,10 @@ export function defaultProviderIds() {
   // third-party address reached with no credential. "Enabling this sends
   // prompts off-box" has to stay a choice somebody made.
   return configuredProviderIds().filter(
-    (id) => !["anonymous", "per-model"].includes(PROVIDERS.get(id)?.authMode),
+    (id) => {
+      const provider = RUNTIME_PROVIDERS.get(id);
+      return provider?.generic !== true && !["anonymous", "per-model"].includes(provider?.authMode);
+    },
   );
 }
 
@@ -236,14 +247,18 @@ export function disableProvider(providerId) {
 
 export function selectedListedModels() {
   const selected = new Set(readProviderSelection());
-  return LISTED_MODELS.filter((model) => selected.has(model.provider));
+  return LISTED_MODELS.filter((model) => (
+    selected.has(model.provider) || RUNTIME_PROVIDERS.get(model.provider)?.generic === true
+  ));
 }
 
 export function selectedConfiguredListedModels() {
   const selected = new Set(readProviderSelection());
   const configured = new Set(configuredProviderIds());
   return LISTED_MODELS.filter(
-    (model) => selected.has(model.provider) && configured.has(model.provider),
+    (model) => (
+      selected.has(model.provider) || RUNTIME_PROVIDERS.get(model.provider)?.generic === true
+    ) && configured.has(model.provider),
   );
 }
 

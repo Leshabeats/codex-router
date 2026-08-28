@@ -18,7 +18,12 @@ import { readInstallManifest } from "./install-manifest.mjs";
 import { redactProxyCredentials } from "./proxy-environment.mjs";
 import { protectPrivateFile } from "./file-security.mjs";
 import { detectLegacyInstallations } from "./legacy-migration.mjs";
-import { PROVIDERS, providerNeedsNoKey } from "./model-registry.mjs";
+import {
+  PROVIDERS,
+  RUNTIME_PROVIDERS,
+  providerNeedsNoKey,
+} from "./model-registry.mjs";
+import { genericProviderConfigured } from "./generic-provider-readiness.mjs";
 import {
   CALLER_SECRET_PATH,
   CONFIG_PATH,
@@ -182,6 +187,17 @@ export function createSupportBundle(options = {}) {
     const status = credentialStatus(provider);
     credentialSources[provider.id] = status.configured
       ? { configured: true, source: status.source, persistent: status.persistent }
+      : { configured: false };
+  }
+  for (const provider of RUNTIME_PROVIDERS.values()) {
+    if (provider.generic !== true) continue;
+    const configured = genericProviderConfigured(provider.id);
+    credentialSources[provider.id] = configured
+      ? {
+          configured: true,
+          source: provider.credentialRef ? "bound credential reference" : "not required",
+          persistent: Boolean(provider.credentialRef),
+        }
       : { configured: false };
   }
   let selection;

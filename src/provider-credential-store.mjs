@@ -262,7 +262,7 @@ function normalizeSecretRef(value, providerId, { legacy = false, providerType } 
   const referenceProviderId = value.providerId === undefined
     ? providerId
     : providerType === "generic"
-      ? normalizeGenericProviderId(value.providerId)
+      ? normalizeGenericProviderId(value.providerId, { reservedProviderIds: PROVIDERS })
       : validateProviderId(value.providerId);
   if (referenceProviderId !== providerId) {
     throw new Error("secretRef.providerId must match providerId.");
@@ -324,7 +324,7 @@ function normalizeCredential(raw, { legacy = false } = {}) {
     throw new Error("Legacy credentials cannot declare providerType.");
   }
   const providerId = providerType === "generic"
-    ? normalizeGenericProviderId(raw.providerId)
+    ? normalizeGenericProviderId(raw.providerId, { reservedProviderIds: PROVIDERS })
     : validateProviderId(raw.providerId);
   const kind = normalizeText(raw.kind || (legacy ? "api_key" : undefined), "credential kind", {
     max: 20,
@@ -463,7 +463,7 @@ function createCredentialReferenceForType(input = {}, providerType) {
     updatedAt,
   } = input;
   const normalizedProviderId = providerType === "generic"
-    ? normalizeGenericProviderId(providerId)
+    ? normalizeGenericProviderId(providerId, { reservedProviderIds: PROVIDERS })
     : validateProviderId(providerId);
   const credential = normalizeCredential({
     id: id || generatedCredentialId(normalizedProviderId, kind),

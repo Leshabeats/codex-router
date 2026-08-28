@@ -10,7 +10,14 @@ import { privateFileIsProtected } from "./file-security.mjs";
 import { grokCliPreflight } from "./grok-cli.mjs";
 import { detectLegacyInstallations } from "./legacy-migration.mjs";
 import { routedCatalogConfigured } from "./catalog.mjs";
-import { MODEL_BY_SLUG, PROVIDERS, providerNeedsNoKey } from "./model-registry.mjs";
+import {
+  MODEL_BY_SLUG,
+  MODELS,
+  PROVIDERS,
+  providerNeedsNoKey,
+  RUNTIME_PROVIDERS,
+  RUNTIME_PROVIDER_WARNINGS,
+} from "./model-registry.mjs";
 import { grokOAuthStatus } from "./grok-oauth-status.mjs";
 import {
   antigravityOAuthHealth,
@@ -53,6 +60,7 @@ import {
   effectiveProviderCredentialStatus,
   resolveStoredCredential,
 } from "./provider-api-key-routing.mjs";
+import { genericProviderConfigured } from "./generic-provider-readiness.mjs";
 import { providerNeedsCuration } from "./provider-onboarding.mjs";
 import { stateOwnershipStatus } from "./state-owner.mjs";
 import {
@@ -925,6 +933,39 @@ const poolAuthoritySnapshot = {
     ]),
   ),
 };
+
+for (const warning of RUNTIME_PROVIDER_WARNINGS) {
+  add(
+    "fail",
+    "Generic provider registry",
+    warning,
+    "Repair or remove the malformed generic provider descriptor, then rerun the doctor.",
+  );
+}
+
+for (const provider of RUNTIME_PROVIDERS.values()) {
+  if (provider.generic !== true) continue;
+  const configured = genericProviderConfigured(provider.id);
+  const curated = MODELS.filter((model) => model.provider === provider.id).length;
+  add(
+    configured ? "ok" : "fail",
+    `${provider.displayName} generic provider`,
+    configured
+      ? `${provider.credentialRef ? "bound credential is available" : "no credential required"}; ${curated} curated model route(s)`
+      : "the bound credential is unavailable",
+    configured
+      ? `Run ./bin/curate-models ${provider.id} to review its routed models.`
+      : "Repair the provider-bound credential reference, then rerun the doctor.",
+  );
+  if (configured && curated === 0) {
+    add(
+      "warn",
+      `${provider.displayName} models`,
+      "provider is registered but has no curated model routes",
+      `Run ./bin/curate-models ${provider.id} in an interactive terminal.`,
+    );
+  }
+}
 
 for (const provider of PROVIDERS.values()) {
   if (provider.kind !== "openai-compatible") continue;

@@ -10,7 +10,47 @@ import {
   normalizeSchemaLiterals,
   objectRootToolSchema,
   providerToolSchema,
+  stripCodexEncryptedSchemaAnnotation,
 } from "../src/tool-schema-root.mjs";
+
+test("Codex encrypted annotations are removed only from JSON-Schema nodes", () => {
+  const ordinary = {
+    type: "object",
+    properties: { value: { type: "string" } },
+  };
+  assert.equal(stripCodexEncryptedSchemaAnnotation(ordinary), ordinary);
+
+  const schema = {
+    type: "object",
+    encrypted: true,
+    properties: {
+      encrypted: {
+        type: "string",
+        description: "A legitimate user property named encrypted.",
+      },
+      nested: {
+        type: "object",
+        properties: {
+          value: { type: "string", encrypted: true },
+        },
+      },
+    },
+    default: { encrypted: true },
+    examples: [{ encrypted: true }],
+  };
+  const repaired = stripCodexEncryptedSchemaAnnotation(schema);
+  assert.notEqual(repaired, schema);
+  assert.equal("encrypted" in repaired, false);
+  assert.deepEqual(repaired.properties.encrypted, {
+    type: "string",
+    description: "A legitimate user property named encrypted.",
+  });
+  assert.equal("encrypted" in repaired.properties.nested.properties.value, false);
+  assert.deepEqual(repaired.default, { encrypted: true });
+  assert.deepEqual(repaired.examples, [{ encrypted: true }]);
+  assert.equal(schema.encrypted, true, "the caller's schema must not be mutated");
+  assert.equal(schema.properties.nested.properties.value.encrypted, true);
+});
 
 test("recursive local refs keep definitions and only the cycle edge becomes permissive", () => {
   const schema = {
