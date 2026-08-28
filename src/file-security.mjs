@@ -92,6 +92,37 @@ function windowsPowerShellEnvironment(paths) {
   return env;
 }
 
+function powershellPrivateArgs() {
+  // PowerShell's `-Command` argument is parsed again by the Windows process
+  // launcher.  That is observable with a spawned child (and especially when
+  // the command contains a block and newlines), so send the UTF-16LE script
+  // through the encoding PowerShell documents for application callers.
+  const encoded = Buffer.from(powershellPrivateScript(), "utf16le").toString("base64");
+  return ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded];
+}
+
+function terminateWindowsChild(child) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  // `ChildProcess.kill()` is not consistently tree-aware on Windows.  A
+  // PowerShell process can leave a native child behind while it is inside an
+  // ACL call, keeping the router process alive after our bounded operation has
+  // already failed.  Kill the process tree as a fallback; the PID is supplied
+  // by Node rather than user input and taskkill's output is discarded.
+  child.kill();
+  if (Number.isInteger(child.pid) && child.pid > 0) {
+    try {
+      execFileSync(
+        "taskkill.exe",
+        ["/PID", String(child.pid), "/T", "/F"],
+        { stdio: "ignore", windowsHide: true },
+      );
+    } catch {
+      // The process may have exited between kill and taskkill.  The original
+      // operation's bounded error is the useful diagnostic in either case.
+    }
+  }
+}
+
 // Protect one or more paths in a single PowerShell process. Each file ends up
 // with exactly one current-identity FullControl Allow rule and no inheritance —
 // the same strictness privateFileIsProtected verifies. Owner/group are left
@@ -102,7 +133,7 @@ function protectPrivateFilesWin32(paths) {
   try {
     execFileSync(
       "powershell.exe",
-      ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", powershellPrivateScript()],
+      powershellPrivateArgs(),
       {
         env: windowsPowerShellEnvironment(list),
         stdio: ["ignore", "ignore", "pipe"],
@@ -131,7 +162,7 @@ function protectPrivateFilesWin32Async(paths) {
     let stderr = "";
     const child = spawn(
       "powershell.exe",
-      ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", powershellPrivateScript()],
+      powershellPrivateArgs(),
       {
         env: windowsPowerShellEnvironment(list),
         stdio: ["ignore", "ignore", "pipe"],
@@ -149,14 +180,14 @@ function protectPrivateFilesWin32Async(paths) {
     child.stderr.on("data", (chunk) => {
       stderr = `${stderr}${chunk}`.slice(-WINDOWS_PRIVATE_ASYNC_OUTPUT_LIMIT);
       if (stderr.length >= WINDOWS_PRIVATE_ASYNC_OUTPUT_LIMIT) {
-        child.kill();
+        terminateWindowsChild(child);
         settle(new Error("Windows private-file protection output exceeded its bound."));
       }
     });
     child.on("error", (cause) => {
       settle(new Error("Windows private-file protection could not start.", { cause }));
     });
-    child.on("exit", (code, signal) => {
+    child.on("close", (code, signal) => {
       if (code === 0) {
         settle();
         return;
@@ -169,7 +200,7 @@ function protectPrivateFilesWin32Async(paths) {
       ));
     });
     timer = setTimeout(() => {
-      child.kill();
+      terminateWindowsChild(child);
       settle(new Error("Timed out protecting a private file ACL."));
     }, WINDOWS_PRIVATE_ASYNC_TIMEOUT_MS);
   });

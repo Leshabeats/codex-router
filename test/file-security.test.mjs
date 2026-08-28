@@ -22,7 +22,8 @@ test("the Windows async ACL path uses the bounded one-shot script", () => {
     implementation,
     /protectPrivateFilesWin32Async\(paths\)/,
   );
-  assert.match(implementation, /"-Command", powershellPrivateScript\(\)/);
+  assert.match(implementation, /powershellPrivateArgs\(\)/);
+  assert.match(implementation, /"-EncodedCommand"/);
   assert.match(implementation, /WINDOWS_PRIVATE_ASYNC_TIMEOUT_MS/);
   assert.doesNotMatch(implementation, /powershellPrivateWorkerScript/);
 });
