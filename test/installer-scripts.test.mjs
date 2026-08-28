@@ -793,10 +793,12 @@ test("the foreign-state override is scoped to a full ownership-transferring inst
     /if \[ "\$prepare_only" != true \]; then\n  MODEL_ROUTER_ALLOW_FOREIGN_STATE=1\n  export MODEL_ROUTER_ALLOW_FOREIGN_STATE\nfi/,
     "the override must be guarded on a full install",
   );
-  const syntax = spawnSync("sh", ["-n", path.join(root, "bin", "install")], {
-    encoding: "utf8",
-  });
-  assert.equal(syntax.status, 0, syntax.stderr);
+  if (POSIX_SHELL_AVAILABLE) {
+    const syntax = spawnSync("sh", ["-n", path.join(root, "bin", "install")], {
+      encoding: "utf8",
+    });
+    assert.equal(syntax.status, 0, syntax.stderr);
+  }
 
   // Windows: set only when -PrepareOnly is off, in place before the generated
   // state is rebuilt, and restored in the outer finally -- removed when the
