@@ -564,7 +564,19 @@ and every client saw a bare "Connection error" naming nothing.
    live probe is the regression oracle: no `OutputTextDelta without active
    item` warnings and the message occupies the next output index after
    reasoning.
-10. **Do not answer a gateway crash by moving the litellm pin.** The pin is a
+10. **LiteLLM custom-tool streaming uses a mixed lifecycle.** LiteLLM 1.96
+   converts Responses `type: "custom"` tools into Chat Completions functions
+   whose one required string property is `content`. On the return stream it can
+   already restore `response.output_item.added` / `done` as native
+   `custom_tool_call` items while still emitting legacy
+   `response.function_call_arguments.delta` / `done` events whose JSON wrapper
+   is `{ "content": "..." }`. `NamespaceToolCallTransform` may decode that
+   wrapper only when the source opening itself was already a native custom call;
+   the router's own custom-function bridge keeps its `{ "input": "..." }`
+   contract. Keep the streamed-input fingerprint check and fail closed when the
+   delta, terminal arguments, or output-item close disagree. The focused
+   namespace-relay test and Z.ai router fixture hold both sides of this boundary.
+11. **Do not answer a gateway crash by moving the litellm pin.** The pin is a
    security floor and a wheel-availability decision (see the lock section
    above), any change to it has to be proven by booting the proxy rather than by
    a successful resolve, and a router that survives its gateway is worth having
