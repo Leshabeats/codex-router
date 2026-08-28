@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -22,6 +22,7 @@ const {
   searchSidecarBindingForModel,
   setSearchSidecarBinding,
 } = await import("../src/search-sidecar-state.mjs");
+const { privateFileIsProtected } = await import("../src/file-security.mjs");
 
 const binding = {
   model: "deepseek/deepseek-v4-flash",
@@ -75,7 +76,7 @@ test("sidecar state is closed, versioned, private, and keyed by exact model slug
     /version 1/,
   );
   assert.deepEqual(setSearchSidecarBinding(binding), binding);
-  assert.equal(statSync(SEARCH_SIDECARS_PATH).mode & 0o777, 0o600);
+  assert.equal(privateFileIsProtected(SEARCH_SIDECARS_PATH), true);
   assert.deepEqual(searchSidecarBindingForModel(binding.model), binding);
   assert.equal(searchSidecarBindingForModel("deepseek/another-model"), undefined);
   const stored = JSON.parse(readFileSync(SEARCH_SIDECARS_PATH, "utf8"));
@@ -208,6 +209,7 @@ test("authorization and cache scopes cannot cross accounts or provider credentia
   assert.equal(calls, 3);
   assert.equal(first.telemetry.cacheHit, false);
   assert.equal(second.telemetry.cacheHit, true);
+  assert.equal(second.telemetry.results, 1);
 });
 
 test("private DNS, malformed JSON, oversized bodies, and unavailable credentials fail closed", async () => {
@@ -272,6 +274,44 @@ test("private DNS, malformed JSON, oversized bodies, and unavailable credentials
     }),
     (error) => error.code === "search_sidecar_malformed_response" && /credential-like/.test(error.message),
   );
+  for (const result of [
+    {
+      title: "pplx-0123456789abcdefghijklmnopqrstuv",
+      url: "https://example.com/result",
+      snippet: "ordinary summary",
+    },
+    {
+      title: "credential in snippet",
+      url: "https://example.com/result",
+      snippet: "Leaked pplx-0123456789abcdefghijklmnopqrstuv",
+    },
+    {
+      title: "credential in innocuous URL field",
+      url: "https://example.com/result?reference=pplx-0123456789abcdefghijklmnopqrstuv",
+      snippet: "ordinary summary",
+    },
+  ]) {
+    await assert.rejects(
+      () => executeSearchSidecar({
+        ...base,
+        requestProvider: requestProviderWith({ results: [result] }),
+        resolveResultHost: publicResolution,
+      }),
+      (error) => error.code === "search_sidecar_malformed_response" && /credential/.test(error.message),
+    );
+  }
+  const nonCredential = await executeSearchSidecar({
+    ...base,
+    requestProvider: requestProviderWith({
+      results: [{
+        title: "pplx-preview release notes",
+        url: "https://example.com/result?reference=pplx-preview",
+        snippet: "The pplx-demo label is public product text.",
+      }],
+    }),
+    resolveResultHost: publicResolution,
+  });
+  assert.equal(nonCredential.response.results[0].title, "pplx-preview release notes");
   await assert.rejects(
     () => executeSearchSidecar({ ...base, providerReady: () => false }),
     (error) => error.code === "search_sidecar_provider_unavailable" && error.status === 503,

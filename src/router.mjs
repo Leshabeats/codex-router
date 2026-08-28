@@ -4182,6 +4182,12 @@ async function handleNativeRequest(request, response, requestUrl, defaultModel) 
       requestedModel = typeof payload.model === "string" ? payload.model : defaultModel;
       const binding = searchSidecarBindingForModel(requestedModel);
       if (binding) {
+        servingProvider = `search:${binding.providerId}`;
+        activity.setRoute({
+          provider: servingProvider,
+          model: requestedModel,
+          ...activityMetadataFromHeaders(request.headers),
+        });
         const routedModel = MODEL_BY_SLUG.get(requestedModel);
         if (
           !routedModel ||
@@ -4193,12 +4199,6 @@ async function handleNativeRequest(request, response, requestUrl, defaultModel) 
             { code: "search_sidecar_model_ineligible", status: 409 },
           );
         }
-        servingProvider = `search:${binding.providerId}`;
-        activity.setRoute({
-          provider: servingProvider,
-          model: requestedModel,
-          ...activityMetadataFromHeaders(request.headers),
-        });
         const accountId = String(request.headers["chatgpt-account-id"] || "");
         const installationId = String(request.headers["x-codex-installation-id"] || "");
         // The local caller capability proves authorization, not account

@@ -24,7 +24,7 @@ const MAX_RESULT_TEXT = 2_000;
 const MAX_PROVIDER_BODY_BYTES = 64 * 1024;
 const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/g;
-const RAW_CREDENTIAL_PATTERN = /(?:\bBearer\s+[A-Za-z0-9._~+\/-]{16,}|\bsk-[A-Za-z0-9_-]{16,}|\bgh[opusr]_[A-Za-z0-9_]{16,}|\bxox[baprs]-[A-Za-z0-9-]{16,}|\bAIza[0-9A-Za-z_-]{20,})/i;
+const RAW_CREDENTIAL_PATTERN = /(?:\bBearer\s+[A-Za-z0-9._~+\/-]{16,}|\bsk-[A-Za-z0-9_-]{16,}|\bpplx-[A-Za-z0-9]{16,}|\bgh[opusr]_[A-Za-z0-9_]{16,}|\bxox[baprs]-[A-Za-z0-9-]{16,}|\bAIza[0-9A-Za-z_-]{20,})/i;
 const CREDENTIAL_QUERY_KEY = /^(?:api[-_]?key|access[-_]?token|auth(?:orization)?|bearer|credential|key|password|secret|session|signature|token)$/i;
 const sharedCache = new Map();
 
@@ -116,8 +116,20 @@ async function publicResultUrl(value, index, resolveHost) {
   ) {
     throw new Error(`results[${index}].url must be a public HTTPS URL without credentials.`);
   }
-  if ([...parsed.searchParams].some(([name, value]) => value && CREDENTIAL_QUERY_KEY.test(name))) {
+  if ([...parsed.searchParams].some(([name, value]) => (
+    value && (CREDENTIAL_QUERY_KEY.test(name) || RAW_CREDENTIAL_PATTERN.test(value))
+  ))) {
     throw new Error(`results[${index}].url must not contain credential query parameters.`);
+  }
+  let decodedUrl = parsed.toString();
+  try {
+    decodedUrl = decodeURIComponent(decodedUrl);
+  } catch {
+    // URL parsing already validated the value. A malformed percent escape is
+    // retained for the ordinary URL check rather than becoming a bypass.
+  }
+  if (RAW_CREDENTIAL_PATTERN.test(decodedUrl)) {
+    throw new Error(`results[${index}].url contains credential-like content.`);
   }
   const addresses = await resolveHost(parsed.hostname);
   if (!Array.isArray(addresses) || addresses.length < 1) {
@@ -375,7 +387,13 @@ export async function executeSearchSidecar({
   if (cached) {
     return {
       response: cached,
-      telemetry: { cacheHit: true, attempts: 0, durationMs: 0, providerId: provider.id },
+      telemetry: {
+        cacheHit: true,
+        attempts: 0,
+        durationMs: 0,
+        providerId: provider.id,
+        results: Array.isArray(cached.results) ? cached.results.length : 0,
+      },
     };
   }
 
