@@ -27,7 +27,8 @@ export async function waitForRouterHealth({
   if (!SUPPORTED_TARGETS.has(target)) throw new Error(`Unknown router target: ${target}`);
   const expectedService = SERVICE_BY_TARGET[ROUTER_PLANE_TARGET];
 
-  const deadline = Date.now() + Math.max(0, timeoutMs);
+  const overallTimeoutMs = Math.max(0, timeoutMs);
+  const deadline = Date.now() + overallTimeoutMs;
   let lastError = "service unavailable";
   // A router that answers but reports a dependency down is a different failure
   // from a router that is not listening, and only the first one is survivable
@@ -35,9 +36,18 @@ export async function waitForRouterHealth({
   // caller can say which of the two happened instead of "not ready".
   let lastPayload;
   do {
+    // The overall health budget is authoritative. A slow TCP/HTTP attempt near
+    // its end must not consume a fresh full request timeout and make callers
+    // wait past the deadline they supplied. Keep timeoutMs=0 as the existing
+    // one-shot probe: tests and diagnostic callers use it to sample once.
+    const remainingRequestMs = deadline - Date.now();
+    const attemptTimeoutMs =
+      overallTimeoutMs === 0
+        ? requestTimeoutMs
+        : Math.max(1, Math.min(requestTimeoutMs, remainingRequestMs));
     try {
       const response = await fetchImpl(url, {
-        signal: AbortSignal.timeout(requestTimeoutMs),
+        signal: AbortSignal.timeout(attemptTimeoutMs),
       });
       const body = await response.text();
       let payload = {};
