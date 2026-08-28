@@ -184,6 +184,21 @@ export async function resolveProviderApiKeyForRequest(
     staleMs,
   } = {},
 ) {
+  // API-key pools are provider-level authority. Per-model endpoint descriptors
+  // deliberately derive their id from the model slug (for example
+  // `custom/foo`) so each model keeps a distinct credential; those ids are not
+  // registry provider ids and must stay on the existing endpoint credential
+  // path instead of being parsed as pool provider identities. Generic runtime
+  // providers are handled by their separate request boundary before this call.
+  if (!PROVIDERS.has(provider.id)) {
+    return {
+      credential: resolveLegacy(),
+      pooled: false,
+      configured: false,
+      fallbackAllowed: true,
+    };
+  }
+
   const status = providerApiKeyPoolStatus(provider.id, {
     filePath: poolStatePath,
     now,

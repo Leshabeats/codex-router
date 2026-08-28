@@ -11,7 +11,7 @@ process.env.MODEL_ROUTER_PROVIDER_CREDENTIAL_STORE = path.join(root, "state", "p
 process.env.MODEL_ROUTER_PROVIDER_CREDENTIAL_MIGRATIONS = path.join(root, "state", "migrations", "provider-credentials");
 delete process.env.OPENROUTER_API_KEY;
 
-const { PROVIDERS } = await import("../src/model-registry.mjs");
+const { MODEL_BY_SLUG, PROVIDERS, endpointForModel } = await import("../src/model-registry.mjs");
 const { writeProviderCredential } = await import("../src/provider-credentials.mjs");
 const { addCredentialReference, migrateProviderCredentialStore } = await import("../src/provider-credential-store.mjs");
 const { resolveProviderApiKeyForRequest } = await import("../src/provider-api-key-routing.mjs");
@@ -30,6 +30,21 @@ test.before(async () => {
   const store = migrateProviderCredentialStore(credentialStorePath).store;
   credentialId = store.credentials.find((entry) => entry.providerId === provider.id).id;
   await upsertProviderApiKey(provider.id, { id: credentialId }, { filePath: statePath });
+});
+
+test("per-model endpoint identities bypass provider-level API-key pools", async () => {
+  const endpoint = endpointForModel(MODEL_BY_SLUG.get("custom/qwen3.8-27b"));
+  assert.equal(endpoint.id, "custom/qwen3.8-27b");
+
+  const routing = await resolveProviderApiKeyForRequest(endpoint, {
+    poolStatePath: statePath,
+    credentialStorePath,
+  });
+
+  assert.equal(routing.pooled, false);
+  assert.equal(routing.configured, false);
+  assert.equal(routing.fallbackAllowed, true);
+  assert.equal(routing.credential?.source, "official anonymous endpoint");
 });
 
 test("credential-store ids resolve through registry-bound references", async () => {
