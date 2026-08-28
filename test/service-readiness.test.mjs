@@ -163,6 +163,62 @@ test("a restart count that never climbs keeps the wait alive until health answer
   assert.ok(queries > 1);
 });
 
+test("health that settles as the restart threshold is reached wins over the crash-loop verdict", async () => {
+  // The poll race has already given up the tick by the time the counter query
+  // runs, so health can arrive inside that very query. The counter must never
+  // override a verdict health has reached; this exact interleaving used to
+  // throw crash-looping for a router that was already healthy.
+  let restarts = 0;
+  let resolveHealth;
+  const healthSettled = new Promise((resolve) => {
+    resolveHealth = resolve;
+  });
+  const health = await waitForServiceReadiness({
+    platform: "linux",
+    timeoutMs: 10_000,
+    pollMs: 10,
+    getServiceRestarts: () => {
+      restarts += 1;
+      if (restarts === 4) resolveHealth({ ok: true });
+      return restarts;
+    },
+    waitForHealth: () => healthSettled,
+  });
+  assert.equal(restarts, 4);
+  assert.deepEqual(health, { ok: true });
+});
+
+test("a restart-count query is given the remaining budget and cannot stretch the wait", async () => {
+  const budgets = [];
+  const startedAt = Date.now();
+  await assert.rejects(
+    waitForServiceReadiness({
+      platform: "linux",
+      timeoutMs: 150,
+      pollMs: 10,
+      getServiceRestarts: (remainingMs) => {
+        budgets.push(remainingMs);
+        return 7; // present but never climbing: no loop evidence, no early verdict
+      },
+      waitForHealth: () =>
+        new Promise((resolve) =>
+          setTimeout(resolve, 200, { ok: false, error: "router never answered" }),
+        ),
+    }),
+    /router never answered/,
+  );
+  assert.ok(budgets.length > 1, "the counter must be polled while the wait runs");
+  assert.ok(
+    budgets.every((budget) => budget >= 0 && budget <= 150),
+    "each query must receive a budget inside the wait's own timeout",
+  );
+  assert.ok(budgets[0] > 0, "the baseline query must still have budget");
+  assert.ok(
+    Date.now() - startedAt < 5_000,
+    "the wait must end at its deadline, not stretch past it",
+  );
+});
+
 test("a failed health result object is a failure, never a resolution", async () => {
   // `waitForRouterHealth` resolves `{ ok: false, error }` instead of
   // rejecting; the guard must surface that as a thrown failure.
@@ -197,4 +253,15 @@ test("the Linux service manager feeds its restart counter to the readiness guard
   const linux = readFileSync(path.join(root, "src", "service-linux.mjs"), "utf8");
   assert.match(linux, /"restart-count"/);
   assert.match(linux, /NRestarts/);
+});
+
+test("the Linux restart-count query is bounded inside the readiness deadline", () => {
+  const service = readFileSync(path.join(root, "src", "service.mjs"), "utf8");
+  assert.match(service, /RESTART_QUERY_TIMEOUT_MS = /);
+  // A blocked systemctl is killed after a fixed slice capped by the wait's
+  // remaining budget, and a killed query reads as inconclusive -- it can
+  // never stretch the outer readiness deadline.
+  assert.match(service, /timeout: Math\.min\(RESTART_QUERY_TIMEOUT_MS, remainingMs\)/);
+  assert.match(service, /killSignal: "SIGKILL"/);
+  assert.match(service, /if \(!\(remainingMs > 0\)\) return undefined;/);
 });

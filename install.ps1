@@ -243,6 +243,11 @@ $ConfigDisableCommand = if ($Target -eq "codex") { "disable" } else { "uninstall
 $ConfigEnabled = $false
 $ServiceInstalled = $false
 $AdoptionPending = $false
+# The foreign-state override below is set inside the try and must be undone in
+# the finally even when a step throws first, so both halves of the caller's
+# environment are captured up front.
+$SavedForeignStateOverride = $null
+$HadForeignStateOverride = $false
 $ConfigWasEnabled = $false
 $ServiceWasInstalled = $false
 $TrayWasInstalled = $false
@@ -393,6 +398,19 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Recording the Python dependency state failed." }
   }
 
+  # Installing is the sanctioned way for a checkout to take over a state
+  # directory: the generated files below are rebuilt here and the new owner is
+  # recorded before the service step, so the ownership guard must not block a
+  # full install. The override is scoped to exactly that run and only after
+  # -PrepareOnly is known: a -PrepareOnly run rewrites the same generated state
+  # but exits before the manifest record, so letting it past the guard would
+  # let a second checkout rebuild foreign-owned state with no ownership
+  # transfer ever recorded. The caller's own value is restored in the finally.
+  if (-not $PrepareOnly) {
+    $HadForeignStateOverride = $null -ne (Get-Item Env:\MODEL_ROUTER_ALLOW_FOREIGN_STATE -ErrorAction SilentlyContinue)
+    $SavedForeignStateOverride = $env:MODEL_ROUTER_ALLOW_FOREIGN_STATE
+    $env:MODEL_ROUTER_ALLOW_FOREIGN_STATE = "1"
+  }
   & node src/secret.mjs ensure
   if ($LASTEXITCODE -ne 0) { throw "Local router-key setup failed." }
   # The state root is read by both arms below, so it is computed once rather
@@ -545,5 +563,13 @@ try {
   }
   throw
 } finally {
+  # Restore the caller's environment exactly as it was found: a value this run
+  # did not set is removed, and a pre-existing one is put back verbatim. The
+  # scoped override must never outlive the install process that justified it.
+  if ($HadForeignStateOverride) {
+    $env:MODEL_ROUTER_ALLOW_FOREIGN_STATE = $SavedForeignStateOverride
+  } else {
+    Remove-Item Env:\MODEL_ROUTER_ALLOW_FOREIGN_STATE -ErrorAction SilentlyContinue
+  }
   Pop-Location
 }

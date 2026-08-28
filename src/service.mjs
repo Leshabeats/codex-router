@@ -28,6 +28,10 @@ const shutdownCommands = new Set(["stop", "uninstall"]);
 // service and reverts the app config out from under a router that goes on to
 // come up healthy seconds later.
 const READINESS_TIMEOUT_MS = 300_000;
+// One restart-count query runs on every readiness poll, synchronously. A
+// systemctl that never answers must cost the wait a bounded slice, not the
+// whole readiness budget, so the query is killed and read as inconclusive.
+const RESTART_QUERY_TIMEOUT_MS = 5_000;
 
 async function runServiceCommand() {
   // The wrapper below is a separate Node process, so a direct
@@ -58,11 +62,19 @@ async function runServiceCommand() {
     // guard, and launchd has no equivalent counter.
     ...(script === "service-linux.mjs"
       ? {
-          getServiceRestarts: () => {
+          // The readiness guard passes whatever budget it has left, so the
+          // fixed slice below can never stretch the wait past its deadline.
+          getServiceRestarts: (remainingMs) => {
+            if (!(remainingMs > 0)) return undefined;
             const counter = spawnSync(
               process.execPath,
               [path.join(SOURCE_ROOT, "src", script), "restart-count"],
-              { encoding: "utf8", env: childEnvironment },
+              {
+                encoding: "utf8",
+                env: childEnvironment,
+                timeout: Math.min(RESTART_QUERY_TIMEOUT_MS, remainingMs),
+                killSignal: "SIGKILL",
+              },
             );
             if (counter.error || counter.status !== 0) return undefined;
             try {

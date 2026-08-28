@@ -29,10 +29,13 @@ async function settleHealth(waitForHealth, timeoutMs) {
 }
 
 // A restart-count query failure is inconclusive, exactly like a failed Task
-// Scheduler query on Windows, and never fails the wait by itself.
-async function settleRestarts(getServiceRestarts) {
+// Scheduler query on Windows, and never fails the wait by itself. The query
+// receives the wait's remaining budget so a slow counter source (spawnSync on
+// the Linux path) can bound itself inside the deadline instead of stretching
+// it.
+async function settleRestarts(getServiceRestarts, remainingMs) {
   try {
-    const restarts = await getServiceRestarts();
+    const restarts = await getServiceRestarts(Math.max(0, remainingMs));
     return Number.isSafeInteger(restarts) && restarts >= 0 ? restarts : undefined;
   } catch {
     return undefined;
@@ -85,7 +88,7 @@ export async function waitForServiceReadiness({
     // Restart counts are compared against the value at wait start, not
     // absolute: a unit can carry restarts from before this install touched
     // it, and only restarts this wait observes are evidence of a loop.
-    let baseline = await settleRestarts(getServiceRestarts);
+    let baseline = await settleRestarts(getServiceRestarts, deadline - Date.now());
     let restartsSince = 0;
     while (Date.now() < deadline) {
       const winner = await Promise.race([
@@ -96,11 +99,23 @@ export async function waitForServiceReadiness({
         if (winner.outcome.healthy) return winner.outcome.health;
         throw failureOf(winner.outcome);
       }
-      const restarts = await settleRestarts(getServiceRestarts);
+      const restarts = await settleRestarts(getServiceRestarts, deadline - Date.now());
       if (restarts !== undefined) {
         baseline ??= restarts;
         restartsSince = Math.max(restartsSince, restarts - baseline);
         if (restartsSince >= CRASH_LOOP_RESTARTS) {
+          // The counter query itself takes time, and health may settle while
+          // it runs -- the poll race above gave up a tick ago. The counter
+          // never overrides a verdict health has already reached, so the
+          // crash-loop finding is reported only after one last bounded look.
+          const finalWinner = await Promise.race([
+            healthWinner,
+            sleep(pollMs).then(() => null),
+          ]);
+          if (finalWinner) {
+            if (finalWinner.outcome.healthy) return finalWinner.outcome.health;
+            throw failureOf(finalWinner.outcome);
+          }
           throw new Error(
             `The background service restarted ${restartsSince} times while ` +
               "waiting for it to become healthy; it is crash-looping. " +

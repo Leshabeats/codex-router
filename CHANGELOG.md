@@ -11,9 +11,16 @@
   back, and repeated on every retry, and deleting the whole state directory
   -- every stored provider key with it -- was the only escape. The record now
   precedes the service step it describes, so the service boots against its
-  own ownership. Linux readiness also fails fast once the service manager's
-  restart counter shows a crash loop, instead of waiting out the whole
-  budget, and names the journal and the router log in the error.
+  own ownership. The ownership override the installers run under is scoped
+  to that full, ownership-transferring install on both platforms: a
+  prepare-only run meets the guard like any other writer (and the Windows
+  installer restores the caller's environment when it finishes). Linux
+  readiness also fails fast once the service manager's restart counter shows
+  a crash loop, instead of waiting out the whole budget, and names the
+  journal and the router log in the error; the counter query itself is
+  killed inside a bounded slice of the remaining budget, so a blocked
+  `systemctl` cannot stretch the wait, and a health answer that lands as the
+  threshold is crossed still wins over the crash-loop verdict.
 
 - **OpenCode Go Kimi K2.7 Code now accepts current Codex tool schemas.** Its
   Moonshot-backed validator receives the same bounded decorated-`$defs` repair
