@@ -58,10 +58,15 @@ test("caller verification requires a valid 200 model list and exact stale 401", 
   }), /valid model list/i);
 });
 
-test("rotation preserves a stopped installed service and uses capability-only client refresh", async () => {
+test("rotation preserves a stopped installed service and uses capability-only client refresh", async (t) => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "caller-key-stopped-"));
+  const secretPath = path.join(directory, "caller-secret");
+  writeFileSync(secretPath, `${oldKey}\n`, { mode: 0o600 });
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
   assert.equal(typeof cli.runCallerKeyRotation, "function");
   const calls = [];
   const result = await cli.runCallerKeyRotation({
+    secretPath,
     assertOwnership: () => {},
     withLock: async (run) => run(),
     withMutationLocks: async (run) => run(),
@@ -88,9 +93,14 @@ test("rotation preserves a stopped installed service and uses capability-only cl
   assert.equal(result.serviceRestarted, false);
 });
 
-test("running service is stopped before swap, then started and verified", async () => {
+test("running service is stopped before swap, then started and verified", async (t) => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "caller-key-running-"));
+  const secretPath = path.join(directory, "caller-secret");
+  writeFileSync(secretPath, `${oldKey}\n`, { mode: 0o600 });
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
   const order = [];
   await cli.runCallerKeyRotation({
+    secretPath,
     assertOwnership: () => {}, withLock: async (run) => run(), withMutationLocks: async (run) => run(), recoverPending: async () => {},
     readClientStatuses: async () => ({ codex: { mode: "router", config_protected: true }, dsh: {}, gemini: {} }),
     readServiceStatus: async () => ({ installed: true, state: "running" }),
