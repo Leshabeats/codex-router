@@ -1553,9 +1553,9 @@ undici.fetch = async (url, options = {}) => {
   fs.writeFileSync(process.env.CODEX_ROUTER_SEARCH_TRANSPORT_AUDIT, JSON.stringify({
     url: String(url),
     method: options.method,
-    authorization: headers.authorization,
+    authorizationMatchesFixture: headers.authorization === ${JSON.stringify(`Bearer ${credentialSecret}`)},
     body: JSON.parse(String(options.body)),
-  }));
+  }), { mode: 0o600 });
   return new undici.Response(JSON.stringify({
     results: [{
       title: "Router integration result",
@@ -1613,7 +1613,7 @@ undici.fetch = async (url, options = {}) => {
     assert.deepEqual(JSON.parse(readFileSync(transportAudit, "utf8")), {
       url: "https://api.perplexity.ai/search",
       method: "POST",
-      authorization: `Bearer ${credentialSecret}`,
+      authorizationMatchesFixture: true,
       body: {
         query: "OpenAI news",
         max_results: 8,
@@ -1690,11 +1690,11 @@ test("an ineligible bound search is attributed to its sidecar provider", async (
         message: "The selected model is not eligible for its configured search sidecar.",
       },
     });
-    const usage = readFileSync(path.join(testRoot, "usage-events.jsonl"), "utf8")
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line))
-      .at(-1);
+    const usage = await waitForUsageEvent(
+      testRoot,
+      (event) => event.model === requestedModel && event.provider === "search:perplexity-sidecar",
+      router,
+    );
     assert.equal(usage.model, requestedModel);
     assert.equal(usage.provider, "search:perplexity-sidecar");
     assert.equal(usage.searchSidecar, true);
@@ -5983,8 +5983,12 @@ test("native redirect falls back to native when the target cannot route", async 
 function usageEvents(stateDir) {
   const file = path.join(stateDir, "usage-events.jsonl");
   if (!existsSync(file)) return [];
-  return readFileSync(file, "utf8")
-    .split("\n")
+  const lines = readFileSync(file, "utf8").split("\n");
+  // appendFileSync writes one newline-terminated event. If this read lands
+  // during the append, leave the unterminated tail for the next poll rather
+  // than parsing a partial JSON object as a completed event.
+  if (lines.at(-1) !== "") lines.pop();
+  return lines
     .filter(Boolean)
     .map((line) => JSON.parse(line));
 }
@@ -5999,6 +6003,16 @@ async function waitForUsageEvents(stateDir, count, child) {
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(`Timed out waiting for ${count} usage events: ${child.testErrors()}`);
+}
+
+async function waitForUsageEvent(stateDir, predicate, child) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const event = usageEvents(stateDir).find(predicate);
+    if (event) return event;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Timed out waiting for a matching usage event: ${child.testErrors()}`);
 }
 
 async function waitForStderr(child, pattern) {
