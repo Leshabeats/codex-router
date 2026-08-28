@@ -340,14 +340,6 @@ export function DashboardPage({
         <ServiceHealthPanel health={health} compact onOpen={() => onNavigate("status")} />
       )}
 
-      <RouteDashboardPanel
-        providers={routeProviders}
-        routeMutations={routeMutations}
-        api={api}
-        onNavigate={onNavigate}
-        loading={routesPending}
-      />
-
       <div className="db-summary-grid" role="list" aria-label="Router summary">
         {tiles.map((tile) => {
           const Icon = tile.icon;
@@ -434,6 +426,14 @@ export function DashboardPage({
         providerUsage={providerUsage}
         refreshing={refreshing}
         loading={snapshotPending && !providerUsage}
+      />
+
+      <RouteDashboardPanel
+        providers={routeProviders}
+        routeMutations={routeMutations}
+        api={api}
+        onNavigate={onNavigate}
+        loading={routesPending}
       />
 
       <div className="db-panel-grid db-dashboard-details">

@@ -615,7 +615,11 @@ private struct IslandOverlayView: View {
 
   private var sourceLabel: String {
     let provider = store.selectedUsageProviderID
-    if provider == "openai" { return routerLocalized("CHATGPT • NATIVE") }
+    if provider == "openai" {
+      let label = routerLocalized("CHATGPT • NATIVE")
+      guard store.dailyFallbackDays(days: 7) > 0 else { return label }
+      return "\(label) + \(routerLocalized("LOCAL FALLBACK"))"
+    }
     if provider == "grok-oauth" { return routerLocalized("XAI • OAUTH SESSION") }
     if provider == "grok-api" { return routerLocalized("XAI • METERED API") }
     if provider.hasSuffix("-api") || ["deepseek", "chutes", "orca"].contains(provider) {
@@ -719,9 +723,11 @@ private struct IslandOverlayView: View {
   }
 
   private var tokenSourceDetail: String {
-    store.selectedUsageUsesChatGPT
-      ? routerLocalized("ChatGPT account usage")
-      : routerLocalized("Measured by this router")
+    guard store.selectedUsageUsesChatGPT else { return routerLocalized("Measured by this router") }
+    if store.dailyFallbackDays(days: 7) > 0 {
+      return routerLocalized("OpenAI account usage; missing dates use local router fallback")
+    }
+    return routerLocalized("ChatGPT account usage")
   }
 
 }
@@ -790,6 +796,15 @@ private struct IslandUsageLineChart: View {
               tint.opacity(0.78),
               style: StrokeStyle(lineWidth: 1.25, lineCap: .round, lineJoin: .round)
             )
+
+          ForEach(Array(points.enumerated()), id: \.element.id) { index, point in
+            if point.isRouterFallback, coordinates.indices.contains(index) {
+              Circle()
+                .stroke(routerYellow, style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
+                .frame(width: 7, height: 7)
+                .position(coordinates[index])
+            }
+          }
         }
 
         if showsAxis {
@@ -932,7 +947,9 @@ private struct IslandUsageLineChart: View {
   private func hoverText(for point: DailyUsagePoint) -> String {
     let date = point.date.formatted(.dateTime.month(.abbreviated).day())
     let tokens = Int64(point.tokens).formatted(.number.grouping(.automatic))
-    return RouterLanguage.isSimplifiedChinese ? "\(date) · \(tokens) token" : "\(date) · \(tokens) tok"
+    let text = RouterLanguage.isSimplifiedChinese ? "\(date) · \(tokens) token" : "\(date) · \(tokens) tok"
+    guard point.isRouterFallback else { return text }
+    return "\(text) · \(routerLocalized("local fallback"))"
   }
 }
 

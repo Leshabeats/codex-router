@@ -8484,6 +8484,111 @@ test("router repairs malformed Z.ai message envelopes after LiteLLM Responses tr
   }
 });
 
+test("router repairs LiteLLM legacy argument events for native Z.ai custom tools", async () => {
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "zai-custom-tool-router-"));
+  const stateDir = path.join(testRoot, "state");
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(
+    path.join(stateDir, "enabled-providers.json"),
+    `${JSON.stringify({ version: 1, providers: ["zai-coding"] })}\n`,
+  );
+  const input = "console.log(6 * 7);\n";
+  const argumentsText = JSON.stringify({ content: input });
+  const customItem = {
+    type: "custom_tool_call",
+    id: "call_custom",
+    call_id: "call_custom",
+    name: "exec",
+    status: "completed",
+    input,
+  };
+  const gateway = await mockServer(async (request, response) => {
+    if (request.method === "GET") {
+      json(response, 200, { ok: true, credential_present: true, credential_source: "test" });
+      return;
+    }
+    const outgoing = await bodyJson(request);
+    assert.equal(outgoing.model, "zai-coding-glm-5-3");
+    assert.equal(outgoing.tools?.some((tool) => tool?.type === "custom" && tool.name === "exec"), true);
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    const events = [
+      {
+        type: "response.output_item.added",
+        output_index: 0,
+        item: { ...customItem, status: "in_progress", input: "" },
+      },
+      {
+        type: "response.function_call_arguments.delta",
+        item_id: "call_custom",
+        output_index: 0,
+        delta: argumentsText,
+      },
+      {
+        type: "response.function_call_arguments.done",
+        item_id: "call_custom",
+        output_index: 0,
+        arguments: argumentsText,
+      },
+      { type: "response.output_item.done", output_index: 0, item: customItem },
+      {
+        type: "response.completed",
+        response: {
+          id: "resp_custom",
+          status: "completed",
+          output: [customItem],
+          usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
+        },
+      },
+    ];
+    response.end(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""));
+  });
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_STATE_DIR: stateDir,
+    CODEX_ROUTER_SHOW_ALL_MODELS: "0",
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_GATEWAY_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_API_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_GROK_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_QUIET: "1",
+  });
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const response = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "zai-coding/glm-5.3",
+        input: "test",
+        stream: true,
+        tools: [{ type: "custom", name: "exec", description: "Run JavaScript." }],
+      }),
+    });
+    assert.equal(response.status, 200);
+    const body = await response.text();
+    const events = body.split(/\r?\n/)
+      .filter((line) => line.startsWith("data: {"))
+      .map((line) => JSON.parse(line.slice(5).trim()));
+    assert.equal(
+      events.filter((event) => event.type === "response.custom_tool_call_input.delta")
+        .map((event) => event.delta).join(""),
+      input,
+    );
+    assert.equal(
+      events.find((event) => event.type === "response.custom_tool_call_input.done")?.input,
+      input,
+    );
+    assert.equal(events.find((event) => event.type === "response.output_item.done")?.item?.input, input);
+    assert.equal(events.at(-1)?.type, "response.completed");
+    assert.doesNotMatch(body, /response\.function_call_arguments/u);
+  } finally {
+    await stopChild(router);
+    await closeServer(gateway.server);
+    rmSync(testRoot, { recursive: true, force: true });
+  }
+});
+
 function curatedMuseCompatibilityModel() {
   const dir = mkdtempSync(path.join(os.tmpdir(), "routing-opencode-tool-model-"));
   const file = path.join(dir, "user-models.json");

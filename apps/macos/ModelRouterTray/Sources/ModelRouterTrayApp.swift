@@ -777,6 +777,7 @@ final class RouterStore: ObservableObject {
   private struct DailyUsageCacheBucket: Hashable {
     let startDate: String
     let tokens: Int64
+    let isRouterFallback: Bool
   }
 
   private struct DailyUsageCacheKey: Hashable {
@@ -2068,15 +2069,30 @@ final class RouterStore: ObservableObject {
     dailyUsage(for: selectedUsageProviderID, days: days)
   }
 
+  func dailyFallbackDays(days: Int) -> Int {
+    guard selectedUsageUsesChatGPT else { return 0 }
+    return dailyUsage(days: days).filter(\.isRouterFallback).count
+  }
+
   func dailyUsage(for providerID: String, days: Int) -> [DailyUsagePoint] {
     let buckets: [DailyUsageCacheBucket]
     if providerID == "openai" {
-      buckets = accountUsage?.dailyUsageBuckets.map {
-        DailyUsageCacheBucket(startDate: $0.startDate, tokens: $0.tokens)
-      } ?? []
+      // OpenAI's account stream is authoritative whenever it contains a date.
+      // The local OpenAI provider stream is narrower router telemetry, so it
+      // only fills an absent account date and never replaces an explicit zero.
+      buckets = mergeAccountUsageBuckets(
+        account: accountUsage?.dailyUsageBuckets ?? [],
+        router: providerUsage(for: "openai")?.dailyUsageBuckets ?? []
+      ).map {
+        DailyUsageCacheBucket(
+          startDate: $0.startDate,
+          tokens: $0.tokens,
+          isRouterFallback: $0.isRouterFallback
+        )
+      }
     } else {
       buckets = providerUsage(for: providerID)?.dailyUsageBuckets.map {
-        DailyUsageCacheBucket(startDate: $0.startDate, tokens: $0.tokens)
+        DailyUsageCacheBucket(startDate: $0.startDate, tokens: $0.tokens, isRouterFallback: false)
       } ?? []
     }
     let calendar = Calendar.current
@@ -2089,14 +2105,14 @@ final class RouterStore: ObservableObject {
     )
     if let cached = dailyUsageCache[cacheKey] { return cached }
 
-    let indexed = Dictionary(uniqueKeysWithValues: buckets.map {
-      ($0.startDate, Double($0.tokens))
-    })
+    let indexed = Dictionary(uniqueKeysWithValues: buckets.map { ($0.startDate, $0) })
     let points = (0..<days).map { offset in
       let date = calendar.date(byAdding: .day, value: offset - (days - 1), to: today) ?? today
+      let bucket = indexed[Self.dayKeyFormatter.string(from: date)]
       return DailyUsagePoint(
         date: date,
-        tokens: indexed[Self.dayKeyFormatter.string(from: date)] ?? 0
+        tokens: Double(bucket?.tokens ?? 0),
+        isRouterFallback: bucket?.isRouterFallback ?? false
       )
     }
     if dailyUsageCache.count >= 24 { dailyUsageCache.removeAll(keepingCapacity: true) }
@@ -3989,6 +4005,7 @@ struct CodexDailyUsageBucket: Decodable, Equatable {
 struct DailyUsagePoint: Identifiable, Equatable {
   let date: Date
   let tokens: Double
+  let isRouterFallback: Bool
   var id: Date { date }
 }
 
@@ -4080,6 +4097,38 @@ struct ProviderDailyUsageBucket: Decodable, Equatable {
   let startDate: String
   let tokens: Int64
   let requests: Int
+}
+
+/// The account stream is the only source that can describe the user's global
+/// OpenAI usage. Router telemetry is local to this installation, so it is
+/// allowed to fill a date the account stream omitted, but it must never replace
+/// an account bucket (including an explicit zero).
+struct DailyUsageDisplayBucket: Equatable {
+  let startDate: String
+  let tokens: Int64
+  let isRouterFallback: Bool
+}
+
+func mergeAccountUsageBuckets(
+  account: [CodexDailyUsageBucket],
+  router: [ProviderDailyUsageBucket]
+) -> [DailyUsageDisplayBucket] {
+  var merged: [String: DailyUsageDisplayBucket] = [:]
+  for bucket in router {
+    merged[bucket.startDate] = DailyUsageDisplayBucket(
+      startDate: bucket.startDate,
+      tokens: bucket.tokens,
+      isRouterFallback: true
+    )
+  }
+  for bucket in account {
+    merged[bucket.startDate] = DailyUsageDisplayBucket(
+      startDate: bucket.startDate,
+      tokens: bucket.tokens,
+      isRouterFallback: false
+    )
+  }
+  return merged.values.sorted { $0.startDate < $1.startDate }
 }
 
 struct RouterTarget: Decodable {
@@ -8839,6 +8888,13 @@ private struct ProviderUsageSection: View {
         .id("\(store.selectedUsageProviderID)-\(range.rawValue)-\(self.tokenDisplayUnit.rawValue)")
         .frame(height: 88)
 
+      if fallbackDays > 0 {
+        Text(fallbackNotice)
+          .font(.system(size: 9))
+          .foregroundStyle(routerYellow)
+          .fixedSize(horizontal: false, vertical: true)
+      }
+
       HStack {
         Text(rangeCaption)
         Spacer()
@@ -8930,9 +8986,22 @@ private struct ProviderUsageSection: View {
         ? "\(formattedTotal) token · \(requests) 个请求 · 近 \(range.rawValue) 天"
         : "\(formattedTotal) tokens · \(requests) requests over \(range.rawValue) days"
     }
-    return RouterLanguage.isSimplifiedChinese
+    let caption = RouterLanguage.isSimplifiedChinese
       ? "\(formattedTotal) token · 近 \(range.rawValue) 天"
       : "\(formattedTotal) tokens over \(range.rawValue) days"
+    guard fallbackDays > 0 else { return caption }
+    let suffix = fallbackDays == 1
+      ? routerLocalized("1 local fallback date")
+      : routerFormat("%d local fallback dates", fallbackDays)
+    return "\(caption) · \(suffix)"
+  }
+
+  private var fallbackDays: Int {
+    store.dailyFallbackDays(days: range.rawValue)
+  }
+
+  private var fallbackNotice: String {
+    routerLocalized("OpenAI supplied no account bucket for these dates; local router traffic fills the gap. These are not global account totals.")
   }
 
   private var usageError: String? {
@@ -9382,6 +9451,12 @@ struct UsageBarChart: View {
                 RoundedRectangle(cornerRadius: min(2.5, width / 2), style: .continuous)
                   .fill(point.tokens == 0 ? Color.primary.opacity(0.07) : tint.opacity(0.86))
                   .frame(height: max(2, chartHeight * CGFloat(point.tokens / maximum)))
+                  .overlay {
+                    if point.isRouterFallback {
+                      RoundedRectangle(cornerRadius: min(2.5, width / 2), style: .continuous)
+                        .stroke(routerYellow, style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
+                    }
+                  }
               }
               .frame(width: width, height: chartHeight)
               .contentShape(Rectangle())
@@ -9453,7 +9528,9 @@ struct UsageBarChart: View {
   private func hoverText(for point: DailyUsagePoint) -> String {
     let date = point.date.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day())
     let tokens = self.tokenDisplayUnit.format(point.tokens)
-    return RouterLanguage.isSimplifiedChinese ? "\(date) · \(tokens) token" : "\(date) · \(tokens) tokens"
+    let text = RouterLanguage.isSimplifiedChinese ? "\(date) · \(tokens) token" : "\(date) · \(tokens) tokens"
+    guard point.isRouterFallback else { return text }
+    return "\(text) · \(routerLocalized("local fallback"))"
   }
 }
 

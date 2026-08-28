@@ -415,7 +415,7 @@ export default function App() {
     const shared = { target, api, refreshing, dataReady, onRefresh: () => void refreshAll(), runAction };
     switch (view) {
       case "dashboard": return <DashboardPage target={target} dashboard={snapshot?.catalog?.dashboard} health={health} account={accountUsage} providerUsage={providerUsage} setup={providers} presence={presence} api={api} runAction={runAction} refreshing={refreshing} dataReady={dataReady} onRefresh={() => void refreshAll()} onNavigate={navigateTo} />;
-      case "usage": return <UsagePage target={target} account={accountUsage} providerUsage={providerUsage} api={api} refreshing={refreshing} dataReady={dataReady} onRefresh={() => void refreshAll()} focusRequest={usageFocusRequest} />;
+      case "usage": return <UsagePage target={target} account={accountUsage} providerUsage={providerUsage} api={api} refreshing={refreshing} dataReady={dataReady} onRefresh={() => void refreshAll()} focusRequest={usageFocusRequest} t={t} />;
       case "status": return <StatusPage {...shared} health={health} account={accountUsage} providerUsage={providerUsage} />;
       case "models": return <ModelsPage {...shared} catalog={snapshot?.catalog} setup={providers} usage={providerUsage} focusRequest={modelFocusRequest} />;
       case "local": return <LocalPage {...shared} operation={operation} />;
