@@ -93,15 +93,19 @@ test("Homebrew setup never offers or installs a desktop companion", () => {
   );
 });
 
-test("the tray launcher refuses to build inside a Homebrew installation", () => {
-  const result = spawnSync(path.join(root, "bin", "model-router-tray"), [], {
-    encoding: "utf8",
-    env: { ...process.env, CODEX_ROUTER_PACKAGE_MANAGER: "homebrew" },
-  });
-  assert.equal(result.status, 2);
-  assert.match(result.stderr, /not packaged by Homebrew/);
-  assert.match(result.stderr, /recommended curl installer/);
-});
+test(
+  "the POSIX tray launcher refuses to build inside a Homebrew installation",
+  { skip: process.platform === "win32" },
+  () => {
+    const result = spawnSync(path.join(root, "bin", "model-router-tray"), [], {
+      encoding: "utf8",
+      env: { ...process.env, CODEX_ROUTER_PACKAGE_MANAGER: "homebrew" },
+    });
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /not packaged by Homebrew/);
+    assert.match(result.stderr, /recommended curl installer/);
+  },
+);
 
 test("trayBundleDir places the macOS bundle in the user's Applications folder", () => {
   assert.equal(
