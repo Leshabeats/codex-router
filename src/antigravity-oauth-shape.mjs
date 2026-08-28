@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 
 import { foldInterveningAssistantMessages } from "./http-utils.mjs";
 import {
@@ -312,6 +313,91 @@ function dereferenceAntigravitySchema(schema, root = schema, stack = new Set(), 
   return next;
 }
 
+// Claude's compatibility path may narrow schemas, but it must never turn a
+// reference it cannot represent into a wider schema. Resolve the full local
+// ref chain before protobuf cleaning, and reject the tool if a ref is dangling,
+// cyclic, or carries an assertion that conflicts with its target. Annotation
+// siblings may override annotations because they do not change accepted input.
+function dereferenceClaudeSchema(schema, root = schema, stack = new Set(), depth = 0) {
+  if (!isPlainObject(schema) || depth > MAX_SCHEMA_DEPTH) {
+    return { ok: true, schema };
+  }
+
+  let source = schema;
+  let nextStack = stack;
+  if (typeof schema.$ref === "string") {
+    const resolved = resolveLocalSchemaRef(schema.$ref, root);
+    if (!resolved || stack.has(schema.$ref)) return { ok: false };
+    nextStack = new Set(stack);
+    nextStack.add(schema.$ref);
+    const target = dereferenceClaudeSchema(resolved, root, nextStack, depth + 1);
+    if (!target.ok || !isPlainObject(target.schema)) return { ok: false };
+    const { $ref: _ref, ...siblings } = schema;
+    const conflicts = Object.entries(siblings).some(([key, value]) =>
+      !CLAUDE_REF_OVERRIDE_ANNOTATIONS.has(key) &&
+      Object.hasOwn(target.schema, key) &&
+      !isDeepStrictEqual(value, target.schema[key]),
+    );
+    if (conflicts) return { ok: false };
+    source = { ...target.schema, ...siblings };
+  }
+
+  const next = { ...source };
+  // Definitions are lookup tables, not constraints on their own. Walk them
+  // only when an active ref resolves into one; otherwise an unused recursive
+  // definition would make a safe tool disappear.
+  for (const keyword of ["properties", "patternProperties"]) {
+    if (!isPlainObject(source[keyword])) continue;
+    const entries = [];
+    for (const [name, child] of Object.entries(source[keyword])) {
+      const result = dereferenceClaudeSchema(child, root, nextStack, depth + 1);
+      if (!result.ok) return result;
+      entries.push([name, result.schema]);
+    }
+    next[keyword] = Object.fromEntries(entries);
+  }
+  for (const keyword of [
+    "items",
+    "additionalProperties",
+    "contains",
+    "not",
+    "if",
+    "then",
+    "else",
+    "propertyNames",
+  ]) {
+    if (isPlainObject(source[keyword])) {
+      const result = dereferenceClaudeSchema(
+        source[keyword],
+        root,
+        nextStack,
+        depth + 1,
+      );
+      if (!result.ok) return result;
+      next[keyword] = result.schema;
+    } else if (Array.isArray(source[keyword])) {
+      const children = [];
+      for (const child of source[keyword]) {
+        const result = dereferenceClaudeSchema(child, root, nextStack, depth + 1);
+        if (!result.ok) return result;
+        children.push(result.schema);
+      }
+      next[keyword] = children;
+    }
+  }
+  for (const keyword of ["anyOf", "oneOf", "allOf", "prefixItems"]) {
+    if (!Array.isArray(source[keyword])) continue;
+    const children = [];
+    for (const child of source[keyword]) {
+      const result = dereferenceClaudeSchema(child, root, nextStack, depth + 1);
+      if (!result.ok) return result;
+      children.push(result.schema);
+    }
+    next[keyword] = children;
+  }
+  return { ok: true, schema: next };
+}
+
 const UNSUPPORTED_SCHEMA_KEYWORDS = Object.freeze([
   "$schema",
   "$id",
@@ -366,6 +452,16 @@ const UNSUPPORTED_SCHEMA_KEYWORDS = Object.freeze([
 ]);
 
 const CLAUDE_UNSUPPORTED_SCHEMA_ANNOTATIONS = new Set(["id", "discriminator"]);
+const CLAUDE_REF_OVERRIDE_ANNOTATIONS = new Set([
+  "$comment",
+  "default",
+  "deprecated",
+  "description",
+  "examples",
+  "readOnly",
+  "title",
+  "writeOnly",
+]);
 const CLAUDE_UNION_SIBLINGS = new Set([
   "$schema",
   "$id",
@@ -714,8 +810,9 @@ function cleanAntigravitySchema(schema, depth = 0, { sanitizeClaude = false } = 
 function antigravityToolSchema(schema, options) {
   const normalized = normalizeSchemaLiterals(schema);
   if (options?.sanitizeClaude) {
-    const dereferenced = dereferenceAntigravitySchema(normalized);
-    const translated = claudeSchemaResult(dereferenced);
+    const dereferenced = dereferenceClaudeSchema(normalized);
+    if (!dereferenced.ok) return undefined;
+    const translated = claudeSchemaResult(dereferenced.schema);
     if (!translated.ok) return undefined;
     const root = translated.schema;
     const objectRoot =
