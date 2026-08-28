@@ -1,30 +1,55 @@
 # Codex Router
 
-Use Anthropic, Kimi, DeepSeek, xAI, GitHub Copilot, opencode Go, Command Code,
-and future external models inside the Codex App and CLI — or inside
-[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) or
-[Gemini CLI](https://github.com/google-gemini/gemini-cli) — through
-one local, credential-isolating router.
-The integration speaks the Responses API and merges external entries into
-Codex's native model catalog, so routed models appear in the normal picker
-next to the native GPT models. The same routed models publish into the
-harness as one provider route, so they appear in its Models page too, and into
-Gemini CLI through a Gemini-shaped endpoint the router serves for it.
+## Install everything (recommended)
 
-Every client shares one installation: one background service, one gateway, one
-set of provider credentials, one provider selection. Installing a second or
-third integration does not ask for a single key again.
+This is the default setup: **guided provider setup + Electron Control Center +
+tray/menu-bar app + macOS desktop widget**.
 
-The router is also the source of truth for routed model policy. Provider/model
-selection and external picker visibility are stored locally in the router state
-directory (`model-picker.json` is an explicit allowlist: only router models you
-show or select during curation are published), then republished to every
-installed client. A signed-in Codex
-installation keeps its native GPT catalog and native visibility client-owned;
-the router never lets an external overlay erase that original picker. Codex's
-active task remains in Codex configuration. Its default model does too unless
-you explicitly opt into a router-owned routed default; that choice is saved
-locally, survives rebuilds, and can be restored to the prior Codex default.
+### macOS or Linux
+
+Copy and paste this into Terminal:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/duolahypercho/codex-router/main/install.sh \
+  | sh -s -- --target codex --guided --with-tray
+```
+
+### Windows
+
+Copy and paste this into PowerShell:
+
+```powershell
+$installer = Join-Path $env:TEMP "codex-router-install.ps1"
+Invoke-WebRequest https://raw.githubusercontent.com/duolahypercho/codex-router/main/install.ps1 -OutFile $installer
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -Target codex -Guided -WithTray
+```
+
+That is the complete installation. It asks which providers you want and keeps
+credential entry in private local prompts.
+
+When it finishes:
+
+1. Fully quit and reopen Codex.
+2. Start a new task and choose a routed model.
+3. Open **Codex Router** to use the Control Center.
+
+On macOS, open **Codex Router** from Spotlight or `~/Applications`; its icon
+stays in the menu bar when the Control Center is closed. The desktop widget is
+already included: choose **Settings → Dynamic Island → Desktop** from the
+menu-bar app to show it. It is a movable Codex Router panel rather than an item
+in macOS's **Edit Widgets** gallery.
+
+macOS does not have a public `.dmg` yet; the command above builds and installs
+the app locally. If it asks for the Xcode Command Line Tools, run
+`xcode-select --install` and repeat the command.
+
+## What Codex Router does
+
+Use Anthropic, Kimi, DeepSeek, xAI, GitHub Copilot, and other external models
+inside the Codex App and CLI. One local installation can also serve
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) and
+[Gemini CLI](https://github.com/google-gemini/gemini-cli). Your provider
+credentials stay on your computer.
 
 Codex Router is an independent community project. It is not affiliated with or
 endorsed by OpenAI, GitHub, Anthropic, Moonshot AI, DeepSeek, OpenRouter,
@@ -48,11 +73,12 @@ If compatible authentication already exists, an agent can finish everything
 except the final app restart. Provider credentials are entered only through a
 hidden local terminal prompt.
 
-## Install
+## Other installation methods
 
-### Homebrew
+### Homebrew (macOS or Linux)
 
-If you already use Homebrew, install Codex Router from this repository's tap:
+Codex Router is not in `homebrew/core` yet, so `brew install codex-router` by
+itself does not work. For now, add this repository as a tap once:
 
 ```sh
 brew tap duolahypercho/codex-router https://github.com/duolahypercho/codex-router
@@ -65,6 +91,11 @@ Python, and build dependencies; `codex-router setup --guided` performs the
 one-time provider selection, credential-safe authentication, background
 service installation, and Codex integration. When setup finishes, fully quit
 and reopen Codex, create a new task, and choose a routed model from the picker.
+
+Homebrew is the **router/CLI-only** installation. It deliberately does not
+build or download the Electron Control Center, tray/menu-bar app, or macOS
+desktop widget during setup. If you want those, use the recommended installer
+at the top of this README instead.
 
 Upgrade an existing Homebrew installation with:
 
@@ -114,6 +145,13 @@ source. The release workflow generates `Formula/codex-router.rb` from
 
 Maintainers preparing the eventual `homebrew/core` submission should follow
 [`docs/HOMEBREW_CORE.md`](docs/HOMEBREW_CORE.md).
+
+### npm
+
+This project does not publish an npm-installable CLI yet. Do not use
+`npm install codex-router` for this project. Use the recommended installer or
+Homebrew above; a future npm package should use the scoped name
+`@duolahypercho/codex-router` so it cannot be confused with existing packages.
 
 ### Guided installer
 
@@ -252,18 +290,27 @@ npm install -g @xai-official/grok
 grok login --oauth
 ```
 
-Antigravity OAuth uses the router's own browser sign-in and the Google AI
-Pro/Ultra entitlement on the signed-in account. It needs neither a Gemini API
-key nor a separate Antigravity CLI. Signing in and enabling are separate so a
-re-authentication never replaces the rest of the provider selection:
+> [!WARNING]
+> **Antigravity OAuth is not a self-service provider in public builds today.**
+> It requires the client secret paired with the integration's OAuth client ID.
+> This project does not distribute that secret, and a Google AI Pro/Ultra
+> subscription, Gemini API key, Google account, or existing `agy` CLI login
+> does not provide a way to retrieve it. Do not use the old
+> `your-integration-client-secret` placeholder: it cannot work.
 
-Antigravity OAuth requires an integration client secret. Set
-`ANTIGRAVITY_CLIENT_SECRET` in the environment used for installation and
-sign-in; the generated background-service definition preserves it for token
-refreshes. The command fails before opening Google consent when it is absent.
+Only enable `antigravity-oauth` if the operator of a provisioned integration
+has privately supplied its matching `ANTIGRAVITY_CLIENT_SECRET`. Set it in the
+private environment used for both installation and sign-in, and re-run the
+installer with that environment so the generated background-service definition
+can refresh tokens. Never paste the secret into chat, an issue, a command
+argument, or a tracked file. The login may provision a Google Cloud project for
+the signed-in account when none exists.
+
+If the secret is already set in the current private shell, sign in and enable
+the provider with:
 
 ```sh
-export ANTIGRAVITY_CLIENT_SECRET='your-integration-client-secret'
+test -n "$ANTIGRAVITY_CLIENT_SECRET"
 ./bin/model-router codex providers login antigravity-oauth
 ./bin/model-router codex providers enable antigravity-oauth
 ```
@@ -271,13 +318,19 @@ export ANTIGRAVITY_CLIENT_SECRET='your-integration-client-secret'
 On Windows PowerShell, use the matching wrapper:
 
 ```powershell
-$env:ANTIGRAVITY_CLIENT_SECRET = 'your-integration-client-secret'
+if (-not $env:ANTIGRAVITY_CLIENT_SECRET) {
+  throw 'ANTIGRAVITY_CLIENT_SECRET is not set'
+}
 .\model-router.ps1 codex providers login antigravity-oauth
 .\model-router.ps1 codex providers enable antigravity-oauth
 ```
 
-The credential stays in the router's owner-only state directory. This is an
-unofficial compatibility route over Google's internal Antigravity service,
+There is currently no router-managed acquisition path for that secret.
+Bring-your-own OAuth client overrides exist for development, but are not yet a
+supported persistent installation flow. Follow
+[#393](https://github.com/duolahypercho/codex-router/issues/393) for that gap.
+The resulting token stays in the router's owner-only state directory. This is
+an unofficial compatibility route over Google's internal Antigravity service,
 not a public Gemini API contract, so availability and wire behavior can change.
 
 MiMo (Xiaomi API) uses Xiaomi's official OpenAI-compatible endpoint at
@@ -1707,9 +1760,10 @@ and rebuild notes.
 The app can also place a Dynamic-Island-style overlay at the top center of the
 active display. It follows the provider handling the latest request, reveals
 usage on hover, and expands on click. It is off on a new install; enable it
-under **Dynamic Island** in the tray Settings. The menu-bar panel is the
+under **Dynamic Island** in the tray Settings. Choose **Desktop** there instead
+for the movable quota-and-activity desktop widget. The menu-bar panel is the
 primary surface for the all-provider overview and configuration, and stays
-available whether or not the overlay is on.
+available whether or not either optional surface is on.
 
 ## Unified desktop app
 
@@ -1734,8 +1788,9 @@ the window.
 .\codex-router.ps1 tray install
 ```
 
-Tagged releases provide unsigned Windows and Linux tester packages for this
-unified application family: `model-router-<version>-windows-x64.exe` and
+[Download the latest Windows or Linux desktop package](https://github.com/duolahypercho/codex-router/releases/latest).
+Tagged releases provide unsigned tester packages for this unified application
+family: `model-router-<version>-windows-x64.exe` and
 `model-router-<version>-linux-x64.tar.gz` (containing the executable AppImage).
 They are frontends, so install the matching Codex Router version first. The
 universal macOS bundle remains an ad-hoc-signed CI artifact until Developer ID

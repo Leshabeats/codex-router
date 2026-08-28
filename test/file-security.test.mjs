@@ -7,28 +7,24 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
-  closeWindowsPrivateFileWorker,
   privateFileIsProtected,
   protectPrivateFile,
   writePrivateJson,
   writePrivateJsonAsync,
   writePrivateFile,
-  windowsPrivateFileWorkerSpawnCount,
 } from "../src/file-security.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-test("the Windows ACL worker keeps its program outside the stdin request protocol", () => {
+test("the Windows async ACL path uses the bounded one-shot script", () => {
   const implementation = readFileSync(path.join(root, "src", "file-security.mjs"), "utf8");
   assert.match(
     implementation,
-    /Buffer\.from\(powershellPrivateWorkerScript\(\), "utf16le"\)/,
+    /protectPrivateFilesWin32Async\(paths\)/,
   );
-  assert.match(implementation, /"-EncodedCommand", encodedWorker/);
-  assert.doesNotMatch(
-    implementation,
-    /"-Command", powershellPrivateWorkerScript\(\)/,
-  );
+  assert.match(implementation, /"-Command", powershellPrivateScript\(\)/);
+  assert.match(implementation, /WINDOWS_PRIVATE_ASYNC_TIMEOUT_MS/);
+  assert.doesNotMatch(implementation, /powershellPrivateWorkerScript/);
 });
 
 test("private JSON state uses one owner-only atomic writer", () => {
@@ -250,20 +246,17 @@ test(
 );
 
 test(
-  "Windows request-path private writes reuse one ACL worker and preserve the atomic target ACL",
+  "Windows request-path private writes use bounded ACL operations and preserve the atomic target ACL",
   { skip: process.platform !== "win32" },
   async () => {
-    const directory = mkdtempSync(path.join(os.tmpdir(), "codex-router-write-worker-"));
+    const directory = mkdtempSync(path.join(os.tmpdir(), "codex-router-write-async-"));
     const target = path.join(directory, "pool.json");
-    const before = windowsPrivateFileWorkerSpawnCount();
     try {
       await writePrivateJsonAsync(target, { version: 1, value: "first" });
       await writePrivateJsonAsync(target, { version: 1, value: "second" });
-      assert.equal(windowsPrivateFileWorkerSpawnCount() - before, 1);
       assert.deepEqual(JSON.parse(readFileSync(target, "utf8")), { version: 1, value: "second" });
       assert.equal(privateFileIsProtected(target), true);
     } finally {
-      closeWindowsPrivateFileWorker();
       rmSync(directory, { recursive: true, force: true });
     }
   },

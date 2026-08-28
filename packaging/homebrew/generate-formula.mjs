@@ -355,6 +355,11 @@ ${exclusionComment}${resourceBlocks}
       Finish the one-time Codex integration with:
         codex-router setup --guided
 
+      This formula installs the router and CLI only. It does not build or
+      download the Electron Control Center, tray/menu-bar app, or macOS desktop
+      widget. Use the recommended installer on the project homepage for the
+      complete desktop experience.
+
       List every available command, including \`codex-router curate-models\`
       for adding a custom provider's models, with:
         codex-router help
