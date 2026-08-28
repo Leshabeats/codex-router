@@ -226,14 +226,19 @@ function validateCredentialId(value) {
   return id;
 }
 
-function generatedCredentialId(providerId, kind) {
-  // Random IDs are used for new entries. Migration uses this deterministic
-  // form so running the migration twice never creates duplicate references.
-  const random = randomBytes(18).toString("base64url");
-  return `cred_${random}`;
+export function generatedCredentialId(random = randomBytes) {
+  // Random IDs are used for new entries.
+  // Base64url may begin with `-` or `_`, while a generic provider's
+  // credentialRef requires the first post-prefix character to be alphanumeric.
+  // A fixed opaque marker makes every generated id valid without discarding
+  // entropy or retrying on a random outcome.
+  const opaque = random(18).toString("base64url");
+  return `cred_r${opaque}`;
 }
 
 function migratedCredentialId(providerId, kind) {
+  // Migration uses a deterministic form so running it twice never creates
+  // duplicate references.
   const digest = createHash("sha256")
     .update(`codex-router-provider-credential:${providerId}:${kind}`)
     .digest("base64url")
@@ -466,7 +471,7 @@ function createCredentialReferenceForType(input = {}, providerType) {
     ? normalizeGenericProviderId(providerId, { reservedProviderIds: PROVIDERS })
     : validateProviderId(providerId);
   const credential = normalizeCredential({
-    id: id || generatedCredentialId(normalizedProviderId, kind),
+    id: id || generatedCredentialId(),
     providerId: normalizedProviderId,
     ...(providerType ? { providerType } : {}),
     kind: providerType === "generic" ? (kind || "api_key") : kind,

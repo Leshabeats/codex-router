@@ -74,6 +74,11 @@ import { readNativeAliases } from "./native-alias.mjs";
 import { nativeContextVariantBase } from "./native-context-variants.mjs";
 import { readNativeRedirect } from "./native-redirect.mjs";
 import {
+  executeSearchSidecar,
+  SearchSidecarError,
+} from "./search-sidecar.mjs";
+import { searchSidecarBindingForModel } from "./search-sidecar-state.mjs";
+import {
   canonicalProviderId,
   readProviderSelection,
   selectedConfiguredListedModels,
@@ -4156,14 +4161,84 @@ async function handleNativeRequest(request, response, requestUrl, defaultModel) 
   const activity = beginRequestActivity({ request, response, controller });
   let clientGone = false;
   let requestedModel = defaultModel;
+  let servingProvider = "openai";
   bindClientAbort(request, response, () => {
     clientGone = true;
     controller.abort();
   });
   try {
     if (!requireCodexTransport(request, response)) return;
-    // Image and web-search turns are native-only; an idle install refuses
-    // them locally rather than forwarding to chatgpt.com.
+    let body;
+    let payload;
+    const searchRequest = defaultModel === "web-search";
+    // A search binding is selected by the exact routed slug inside Codex's
+    // authenticated search request. Parse it before asking for a native
+    // session; otherwise a deliberately external sidecar would still require
+    // and leak the request to ChatGPT. Image requests keep their old ordering.
+    if (searchRequest) {
+      const encoded = await readRequestBody(request, { signal: controller.signal });
+      body = decodeBody(encoded, request.headers["content-encoding"]);
+      payload = await parseBodyAsync(body);
+      requestedModel = typeof payload.model === "string" ? payload.model : defaultModel;
+      const binding = searchSidecarBindingForModel(requestedModel);
+      if (binding) {
+        servingProvider = `search:${binding.providerId}`;
+        activity.setRoute({
+          provider: servingProvider,
+          model: requestedModel,
+          ...activityMetadataFromHeaders(request.headers),
+        });
+        const routedModel = MODEL_BY_SLUG.get(requestedModel);
+        if (
+          !routedModel ||
+          !routeProviderEnabled(routedModel.provider) ||
+          routedModel.searchTool !== undefined
+        ) {
+          throw new SearchSidecarError(
+            "The selected model is not eligible for its configured search sidecar.",
+            { code: "search_sidecar_model_ineligible", status: 409 },
+          );
+        }
+        const accountId = String(request.headers["chatgpt-account-id"] || "");
+        const installationId = String(request.headers["x-codex-installation-id"] || "");
+        // The local caller capability proves authorization, not account
+        // identity. If Codex supplies no account id, use a one-request nonce
+        // so the cache cannot cross an account switch on the same install.
+        const accountScope = createHash("sha256")
+          .update(String(request.headers.authorization || ""))
+          .update("\0")
+          .update(accountId || randomUUID())
+          .update("\0")
+          .update(installationId)
+          .digest("base64url");
+        const sidecar = await executeSearchSidecar({
+          binding,
+          payload,
+          accountScope,
+          signal: controller.signal,
+        });
+        writeJson(response, 200, sidecar.response);
+        recordUsageEvent({
+          model: requestedModel,
+          provider: servingProvider,
+          status: 200,
+          durationMs: Date.now() - startedAt,
+          retries: Math.max(0, (sidecar.telemetry?.attempts || 1) - 1),
+          searchSidecar: true,
+          searchCacheHit: sidecar.telemetry?.cacheHit === true,
+          searchResults: sidecar.telemetry?.results,
+        });
+        if (!QUIET) {
+          console.error(
+            `[codex-router] model=${requestedModel} provider=${servingProvider} status=200 attempts=${sidecar.telemetry?.attempts || 0} cache_hit=${sidecar.telemetry?.cacheHit === true}`,
+          );
+        }
+        return;
+      }
+    }
+
+    // Image requests and unbound web-search turns remain native-only; an idle
+    // install refuses them locally rather than forwarding to chatgpt.com.
     if (discoveryDisabled()) {
       writeIdleNoProviderError(response);
       return;
@@ -4178,9 +4253,11 @@ async function handleNativeRequest(request, response, requestUrl, defaultModel) 
       });
       return;
     }
-    const encoded = await readRequestBody(request, { signal: controller.signal });
-    const body = decodeBody(encoded, request.headers["content-encoding"]);
-    const payload = await parseBodyAsync(body);
+    if (!payload) {
+      const encoded = await readRequestBody(request, { signal: controller.signal });
+      body = decodeBody(encoded, request.headers["content-encoding"]);
+      payload = await parseBodyAsync(body);
+    }
     controller.signal.throwIfAborted();
     requestedModel =
       typeof payload.model === "string" ? payload.model : defaultModel;
@@ -4255,7 +4332,7 @@ async function handleNativeRequest(request, response, requestUrl, defaultModel) 
       }
       recordUsageEvent({
         model: requestedModel,
-        provider: "openai",
+        provider: servingProvider,
         status,
         durationMs: Date.now() - startedAt,
         ...(response.headersSent ? { streamAborted: true } : {}),
@@ -4271,17 +4348,37 @@ async function handleNativeRequest(request, response, requestUrl, defaultModel) 
     if (clientGone) {
       recordUsageEvent({
         model: requestedModel,
-        provider: "openai",
+        provider: servingProvider,
         status: 0,
         durationMs: Date.now() - startedAt,
       });
       activity.finish(0);
       return;
     }
+    if (error instanceof SearchSidecarError && !response.headersSent) {
+      const status = error.status;
+      writeJson(response, status, {
+        error: {
+          type: error.code,
+          message: error.message,
+        },
+      });
+      recordUsageEvent({
+        model: requestedModel,
+        provider: servingProvider,
+        status,
+        durationMs: Date.now() - startedAt,
+        retries: Math.max(0, (error.telemetry?.attempts || 1) - 1),
+        searchSidecar: true,
+        searchCacheHit: false,
+      });
+      activity.finish(status);
+      return;
+    }
     const status = response.headersSent ? 502 : httpErrorStatus(error);
     recordUsageEvent({
       model: requestedModel,
-      provider: "openai",
+      provider: servingProvider,
       status,
       durationMs: Date.now() - startedAt,
       ...(response.headersSent ? { streamAborted: true } : {}),

@@ -98,3 +98,50 @@ test("doctor names malformed generic state without reflecting its bytes", () => 
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("doctor reports an enabled search sidecar whose protected credential is unavailable", () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "search-sidecar-doctor-"));
+  const env = environment(directory);
+  const stateDir = env.CODEX_ROUTER_STATE_DIR;
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  writeFileSync(env.MODEL_ROUTER_GENERIC_PROVIDERS, `${JSON.stringify({
+    version: 1,
+    providers: [{
+      id: "perplexity-sidecar",
+      displayName: "Perplexity Search",
+      baseUrl: "https://api.perplexity.ai",
+      adapter: "openai-chat",
+      headers: {},
+      credentialRef: "cred_perplexity_sidecar_01",
+      allowPrivate: false,
+      enabled: true,
+    }],
+  })}\n`, { mode: 0o600 });
+  writeFileSync(path.join(stateDir, "search-sidecars.json"), `${JSON.stringify({
+    version: 1,
+    bindings: [{
+      model: "deepseek/deepseek-v4-pro",
+      providerId: "perplexity-sidecar",
+      adapter: "perplexity-search",
+      enabled: true,
+      timeoutMs: 10_000,
+      maxResults: 8,
+      cacheTtlMs: 60_000,
+      cacheMaxEntries: 128,
+      maxAttempts: 2,
+      retryDelayMs: 100,
+    }],
+  })}\n`, { mode: 0o600 });
+
+  try {
+    const { report } = doctor(env);
+    const row = report.checks.find(
+      (check) => check.name === "Search sidecar deepseek/deepseek-v4-pro",
+    );
+    assert.equal(row.status, "fail");
+    assert.match(row.fix, /search-sidecar status/);
+    assert.equal(JSON.stringify(row).includes("api.perplexity.ai"), false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

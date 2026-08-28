@@ -72,14 +72,14 @@ async function mockServer(handler) {
   return { server, port: address.port };
 }
 
-function run(script, env) {
+function run(script, env, { nodeArgs = [] } = {}) {
   // Isolate from the user's real router state (e.g. native-aliases.json)
   // unless the test provides its own state directory.
   const stateIsolation =
     env?.MODEL_ROUTER_STATE_DIR || env?.CODEX_ROUTER_STATE_DIR
       ? {}
       : { MODEL_ROUTER_STATE_DIR: mkdtempSync(path.join(os.tmpdir(), "routing-state-")) };
-  const child = spawn(process.execPath, [path.join(root, "src", script)], {
+  const child = spawn(process.execPath, [...nodeArgs, path.join(root, "src", script)], {
     cwd: root,
     env: {
       ...process.env,
@@ -1455,6 +1455,254 @@ test("native web search fails closed without a ChatGPT session", async () => {
   } finally {
     await stopChild(router);
     await closeServer(native.server);
+  }
+});
+
+test("an authenticated exact-slug search uses the generic-provider transport and Codex schema", async () => {
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "router-search-sidecar-"));
+  const providerId = "perplexity-sidecar";
+  const credentialRef = "cred_perplexity_sidecar_01";
+  const credentialSecret = "pplx-0123456789abcdefghijklmnopqrstuv";
+  const transportAudit = path.join(testRoot, "search-transport-audit.json");
+  const transportPreload = path.join(testRoot, "search-transport-preload.cjs");
+  writeFileSync(
+    path.join(testRoot, "enabled-providers.json"),
+    `${JSON.stringify({ version: 1, providers: ["deepseek"] })}\n`,
+    { mode: 0o600 },
+  );
+  writeFileSync(
+    path.join(testRoot, "generic-providers.json"),
+    `${JSON.stringify({
+      version: 1,
+      providers: [{
+        id: providerId,
+        displayName: "Perplexity Search",
+        baseUrl: "https://api.perplexity.ai",
+        adapter: "openai-chat",
+        headers: {},
+        credentialRef,
+        allowPrivate: false,
+        enabled: true,
+      }],
+    })}\n`,
+    { mode: 0o600 },
+  );
+  writeFileSync(
+    path.join(testRoot, "search-sidecars.json"),
+    `${JSON.stringify({
+      version: 1,
+      bindings: [{
+        model: "deepseek/deepseek-v4-pro",
+        providerId,
+        adapter: "perplexity-search",
+        enabled: true,
+        timeoutMs: 1_000,
+        maxResults: 8,
+        cacheTtlMs: 60_000,
+        cacheMaxEntries: 128,
+        maxAttempts: 2,
+        retryDelayMs: 100,
+      }],
+    })}\n`,
+    { mode: 0o600 },
+  );
+  writeFileSync(
+    path.join(testRoot, "provider-credentials.json"),
+    `${JSON.stringify({
+      schemaVersion: 2,
+      credentials: [{
+        id: credentialRef,
+        providerId,
+        providerType: "generic",
+        kind: "api_key",
+        secretRef: { type: "provider-file", providerId, target: "codex" },
+        state: "active",
+        createdAt: "2026-08-29T00:00:00.000Z",
+        updatedAt: "2026-08-29T00:00:00.000Z",
+      }],
+    })}\n`,
+    { mode: 0o600 },
+  );
+  mkdirSync(path.join(testRoot, "generic-provider-credentials"), { mode: 0o700 });
+  writeFileSync(
+    path.join(testRoot, "generic-provider-credentials", `${providerId}.key`),
+    `${credentialSecret}\n`,
+    { mode: 0o600 },
+  );
+  // Keep the production router, binding lookup, credential resolution, and
+  // requestGenericProvider path intact. Only the final network boundary is
+  // replaced, so this test cannot spend quota or depend on public DNS.
+  writeFileSync(transportPreload, `
+const dns = require("node:dns");
+const fs = require("node:fs");
+const undici = require(${JSON.stringify(path.join(root, "node_modules", "undici"))});
+const originalLookup = dns.promises.lookup.bind(dns.promises);
+dns.promises.lookup = async (hostname, options) => {
+  if (hostname === "api.perplexity.ai") {
+    const address = { address: "93.184.216.34", family: 4 };
+    return options?.all ? [address] : address;
+  }
+  return originalLookup(hostname, options);
+};
+const originalFetch = undici.fetch;
+undici.fetch = async (url, options = {}) => {
+  if (String(url) !== "https://api.perplexity.ai/search") {
+    return originalFetch(url, options);
+  }
+  const headers = Object.fromEntries(new undici.Headers(options.headers));
+  fs.writeFileSync(process.env.CODEX_ROUTER_SEARCH_TRANSPORT_AUDIT, JSON.stringify({
+    url: String(url),
+    method: options.method,
+    authorizationMatchesFixture: headers.authorization === ${JSON.stringify(`Bearer ${credentialSecret}`)},
+    body: JSON.parse(String(options.body)),
+  }), { mode: 0o600 });
+  return new undici.Response(JSON.stringify({
+    results: [{
+      title: "Router integration result",
+      url: "https://93.184.216.34/reference",
+      snippet: "Production path fixture",
+    }],
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+};
+`, { mode: 0o600 });
+  let nativeRequests = 0;
+  const native = await mockServer(async (request, response) => {
+    nativeRequests += 1;
+    await bodyJson(request);
+    json(response, 200, { output: "unexpected native response" });
+  });
+  const routerPort = await openPort();
+  const router = run(
+    "router.mjs",
+    {
+      CODEX_ROUTER_PORT: String(routerPort),
+      CODEX_ROUTER_STATE_DIR: testRoot,
+      CODEX_NATIVE_BASE_URL: `http://127.0.0.1:${native.port}/backend-api/codex`,
+      CODEX_ROUTER_NATIVE_SESSION_FALLBACK: "0",
+      CODEX_ROUTER_QUIET: "1",
+      CODEX_ROUTER_SEARCH_TRANSPORT_AUDIT: transportAudit,
+    },
+    { nodeArgs: ["--require", transportPreload] },
+  );
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const response = await fetch(`${routerBase(routerPort)}/alpha/search?source=codex`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${CALLER_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "deepseek/deepseek-v4-pro",
+        commands: { search_query: [{ q: "OpenAI news" }] },
+      }),
+    });
+    const responseText = await response.text();
+    assert.equal(response.status, 200, `${router.testErrors()}\n${responseText}`);
+    const payload = JSON.parse(responseText);
+    assert.deepEqual(payload.results, [{
+      type: "text_result",
+      ref_id: "turn0search0",
+      title: "Router integration result",
+      url: "https://93.184.216.34/reference",
+      snippet: "Production path fixture",
+    }]);
+    assert.equal(payload.query, "OpenAI news");
+    assert.match(payload.output, /untrusted content/);
+    assert.deepEqual(JSON.parse(readFileSync(transportAudit, "utf8")), {
+      url: "https://api.perplexity.ai/search",
+      method: "POST",
+      authorizationMatchesFixture: true,
+      body: {
+        query: "OpenAI news",
+        max_results: 8,
+        max_tokens: 16_000,
+        max_tokens_per_page: 2_000,
+      },
+    });
+    assert.equal(nativeRequests, 0);
+  } finally {
+    await stopChild(router);
+    await closeServer(native.server);
+    rmSync(testRoot, { recursive: true, force: true });
+  }
+});
+
+test("an ineligible bound search is attributed to its sidecar provider", async () => {
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "router-search-sidecar-attribution-"));
+  const requestedModel = "deepseek/not-a-registered-route";
+  writeFileSync(
+    path.join(testRoot, "enabled-providers.json"),
+    `${JSON.stringify({ version: 1, providers: ["deepseek"] })}\n`,
+    { mode: 0o600 },
+  );
+  writeFileSync(
+    path.join(testRoot, "search-sidecars.json"),
+    `${JSON.stringify({
+      version: 1,
+      bindings: [{
+        model: requestedModel,
+        providerId: "perplexity-sidecar",
+        adapter: "perplexity-search",
+        enabled: true,
+        timeoutMs: 1_000,
+        maxResults: 8,
+        cacheTtlMs: 60_000,
+        cacheMaxEntries: 128,
+        maxAttempts: 2,
+        retryDelayMs: 100,
+      }],
+    })}\n`,
+    { mode: 0o600 },
+  );
+  let nativeRequests = 0;
+  const native = await mockServer(async (_request, response) => {
+    nativeRequests += 1;
+    json(response, 200, { output: "unexpected native response" });
+  });
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_STATE_DIR: testRoot,
+    CODEX_NATIVE_BASE_URL: `http://127.0.0.1:${native.port}/backend-api/codex`,
+    CODEX_ROUTER_NATIVE_SESSION_FALLBACK: "0",
+    CODEX_ROUTER_QUIET: "1",
+  });
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const response = await fetch(`${routerBase(routerPort)}/alpha/search?source=codex`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${CALLER_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: requestedModel,
+        commands: { search_query: [{ q: "OpenAI news" }] },
+      }),
+    });
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), {
+      error: {
+        type: "search_sidecar_model_ineligible",
+        message: "The selected model is not eligible for its configured search sidecar.",
+      },
+    });
+    const usage = await waitForUsageEvent(
+      testRoot,
+      (event) => event.model === requestedModel && event.provider === "search:perplexity-sidecar",
+      router,
+    );
+    assert.equal(usage.model, requestedModel);
+    assert.equal(usage.provider, "search:perplexity-sidecar");
+    assert.equal(usage.searchSidecar, true);
+    assert.equal(nativeRequests, 0);
+  } finally {
+    await stopChild(router);
+    await closeServer(native.server);
+    rmSync(testRoot, { recursive: true, force: true });
   }
 });
 
@@ -5735,8 +5983,12 @@ test("native redirect falls back to native when the target cannot route", async 
 function usageEvents(stateDir) {
   const file = path.join(stateDir, "usage-events.jsonl");
   if (!existsSync(file)) return [];
-  return readFileSync(file, "utf8")
-    .split("\n")
+  const lines = readFileSync(file, "utf8").split("\n");
+  // appendFileSync writes one newline-terminated event. If this read lands
+  // during the append, leave the unterminated tail for the next poll rather
+  // than parsing a partial JSON object as a completed event.
+  if (lines.at(-1) !== "") lines.pop();
+  return lines
     .filter(Boolean)
     .map((line) => JSON.parse(line));
 }
@@ -5751,6 +6003,16 @@ async function waitForUsageEvents(stateDir, count, child) {
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(`Timed out waiting for ${count} usage events: ${child.testErrors()}`);
+}
+
+async function waitForUsageEvent(stateDir, predicate, child) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const event = usageEvents(stateDir).find(predicate);
+    if (event) return event;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Timed out waiting for a matching usage event: ${child.testErrors()}`);
 }
 
 async function waitForStderr(child, pattern) {
