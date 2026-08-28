@@ -4,7 +4,7 @@ class CodexRouter < Formula
   desc "Use external coding models inside the Codex App and CLI"
   homepage "https://github.com/duolahypercho/codex-router"
   url "https://github.com/duolahypercho/codex-router/releases/download/v0.5.0/codex-router-0.5.0.tar.gz"
-  sha256 "89f494a21399c3c2a54f6f25531e10b0d64e7e5a238f17cb8f8f7f2c9222e076"
+  sha256 "89f6765ccfd78a7ca9931507f17945d520080939d632572429c1f15dff61b529"
   license "MIT"
 
   depends_on "pkgconf" => :build
@@ -654,6 +654,11 @@ class CodexRouter < Formula
     <<~EOS
       Finish the one-time Codex integration with:
         codex-router setup --guided
+
+      This formula installs the router and CLI only. It does not build or
+      download the Electron Control Center, tray/menu-bar app, or macOS desktop
+      widget. Use the recommended installer on the project homepage for the
+      complete desktop experience.
 
       List every available command, including `codex-router curate-models`
       for adding a custom provider's models, with:
