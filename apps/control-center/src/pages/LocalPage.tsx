@@ -309,7 +309,7 @@ export function LocalPage({ target, api, refreshing, dataReady, operation, onRef
                       {family.researchNote ? <p className="lhc-catalog-note">{family.researchNote}</p> : null}
                       <div className="lhc-catalog-model-list">
                         {family.models.map((model) => (
-                          <CatalogModelRow key={model.tag} model={model} onSelect={() => setInstallRef(model.tag)} />
+                          <CatalogModelRow key={model.tag} model={model} allowOversized={forceInstall} onSelect={() => setInstallRef(model.tag)} />
                         ))}
                       </div>
                     </div>
@@ -491,7 +491,7 @@ function familySummary(models: LocalModel[]): string {
   return "no local variant fits";
 }
 
-function CatalogModelRow({ model, onSelect }: { model: LocalModel; onSelect: () => void }) {
+function CatalogModelRow({ model, allowOversized, onSelect }: { model: LocalModel; allowOversized: boolean; onSelect: () => void }) {
   const downloadable = model.downloadable !== false;
   const tooLarge = model.fit === "too-large" || model.diskFit === "too-large";
   const fitLabel = model.downloadable === false
@@ -510,7 +510,7 @@ function CatalogModelRow({ model, onSelect }: { model: LocalModel; onSelect: () 
         <small>{model.tag}{model.sizeGb !== undefined ? ` · ${formatBytesGb(model.sizeGb)}` : ""}{model.context ? ` · ${compactNumber(model.context)} context` : ""}</small>
       </div>
       <Badge tone={tone}>{fitLabel}</Badge>
-      <Button variant="ghost" disabled={!downloadable || tooLarge} onClick={onSelect}>
+      <Button variant="ghost" disabled={!downloadable || (tooLarge && !allowOversized)} onClick={onSelect}>
         <Download aria-hidden size={13} strokeWidth={1.7} /> Select
       </Button>
     </article>

@@ -93,7 +93,35 @@ const bridgeSource = String.raw`
     modelSettings: {
       subagents,
       picker: { hidden: [], visible: [selectedModel.slug], hasExplicitVisibility: true },
-      localModels: {},
+      localModels: {
+        available: [],
+        availableVision: [],
+        availableExplore: [{
+          tag: "hf.co/unsloth/GLM-5.3-Flash-GGUF:UD-IQ1_S",
+          family: "hf.co/unsloth/GLM-5.3-Flash-GGUF",
+          variant: "UD-IQ1_S",
+          displayName: "GLM-5.3-Flash · UD-IQ1_S",
+          sizeGb: 93.1,
+          context: 1048576,
+          fit: "too-large",
+          diskFit: "fits",
+          downloadable: true,
+          researchStatus: "Unsloth GGUF · 7 local quants",
+          researchCapabilities: ["vision", "tools", "thinking"],
+          researchNote: "Community quantization; capability and Codex checks run after pull.",
+        }],
+        families: [{
+          family: "hf.co/unsloth/GLM-5.3-Flash-GGUF",
+          displayName: "GLM-5.3-Flash",
+          variants: ["UD-IQ1_S"],
+        }],
+        installed: 0,
+        enabled: 0,
+        models: [],
+        totalGb: 0,
+        machine: "16 GB unified memory",
+        runtime: { installed: true, running: true, managed: true, version: "test" },
+      },
       visionBridge: { enabled: false },
     },
   };
@@ -515,6 +543,24 @@ test("the production renderer exposes model discovery and picker actions", { tim
       ["catalog-addable"],
     ]);
     assert.equal(calls.some((call) => call.name === "setPickerModels" && call.args[0] === true), true);
+
+    // Huge community GGUFs stay guarded, but the explicit oversized-model
+    // acknowledgement must make their exact Ollama tag selectable. Otherwise
+    // the catalog advertises GLM while forcing the operator to retype it.
+    await page.getByRole("button", { name: "Local", exact: true }).click();
+    await page.getByRole("heading", { name: "Local", exact: true }).waitFor();
+    const glmFamily = page.locator(".lhc-catalog-family").filter({ hasText: "GLM-5.3-Flash" });
+    await glmFamily.locator(".lhc-catalog-family-trigger").click();
+    const glmRow = glmFamily.locator(".lhc-catalog-model").filter({ hasText: "UD-IQ1_S" });
+    const glmSelect = glmRow.getByRole("button", { name: "Select", exact: true });
+    assert.equal(await glmSelect.isDisabled(), true);
+    await page.getByRole("checkbox", { name: "Allow a model larger than the router recommends for this machine" }).check();
+    assert.equal(await glmSelect.isEnabled(), true);
+    await glmSelect.click();
+    assert.equal(
+      await page.getByRole("textbox", { name: "Model tag or Ollama URL" }).inputValue(),
+      "hf.co/unsloth/GLM-5.3-Flash-GGUF:UD-IQ1_S",
+    );
     assert.deepEqual(pageErrors, [], `renderer errors: ${pageErrors.join("; ")}`);
   } finally {
     await browser.close();

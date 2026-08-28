@@ -1265,11 +1265,11 @@ For reading images only — cannot code:
   moondream            1.7 GB  captions-only
 ```
 
-The tray's **View more** panel also exposes the full 201-tag snapshot captured
-from the official Ollama pages for Gemma 4, Qwen 3.5/3.6/3.8, Nemotron 3 Super,
-Ornith, Nemotron 3, and Muse Glimmer, including quantized and MLX variants.
-Cloud aliases are listed for completeness but marked cloud-only and cannot be
-downloaded as local weights.
+The tray's **View more** panel also exposes the full 213-tag snapshot: official
+Ollama tags for Gemma 4, Qwen 3.5/3.6/3.8, Nemotron 3 Super, Ornith, Nemotron 3,
+and Muse Glimmer, plus the Ollama-compatible Unsloth GGUF variants of GLM-5.3
+and GLM-5.3-Flash. Cloud aliases are listed for completeness but marked
+cloud-only and cannot be downloaded as local weights.
 
 A tool template is a floor, not a prediction — it has been wrong in both
 directions here. What settles it is running the real client:

@@ -2266,9 +2266,20 @@ async function handleLocalModels(action, value, ...rest) {
     }
     const cancelled = () => readLocalDownload()?.status === "cancelled";
     try {
-      const { fetchRegistryCapabilities, detectMachine, fitAdvisory, rateDiskFit, rateModelFit } =
-        await import("./local-models.mjs");
-      const advertised = await fetchRegistryCapabilities(tag);
+      const {
+        EXPLORE_LOCAL_MODELS,
+        fetchRegistryCapabilities,
+        detectMachine,
+        fitAdvisory,
+        rateDiskFit,
+        rateModelFit,
+      } = await import("./local-models.mjs");
+      // Hugging Face namespaced tags are pulled directly by Ollama and do not
+      // have a registry.ollama.ai manifest. Their checked-in catalog size is
+      // still authoritative enough for the safety gate: without this fallback
+      // a 93-467 GB GLM download could bypass the explicit --force consent.
+      const advertised = await fetchRegistryCapabilities(tag)
+        || EXPLORE_LOCAL_MODELS.find((entry) => entry.tag === tag);
       if (cancelled()) return;
       // A missing tool template costs nothing to discover afterwards; gigabytes
       // that cannot run cost the download and the disk. So the tool note stays
