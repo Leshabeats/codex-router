@@ -121,6 +121,7 @@ export default function App() {
   const [operation, setOperation] = useState<OperationEvent | null>(null);
   const [toast, setToast] = useState<{ tone: "neutral" | "success" | "danger"; message: string } | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [readErrors, setReadErrors] = useState<Partial<Record<keyof RouterDataReady, string>>>({});
   const downloadPollInFlight = useRef(false);
   const healthPollInFlight = useRef(false);
   const previousActivityState = useRef<string | undefined>(undefined);
@@ -130,12 +131,25 @@ export default function App() {
     key: keyof RouterDataReady,
     request: Promise<T>,
     commit: (value: T) => void,
+    recover?: (error: unknown) => T,
   ) => {
     const generation = (readGenerations.current[key] ?? 0) + 1;
     readGenerations.current[key] = generation;
     try {
       const value = await request;
-      if (readGenerations.current[key] === generation) commit(value);
+      if (readGenerations.current[key] !== generation) return;
+      commit(value);
+      setReadErrors((current) => {
+        if (current[key] === undefined) return current;
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
+    } catch (error) {
+      if (readGenerations.current[key] !== generation) return;
+      if (recover) commit(recover(error));
+      const message = readableError(error);
+      setReadErrors((current) => current[key] === message ? current : { ...current, [key]: message });
     } finally {
       if (readGenerations.current[key] === generation) {
         // "Ready" means the latest attempt settled, not necessarily succeeded.
@@ -156,38 +170,36 @@ export default function App() {
     if (!api || healthPollInFlight.current || document.visibilityState !== "visible") return;
     healthPollInFlight.current = true;
     try {
-      setHealth(await api.getHealth());
-    } catch (error) {
-      setHealth({ ok: false, error: readableError(error), activity: { state: "offline", active: [], activeCount: 0 } });
+      await settleRead("health", api.getHealth(), setHealth, (error) => ({
+        ok: false,
+        error: readableError(error),
+        activity: { state: "offline", active: [], activeCount: 0 },
+      }));
     } finally {
       healthPollInFlight.current = false;
     }
-  }, [api]);
+  }, [api, settleRead]);
 
   const refreshCore = useCallback(async () => {
     if (!api) return;
-    const [nextSnapshot, nextProviders, nextPresence, nextHealth] = await Promise.allSettled([
+    await Promise.allSettled([
       settleRead("snapshot", api.getSnapshot(), setSnapshot),
       settleRead("providers", api.getProviders(), setProviders),
       settleRead("presence", api.getPresence(), setPresence),
-      settleRead("health", api.getHealth(), setHealth),
+      settleRead("health", api.getHealth(), setHealth, (error) => ({
+        ok: false,
+        error: readableError(error),
+        activity: { state: "offline", active: [], activeCount: 0 },
+      })),
     ]);
-    const failure = [nextSnapshot, nextProviders, nextPresence, nextHealth]
-      .find((result) => result.status === "rejected") as PromiseRejectedResult | undefined;
-    if (failure) throw failure.reason;
   }, [api, settleRead]);
 
   const refreshUsage = useCallback(async () => {
     if (!api) return;
-    const results = await Promise.allSettled([
+    await Promise.allSettled([
       settleRead("accountUsage", api.getAccountUsage(), setAccountUsage),
       settleRead("providerUsage", api.getProviderUsage(), setProviderUsage),
     ]);
-    const failure = results.find((result) => result.status === "rejected") as PromiseRejectedResult | undefined;
-    // Background polling deliberately starts this callback without awaiting it.
-    // Surface a partial usage failure here so every caller, including the timer,
-    // receives a settled promise instead of producing an unhandled rejection.
-    if (failure) setLoadError(readableError(failure.reason));
   }, [api, settleRead]);
 
   const refreshDownloadProgress = useCallback(async () => {
@@ -241,9 +253,7 @@ export default function App() {
     }
     setRefreshing(true);
     setLoadError(null);
-    const results = await Promise.allSettled([refreshCore(), refreshUsage()]);
-    const failure = results.find((result) => result.status === "rejected") as PromiseRejectedResult | undefined;
-    if (failure) setLoadError(readableError(failure.reason));
+    await Promise.allSettled([refreshCore(), refreshUsage()]);
     setRefreshing(false);
   }, [api, refreshCore, refreshUsage]);
 
@@ -362,6 +372,7 @@ export default function App() {
     [language],
   );
   const activeMeta = useMemo(() => navItems.find((item) => item.id === view) ?? navItems[0], [navItems, view]);
+  const readError = Object.values(readErrors).find((message): message is string => Boolean(message));
   const navigateTo = useCallback((next: ViewId, modelFocus?: ModelViewFocus) => {
     if (next === "models" && modelFocus) {
       modelFocusSequence.current += 1;
@@ -469,7 +480,7 @@ export default function App() {
           <button className="title-refresh" type="button" aria-label="Refresh all data" disabled={refreshing} onClick={() => void refreshAll()}><RefreshCw aria-hidden size={13} strokeWidth={1.7} className={refreshing ? "spin" : ""} /></button>
         </div>
         <div className={classNames("page-scroll", `page-scroll-${view}`)}>
-          {loadError ? <InlineNotice tone="warning" title="Some router data could not load">{loadError}</InlineNotice> : null}
+          {loadError || readError ? <InlineNotice tone="warning" title="Some router data could not load">{loadError || readError}</InlineNotice> : null}
           {page}
         </div>
       </main>

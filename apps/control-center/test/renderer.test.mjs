@@ -24,16 +24,22 @@ const bridgeSource = String.raw`
   const providerUsageDelay = searchParams.has("providerUsageDelayMs")
     ? Number(searchParams.get("providerUsageDelayMs")) || 0
     : null;
-  const rejectAccountUsageAfter = Number(searchParams.get("rejectAccountUsageAfter")) || 0;
+  const rejectAccountUsageRead = Number(searchParams.get("rejectAccountUsageRead")) || 0;
+  const staleAccountFailure = searchParams.get("staleAccountFailure") === "1";
   const staleProviderUsage = searchParams.get("staleProviderUsage") === "1";
   const pollOnceMs = Number(searchParams.get("pollOnceMs")) || 0;
+  const healthPollOnceMs = Number(searchParams.get("healthPollOnceMs")) || 0;
+  const staleHealth = searchParams.get("staleHealth") === "1";
   let accountUsageReads = 0;
   let providerUsageReads = 0;
-  if (pollOnceMs > 0) {
+  let healthReads = 0;
+  if (pollOnceMs > 0 || healthPollOnceMs > 0) {
     const nativeSetInterval = window.setInterval.bind(window);
-    window.setInterval = (callback, delay, ...args) => delay === 5 * 60_000
-      ? window.setTimeout(callback, pollOnceMs, ...args)
-      : nativeSetInterval(callback, delay, ...args);
+    window.setInterval = (callback, delay, ...args) => {
+      if (delay === 5 * 60_000 && pollOnceMs > 0) return window.setTimeout(callback, pollOnceMs, ...args);
+      if (delay === 1_000 && healthPollOnceMs > 0) return window.setTimeout(callback, healthPollOnceMs, ...args);
+      return nativeSetInterval(callback, delay, ...args);
+    };
   }
   const subagents = { mode: "all", enabled: [], disabled: [], efforts: {}, proofs: {} };
   const selectedModel = {
@@ -171,11 +177,22 @@ const bridgeSource = String.raw`
       return providers;
     },
     getPresence: async () => ({ mode: "always" }),
-    getHealth: async () => ({ ok: true, activity: { state: "idle", active: [], activeCount: 0 } }),
+    getHealth: async () => {
+      healthReads += 1;
+      const read = healthReads;
+      await new Promise((resolve) => setTimeout(resolve, staleHealth && read === 1 ? 400 : 0));
+      return staleHealth && read === 1
+        ? { ok: false, error: "Stale health response", activity: { state: "offline", active: [], activeCount: 0 } }
+        : { ok: true, version: "health-" + read, activity: { state: "idle", active: [], activeCount: 0 } };
+    },
     getAccountUsage: async () => {
       accountUsageReads += 1;
-      await new Promise((resolve) => setTimeout(resolve, accountDelay ?? usageDelayMs));
-      if (rejectAccountUsageAfter && accountUsageReads >= rejectAccountUsageAfter) {
+      const read = accountUsageReads;
+      await new Promise((resolve) => setTimeout(
+        resolve,
+        staleAccountFailure && read > 1 ? 0 : accountDelay ?? usageDelayMs,
+      ));
+      if ((staleAccountFailure && read === 1) || rejectAccountUsageRead === read) {
         throw new Error("Account usage poll failed");
       }
       return {
@@ -261,6 +278,7 @@ const bridgeSource = String.raw`
     },
     setUsageDelay: (milliseconds) => { usageDelayMs = milliseconds; },
     usageReads: () => ({ account: accountUsageReads, provider: providerUsageReads }),
+    healthReads: () => healthReads,
   });
 })();
 `;
@@ -553,7 +571,7 @@ test("independent control-center reads reveal each ready page region", { timeout
   }
 });
 
-test("usage polling surfaces rejections and ignores older overlapping results", { timeout: 120_000 }, async () => {
+test("usage polling surfaces current rejections, recovers, and ignores older results", { timeout: 120_000 }, async () => {
   assert.equal(existsSync(path.join(dist, "index.html")), true, "npm test must build the renderer first");
   assert.ok(chromiumPath, "No Chromium executable is available for the Control Center renderer test.");
 
@@ -572,7 +590,7 @@ test("usage polling surfaces rejections and ignores older overlapping results", 
       if (message.type() === "error") pageErrors.push(message.text());
     });
 
-    await page.goto(`${url}?providerUsageDelayMs=400&staleProviderUsage=1&rejectAccountUsageAfter=2&pollOnceMs=50`, {
+    await page.goto(`${url}?providerUsageDelayMs=400&staleProviderUsage=1&rejectAccountUsageRead=2&pollOnceMs=50`, {
       waitUntil: "domcontentloaded",
       timeout: 30_000,
     });
@@ -585,6 +603,78 @@ test("usage polling surfaces rejections and ignores older overlapping results", 
     assert.equal(
       await page.locator('.db-breakdown-list[aria-label="Providers usage breakdown"] .db-breakdown-value').innerText(),
       "24k",
+    );
+    await page.getByRole("button", { name: "Refresh all data", exact: true }).click();
+    await page.getByText("Account usage poll failed", { exact: true }).waitFor({ state: "detached" });
+    assert.deepEqual(pageErrors, [], `renderer errors: ${pageErrors.join("; ")}`);
+  } finally {
+    await browser.close();
+    await close();
+  }
+});
+
+test("an older rejected usage read cannot replace a newer success with a warning", { timeout: 120_000 }, async () => {
+  assert.equal(existsSync(path.join(dist, "index.html")), true, "npm test must build the renderer first");
+  assert.ok(chromiumPath, "No Chromium executable is available for the Control Center renderer test.");
+
+  const { url, close } = await serveRenderer();
+  const browser = await chromium.launch({
+    executablePath: chromiumPath,
+    headless: true,
+    args: process.platform === "linux" ? ["--no-sandbox"] : [],
+  });
+  const pageErrors = [];
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 840 } });
+    page.setDefaultTimeout(10_000);
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    page.on("console", (message) => {
+      if (message.type() === "error") pageErrors.push(message.text());
+    });
+
+    await page.goto(`${url}?accountDelayMs=400&staleAccountFailure=1&pollOnceMs=50`, {
+      waitUntil: "domcontentloaded",
+      timeout: 30_000,
+    });
+    await page.waitForFunction(() => window.routerControlTest.usageReads().account >= 2);
+    await page.waitForTimeout(450);
+    assert.equal(await page.getByText("Account usage poll failed", { exact: true }).count(), 0);
+    assert.deepEqual(pageErrors, [], `renderer errors: ${pageErrors.join("; ")}`);
+  } finally {
+    await browser.close();
+    await close();
+  }
+});
+
+test("health polling and core refresh share latest-wins ordering", { timeout: 120_000 }, async () => {
+  assert.equal(existsSync(path.join(dist, "index.html")), true, "npm test must build the renderer first");
+  assert.ok(chromiumPath, "No Chromium executable is available for the Control Center renderer test.");
+
+  const { url, close } = await serveRenderer();
+  const browser = await chromium.launch({
+    executablePath: chromiumPath,
+    headless: true,
+    args: process.platform === "linux" ? ["--no-sandbox"] : [],
+  });
+  const pageErrors = [];
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 840 } });
+    page.setDefaultTimeout(10_000);
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    page.on("console", (message) => {
+      if (message.type() === "error") pageErrors.push(message.text());
+    });
+
+    await page.goto(`${url}?staleHealth=1&healthPollOnceMs=50`, {
+      waitUntil: "domcontentloaded",
+      timeout: 30_000,
+    });
+    await page.waitForFunction(() => window.routerControlTest.healthReads() >= 2);
+    await page.waitForTimeout(450);
+    assert.match(await page.locator(".service-health-strip").innerText(), /ALL CLEAR/);
+    assert.match(
+      await page.getByRole("listitem", { name: /^Router state:/ }).getAttribute("aria-label"),
+      /version health-2/,
     );
     assert.deepEqual(pageErrors, [], `renderer errors: ${pageErrors.join("; ")}`);
   } finally {
