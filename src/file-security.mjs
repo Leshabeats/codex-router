@@ -80,7 +80,22 @@ function windowsPowerShellEnvironment(paths) {
   // not copy provider API keys or other caller secrets into PowerShell's
   // environment while applying an ACL.
   const allowed = new Set(
-    ["SystemRoot", "WINDIR", "ComSpec", "PATH", "PATHEXT", "TEMP", "TMP"]
+    [
+      "SystemRoot",
+      "WINDIR",
+      "ComSpec",
+      "PATH",
+      "PATHEXT",
+      "TEMP",
+      "TMP",
+      "PSModulePath",
+      "SystemDrive",
+      "ProgramData",
+      "ProgramFiles",
+      "ProgramFiles(x86)",
+      "ProgramW6432",
+      "USERPROFILE",
+    ]
       .map((name) => name.toLowerCase()),
   );
   const env = Object.fromEntries(
@@ -99,6 +114,17 @@ function powershellPrivateArgs() {
   // through the encoding PowerShell documents for application callers.
   const encoded = Buffer.from(powershellPrivateScript(), "utf16le").toString("base64");
   return ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded];
+}
+
+function powershellPrivateCommandArgs() {
+  // `execFileSync` already hands Node's argument vector directly to
+  // CreateProcess.  Keep the synchronous setup/control path on the proven
+  // `-Command` form; PowerShell's encoded-command decoder is much slower on
+  // the hosted Windows image and turns every private write into a timeout-
+  // shaped delay.  The async request path still uses powershellPrivateArgs()
+  // because its one-shot child is launched through spawn and must not depend
+  // on nested command-line quoting.
+  return ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", powershellPrivateScript()];
 }
 
 function terminateWindowsChild(child) {
@@ -142,7 +168,7 @@ function protectPrivateFilesWin32(paths) {
   try {
     execFileSync(
       "powershell.exe",
-      powershellPrivateArgs(),
+      powershellPrivateCommandArgs(),
       {
         env: windowsPowerShellEnvironment(list),
         stdio: ["ignore", "ignore", "pipe"],
