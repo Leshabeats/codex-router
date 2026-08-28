@@ -229,6 +229,12 @@ Linux installations support the Codex CLI.
 | Muse Spark 1.2 (Meta) | `meta/muse-spark-1.2` | Meta Model API key |
 | Muse Spark 1.2 Contributor (Meta) | `meta/muse-spark-1.2-contributor` | Meta Model API key |
 | Muse Spark 1.1 (Meta) | `meta/muse-spark-1.1` | Meta Model API key |
+| Hy4 Preview (ClinePass) | `clinepass/tencent/hy4-preview` | ClinePass API key |
+| Hy4 Preview (Command Code) | `commandcode/hy4-preview` | Command Code API key |
+| Hy4 Preview (NanoGPT) | `nano-gpt/tencent/hy4-preview` | NanoGPT API key |
+| Hy4 Preview (Nous Research) | `nousresearch/tencent/hy4-preview` | Nous Portal API key |
+| Hy4 Preview (opencode Go) | `opencode-go/hy4-preview` | opencode Go/Zen API key |
+| Hy4 Preview (OpenRouter) | `openrouter/tencent/hy4-preview` | OpenRouter API key |
 | GLM-5.2 (ClinePass) | `clinepass/glm-5.2` | ClinePass API key |
 | Kimi K3 (ClinePass) | `clinepass/kimi-k3` | ClinePass API key |
 | Kimi K2.7 Code (ClinePass) | `clinepass/kimi-k2.7-code` | ClinePass API key |
@@ -517,6 +523,7 @@ the operator explicitly selects them.
 | MiMo-V2.5 (opencode Go) | `opencode-go/mimo-v2.5` |
 | MiMo-V2.5-Pro (opencode Go) | `opencode-go/mimo-v2.5-pro` |
 | Hy3 (opencode Go) | `opencode-go/hy3` |
+| Hy4 Preview (opencode Go) | `opencode-go/hy4-preview` |
 | MiniMax M3 (opencode Go) | `opencode-go-messages/minimax-m3` |
 | MiniMax M2.7 (opencode Go) | `opencode-go-messages/minimax-m2.7` |
 | MiniMax M2.5 (opencode Go) | `opencode-go-messages/minimax-m2.5` |
@@ -580,6 +587,10 @@ the router refuses paid IDs and shows traffic-only usage when no quota header
 has been observed. Kilo's general SDK setup guide still asks external SDK
 users for an API key; this entry intentionally covers only the gateway's
 documented anonymous `:free` path.
+
+Kilo's catalog also advertises `tencent/hy4-preview`, but that ID is paid: it
+does not end in `:free`. The Kilo Free route deliberately filters it out rather
+than presenting HY4 as an anonymous model.
 
 ### Custom: one provider, many endpoints
 
@@ -679,6 +690,7 @@ CLI session.
 | GPT 5.5 (Command Code) | `commandcode/gpt-5.5` |
 | Gemini 3.5 Flash (Command Code) | `commandcode/gemini-3.5-flash` |
 | Hy3 (Command Code) | `commandcode/hy3-paid` |
+| Hy4 Preview (Command Code) | `commandcode/hy4-preview` |
 | Step 3.7 Flash (Command Code) | `commandcode/step-3.7-flash` |
 | Claude Sonnet 5 (Command Code) | `commandcode-messages/claude-sonnet-5` |
 | Claude Opus 4.8 (Command Code) | `commandcode-messages/claude-opus-4.8` |
@@ -792,20 +804,20 @@ often for the repository to pin and live-verify individual entries:
 | GitHub Copilot | `github-copilot` | Account-specific GitHub Copilot endpoint |
 | Chutes | `chutes` | `https://llm.chutes.ai/v1` |
 | OrcaRouter | `orca` | `https://api.orcarouter.ai/v1` |
-| NanoGPT | `nano-gpt` | `https://nano-gpt.com/api/v1` |
 
 `devin-cli` is the OAuth exception to this API-key table. After `devin auth
 login`, the Control Center and `./bin/curate-models devin-cli` read the model
 configuration available to that account through the installed Devin CLI; the
 provider still ships no preselected models.
 
-OpenRouter, Venice, and Nous Research are ordinary API-key providers with
+OpenRouter, NanoGPT, Venice, and Nous Research are ordinary API-key providers with
 live-reviewed checked-in routes in the model table. Use `bin/curate-models` for
 anything else their current account catalogs expose:
 
 | Provider | Provider ID | Base URL | Key from |
 | --- | --- | --- | --- |
 | OpenRouter | `openrouter` | `https://openrouter.ai/api/v1` | [openrouter.ai/settings/keys](https://openrouter.ai/settings/keys) |
+| NanoGPT | `nano-gpt` | `https://nano-gpt.com/api/v1` | [nano-gpt.com](https://nano-gpt.com) |
 | Venice | `venice` | `https://api.venice.ai/api/v1` | [venice.ai/settings/api](https://venice.ai/settings/api) |
 | Nous Research (Hermes) | `nousresearch` | `https://inference-api.nousresearch.com/v1` | [portal.nousresearch.com](https://portal.nousresearch.com) |
 
