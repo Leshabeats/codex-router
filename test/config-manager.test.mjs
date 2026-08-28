@@ -2143,3 +2143,25 @@ accent = "#4e96d1"
     rmSync(codexHome, { recursive: true, force: true });
   }
 });
+
+test("caller capability refresh preserves Codex policy while replacing managed URLs", () => {
+  const codexHome = mkdtempSync(path.join(os.tmpdir(), "codex-router-caller-refresh-"));
+  const stateDir = path.join(codexHome, "router-state");
+  const configPath = path.join(codexHome, "config.toml");
+  const original = `model = "keep-model"\n\n[desktop]\nambient-suggestions-enabled = false\n`;
+  writeFileSync(configPath, original, { mode: 0o600 });
+  try {
+    run("enable", codexHome, stateDir);
+    const before = readFileSync(configPath, "utf8");
+    const nextSecret = "n".repeat(48);
+    writeFileSync(path.join(stateDir, "caller-secret"), `${nextSecret}\n`, { mode: 0o600 });
+    const result = run("caller-capability-refresh", codexHome, stateDir);
+    assert.equal(result.refreshed, true);
+    const after = readFileSync(configPath, "utf8");
+    assert.equal(after, before.replaceAll(CALLER_KEY, nextSecret));
+    assert.match(after, /model = "keep-model"/);
+    assert.match(after, /ambient-suggestions-enabled = false/);
+  } finally {
+    rmSync(codexHome, { recursive: true, force: true });
+  }
+});

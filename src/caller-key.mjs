@@ -1,27 +1,72 @@
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { callerBaseUrl, redactCallerUrl } from "./caller-auth.mjs";
-import { rotateCallerCapability } from "./caller-key-rotation.mjs";
+import { assertCallerSecret, callerBaseUrl, redactCallerUrl } from "./caller-auth.mjs";
+import {
+  callerCapabilityBackupPath,
+  discardCallerCapabilityBackup,
+  restoreCallerCapability,
+  swapCallerCapability,
+} from "./caller-key-rotation.mjs";
+import {
+  beginCallerKeyRotationJournal,
+  clearCallerKeyRotationJournal,
+  readCallerKeyRotationJournal,
+  updateCallerKeyRotationJournal,
+} from "./caller-key-rotation-journal.mjs";
+import { withCallerKeyRotationLock } from "./caller-key-rotation-lock.mjs";
+import { withModelOverlayLock } from "./model-overlay-lock.mjs";
+import { withLoginFreeRefreshLock } from "./login-free-refresh-lock.mjs";
+import { privateFileIsProtected } from "./file-security.mjs";
 import { CALLER_SECRET_PATH, PORTS } from "./paths.mjs";
 import { assertStateOwnership } from "./state-owner.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const refreshCommand = Object.freeze({
+  codex: ["src/config-manager.mjs", ["caller-capability-refresh"]],
+  dsh: ["src/dsh-config-manager.mjs", ["caller-capability-refresh"]],
+  gemini: ["src/gemini-config-manager.mjs", ["caller-capability-refresh"]],
+});
+
+function secretDigest(secret) {
+  return createHash("sha256").update(secret).digest("hex");
+}
+
+function partialClient(label) {
+  throw new Error(`Refusing caller capability rotation while ${label} has partial managed state; run its doctor/repair path first.`);
+}
 
 export function installedTargetsFromStatus({ codex = {}, dsh = {}, gemini = {} } = {}) {
   const targets = [];
-  if (codex.mode === "router") targets.push("codex");
-  if (dsh.routeInstalled || dsh.credentialInstalled) targets.push("dsh");
-  if (gemini.installed || gemini.baseUrlManaged) targets.push("gemini");
+  const codexStatePresent = codex.provider_mode_state_present === true || codex.signed_provider_state_present === true;
+  if (codex.mode === "router") {
+    if (codex.config_protected === false) partialClient("Codex");
+    if (codex.provider_mode_state_present && !codex.login_free_managed) partialClient("Codex");
+    if (codex.signed_provider_state_present && !codex.signed_routing_managed) partialClient("Codex");
+    targets.push("codex");
+  } else if (codexStatePresent) {
+    partialClient("Codex");
+  }
+
+  const dshRoute = dsh.routeInstalled === true;
+  const dshCredential = dsh.credentialInstalled === true;
+  if (dshRoute !== dshCredential) partialClient("DeepSeek Harness");
+  if (dshRoute) targets.push("dsh");
+
+  const geminiCatalog = gemini.installed === true;
+  const geminiBase = gemini.baseUrlManaged === true;
+  if (geminiCatalog !== geminiBase) partialClient("Gemini");
+  if (geminiCatalog) {
+    if (gemini.envExists === false || gemini.documentReadable === false || gemini.managedBlockPresent === false || (Array.isArray(gemini.conflicts) && gemini.conflicts.length)) {
+      partialClient("Gemini");
+    }
+    targets.push("gemini");
+  }
   return targets;
 }
-
-const republishCommand = Object.freeze({
-  codex: ["src/config-manager.mjs", ["enable"]],
-  dsh: ["src/dsh-config-manager.mjs", ["install"]],
-  gemini: ["src/gemini-config-manager.mjs", ["install"]],
-});
 
 function commandDetail(result, fallback) {
   if (result.error) return result.error.message;
@@ -31,24 +76,16 @@ function commandDetail(result, fallback) {
 
 export function runNodeCommand(script, args = []) {
   const result = spawnSync(process.execPath, [path.join(ROOT, script), ...args], {
-    cwd: ROOT,
-    env: process.env,
-    encoding: "utf8",
-    maxBuffer: 32 * 1024 * 1024,
+    cwd: ROOT, env: process.env, encoding: "utf8", maxBuffer: 32 * 1024 * 1024,
   });
-  if (result.error || result.status !== 0) {
-    throw new Error(commandDetail(result, `${script} failed.`));
-  }
+  if (result.error || result.status !== 0) throw new Error(commandDetail(result, `${script} failed.`));
   return String(result.stdout || "");
 }
 
 function parseJsonCommand(script, args, runNode = runNodeCommand) {
   const output = runNode(script, args);
-  try {
-    return JSON.parse(String(output || ""));
-  } catch {
-    throw new Error(`${script} returned invalid status JSON.`);
-  }
+  try { return JSON.parse(String(output || "")); }
+  catch { throw new Error(`${script} returned invalid status JSON.`); }
 }
 
 export async function readManagedClientStatuses({ runNode = runNodeCommand } = {}) {
@@ -63,60 +100,193 @@ export async function readRouterServiceStatus({ runNode = runNodeCommand } = {})
   return parseJsonCommand("src/service.mjs", ["status"], runNode);
 }
 
-export async function verifyCallerRotation({ previousSecret, currentSecret }) {
+async function validModelList(response) {
+  if (response.status !== 200) return false;
   try {
-    const fresh = await fetch(`${callerBaseUrl(PORTS.router, currentSecret)}/models`, {
-      signal: AbortSignal.timeout(5_000),
-    });
-    const stale = await fetch(`${callerBaseUrl(PORTS.router, previousSecret)}/models`, {
-      signal: AbortSignal.timeout(5_000),
-    });
-    if (fresh.status !== 200) throw new Error("The new caller capability was not accepted.");
-    if (stale.status === 200) throw new Error("The previous caller capability is still accepted.");
+    const body = await response.json();
+    return body?.object === "list" && Array.isArray(body.data);
+  } catch {
+    return false;
+  }
+}
+
+export async function verifyCurrentCallerCapability({ currentSecret, fetchImpl = fetch }) {
+  try {
+    const fresh = await fetchImpl(`${callerBaseUrl(PORTS.router, currentSecret)}/models`, { signal: AbortSignal.timeout(5_000) });
+    if (!(await validModelList(fresh))) throw new Error("The new caller capability did not return a valid model list.");
   } catch (error) {
-    if (error instanceof Error && /caller capability/.test(error.message)) throw error;
+    if (error instanceof Error && /caller capability|valid model list/.test(error.message)) throw error;
     throw new Error("Router caller-capability verification failed.");
   }
+}
+
+export async function verifyCallerRotation({ previousSecret, currentSecret, fetchImpl = fetch }) {
+  try {
+    const fresh = await fetchImpl(`${callerBaseUrl(PORTS.router, currentSecret)}/models`, { signal: AbortSignal.timeout(5_000) });
+    if (!(await validModelList(fresh))) throw new Error("The new caller capability did not return a valid model list.");
+    const stale = await fetchImpl(`${callerBaseUrl(PORTS.router, previousSecret)}/models`, { signal: AbortSignal.timeout(5_000) });
+    if (stale.status !== 401) throw new Error("The previous caller capability was not rejected with 401.");
+  } catch (error) {
+    if (error instanceof Error && /caller capability|valid model list|rejected with 401/.test(error.message)) throw error;
+    throw new Error("Router caller-capability verification failed.");
+  }
+}
+
+async function refreshTargets(targets, runNode) {
+  for (const target of targets) {
+    const [script, args] = refreshCommand[target];
+    await runNode(script, args);
+  }
+}
+
+function currentSecret(secretPath) {
+  return assertCallerSecret(readFileSync(secretPath, "utf8").trim());
+}
+
+async function withCallerMutationLocks(operation) {
+  return withModelOverlayLock(() => withLoginFreeRefreshLock(operation));
+}
+
+export async function finalizeCallerKeyRotation({ journal, secretPath = CALLER_SECRET_PATH } = {}) {
+  discardCallerCapabilityBackup({ secretPath, operationId: journal.operationId });
+  clearCallerKeyRotationJournal({ operationId: journal.operationId });
+}
+
+export async function recoverPendingCallerKeyRotation({
+  secretPath = CALLER_SECRET_PATH,
+  runNode = runNodeCommand,
+  readServiceStatus = () => readRouterServiceStatus({ runNode }),
+  readJournal = () => readCallerKeyRotationJournal(),
+  restoreSecret = restoreCallerCapability,
+  discardBackup = discardCallerCapabilityBackup,
+  clearJournal = clearCallerKeyRotationJournal,
+  verifyServiceKeys = verifyCallerRotation,
+  verifyCurrentKey = verifyCurrentCallerCapability,
+  secretIsProtected = privateFileIsProtected,
+} = {}) {
+  const journal = await readJournal();
+  if (!journal) return { recovered: false };
+
+  if (journal.phase === "verified") {
+    const live = currentSecret(secretPath);
+    if (journal.currentSecretSha256 && secretDigest(live) !== journal.currentSecretSha256) {
+      throw new Error("Verified caller rotation journal does not match the live capability; refusing cleanup.");
+    }
+    if (!secretIsProtected(secretPath)) {
+      throw new Error("Verified caller rotation live capability is not private; refusing cleanup.");
+    }
+    discardBackup({ secretPath, operationId: journal.operationId });
+    clearJournal({ operationId: journal.operationId });
+    return { recovered: true, committed: true };
+  }
+
+  if (journal.serviceWasRunning) {
+    const service = await readServiceStatus();
+    if (service?.state === "running") await runNode("src/service.mjs", ["stop"]);
+  }
+
+  const backupPath = callerCapabilityBackupPath(secretPath, journal.operationId);
+  let restored;
+  if (existsSync(backupPath)) {
+    if (!secretIsProtected(backupPath)) {
+      throw new Error("Pending caller rotation rollback generation is not private; refusing recovery.");
+    }
+    const rollbackSecret = currentSecret(backupPath);
+    if (secretDigest(rollbackSecret) !== journal.previousSecretSha256) {
+      throw new Error("Pending caller rotation rollback generation does not match its protected journal; refusing recovery.");
+    }
+    restored = restoreSecret({ secretPath, operationId: journal.operationId });
+    if (!restored.restored || restored.currentSecret !== rollbackSecret || !secretIsProtected(secretPath)) {
+      throw new Error("Pending caller rotation could not restore a private prior capability; refusing cleanup.");
+    }
+  } else {
+    const live = currentSecret(secretPath);
+    if (secretDigest(live) !== journal.previousSecretSha256) {
+      throw new Error("Pending caller rotation has no rollback generation matching the live capability; refusing recovery.");
+    }
+    if (!secretIsProtected(secretPath)) {
+      throw new Error("Pending caller rotation live rollback capability is not private; refusing recovery.");
+    }
+    restored = { restored: false, currentSecret: live };
+  }
+
+  await refreshTargets(journal.targets, runNode);
+  if (journal.serviceWasRunning) {
+    await runNode("src/service.mjs", ["start"]);
+    if (restored.displacedSecret && restored.displacedSecret !== restored.currentSecret) {
+      await verifyServiceKeys({ previousSecret: restored.displacedSecret, currentSecret: restored.currentSecret });
+    } else {
+      await verifyCurrentKey({ currentSecret: restored.currentSecret });
+    }
+  }
+  discardBackup({ secretPath, operationId: journal.operationId });
+  clearJournal({ operationId: journal.operationId });
+  return { recovered: true, committed: false };
 }
 
 export async function runCallerKeyRotation({
   readClientStatuses = () => readManagedClientStatuses(),
   readServiceStatus = () => readRouterServiceStatus(),
   runNode = runNodeCommand,
-  rotate = rotateCallerCapability,
+  withLock = withCallerKeyRotationLock,
+  withMutationLocks = withCallerMutationLocks,
+  recoverPending = recoverPendingCallerKeyRotation,
+  rotateSecret = swapCallerCapability,
+  beginJournal = beginCallerKeyRotationJournal,
+  updateJournal = updateCallerKeyRotationJournal,
+  finalizeRotation = finalizeCallerKeyRotation,
+  recoverAfterFailure = recoverPendingCallerKeyRotation,
   verifyServiceKeys = verifyCallerRotation,
   secretPath = CALLER_SECRET_PATH,
   assertOwnership = () => assertStateOwnership("rotate the router caller capability"),
 } = {}) {
   assertOwnership();
-  const statuses = await readClientStatuses();
-  const targets = installedTargetsFromStatus(statuses);
-  const service = await readServiceStatus();
-  const serviceRestarted = service?.installed === true;
-
-  const apply = async () => {
-    for (const target of targets) {
-      const [script, args] = republishCommand[target];
-      await runNode(script, args);
+  return withLock(() => withMutationLocks(async () => {
+    await recoverPending({ secretPath, runNode, readServiceStatus, verifyServiceKeys });
+    const statuses = await readClientStatuses();
+    const targets = installedTargetsFromStatus(statuses);
+    const service = await readServiceStatus();
+    const serviceWasRunning = service?.installed === true && service?.state === "running";
+    const previousSecret = currentSecret(secretPath);
+    let journal = await beginJournal({ targets, serviceWasRunning, previousSecretSha256: secretDigest(previousSecret) });
+    let swapped;
+    try {
+      if (serviceWasRunning) {
+        await runNode("src/service.mjs", ["stop"]);
+        journal = await updateJournal(journal, "service-stopped");
+      }
+      swapped = await rotateSecret({ secretPath, operationId: journal.operationId });
+      journal = await updateJournal(journal, "secret-swapped", { patch: { currentSecretSha256: secretDigest(swapped.currentSecret) } });
+      await refreshTargets(targets, runNode);
+      journal = await updateJournal(journal, "clients-refreshed");
+      if (serviceWasRunning) {
+        await runNode("src/service.mjs", ["start"]);
+        journal = await updateJournal(journal, "service-started");
+        await verifyServiceKeys({ previousSecret: swapped.previousSecret, currentSecret: swapped.currentSecret });
+      }
+      journal = await updateJournal(journal, "verified");
+      await finalizeRotation({ journal, secretPath });
+      return { rotated: true, targets, serviceRestarted: serviceWasRunning };
+    } catch (error) {
+      let recoveryError;
+      try {
+        await recoverAfterFailure({ secretPath, runNode, readServiceStatus, verifyServiceKeys });
+      } catch (caught) {
+        recoveryError = caught;
+      }
+      if (recoveryError) {
+        throw new Error(`${error instanceof Error ? error.message : String(error)}; caller capability recovery failed: ${recoveryError.message}`, { cause: error });
+      }
+      throw error;
     }
-    if (serviceRestarted) {
-      await runNode("src/service.mjs", ["install"]);
-      await runNode("src/wait-health.mjs", []);
-    }
-  };
-
-  const verify = serviceRestarted
-    ? (keys) => verifyServiceKeys(keys)
-    : async () => {};
-  const result = await rotate({ secretPath, apply, verify });
-  return { ...result, targets, serviceRestarted };
+  }));
 }
 
 function restartNotice(targets, serviceRestarted) {
   const notes = [];
   if (targets.includes("codex")) notes.push("Fully quit and reopen Codex before continuing existing tasks.");
   if (targets.includes("gemini")) notes.push("Restart any running Gemini CLI session.");
-  if (!serviceRestarted) notes.push("The router service was not installed; the new capability will be used on its next start.");
+  if (!serviceRestarted) notes.push("The router service was not running; its prior stopped state was preserved.");
   return notes.join(" ");
 }
 

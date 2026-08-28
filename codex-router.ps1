@@ -858,6 +858,7 @@ switch ($Command) {
   }
   "providers" { Invoke-RouterNode "src\providers.mjs" $Arguments }
   "provider-key" { Invoke-RouterNode "src\provider-key.mjs" $Arguments }
+  "caller-key" { Invoke-RouterNode "src\caller-key.mjs" $Arguments }
   "key-pool" { Invoke-RouterNode "src\control.mjs" (@("key-pool") + $Arguments) }
   "search-sidecar" { Invoke-RouterNode "src\search-sidecar-control.mjs" $Arguments }
   "chatgpt-session" { Invoke-RouterNode "src\chatgpt-session.mjs" $Arguments }

@@ -1101,13 +1101,16 @@ through the supported transaction instead of deleting state files by hand:
 ./bin/model-router codex caller-key rotate
 ```
 
-On Windows use `./codex-router.ps1 caller-key rotate`. Rotation republishes only
-client integrations that are already installed. When the router service is
-installed, rotation restarts it and verifies that the previous capability is
-rejected; otherwise the new capability becomes authoritative on the next service
-start. Neither key is printed. Fully quit and reopen Codex (and restart a running
-Gemini CLI session) after a successful rotation so cached client configuration
-cannot keep using the previous route.
+On Windows use `./codex-router.ps1 caller-key rotate`. Rotation acquires the
+router's mutation locks, refuses partial managed client state, and refreshes only
+the caller URL/key fields of integrations that are already installed. A running
+router is stopped before the key swap, restarted afterward, and accepted only
+after the new capability returns a valid model list while the old one returns
+exactly `401`. An installed-but-stopped service stays stopped. A protected phase
+journal and rollback generation make an interrupted rotation recoverable without
+printing either key. Fully quit and reopen Codex (and restart a running Gemini
+CLI session) after success so cached client configuration cannot keep using the
+previous route.
 
 ### Run GPT-5.6 Sol at its documented 1M context window
 
