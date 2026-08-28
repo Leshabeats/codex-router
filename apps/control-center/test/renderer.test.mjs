@@ -14,7 +14,8 @@ const bridgeSource = String.raw`
 (() => {
   const calls = [];
   let navigationListener;
-  let usageDelayMs = 0;
+  let usageDelayMs = Number(new URLSearchParams(location.search).get("usageDelayMs")) || 0;
+  const providerDelayMs = Number(new URLSearchParams(location.search).get("providerDelayMs")) || 0;
   const subagents = { mode: "all", enabled: [], disabled: [], efforts: {}, proofs: {} };
   const selectedModel = {
     slug: "deepseek/deepseek-chat",
@@ -143,7 +144,10 @@ const bridgeSource = String.raw`
   window.routerControl = Object.freeze({
     platform: navigator.platform.toLowerCase().includes("mac") ? "darwin" : "linux",
     getSnapshot: async () => snapshot,
-    getProviders: async () => providers,
+    getProviders: async () => {
+      await new Promise((resolve) => setTimeout(resolve, providerDelayMs));
+      return providers;
+    },
     getPresence: async () => ({ mode: "always" }),
     getHealth: async () => ({ ok: true, activity: { state: "idle", active: [], activeCount: 0 } }),
     getAccountUsage: async () => {
@@ -458,6 +462,45 @@ test("the production renderer exposes model discovery and picker actions", { tim
       ["catalog-addable"],
     ]);
     assert.equal(calls.some((call) => call.name === "setPickerModels" && call.args[0] === true), true);
+    assert.deepEqual(pageErrors, [], `renderer errors: ${pageErrors.join("; ")}`);
+  } finally {
+    await browser.close();
+    await close();
+  }
+});
+
+test("slow usage reads do not block dashboard, health, or models", { timeout: 120_000 }, async () => {
+  assert.equal(existsSync(path.join(dist, "index.html")), true, "npm test must build the renderer first");
+  assert.ok(chromiumPath, "No Chromium executable is available for the Control Center renderer test.");
+
+  const { url, close } = await serveRenderer();
+  const browser = await chromium.launch({
+    executablePath: chromiumPath,
+    headless: true,
+    args: process.platform === "linux" ? ["--no-sandbox"] : [],
+  });
+  const pageErrors = [];
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 840 } });
+    page.setDefaultTimeout(1_500);
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    page.on("console", (message) => {
+      if (message.type() === "error") pageErrors.push(message.text());
+    });
+
+    await page.goto(`${url}?usageDelayMs=4000&providerDelayMs=3000`, { waitUntil: "domcontentloaded" });
+    await page.getByRole("heading", { name: "Dashboard", exact: true }).waitFor();
+    await page.locator(".service-health-strip").waitFor();
+    await page.locator(".db-breakdown-panel .panel-skeleton").waitFor();
+
+    await page.getByRole("button", { name: "Models", exact: true }).click();
+    await page.getByRole("heading", { name: "Models", exact: true }).waitFor();
+    await page.locator(".pm-family-row").filter({ hasText: "DeepSeek Chat" }).waitFor();
+    await page.locator(".pm-connections-loading").waitFor();
+
+    page.setDefaultTimeout(7_000);
+    await page.getByRole("button", { name: "Dashboard", exact: true }).click();
+    await page.locator(".db-breakdown-panel .panel-skeleton").waitFor({ state: "detached" });
     assert.deepEqual(pageErrors, [], `renderer errors: ${pageErrors.join("; ")}`);
   } finally {
     await browser.close();

@@ -18,7 +18,7 @@ import {
   Settings,
   Sun,
 } from "lucide-react";
-import { Badge, Button, InlineNotice, LoadingState } from "./components";
+import { Badge, Button, InlineNotice } from "./components";
 import { classNames } from "./lib";
 import { ContextPage } from "./pages/ContextPage";
 import { DashboardPage } from "./pages/DashboardPage";
@@ -47,12 +47,21 @@ import type {
   ProviderUsageSnapshot,
   RouterHealth,
   RouterSnapshot,
+  RouterDataReady,
   ViewId,
 } from "./types";
 
 const THEME_KEY = "model-router-control-center-theme";
 const VIEW_KEY = "model-router-control-center-view";
 const ACTIVE_MLX_STATES = new Set(["preparing", "downloading", "loading", "starting-server", "verifying", "publishing"]);
+const INITIAL_DATA_READY: RouterDataReady = {
+  snapshot: false,
+  providers: false,
+  presence: false,
+  health: false,
+  accountUsage: false,
+  providerUsage: false,
+};
 
 const NAV_ITEMS: Array<{
   id: ViewId;
@@ -107,7 +116,7 @@ export default function App() {
   const [accountUsage, setAccountUsage] = useState<AccountUsage>();
   const [providerUsage, setProviderUsage] = useState<ProviderUsageSnapshot>();
   const [presence, setPresence] = useState<PresenceSnapshot>();
-  const [loading, setLoading] = useState(true);
+  const [dataReady, setDataReady] = useState<RouterDataReady>(INITIAL_DATA_READY);
   const [refreshing, setRefreshing] = useState(false);
   const [operation, setOperation] = useState<OperationEvent | null>(null);
   const [toast, setToast] = useState<{ tone: "neutral" | "success" | "danger"; message: string } | null>(null);
@@ -115,6 +124,21 @@ export default function App() {
   const downloadPollInFlight = useRef(false);
   const healthPollInFlight = useRef(false);
   const previousActivityState = useRef<string | undefined>(undefined);
+
+  const settleRead = useCallback(async <T,>(
+    key: keyof RouterDataReady,
+    request: Promise<T>,
+    commit: (value: T) => void,
+  ) => {
+    try {
+      commit(await request);
+    } finally {
+      // "Ready" means the first attempt settled, not necessarily succeeded.
+      // Errors are rendered separately, while this prevents an unreachable
+      // optional source from leaving its skeleton on screen forever.
+      setDataReady((current) => current[key] ? current : { ...current, [key]: true });
+    }
+  }, []);
 
   const target = snapshot?.targets.codex;
   const localDownloadActive = target?.modelSettings?.localModels?.download?.status === "downloading";
@@ -137,26 +161,25 @@ export default function App() {
   const refreshCore = useCallback(async () => {
     if (!api) return;
     const [nextSnapshot, nextProviders, nextPresence, nextHealth] = await Promise.allSettled([
-      api.getSnapshot(),
-      api.getProviders(),
-      api.getPresence(),
-      api.getHealth(),
+      settleRead("snapshot", api.getSnapshot(), setSnapshot),
+      settleRead("providers", api.getProviders(), setProviders),
+      settleRead("presence", api.getPresence(), setPresence),
+      settleRead("health", api.getHealth(), setHealth),
     ]);
-    if (nextSnapshot.status === "fulfilled") setSnapshot(nextSnapshot.value);
-    if (nextProviders.status === "fulfilled") setProviders(nextProviders.value);
-    if (nextPresence.status === "fulfilled") setPresence(nextPresence.value);
-    if (nextHealth.status === "fulfilled") setHealth(nextHealth.value);
     const failure = [nextSnapshot, nextProviders, nextPresence, nextHealth]
       .find((result) => result.status === "rejected") as PromiseRejectedResult | undefined;
     if (failure) throw failure.reason;
-  }, [api]);
+  }, [api, settleRead]);
 
   const refreshUsage = useCallback(async () => {
     if (!api) return;
-    const [account, provider] = await Promise.allSettled([api.getAccountUsage(), api.getProviderUsage()]);
-    if (account.status === "fulfilled") setAccountUsage(account.value);
-    if (provider.status === "fulfilled") setProviderUsage(provider.value);
-  }, [api]);
+    const results = await Promise.allSettled([
+      settleRead("accountUsage", api.getAccountUsage(), setAccountUsage),
+      settleRead("providerUsage", api.getProviderUsage(), setProviderUsage),
+    ]);
+    const failure = results.find((result) => result.status === "rejected") as PromiseRejectedResult | undefined;
+    if (failure) throw failure.reason;
+  }, [api, settleRead]);
 
   const refreshDownloadProgress = useCallback(async () => {
     if (!api || downloadPollInFlight.current) return;
@@ -196,7 +219,14 @@ export default function App() {
 
   const refreshAll = useCallback(async () => {
     if (!api) {
-      setLoading(false);
+      setDataReady({
+        snapshot: true,
+        providers: true,
+        presence: true,
+        health: true,
+        accountUsage: true,
+        providerUsage: true,
+      });
       setLoadError("The Electron bridge is unavailable. Open this UI through the Codex Router desktop app.");
       return;
     }
@@ -205,7 +235,6 @@ export default function App() {
     const results = await Promise.allSettled([refreshCore(), refreshUsage()]);
     const failure = results.find((result) => result.status === "rejected") as PromiseRejectedResult | undefined;
     if (failure) setLoadError(readableError(failure.reason));
-    setLoading(false);
     setRefreshing(false);
   }, [api, refreshCore, refreshUsage]);
 
@@ -363,10 +392,10 @@ export default function App() {
     window.setTimeout(() => searchTriggerRef.current?.focus(), 0);
   }, []);
   const page = (() => {
-    const shared = { target, api, refreshing, onRefresh: () => void refreshAll(), runAction };
+    const shared = { target, api, refreshing, dataReady, onRefresh: () => void refreshAll(), runAction };
     switch (view) {
-      case "dashboard": return <DashboardPage target={target} dashboard={snapshot?.catalog?.dashboard} health={health} account={accountUsage} providerUsage={providerUsage} setup={providers} presence={presence} api={api} runAction={runAction} refreshing={refreshing} onRefresh={() => void refreshAll()} onNavigate={navigateTo} />;
-      case "usage": return <UsagePage target={target} account={accountUsage} providerUsage={providerUsage} api={api} refreshing={refreshing} onRefresh={() => void refreshAll()} focusRequest={usageFocusRequest} />;
+      case "dashboard": return <DashboardPage target={target} dashboard={snapshot?.catalog?.dashboard} health={health} account={accountUsage} providerUsage={providerUsage} setup={providers} presence={presence} api={api} runAction={runAction} refreshing={refreshing} dataReady={dataReady} onRefresh={() => void refreshAll()} onNavigate={navigateTo} />;
+      case "usage": return <UsagePage target={target} account={accountUsage} providerUsage={providerUsage} api={api} refreshing={refreshing} dataReady={dataReady} onRefresh={() => void refreshAll()} focusRequest={usageFocusRequest} />;
       case "status": return <StatusPage {...shared} health={health} account={accountUsage} providerUsage={providerUsage} />;
       case "models": return <ModelsPage {...shared} catalog={snapshot?.catalog} setup={providers} usage={providerUsage} focusRequest={modelFocusRequest} />;
       case "local": return <LocalPage {...shared} operation={operation} />;
@@ -432,7 +461,7 @@ export default function App() {
         </div>
         <div className={classNames("page-scroll", `page-scroll-${view}`)}>
           {loadError ? <InlineNotice tone="warning" title="Some router data could not load">{loadError}</InlineNotice> : null}
-          {loading ? <LoadingState /> : page}
+          {page}
         </div>
       </main>
 

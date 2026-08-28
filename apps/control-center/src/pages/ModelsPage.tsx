@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Check, ChevronDown, Filter, KeyRound, Link2, LogIn, MoreHorizontal, Plus, SearchX, ShieldCheck, Trash2 } from "lucide-react";
-import { Badge, Button, CatalogSkeleton, Dialog, EmptyState, PageHeader, SearchField, SkeletonBlock, Toggle } from "../components";
+import { Badge, Button, CatalogSkeleton, Dialog, EmptyState, PageHeader, PanelSkeleton, SearchField, SkeletonBlock, Toggle } from "../components";
 import { BrandLogo, ProviderLogo, brandForModel } from "../provider-branding";
 import { formatContext, formatDateTime } from "../lib";
 import {
@@ -25,6 +25,7 @@ import type {
   ProviderUsageSnapshot,
   RouterCatalogSnapshot,
   RouterControlApi,
+  RouterDataReady,
   RouterKnownModel,
   RouterModel,
   RouterTarget,
@@ -82,6 +83,7 @@ interface ModelsPageProps {
   usage?: ProviderUsageSnapshot;
   api?: RouterControlApi;
   refreshing: boolean;
+  dataReady: RouterDataReady;
   onRefresh: () => void;
   runAction: RunAction;
   focusRequest?: ModelViewFocusRequest;
@@ -139,7 +141,7 @@ function routeUsable(model: RouterModel): boolean {
   return model.available !== false;
 }
 
-export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onRefresh, runAction, focusRequest }: ModelsPageProps) {
+export function ModelsPage({ target, catalog, setup, usage, api, refreshing, dataReady, onRefresh, runAction, focusRequest }: ModelsPageProps) {
   const [modelSearch, setModelSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [filterMenuOpen, setFilterMenuOpen] = useState(false);
@@ -466,7 +468,24 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
   }, [focusRequest]);
 
   if (!target) {
-    return <EmptyState icon={<SearchX size={22} />} title="Router snapshot unavailable" body="Start the router or refresh after setup completes." />;
+    return (
+      <div className="providers-models-page models-page">
+        <PageHeader
+          eyebrow="Models"
+          title="Models"
+          description="Choose which models your installed clients can use, and connect the accounts that serve them."
+          onRefresh={onRefresh}
+          refreshing={refreshing}
+        />
+        {!dataReady.snapshot ? (
+          <section className="panel-section pm-models-loading" aria-label="Loading models" aria-busy="true">
+            <PanelSkeleton label="Loading model routes" count={6} />
+          </section>
+        ) : (
+          <EmptyState icon={<SearchX size={22} />} title="Router snapshot unavailable" body="Start the router or refresh after setup completes." />
+        )}
+      </div>
+    );
   }
 
   const connectedProviderCount = directory.filter((entry) => providerConnected(entry, enabledProviders)).length;
@@ -548,7 +567,13 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
           refreshing={refreshing}
         />
 
-        <ConnectionsBar
+        {!dataReady.providers && !setup ? (
+          <section className="pm-connections pm-connections-loading" aria-label="Loading provider connections" aria-busy="true">
+            <SkeletonBlock />
+            <SkeletonBlock />
+            <SkeletonBlock />
+          </section>
+        ) : <ConnectionsBar
           directory={directory}
           enabledProviders={enabledProviders}
           usageById={usageById}
@@ -570,7 +595,7 @@ export function ModelsPage({ target, catalog, setup, usage, api, refreshing, onR
           }}
           onKey={(entry) => entry.setup && setCredentialProvider(entry.setup)}
           onRemove={(entry) => entry.setup && setRemoveProvider(entry.setup)}
-        />
+        />}
 
         <section className="panel-section pm-model-catalog" id="model-catalog-controls">
           <div className="pm-model-toolbar">

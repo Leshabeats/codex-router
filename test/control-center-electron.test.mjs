@@ -858,6 +858,10 @@ test("background usage polling is conservative while manual refresh stays immedi
   assert.doesNotMatch(source, /usageTimer = window\.setInterval\(\(\) => void refreshUsage\(\), 30_000\)/);
   assert.match(source, /Promise\.allSettled\(\[refreshCore\(\), refreshUsage\(\)\]\)/);
   assert.match(source, /Promise\.allSettled\(\[[\s\S]*api\.getSnapshot\(\)[\s\S]*api\.getHealth\(\)/);
+  assert.match(source, /settleRead\("snapshot", api\.getSnapshot\(\), setSnapshot\)/);
+  assert.match(source, /settleRead\("providers", api\.getProviders\(\), setProviders\)/);
+  assert.match(source, /settleRead\("providerUsage", api\.getProviderUsage\(\), setProviderUsage\)/);
+  assert.doesNotMatch(source, /loading \? <LoadingState \/> : page/);
   assert.match(source, /downloadPollInFlight\.current/);
   assert.match(source, /healthPollInFlight\.current/);
   assert.match(source, /document\.visibilityState !== "visible"/);
