@@ -223,6 +223,107 @@ test("omits only Claude tools whose false schemas or conjunctions cannot be repr
   );
 });
 
+test("omits Claude tools whose refs cannot be dereferenced without widening", () => {
+  const request = toAntigravityRequest({
+    model: "claude-opus-4-6-thinking",
+    messages: [{ role: "user", content: "inspect" }],
+    tools: [
+      {
+        type: "function",
+        function: {
+          name: "safe",
+          parameters: { type: "object", properties: { value: { type: "string" } } },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "safe_ref",
+          parameters: {
+            type: "object",
+            properties: {
+              value: { $ref: "#/$defs/alias", description: "Alias value." },
+            },
+            required: ["value"],
+            $defs: {
+              base: { type: "string", enum: ["a"] },
+              alias: { $ref: "#/$defs/base" },
+            },
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "safe_unused_defs",
+          parameters: {
+            type: "object",
+            properties: { value: { type: "string" } },
+            $defs: { node: { $ref: "#/$defs/node" } },
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "dangling_ref",
+          parameters: {
+            type: "object",
+            properties: { value: { $ref: "#/$defs/missing" } },
+            required: ["value"],
+            $defs: {},
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "recursive_ref",
+          parameters: {
+            type: "object",
+            properties: { node: { $ref: "#/$defs/node" } },
+            $defs: {
+              node: {
+                type: "object",
+                properties: { child: { $ref: "#/$defs/node" } },
+              },
+            },
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "conflicting_ref",
+          parameters: {
+            type: "object",
+            properties: {
+              base: { type: "string", enum: ["a"] },
+              alias: { $ref: "#/properties/base", enum: ["a", "b"] },
+            },
+            required: ["alias"],
+          },
+        },
+      },
+    ],
+  });
+
+  assert.deepEqual(
+    request.request.tools[0].functionDeclarations.map((declaration) => declaration.name),
+    ["safe", "safe_ref", "safe_unused_defs"],
+  );
+  const safeRef = request.request.tools[0].functionDeclarations.find(
+    (declaration) => declaration.name === "safe_ref",
+  );
+  assert.deepEqual(safeRef.parameters, {
+    type: "object",
+    properties: {
+      value: { type: "string", enum: ["a"], description: "Alias value." },
+    },
+    required: ["value"],
+  });
+});
+
 test("narrows Claude anyOf and provably disjoint oneOf branches deterministically", () => {
   const request = toAntigravityRequest({
     model: "claude-opus-4-6-thinking",
