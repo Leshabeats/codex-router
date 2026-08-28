@@ -164,6 +164,13 @@ test("fallback is bounded, pre-response, and excludes only the exact failed iden
     }),
     undefined,
   );
+  assert.equal(
+    subagentFallbackPlan(ranked, {
+      failureKind: "connection",
+      settings: SETTINGS,
+    }),
+    undefined,
+  );
 });
 
 test("fallback refuses ranked entries outside the checked-in v2 registry", () => {

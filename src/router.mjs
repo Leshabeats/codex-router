@@ -126,6 +126,11 @@ import {
 import { forgetChildSpawn, observeChildTurn } from "./subagent-turns.mjs";
 import { subagentEffort } from "./multi-agent-state.mjs";
 import {
+  rankSubagentCandidates,
+  subagentEligibility,
+  subagentFallbackPlan,
+} from "./subagent-routing.mjs";
+import {
   activityMetadataFromHeaders,
   threadIdFromHeaders,
 } from "./codex-session-names.mjs";
@@ -2975,6 +2980,34 @@ function failoverCandidates({ route, agedInput, flattenedNamespaces, chain }) {
   );
 }
 
+// Transport failover for a child turn is stricter than the general quota path:
+// every destination must be the exact checked-in v2 route Codex was allowed to
+// spawn as an agent. Runtime health may remove a route, but it cannot certify
+// one or change its provider identity.
+function subagentTransportFailoverCandidates({ request, route, agedInput, chain }) {
+  if (!request.headers["x-openai-subagent"]) return [];
+  // The header describes the caller's turn; it is not certification evidence.
+  // Require the failed route itself to carry the repository's exact v2 proof
+  // before that metadata can select this stricter recovery path.
+  if (subagentEligibility(route)) return [];
+  const hidden = readHiddenModels();
+  const ranked = rankSubagentCandidates(
+    selectedConfiguredListedModels().filter((model) => !hidden.has(model.slug)),
+    {
+      chain,
+      requiredCapabilities: [
+        "tools",
+        ...(inputHasImage(agedInput) ? ["vision"] : []),
+      ],
+    },
+  );
+  return subagentFallbackPlan(ranked, {
+    failureKind: "transport",
+    failedTarget: route,
+    maxAttempts: MAX_FAILOVER_HOPS,
+  })?.attempts || [];
+}
+
 function routedRequestFits(route, body) {
   const estimatedTokens = estimateInputTokens(body);
   return (
@@ -3023,12 +3056,20 @@ async function attemptModelFailover({
 }) {
   const settings = readFailoverSettings();
   if (!settings.enabled) return undefined;
-  const candidates = failoverCandidates({
-    route,
-    agedInput,
-    flattenedNamespaces,
-    chain: settings.chain,
-  }).slice(0, MAX_FAILOVER_HOPS);
+  const transportFallback = verdict.reason === "transport";
+  const candidates = transportFallback
+    ? subagentTransportFailoverCandidates({
+        request,
+        route,
+        agedInput,
+        chain: settings.chain,
+      })
+    : failoverCandidates({
+        route,
+        agedInput,
+        flattenedNamespaces,
+        chain: settings.chain,
+      }).slice(0, MAX_FAILOVER_HOPS);
   if (!candidates.length) {
     logFailover(route, undefined, verdict.reason, status, "no-candidate");
     return undefined;
@@ -3075,11 +3116,23 @@ async function attemptModelFailover({
     // The candidate failed too. If it failed the same way, believe it and take
     // it out of the running for the next turn as well; anything else is that
     // model's own problem and not evidence about the operator's chosen one.
+    const hopBodyText = await boundedResponseText(
+      upstream,
+      MAX_BUFFERED_RESPONSE_BYTES,
+      signal,
+    );
     const hopVerdict = classifyRoutedFailure({
       status: upstream.status,
-      bodyText: await boundedResponseText(upstream, MAX_BUFFERED_RESPONSE_BYTES, signal),
+      bodyText: hopBodyText,
       retryAfterSeconds: Number(upstream.headers.get("retry-after")),
     });
+    // A transport retry stops as soon as another provider gives any real HTTP
+    // answer. Walking onward would turn an application failure into a silent
+    // cross-provider retry, outside the authority this path was given.
+    if (transportFallback && hopVerdict.reason !== "transport") {
+      logFailover(route, model, verdict.reason, status, upstream.status);
+      return { route: model, built, upstream, failedBodyText: hopBodyText };
+    }
     if (hopVerdict.swap) recordProviderCooldown(model.provider, hopVerdict);
     logFailover(route, model, verdict.reason, status, upstream.status);
   }
@@ -3476,7 +3529,7 @@ async function handleResponses(request, response, requestUrl) {
           adoptRoute(moved.route, moved.built);
           upstream = moved.upstream;
           upstreamStatus = upstream.status;
-          failedBodyText = undefined;
+          failedBodyText = moved.failedBodyText;
         }
       }
     }
