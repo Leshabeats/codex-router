@@ -17,8 +17,8 @@
           "description": "Deep reasoning"
         }
       ],
-      "contextWindow": 131072,
-      "autoCompact": 110000,
+      "contextWindow": 1000000,
+      "autoCompact": 900000,
       "inputModalities": [
         "text"
       ],
