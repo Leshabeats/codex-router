@@ -45,6 +45,7 @@ import {
   LITELLM_CONFIG_PATH,
   MERGED_CATALOG_PATH,
   PORTS,
+  SEARCH_SIDECARS_PATH,
   SOURCE_ROOT,
   TARGET,
 } from "./paths.mjs";
@@ -61,6 +62,8 @@ import {
   resolveStoredCredential,
 } from "./provider-api-key-routing.mjs";
 import { genericProviderConfigured } from "./generic-provider-readiness.mjs";
+import { trustedSearchProviderDescriptor } from "./search-sidecar-policy.mjs";
+import { readSearchSidecarState } from "./search-sidecar-state.mjs";
 import { providerNeedsCuration } from "./provider-onboarding.mjs";
 import { stateOwnershipStatus } from "./state-owner.mjs";
 import {
@@ -963,6 +966,38 @@ for (const provider of RUNTIME_PROVIDERS.values()) {
       `${provider.displayName} models`,
       "provider is registered but has no curated model routes",
       `Run ./bin/curate-models ${provider.id} in an interactive terminal.`,
+    );
+  }
+}
+
+if (TARGET === "codex" && existsSync(SEARCH_SIDECARS_PATH)) {
+  try {
+    for (const binding of readSearchSidecarState().bindings) {
+      const model = MODEL_BY_SLUG.get(binding.model);
+      const provider = RUNTIME_PROVIDERS.get(binding.providerId);
+      const ready = binding.enabled &&
+        Boolean(model) &&
+        model.searchTool === undefined &&
+        Boolean(provider) &&
+        trustedSearchProviderDescriptor(provider, { requireGeneric: true }) &&
+        genericProviderConfigured(binding.providerId);
+      add(
+        ready ? "ok" : binding.enabled ? "fail" : "warn",
+        `Search sidecar ${binding.model}`,
+        ready
+          ? `ready through ${binding.providerId}`
+          : binding.enabled
+            ? "binding, model eligibility, trusted provider, or credential is unavailable"
+            : "disabled",
+        `Run ./bin/model-router codex search-sidecar status ${binding.model}.`,
+      );
+    }
+  } catch (error) {
+    add(
+      "fail",
+      "Search sidecar state",
+      error instanceof Error ? error.message : String(error),
+      `Repair or remove ${SEARCH_SIDECARS_PATH}, then rerun the doctor.`,
     );
   }
 }

@@ -1458,6 +1458,92 @@ test("native web search fails closed without a ChatGPT session", async () => {
   }
 });
 
+test("an explicitly bound routed search never falls back to the native backend", async () => {
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "router-search-sidecar-"));
+  writeFileSync(
+    path.join(testRoot, "enabled-providers.json"),
+    `${JSON.stringify({ version: 1, providers: ["deepseek"] })}\n`,
+    { mode: 0o600 },
+  );
+  writeFileSync(
+    path.join(testRoot, "generic-providers.json"),
+    `${JSON.stringify({
+      version: 1,
+      providers: [{
+        id: "perplexity-sidecar",
+        displayName: "Perplexity Search",
+        baseUrl: "https://api.perplexity.ai",
+        adapter: "openai-chat",
+        headers: {},
+        credentialRef: "cred_perplexity_sidecar_01",
+        allowPrivate: false,
+        enabled: true,
+      }],
+    })}\n`,
+    { mode: 0o600 },
+  );
+  writeFileSync(
+    path.join(testRoot, "search-sidecars.json"),
+    `${JSON.stringify({
+      version: 1,
+      bindings: [{
+        model: "deepseek/deepseek-v4-pro",
+        providerId: "perplexity-sidecar",
+        adapter: "perplexity-search",
+        enabled: true,
+        timeoutMs: 1_000,
+        maxResults: 8,
+        cacheTtlMs: 60_000,
+        cacheMaxEntries: 128,
+        maxAttempts: 2,
+        retryDelayMs: 100,
+      }],
+    })}\n`,
+    { mode: 0o600 },
+  );
+  let nativeRequests = 0;
+  const native = await mockServer(async (request, response) => {
+    nativeRequests += 1;
+    await bodyJson(request);
+    json(response, 200, { output: "unexpected native response" });
+  });
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_STATE_DIR: testRoot,
+    CODEX_NATIVE_BASE_URL: `http://127.0.0.1:${native.port}/backend-api/codex`,
+    CODEX_ROUTER_NATIVE_SESSION_FALLBACK: "0",
+    CODEX_ROUTER_QUIET: "1",
+  });
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const response = await fetch(`${routerBase(routerPort)}/alpha/search?source=codex`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${CALLER_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "deepseek/deepseek-v4-pro",
+        commands: { search_query: [{ q: "OpenAI news" }] },
+      }),
+    });
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), {
+      error: {
+        type: "search_sidecar_provider_unavailable",
+        message: "The search provider credential is unavailable.",
+      },
+    });
+    assert.equal(nativeRequests, 0);
+  } finally {
+    await stopChild(router);
+    await closeServer(native.server);
+    rmSync(testRoot, { recursive: true, force: true });
+  }
+});
+
 test("router synthesizes routed compaction and safely replays it to native models", async () => {
   const gatewayRequests = [];
   const finalContract = JSON.stringify({

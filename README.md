@@ -285,6 +285,47 @@ from an OpenAI-compatible endpoint. A model is advertised only after its
 provider path has been verified to preserve Codex search-result items and
 tool-call history.
 
+For a routed model that has no verified standalone or provider-hosted search,
+Codex can instead use an explicit Perplexity Search sidecar. This is not a
+global fallback: the binding names one exact routed model, uses a separately
+stored Perplexity API key, and is refused for a model that already owns a
+search capability. The adapter implements Perplexity's raw
+[`POST /search`](https://docs.perplexity.ai/api-reference/search-post) API and
+accepts only Codex `search_query` commands; unsupported filters or other web
+commands fail by name.
+
+Create the trusted provider descriptor, enter the key at the hidden terminal
+prompt, and bind the model:
+
+```sh
+./bin/model-router codex providers generic add perplexity-search \
+  --name "Perplexity Search" \
+  --base-url https://api.perplexity.ai \
+  --adapter openai-chat
+./bin/model-router codex providers generic credential perplexity-search set
+./bin/model-router codex search-sidecar set PROVIDER/MODEL perplexity-search
+./bin/model-router codex search-sidecar status PROVIDER/MODEL
+```
+
+The credential command never accepts the key as an argument. The descriptor,
+credential reference, and per-model binding are private, atomic state; the key
+remains in the generic-provider protected credential file. Search requests use
+the generic-provider DNS-pinned, redirect-refusing transport. Result URLs must
+resolve publicly, credential-bearing citations are rejected, the whole
+operation shares one timeout across retry and backoff, and cache entries are
+scoped by caller account, model, provider, and credential reference. Removing
+the generic provider also removes its credential and every dependent sidecar
+binding. Fully quit and reopen Codex after changing a binding so its model
+catalog refreshes.
+
+On Windows, the same commands are available through `codex-router.ps1`:
+
+```powershell
+.\codex-router.ps1 providers generic add perplexity-search --name "Perplexity Search" --base-url https://api.perplexity.ai --adapter openai-chat
+.\codex-router.ps1 providers generic credential perplexity-search set
+.\codex-router.ps1 search-sidecar set PROVIDER/MODEL perplexity-search
+```
+
 ```sh
 npm install -g @xai-official/grok
 grok login --oauth
