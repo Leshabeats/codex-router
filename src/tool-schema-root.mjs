@@ -239,6 +239,16 @@ export function nonRecursiveToolSchema(schema) {
 // list. Copy-on-write throughout: a schema with no foreign ref keeps identity,
 // and the client's object is never mutated.
 const DEFS_REF_PREFIX = "#/$defs/";
+const REF_OVERRIDE_ANNOTATIONS = new Set([
+  "$comment",
+  "default",
+  "deprecated",
+  "description",
+  "examples",
+  "readOnly",
+  "title",
+  "writeOnly",
+]);
 const MAX_INLINE_DEPTH = 32;
 const MAX_INLINE_EXPANSIONS = 512;
 const MAX_INLINE_BYTES = 256 * 1024;
@@ -376,6 +386,17 @@ function inlineNodeRefs(
   // keep the decorated node intact and let the provider fail closed if it
   // cannot represent that conjunction.
   if (strictDefsRef && expanded.$ref !== undefined) return node;
+  if (foreignRef) {
+    const conflicts = Object.keys(rewrittenSiblings).some((key) => (
+      !REF_OVERRIDE_ANNOTATIONS.has(key) &&
+      Object.hasOwn(expanded, key) &&
+      !isDeepStrictEqual(rewrittenSiblings[key], expanded[key])
+    ));
+    // `$ref` siblings are conjunctive. Object spread is lossless when the
+    // assertions are distinct or identical, but a different value for the
+    // same assertion would overwrite one side and can widen the schema.
+    if (conflicts) return node;
+  }
   if (strictDefsRef) {
     const conflicts = Object.keys(rewrittenSiblings).some((key) => (
       Object.hasOwn(expanded, key) && !isDeepStrictEqual(rewrittenSiblings[key], expanded[key])
