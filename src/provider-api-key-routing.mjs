@@ -190,7 +190,9 @@ export async function resolveProviderApiKeyForRequest(
   // registry provider ids and must stay on the existing endpoint credential
   // path instead of being parsed as pool provider identities. Generic runtime
   // providers are handled by their separate request boundary before this call.
-  if (!PROVIDERS.has(provider.id)) {
+  const perModelEndpointId =
+    typeof provider?.id === "string" && provider.id.includes("/");
+  if (perModelEndpointId) {
     return {
       credential: resolveLegacy(),
       pooled: false,
