@@ -229,6 +229,12 @@ Linux installations support the Codex CLI.
 | Muse Spark 1.2 (Meta) | `meta/muse-spark-1.2` | Meta Model API key |
 | Muse Spark 1.2 Contributor (Meta) | `meta/muse-spark-1.2-contributor` | Meta Model API key |
 | Muse Spark 1.1 (Meta) | `meta/muse-spark-1.1` | Meta Model API key |
+| Hy4 Preview (ClinePass) | `clinepass/tencent/hy4-preview` | ClinePass API key |
+| Hy4 Preview (Command Code) | `commandcode/hy4-preview` | Command Code API key |
+| Hy4 Preview (NanoGPT) | `nano-gpt/tencent/hy4-preview` | NanoGPT API key |
+| Hy4 Preview (Nous Research) | `nousresearch/tencent/hy4-preview` | Nous Portal API key |
+| Hy4 Preview (opencode Go) | `opencode-go/hy4-preview` | opencode Go/Zen API key |
+| Hy4 Preview (OpenRouter) | `openrouter/tencent/hy4-preview` | OpenRouter API key |
 | GLM-5.2 (ClinePass) | `clinepass/glm-5.2` | ClinePass API key |
 | Kimi K3 (ClinePass) | `clinepass/kimi-k3` | ClinePass API key |
 | Kimi K2.7 Code (ClinePass) | `clinepass/kimi-k2.7-code` | ClinePass API key |
@@ -284,6 +290,47 @@ the router does not enable a global web-search switch or infer compatibility
 from an OpenAI-compatible endpoint. A model is advertised only after its
 provider path has been verified to preserve Codex search-result items and
 tool-call history.
+
+For a routed model that has no verified standalone or provider-hosted search,
+Codex can instead use an explicit Perplexity Search sidecar. This is not a
+global fallback: the binding names one exact routed model, uses a separately
+stored Perplexity API key, and is refused for a model that already owns a
+search capability. The adapter implements Perplexity's raw
+[`POST /search`](https://docs.perplexity.ai/api-reference/search-post) API and
+accepts only Codex `search_query` commands; unsupported filters or other web
+commands fail by name.
+
+Create the trusted provider descriptor, enter the key at the hidden terminal
+prompt, and bind the model:
+
+```sh
+./bin/model-router codex providers generic add perplexity-search \
+  --name "Perplexity Search" \
+  --base-url https://api.perplexity.ai \
+  --adapter openai-chat
+./bin/model-router codex providers generic credential perplexity-search set
+./bin/model-router codex search-sidecar set PROVIDER/MODEL perplexity-search
+./bin/model-router codex search-sidecar status PROVIDER/MODEL
+```
+
+The credential command never accepts the key as an argument. The descriptor,
+credential reference, and per-model binding are private, atomic state; the key
+remains in the generic-provider protected credential file. Search requests use
+the generic-provider DNS-pinned, redirect-refusing transport. Result URLs must
+resolve publicly, credential-bearing citations are rejected, the whole
+operation shares one timeout across retry and backoff, and cache entries are
+scoped by caller account, model, provider, and credential reference. Removing
+the generic provider also removes its credential and every dependent sidecar
+binding. Fully quit and reopen Codex after changing a binding so its model
+catalog refreshes.
+
+On Windows, the same commands are available through `codex-router.ps1`:
+
+```powershell
+.\codex-router.ps1 providers generic add perplexity-search --name "Perplexity Search" --base-url https://api.perplexity.ai --adapter openai-chat
+.\codex-router.ps1 providers generic credential perplexity-search set
+.\codex-router.ps1 search-sidecar set PROVIDER/MODEL perplexity-search
+```
 
 ```sh
 npm install -g @xai-official/grok
@@ -517,6 +564,7 @@ the operator explicitly selects them.
 | MiMo-V2.5 (opencode Go) | `opencode-go/mimo-v2.5` |
 | MiMo-V2.5-Pro (opencode Go) | `opencode-go/mimo-v2.5-pro` |
 | Hy3 (opencode Go) | `opencode-go/hy3` |
+| Hy4 Preview (opencode Go) | `opencode-go/hy4-preview` |
 | MiniMax M3 (opencode Go) | `opencode-go-messages/minimax-m3` |
 | MiniMax M2.7 (opencode Go) | `opencode-go-messages/minimax-m2.7` |
 | MiniMax M2.5 (opencode Go) | `opencode-go-messages/minimax-m2.5` |
@@ -580,6 +628,10 @@ the router refuses paid IDs and shows traffic-only usage when no quota header
 has been observed. Kilo's general SDK setup guide still asks external SDK
 users for an API key; this entry intentionally covers only the gateway's
 documented anonymous `:free` path.
+
+Kilo's catalog also advertises `tencent/hy4-preview`, but that ID is paid: it
+does not end in `:free`. The Kilo Free route deliberately filters it out rather
+than presenting HY4 as an anonymous model.
 
 ### Custom: one provider, many endpoints
 
@@ -679,6 +731,7 @@ CLI session.
 | GPT 5.5 (Command Code) | `commandcode/gpt-5.5` |
 | Gemini 3.5 Flash (Command Code) | `commandcode/gemini-3.5-flash` |
 | Hy3 (Command Code) | `commandcode/hy3-paid` |
+| Hy4 Preview (Command Code) | `commandcode/hy4-preview` |
 | Step 3.7 Flash (Command Code) | `commandcode/step-3.7-flash` |
 | Claude Sonnet 5 (Command Code) | `commandcode-messages/claude-sonnet-5` |
 | Claude Opus 4.8 (Command Code) | `commandcode-messages/claude-opus-4.8` |
@@ -792,20 +845,20 @@ often for the repository to pin and live-verify individual entries:
 | GitHub Copilot | `github-copilot` | Account-specific GitHub Copilot endpoint |
 | Chutes | `chutes` | `https://llm.chutes.ai/v1` |
 | OrcaRouter | `orca` | `https://api.orcarouter.ai/v1` |
-| NanoGPT | `nano-gpt` | `https://nano-gpt.com/api/v1` |
 
 `devin-cli` is the OAuth exception to this API-key table. After `devin auth
 login`, the Control Center and `./bin/curate-models devin-cli` read the model
 configuration available to that account through the installed Devin CLI; the
 provider still ships no preselected models.
 
-OpenRouter, Venice, and Nous Research are ordinary API-key providers with
+OpenRouter, NanoGPT, Venice, and Nous Research are ordinary API-key providers with
 live-reviewed checked-in routes in the model table. Use `bin/curate-models` for
 anything else their current account catalogs expose:
 
 | Provider | Provider ID | Base URL | Key from |
 | --- | --- | --- | --- |
 | OpenRouter | `openrouter` | `https://openrouter.ai/api/v1` | [openrouter.ai/settings/keys](https://openrouter.ai/settings/keys) |
+| NanoGPT | `nano-gpt` | `https://nano-gpt.com/api/v1` | [nano-gpt.com](https://nano-gpt.com) |
 | Venice | `venice` | `https://api.venice.ai/api/v1` | [venice.ai/settings/api](https://venice.ai/settings/api) |
 | Nous Research (Hermes) | `nousresearch` | `https://inference-api.nousresearch.com/v1` | [portal.nousresearch.com](https://portal.nousresearch.com) |
 
@@ -1225,11 +1278,11 @@ For reading images only — cannot code:
   moondream            1.7 GB  captions-only
 ```
 
-The tray's **View more** panel also exposes the full 201-tag snapshot captured
-from the official Ollama pages for Gemma 4, Qwen 3.5/3.6/3.8, Nemotron 3 Super,
-Ornith, Nemotron 3, and Muse Glimmer, including quantized and MLX variants.
-Cloud aliases are listed for completeness but marked cloud-only and cannot be
-downloaded as local weights.
+The tray's **View more** panel also exposes the full 213-tag snapshot: official
+Ollama tags for Gemma 4, Qwen 3.5/3.6/3.8, Nemotron 3 Super, Ornith, Nemotron 3,
+and Muse Glimmer, plus the Ollama-compatible Unsloth GGUF variants of GLM-5.3
+and GLM-5.3-Flash. Cloud aliases are listed for completeness but marked
+cloud-only and cannot be downloaded as local weights.
 
 A tool template is a floor, not a prediction — it has been wrong in both
 directions here. What settles it is running the real client:

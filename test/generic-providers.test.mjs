@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import os from "node:os";
@@ -44,6 +44,7 @@ const { LOG_PATH } = await import("../src/paths.mjs");
 const { createSupportBundle } = await import("../src/support-bundle.mjs");
 const { discoverGenericProviderModels } = await import("../src/model-discovery.mjs");
 const { userModelEntry } = await import("../src/user-models.mjs");
+const { runGenericCommand } = await import("../src/providers.mjs");
 test.after(() => rmSync(testRoot, { recursive: true, force: true }));
 
 async function listen(server) {
@@ -264,6 +265,45 @@ test("generic credential references never enter descriptors or logs", async () =
     }),
     /bound credential is unavailable/,
   );
+});
+
+test("generic provider credential CLI binds a hidden-prompt key and removes it coherently", async () => {
+  const providerId = "generic-key-cli";
+  const secret = "TEST_GENERIC_HIDDEN_PROMPT_TOKEN_7d2f09";
+  addGenericProvider({
+    id: providerId,
+    displayName: "Generic Key CLI",
+    baseUrl: "https://provider.example.test/v1",
+  });
+  const transact = async ({ mutate, applyPublication }) => {
+    await mutate();
+    await applyPublication();
+  };
+  const configured = await runGenericCommand(
+    ["credential", providerId, "set", "--json"],
+    { prompt: () => secret, transact, applyPublication: async () => ({ published: false }) },
+  );
+  assert.equal(configured.configured, true);
+  assert.match(configured.credentialRef, /^cred_/);
+  assert.equal(JSON.stringify(configured).includes(secret), false);
+  assert.equal(getGenericProvider(providerId).credentialRef, configured.credentialRef);
+  assert.equal(existsSync(genericProviderCredentialPath(providerId)), true);
+  assert.equal(readProviderCredentialStore().credentials.some(
+    (credential) => credential.id === configured.credentialRef &&
+      credential.providerType === "generic" && credential.providerId === providerId,
+  ), true);
+
+  const removed = await runGenericCommand(
+    ["credential", providerId, "remove", "--json"],
+    { transact, applyPublication: async () => ({ published: false }) },
+  );
+  assert.equal(removed.configured, false);
+  assert.equal(removed.credentialRef, null);
+  assert.equal(getGenericProvider(providerId).credentialRef, undefined);
+  assert.equal(existsSync(genericProviderCredentialPath(providerId)), false);
+  assert.equal(readProviderCredentialStore().credentials.some(
+    (credential) => credential.id === configured.credentialRef,
+  ), false);
 });
 
 test("generic requests fail closed when a credential is unavailable or not an API key", async () => {

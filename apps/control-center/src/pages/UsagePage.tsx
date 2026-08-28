@@ -5,7 +5,7 @@ import {
   Coins,
   Gauge,
 } from "lucide-react";
-import { Badge, Button, EmptyState, PageHeader, SectionHeading, SkeletonBlock } from "../components";
+import { Badge, Button, EmptyState, PageHeader, PanelSkeleton, SectionHeading, SkeletonBlock } from "../components";
 import {
   bucketRange,
   compactNumber,
@@ -19,6 +19,7 @@ import type {
   ProviderUsage,
   ProviderUsageSnapshot,
   RouterControlApi,
+  RouterDataReady,
   RouterTarget,
   UsageBucket,
   UsageEvent,
@@ -82,6 +83,7 @@ export function UsagePage({
   providerUsage,
   api,
   refreshing,
+  dataReady,
   onRefresh,
   focusRequest,
 }: {
@@ -90,6 +92,7 @@ export function UsagePage({
   providerUsage?: ProviderUsageSnapshot;
   api?: RouterControlApi;
   refreshing: boolean;
+  dataReady: RouterDataReady;
   onRefresh: () => void;
   focusRequest?: { id: number; sourceId?: string; allowance: boolean };
 }) {
@@ -248,7 +251,7 @@ export function UsagePage({
       />
 
       {!source ? (
-        refreshing ? <UsageLoading /> : (
+        !dataReady.snapshot || !dataReady.accountUsage || !dataReady.providerUsage ? <UsageLoading /> : (
           <EmptyState
             icon={<BarChart3 size={22} />}
             title="No usage sources available"
@@ -331,7 +334,12 @@ export function UsagePage({
                       navigationFocused={allowanceFocused && row.id === targetAllowanceRowId}
                     />
                   ))}
+                  {!dataReady.accountUsage || !dataReady.providerUsage ? (
+                    <SkeletonBlock className="us-loading-metric" />
+                  ) : null}
                 </div>
+              ) : !dataReady.accountUsage || !dataReady.providerUsage ? (
+                <PanelSkeleton label="Loading account allowances" count={2} />
               ) : (
                 <EmptyState
                   icon={<Gauge size={20} />}
@@ -372,6 +380,12 @@ export function UsagePage({
                     onSelect={() => setSelected(entry.id)}
                   />
                 ))}
+                {!dataReady.providerUsage ? (
+                  <>
+                    <SkeletonBlock className="us-loading-source" />
+                    <SkeletonBlock className="us-loading-source" />
+                  </>
+                ) : null}
               </div>
               {sources.some((entry) => entry.kind === "subscription") ? (
                 <>

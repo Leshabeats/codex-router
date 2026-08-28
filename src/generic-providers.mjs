@@ -404,7 +404,8 @@ function cliUsage() {
     "Usage: providers generic list [--json] | add ID --name NAME --base-url URL " +
       "[--adapter openai-chat|openai-responses|openai-completions] [--header Name=Value] " +
       "[--credential-ref cred_ID] [--description TEXT] [--allow-private] | edit ID [options] | show ID [--json] | " +
-      "enable ID | disable ID | remove ID | test ID [--json]. Descriptor mutations also accept --no-apply only while no curated routes exist.",
+      "enable ID | disable ID | remove ID | test ID [--json]. Descriptor mutations also accept --no-apply only while no curated routes exist. " +
+      "Use `providers generic credential ID status|set|remove` to manage its protected key.",
   );
 }
 
