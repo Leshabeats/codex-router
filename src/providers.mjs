@@ -24,7 +24,23 @@ import {
   targetRestartHint,
 } from "./target-integration.mjs";
 import { withModelOverlayLock } from "./model-overlay-lock.mjs";
-import { runGenericProviderCli } from "./generic-providers.mjs";
+import {
+  GENERIC_PROVIDERS_PATH,
+  runGenericProviderCli,
+} from "./generic-providers.mjs";
+import {
+  applyModelOverlayPublication,
+  transactModelOverlayMutation,
+} from "./model-overlay-publication.mjs";
+import {
+  USER_MODELS_PATH,
+  readUserModels,
+  writeUserModels,
+} from "./user-models.mjs";
+import {
+  MODEL_PICKER_STATE_PATH,
+  forgetModelVisibility,
+} from "./model-picker-state.mjs";
 
 function providersCommand(action, providerId) {
   return process.platform === "win32"
@@ -67,11 +83,73 @@ function list() {
     }));
 }
 
+const GENERIC_MUTATIONS = new Set(["add", "edit", "enable", "disable", "remove"]);
+
+export async function runGenericCommand(args) {
+  const action = args[0] || "list";
+  if (!GENERIC_MUTATIONS.has(action)) {
+    return runGenericProviderCli(args);
+  }
+  const providerId = String(args[1] || "").trim();
+  const noApply = args.includes("--no-apply");
+  let output = "";
+  let result;
+  let routedModels = [];
+  await transactModelOverlayMutation({
+    files: [GENERIC_PROVIDERS_PATH, USER_MODELS_PATH, MODEL_PICKER_STATE_PATH],
+    mutate: async () => {
+      // Read after the cross-process overlay lock is held. A curation command
+      // may have committed while this command was queued, and descriptor
+      // removal must not leave those newly added routes or picker decisions
+      // behind.
+      routedModels = readUserModels().filter((model) => model?.provider === providerId);
+      if (noApply && routedModels.length > 0) {
+        throw new Error(
+          `--no-apply is unsafe while ${providerId} has ${routedModels.length} curated model route(s); rerun without it so the running route cannot drift.`,
+        );
+      }
+      result = await runGenericProviderCli(args, {
+        output: { write: (chunk) => { output += String(chunk); } },
+      });
+      if (action !== "remove") return;
+      const allModels = readUserModels();
+      writeUserModels(allModels.filter((model) => model?.provider !== providerId));
+      forgetModelVisibility(routedModels.map((model) => model.slug));
+    },
+    restart: !noApply,
+    applyPublication: noApply
+      ? async () => ({ published: false })
+      : applyModelOverlayPublication,
+  });
+  process.stdout.write(output);
+  const json = args.includes("--json");
+  if (noApply) {
+    if (!json) {
+      process.stdout.write("Saved generic provider state without publishing an unused route.\n");
+    }
+    return result;
+  }
+  if (action === "remove") {
+    if (!json) {
+      process.stdout.write(
+        `Removed ${routedModels.length} curated model route(s) and their picker decisions.\n`,
+      );
+    }
+  } else {
+    if (!json) {
+      process.stdout.write(
+        `Republished the routing plane (${routedModels.length} curated model route(s)) and reloaded the installed router if present.\n`,
+      );
+    }
+  }
+  return result;
+}
+
 async function main() {
   const command = process.argv[2] || "list";
   const providerId = process.argv[3];
   if (command === "generic") {
-    await runGenericProviderCli(process.argv.slice(3));
+    await runGenericCommand(process.argv.slice(3));
     return;
   }
   if (command === "list") {

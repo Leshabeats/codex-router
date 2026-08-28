@@ -661,8 +661,12 @@ async function printProviderOnboarding() {
 }
 
 async function handleGenericProviders(...commandArgs) {
-  const { runGenericProviderCli } = await import("./generic-providers.mjs");
-  await runGenericProviderCli(commandArgs, { output: process.stdout });
+  // The control center and the provider CLI must cross the same publication
+  // boundary. Calling the descriptor CRUD layer directly here can leave a
+  // running route and every installed client's picker on the pre-mutation
+  // registry until some unrelated later apply.
+  const { runGenericCommand } = await import("./providers.mjs");
+  await runGenericCommand(commandArgs);
 }
 
 async function installProviderCli(providerId) {
