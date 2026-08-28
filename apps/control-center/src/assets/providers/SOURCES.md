@@ -7,10 +7,10 @@ hotlinked at runtime. Research was refreshed on 2026-08-21.
 | Local asset | Used for | Official brand or product page | Asset source |
 | --- | --- | --- | --- |
 | `openai.png` | OpenAI and GPT models | https://openai.com/brand/ | https://www.google.com/s2/favicons?domain=openai.com&sz=128, reused from the attributed tray asset |
-| `anthropic.png` | Anthropic and Claude models | https://www.anthropic.com/ | https://cdn.prod.website-files.com/67ce28cfec624e2b733f8a52/681d52619fec35886a7f1a70_favicon.png |
+| `anthropic.png` | Anthropic and Claude models | https://www.anthropic.com/ | https://claude.ai/apple-touch-icon.png (official Claude icon, resized to 256px; replaced a monochrome favicon that lost the brand colour) |
 | `xai.png` | xAI and Grok | https://x.ai/ | https://x.ai/icon.png |
 | `deepseek.png` | DeepSeek | https://www.deepseek.com/ | https://www.deepseek.com/favicon.ico |
-| `kimi.png` | Kimi and Moonshot | https://www.kimi.com/ | https://www.kimi.com/favicon-dark.ico |
+| `kimi.png` | Kimi and Moonshot | https://www.kimi.com/ | Official Kimi app icon, App Store artwork for Beijing Moonshot Technology's Kimi app, resized to 256px |
 | `commandcode.svg` | Command Code | https://commandcode.ai/brand | https://raw.githubusercontent.com/CommandCodeAI/command-code/refs/heads/main/.github/commandcode/symbols/symbol.svg |
 | `github-copilot.svg` | GitHub Copilot | https://github.com/features/copilot | https://github.com/primer/octicons/blob/main/icons/copilot-24.svg |
 | `chutes.svg` | Chutes | https://chutes.ai/ | Official site header mark, reused from the attributed tray asset |
@@ -31,7 +31,9 @@ hotlinked at runtime. Research was refreshed on 2026-08-21.
 | `poolside.svg` | Poolside Laguna models | https://poolside.ai/models | https://poolside.ai/favicon/favicon.svg (official site favicon; the official verified organization identifies Laguna as its model family at https://github.com/poolsideai) |
 | `stepfun.svg` | StepFun models | https://www.stepfun.com/ | https://www.stepfun.com/step_favicon.svg |
 | `tencent.svg` | Tencent Hy3 models | https://www.tencent.com/tencent-hunyuan-officially-releases-hy3-advancing-agent-capabilities-and-deeper-product-integration/ | https://www.tencent.com/wp-content/themes/tencent-web/assets/favicon/safari-pinned-tab.svg (official site vector mask, locally colored with Tencent's `#0052d9` mask-icon color) |
-| `google.svg` | Google Gemini and Gemma | https://about.google/brand-resource-center/ | https://cdn.simpleicons.org/google |
+| `google.svg` | Google, and Gemma models | https://about.google/brand-resource-center/ | https://cdn.simpleicons.org/google |
+| `gemini.svg` | Gemini models | https://gemini.google/ | https://www.gstatic.com/lamda/images/gemini_sparkle_v002_d4735304ff6292a690345.svg (official sparkle, with its own purple-to-cyan gradient) |
+| `antigravity.png` | Google Antigravity | https://antigravity.google/ | https://antigravity.google/assets/image/brand/antigravity-icon__full-color.png (official press asset) |
 | `meta.svg` | Meta and Llama models | https://about.meta.com/brand/resources/meta/company-brand/ | https://cdn.simpleicons.org/meta |
 | `minimax.svg` | MiniMax | https://www.minimax.io/about | https://cdn.simpleicons.org/minimax |
 | `mistral.svg` | Mistral AI | https://mistral.ai/ | https://cdn.simpleicons.org/mistralai |
@@ -41,6 +43,7 @@ hotlinked at runtime. Research was refreshed on 2026-08-21.
 | `xiaomi.svg` | Xiaomi MiMo models | https://www.mi.com/global/ | https://cdn.simpleicons.org/xiaomi |
 | `venice.png` | Venice | https://venice.ai/ | https://venice.ai/apple-touch-icon.png (official touch icon, locally adapted to a white-on-transparent mask) |
 | `nousresearch.png` | Nous Research (Hermes) | https://nousresearch.com/ | https://nousresearch.com/apple-touch-icon.png (official touch icon, locally adapted to a white-on-transparent mask) |
+| `stealth.svg` | Codenamed preview models with no maker's mark of their own (Ox Alpha, Fugu Ultra, Inkling), and the user-defined Custom provider | n/a | Original artwork drawn for this repository; not a third-party mark |
 
 Simple Icons copies are stored locally and used only where an official site did
 not expose a practical standalone product mark. Unknown future providers and

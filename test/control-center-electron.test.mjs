@@ -42,22 +42,70 @@ import {
   shouldQuitOnLastWindowClosed,
   writeLifecycleState,
 } from "../apps/control-center/electron/lifecycle-state.mjs";
+import {
+  controlCenterDestination,
+  controlCenterNavigationURL,
+  NAVIGATION_ARGUMENT,
+  NAVIGATION_SOURCE_ARGUMENT,
+} from "../apps/control-center/electron/navigation.mjs";
+
+test("Control Center navigation accepts only one fixed widget destination", () => {
+  assert.deepEqual(controlCenterDestination(["electron", ".", NAVIGATION_ARGUMENT, "usage"]), {
+    destination: "usage",
+    sourceId: undefined,
+  });
+  assert.deepEqual(
+    controlCenterDestination(["electron", ".", NAVIGATION_ARGUMENT, "usage-resets"]),
+    { destination: "usage-resets", sourceId: undefined },
+  );
+  assert.deepEqual(
+    controlCenterDestination([
+      "electron", ".", NAVIGATION_ARGUMENT, "usage", NAVIGATION_SOURCE_ARGUMENT, "deepseek",
+    ]),
+    { destination: "usage", sourceId: "deepseek" },
+  );
+  assert.equal(controlCenterDestination(["electron", ".", NAVIGATION_ARGUMENT, "settings"]), undefined);
+  assert.equal(controlCenterDestination(["electron", ".", NAVIGATION_ARGUMENT]), undefined);
+  assert.equal(controlCenterDestination([
+    "electron", ".", NAVIGATION_ARGUMENT, "usage", NAVIGATION_SOURCE_ARGUMENT, "deep_seek",
+  ]), undefined);
+  assert.equal(controlCenterDestination([
+    "electron", ".", NAVIGATION_ARGUMENT, "usage", NAVIGATION_ARGUMENT, "usage-resets",
+  ]), undefined);
+});
+
+test("Control Center navigation URLs are exact and source bounded", () => {
+  assert.deepEqual(controlCenterNavigationURL(
+    "codex-router://control-center/usage-resets?source=openai",
+  ), { destination: "usage-resets", sourceId: "openai" });
+  assert.deepEqual(controlCenterNavigationURL(
+    "codex-router://control-center/usage",
+  ), { destination: "usage", sourceId: undefined });
+  for (const value of [
+    "https://control-center/usage",
+    "codex-router://other/usage",
+    "codex-router://control-center//usage",
+    "codex-router://control-center/settings",
+    "codex-router://control-center/usage?source=deep_seek",
+    "codex-router://control-center/usage?source=openai&source=deepseek",
+    "codex-router://control-center/usage?next=settings",
+    "codex-router://control-center/usage#reset",
+  ]) assert.equal(controlCenterNavigationURL(value), undefined, value);
+});
 
 test("Control Center groups provider routes under one model family", () => {
   const families = groupModelFamilies([
-    { slug: "opencode-free/ox-alpha", displayName: "Ox Alpha (OpenCode Free)", provider: "opencode-free", visible: false, enabled: true },
-    { slug: "opencode-go/ox-alpha", displayName: "Ox Alpha (opencode Go)", provider: "opencode-go", visible: true, enabled: true },
-    { slug: "opencode-free/x-preview-f-free", displayName: "Ox Alpha Free", provider: "opencode-free", visible: true, enabled: true },
+    { slug: "opencode-go/glm-5.3-flash", displayName: "GLM-5.3-Flash (opencode Go)", provider: "opencode-go", visible: true, enabled: true },
+    { slug: "opencode-go/glm-5.3", displayName: "GLM-5.3 (opencode Go)", provider: "opencode-go", visible: true, enabled: true },
     { slug: "deepseek/deepseek-v4-pro", displayName: "DeepSeek V4 Pro (API)", provider: "deepseek", visible: true, enabled: true },
   ]);
-  assert.equal(families.length, 2);
-  const ox = families.find((family) => family.id === "ox-alpha");
-  assert.equal(ox.displayName, "Ox Alpha");
-  assert.deepEqual(ox.routes.map((route) => route.slug), [
-    "opencode-free/ox-alpha",
-    "opencode-free/x-preview-f-free",
-    "opencode-go/ox-alpha",
-  ]);
+  assert.equal(families.length, 3);
+  const glmFlash = families.find((family) => family.id === "glm-5-3-flash");
+  assert.equal(glmFlash.displayName, "GLM-5.3-Flash");
+  assert.deepEqual(glmFlash.routes.map((route) => route.slug), ["opencode-go/glm-5.3-flash"]);
+  const glm = families.find((family) => family.id === "glm-5-3");
+  assert.equal(glm.displayName, "GLM-5.3");
+  assert.deepEqual(glm.routes.map((route) => route.slug), ["opencode-go/glm-5.3"]);
   assert.equal(modelFamilyKey({ displayName: "Kimi K3 (OAuth)" }), "kimi-k3");
   assert.equal(modelFamilyKey({ displayName: "Kimi K3 (opencode Go)" }), "kimi-k3");
 });
@@ -83,6 +131,15 @@ test("global model search includes candidates that exist only in loaded discover
         addable: ["discovery-only-model"],
         blocked: {},
         contextLengths: { "discovery-only-model": 131_072 },
+        metadata: {
+          "discovery-only-model": {
+            contextWindow: 262_144,
+            maxOutputTokens: 32_000,
+            inputModalities: ["text", "image"],
+            supportsTools: true,
+            reasoning: { supportedEfforts: ["low", "high"] },
+          },
+        },
       },
     },
   };
@@ -94,7 +151,11 @@ test("global model search includes candidates that exist only in loaded discover
   assert.equal(match.sourceId, "opencode-zen");
   assert.equal(match.addable, true);
   assert.equal(match.registered, false);
-  assert.equal(match.contextWindow, 131_072);
+  assert.equal(match.contextWindow, 262_144);
+  assert.equal(match.maxOutputTokens, 32_000);
+  assert.deepEqual(match.inputModalities, ["text", "image"]);
+  assert.deepEqual(match.reasoningEfforts, ["low", "high"]);
+  assert.equal(match.supportsTools, true);
   assert.equal(searchLoadedCatalogModels(directory, states, "opencode zen").length, 1);
 });
 
@@ -699,11 +760,18 @@ test("electron boundary does not enable node integration or shell argv", async (
   assert.match(main, /contextIsolation:\s*true/);
   assert.match(main, /nodeIntegration:\s*false/);
   assert.match(main, /sandbox:\s*true/);
-  assert.match(main, /frame:\s*process\.platform\s*!==\s*"darwin"/);
+  assert.match(main, /frame:\s*false/);
   assert.match(main, /titleBarStyle:\s*"hiddenInset"/);
   assert.match(main, /trafficLightPosition:\s*\{\s*x:\s*16,\s*y:\s*16\s*\}/);
+  assert.match(main, /titleBarStyle:\s*"hidden"/);
+  assert.doesNotMatch(main, /titleBarOverlay/);
+  assert.match(main, /setApplicationMenu\(null\)/);
   assert.match(main, /icon:\s*appIconPath\(\)/);
   assert.match(main, /app\.dock\?\.setIcon\(appIconPath\(\)\)/);
+  assert.match(main, /function showDockForVisibleWindow\(\)[\s\S]*app\.dock\.setIcon\(appIconPath\(\)\)[\s\S]*app\.dock\.show\(\)/);
+  assert.match(main, /function hideDockForHiddenWindow\(\)[\s\S]*app\.dock\.hide\(\)/);
+  assert.match(main, /function revealWindow\(\)[\s\S]{0,420}showDockForVisibleWindow\(\)[\s\S]{0,120}mainWindow\.show\(\)/);
+  assert.match(main, /createdWindow\.on\("hide"[\s\S]{0,180}hideDockForHiddenWindow\(\)/);
   assert.match(main, /setWindowOpenHandler\(\(\) => \(\{ action: "deny" \}\)\)/);
   assert.match(main, /if \(app\.isPackaged \|\| !requested\)/);
   assert.match(main, /\["127\.0\.0\.1", "localhost", "\[::1\]"\]\.includes\(parsed\.hostname\)/);
@@ -754,17 +822,17 @@ test("electron boundary does not enable node integration or shell argv", async (
   assert.match(compatibilityMain, /import "\.\/electron\/main\.mjs"/);
   assert.doesNotMatch(compatibilityMain, /BrowserWindow|ipcMain|registerIpcHandlers/);
   const renderer = await readFile(new URL("../apps/control-center/src/App.tsx", import.meta.url), "utf8");
-  assert.doesNotMatch(renderer, /WindowControls|traffic-lights|window-control/);
+  assert.match(renderer, /traffic-lights/);
   assert.match(renderer, /native-titlebar/);
   const styles = await readFile(new URL("../apps/control-center/src/styles.css", import.meta.url), "utf8");
-  assert.doesNotMatch(styles, /traffic-lights|window-control|window-close|window-minimize|window-maximize/);
+  assert.match(styles, /\.traffic-lights/);
   assert.match(styles, /native-titlebar/);
-  assert.match(styles, /native-titlebar\.sidebar-collapsed \.titlebar[\s\S]*padding-left:\s*88px/);
+  assert.match(styles, /native-titlebar-darwin\.sidebar-collapsed \.titlebar[\s\S]*padding-left:\s*88px/);
   assert.doesNotMatch(renderer, /drag-region|no-drag/);
   assert.match(styles, /-webkit-app-region:\s*drag/);
   assert.match(styles, /-webkit-app-region:\s*no-drag/);
   for (const label of ["Close window", "Minimize window", "Maximize or restore window"]) {
-    assert.doesNotMatch(renderer, new RegExp(`aria-label=\\"${label}\\"`));
+    assert.match(renderer, new RegExp(`aria-label=\\"${label}\\"`));
   }
   const runner = await readFile(new URL("../apps/control-center/electron/command-runner.mjs", import.meta.url), "utf8");
   assert.match(runner, /shell:\s*false/);
@@ -791,6 +859,8 @@ test("background usage polling is conservative while manual refresh stays immedi
   assert.match(source, /Promise\.allSettled\(\[refreshCore\(\), refreshUsage\(\)\]\)/);
   assert.match(source, /Promise\.allSettled\(\[[\s\S]*api\.getSnapshot\(\)[\s\S]*api\.getHealth\(\)/);
   assert.match(source, /downloadPollInFlight\.current/);
+  assert.match(source, /healthPollInFlight\.current/);
+  assert.match(source, /document\.visibilityState !== "visible"/);
   assert.match(source, /localDownloadActive(?: \|\| mlxOperationActive)? \? api\.getLocalModels\(\)/);
   assert.match(source, /visionDownloadActive \? api\.getVisionBridge\(\)/);
   assert.match(source, /downloadTimer = window\.setInterval\(\(\) => void refreshDownloadProgress\(\), 4_000\)/);
@@ -1087,24 +1157,103 @@ test("the model directory combines provider setup with de-duplicated model-famil
   assert.match(models, /aria-expanded=\{expanded\}/);
   assert.match(models, /aria-controls=\{panelId\}/);
   assert.match(models, /hidden=\{!expanded\}/);
-  assert.match(models, /setExpandedProviderId\(expanded \? null : entry\.id\)/);
-  assert.match(models, /className="pm-provider-detail"[\s\S]*className="pm-provider-connection"[\s\S]*className="pm-model-list"/);
+  assert.match(models, /setExpandedFamilyId\(expandedFamilyId === family\.id \? null : family\.id\)/);
   assert.match(models, /saveProviderCredential/);
   assert.match(models, /setProviderEnabled/);
   assert.match(models, /setPickerModel/);
   assert.match(models, /"Show all router models", \(\) => api\.setPickerModels\(true\)/);
-  assert.match(models, />Show all<\/Button>/);
-  assert.match(models, />Hide all<\/Button>/);
+  assert.match(models, /<span>Turn all on<\/span>/);
+  assert.match(models, /<span>Turn all off<\/span>/);
   assert.match(models, /invalidateCatalogs\(\);[\s\S]{0,180}try \{[\s\S]*finally \{\s*invalidateCatalogs\(\)/);
   assert.match(models, /const generation = beginCatalogRequest/);
   assert.match(models, /catalogRequestIsCurrent\(catalogRequestGenerations\.current, sourceId, generation\)/);
+
+  // One page, one list. Provider accounts live in a connections strip whose
+  // chips open the credential controls, so nothing competes with the models
+  // for the reader's attention.
+  assert.match(models, /className="panel-section pm-connections"/);
+  assert.match(models, /className="pm-chip"/);
+  assert.match(models, /className="pm-connection-menu"/);
+  assert.match(models, /\{connected\.length\} of \{directory\.length\} connected/);
+  assert.match(models, /Connect provider/);
+  assert.doesNotMatch(models, /className="pm-provider-row"|className="pm-provider-summary"/);
+  assert.doesNotMatch(models, /<StatStrip/);
+  assert.match(providerModelsCss, /\.pm-connections\s*\{/);
+  assert.match(providerModelsCss, /\.pm-chip\s*\{/);
+  assert.match(providerModelsCss, /\.pm-connection-menu\s*\{/);
+
+  // Row order must not depend on the switches: a row that leaps to another
+  // part of the list on click loses the reader mid-confirmation.
+  assert.match(models, /const rows = useMemo\(\(\) => filteredFamilies\.map/);
+  assert.doesNotMatch(models, /buckets\[bucket\]\.push/);
+  assert.match(models, /const readyRows = visibleRows\.filter\(\(row\) => row\.usable\.length\)/);
+  assert.match(models, /const blockedRows = visibleRows\.filter\(\(row\) => !row\.usable\.length\)/);
+  // Only the one split a switch cannot change keeps a heading.
+  assert.match(models, /<span>Needs a provider<\/span>/);
+  assert.match(models, /className="pm-group-heading"/);
+  assert.match(providerModelsCss, /\.pm-group-heading\s*\{/);
+
+  // The switch states its own value, and the disclosure sits at the far left
+  // so it cannot read as part of that switch.
+  assert.match(models, /className="pm-family-state" aria-hidden>\{on \? "On" : "Off"\}/);
+  assert.match(models, /<ChevronDown className="pm-accordion-chevron"[\s\S]{0,80}<BrandLogo/);
+  assert.match(providerModelsCss, /\.pm-family-open \{[^}]*grid-template-columns: 14px 38px/s);
+
+  // A short list reads whole; filters and bulk switches only appear once it
+  // is long enough to need them.
+  assert.match(models, /const CROWDED_LIST = 8/);
+  assert.match(models, /const crowded = rows\.length > CROWDED_LIST/);
+  // The count describes the visible list, not the whole catalogue.
+  assert.match(models, /modelSearch \|\| statusFilter !== "all"[\s\S]{0,120}visibleRows\.length/);
+  assert.match(models, /\{crowded \? \(/);
+  assert.match(models, /aria-label="More model actions"/);
+
+  // The provider chip follows the same judgement, counted in providers rather
+  // than rows, and composes with the search and status filters instead of
+  // replacing them.
+  assert.match(models, /const CROWDED_PROVIDERS = 3/);
+  assert.match(models, /const providerCrowded = filterProviders\.length > CROWDED_PROVIDERS/);
+  assert.match(models, /\{providerCrowded \? \([\s\S]{0,400}className="pm-filter-trigger"/);
+  assert.match(models, /aria-label="Filter models by provider"/);
+  assert.match(models, /role="menuitemradio"\s*aria-checked=\{activeProviderFilter === entry\.id\}/);
+  assert.match(models, /activeProviderFilter !== "all" && !family\.routes\.some\(\(model\) => model\.provider === activeProviderFilter\)/);
+  assert.match(models, /modelSearch \|\| statusFilter !== "all" \|\| activeProviderFilter !== "all"[\s\S]{0,120}visibleRows\.length/);
+  // A chip that is no longer rendered must not keep the list narrowed.
+  assert.match(models, /const activeProviderFilter = providerCrowded && filterProviders\.some/);
+  assert.match(providerModelsCss, /\.pm-provider-filter-menu\s*\{/);
+
+  // Nothing to connect means nothing to browse, so the page asks for that
+  // first instead of showing an empty list behind a disabled button.
+  assert.match(models, /title="Connect a provider to get started"/);
+
+  // A single-route model already showed its identity in the row above, so the
+  // panel carries only what the summary left out.
+  assert.match(models, /function ModelDetails\(/);
+  // Two cells, so a route stays one row: stacking the switch and the effort
+  // menu doubled every row's height and repeated "Thinking" down the list.
+  assert.match(models, /function SubagentToggle\(/);
+  assert.match(models, /function SubagentEffort\(/);
+  assert.match(models, /<span>Thinking<\/span>/);
+  assert.match(providerModelsCss, /grid-template-columns: minmax\(0, 1fr\) 78px 92px 70px 74px 104px/);
+  // The effort control uses this page's own menu: a native select's popup is
+  // shifted by the macOS checkmark gutter, which reads as misaligned in a table.
+  assert.match(providerModelsCss, /\.pm-effort-menu \{/);
+  assert.match(models, /className="pm-effort-trigger"/);
+  assert.doesNotMatch(models, /<select[\s\S]{0,200}subagent thinking effort/);
+  assert.match(models, /<dt>Model id<\/dt>/);
+  assert.match(providerModelsCss, /\.pm-model-details\s*\{/);
+  assert.match(models, /<dd className="pm-model-details-controls">/);
+  assert.match(
+    providerModelsCss,
+    /\.pm-model-details dd\.pm-model-details-controls\s*\{[^}]*overflow:\s*visible/,
+  );
 
   // Adding republishes the whole catalog to every installed client and is the
   // slowest thing this page starts. Placeholder rows carrying the chosen slugs
   // stand in meanwhile, or the click reads as having done nothing at all.
   assert.match(models, /setPendingModels\(\(current\) => addPendingCatalogModels\(current, entry\.id, selected\)\)/);
-  assert.match(models, /<PendingModelRows slugs=\{pending\} \/>/);
-  assert.match(models, /Adding to the picker/);
+  assert.match(models, /<PendingModelRows slugs=\{pendingSlugs\} \/>/);
+  assert.match(models, /<small>Adding…<\/small>/);
   // Cleared in a finally: a placeholder surviving a failed add would claim the
   // model arrived.
   assert.match(models, /\} finally \{[\s\S]{0,400}setPendingModels\(/);
@@ -1117,67 +1266,59 @@ test("the model directory combines provider setup with de-duplicated model-famil
   assert.match(providerModelsCss, /\.pm-pending-control/);
   assert.match(models, /setSubagentModel/);
   assert.match(models, /setSubagentEffort/);
-  assert.match(models, /<Badge tone="accent">Subagent<\/Badge>/);
-  assert.match(models, /subagent thinking effort/);
-  assert.match(models, /<option value="default">Model default<\/option>/);
-  assert.match(providerModelsCss, /\.pm-model-row\[data-subagent="enabled"\]/);
-  assert.match(models, /<strong>\{family\.displayName\}<\/strong>/);
-  assert.match(models, /<strong>\{providerName\}<\/strong>/);
-  assert.match(models, /groupModelFamilies\(models\)/);
-  assert.match(models, /One model row\. Expand it only when you need to choose a provider route\./);
-  assert.match(models, /These routes use different credentials, quotas, and provider policies\./);
-  assert.match(models, /setExpandedFamilyId\(expanded \? null : family\.id\)/);
-  assert.match(models, /discoverProviderModels/);
-  assert.match(models, /addProviderModels/);
-  assert.match(models, /<Badge tone="accent">\{entry\.models\.length\} active/);
-  assert.doesNotMatch(models, /providerUsage\?\.requests \|\| 0/);
-  assert.match(models, /\{providerUsage\?\.requests \? <small className="pm-provider-requests">/);
-  assert.match(models, /providerUsage\.requests === 1 \? "request" : "requests"/);
-  assert.match(providerModelsCss, /\.pm-provider-tags\s*\{[^}]*flex-wrap:\s*nowrap;/s);
-  assert.match(models, /\{ label: "Models", value: modelFamilies\.length, detail: `\$\{enabledCount\} provider routes` \}/);
-  assert.match(models, /className="pm-provider-toolbar-primary"/);
-  assert.match(models, /className="pm-provider-toolbar-actions"/);
-  assert.match(models, /className="pm-filter-trigger"/);
-  assert.match(models, /aria-haspopup="menu"/);
-  assert.match(models, /role="menuitemradio"/);
-  assert.doesNotMatch(models, /className="segmented-control compact"/);
-  assert.doesNotMatch(models, /Default routed model/);
-  assert.doesNotMatch(models, /Subagent catalog/);
-  assert.doesNotMatch(models, /Enabled models only/);
-  assert.doesNotMatch(models, /if \(enabledModelsOnly/);
-  assert.match(models, /className="pm-selected-models-heading"/);
-  assert.match(models, />Provider catalog<\/strong>/);
-  assert.match(models, />Model families<\/strong>/);
-  assert.match(models, /catalogEligible\(entry\) && catalog \?/);
-  assert.match(models, /catalog\?\.data \? "Reload catalog" : "Browse model catalog"/);
-  assert.match(models, /Load connected catalogs/);
-  assert.match(models, /Available from loaded catalogs/);
-  assert.match(models, /publishCatalogModels\(entry, result\.sourceId, \[result\.modelId\]\)/);
-  assert.match(models, /modelRouteKind\(model\)/);
-  assert.match(models, /Search providers or known models/);
-  assert.match(models, /Every supported provider stays visible/);
-  assert.match(models, /catalogSources\.length > 1/);
-  assert.match(models, /Select up to 200/);
-  assert.match(models, /state\.data\.addable \?\? state\.data\.unregistered/);
-  assert.match(models, /addable\.has\(id\)/);
+  // The registry is the only thing that can make a route a subagent, so the
+  // page offers the switch or says nothing -- never a test that cannot change
+  // the outcome.
+  assert.match(models, /function subagentControl\(/);
+  // One switch, one meaning, for every route: use this as a subagent or do
+  // not. No certification state to decode in front of a model choice.
+  // The certification states are gone; the muted dash survives as the empty
+  // Thinking cell, which is a different thing entirely.
+  assert.doesNotMatch(models, /kind: "certifiable"|kind: "unsupported"/);
+  assert.doesNotMatch(models, /"Test v2"|>v1 only<|Test subagents|Untested|Awaiting certification|Certification candidate/);
+  assert.doesNotMatch(models, /proof\?\.status/);
+
+  // Turning the switch on adds the route to the subagent selection; the
+  // router publishes it as v2 with an agent definition Codex can spawn. There
+  // is no certification run behind the switch.
+  assert.match(models, /function subagentControl\(/);
+  assert.match(models, /checked: selectedInSettings/);
+  assert.doesNotMatch(models, /certifySubagentModels\(slugs\)/);
+  assert.doesNotMatch(models, /certifyBatch/);
+  assert.doesNotMatch(models, /Couldn't check/);
+
+  // Adding a model is one surface that searches every connected provider at
+  // once, rather than a catalog browser hidden inside each provider.
+  assert.match(models, /function AddModelsDialog\(/);
+  assert.match(models, /loadedCatalogModels\(directory, catalogStates\)/);
+  assert.match(models, /Search every connected provider/);
+  assert.match(models, /const CATALOG_ADD_BATCH_LIMIT = 200/);
+  assert.match(models, /selected\.length >= CATALOG_ADD_BATCH_LIMIT/);
+  assert.match(models, /const blocked = !model\.registered && !model\.addable/);
   assert.match(models, /Not yet supported/);
   assert.match(models, /pm-catalog-block-reason/);
   assert.match(models, /Show 120 more/);
-  // Opening a provider shows its stored list; only an explicit reload re-asks.
-  assert.match(models, /const openProvider = \(entry: ProviderDirectoryEntry, expanded: boolean\)/);
+  assert.doesNotMatch(models, /Browse model catalog|Load connected catalogs/);
+  // Opening the picker reads stored lists; only an explicit reload re-asks.
+  assert.match(models, /const loadConnectedCatalogs = async/);
+  assert.match(models, /refresh \|\| \(catalogStates\[sourceId\]\?\.status \?\? "idle"\) === "idle"/);
   assert.match(models, /discoverProviderModels\(sourceId, \{ refresh \}\)/);
-  assert.match(models, /onReload=\{\(\) => catalogSource && void discoverCatalog/);
-  assert.match(models, /state\.data\.cached \? "saved list from" : "read"/);
-  assert.match(models, /<strong>Available models<\/strong>/);
-  assert.doesNotMatch(models, /Use Add models|<strong>Add models<\/strong>/);
+  assert.match(models, /onReload=\{\(\) => void loadConnectedCatalogs\(\{ refresh: true \}\)\}/);
+  // A stored list can be a day old, so the dialog says when it was read.
+  assert.match(models, /read \$\{formatDateTime\(lastRead\)\}/);
+  assert.match(models, /Lists are stored locally/);
+  assert.match(providerModelsCss, /\.pm-add-models\s*\{/);
+  assert.match(providerModelsCss, /\.dialog-panel:has\(\.pm-add-models\)/);
   assert.match(providerModelsCss, /\.pm-filter-menu-wrap\s*\{/);
   assert.match(providerModelsCss, /\.pm-filter-menu\s*\{/);
   assert.doesNotMatch(providerModelsCss, /\.pm-model-layout\s*\{/);
+  // The removed provider accordion must not leave its styles behind.
+  assert.doesNotMatch(providerModelsCss, /\.pm-live-catalog|\.pm-catalog-search-row|\.pm-provider-detail/);
   assert.match(models, /const effortOptions = model\.reasoningLevels \?\? \[\]/);
   assert.doesNotMatch(models, /reasoningLevels\?\.map\(\(level\) => level\.effort\)/);
   assert.doesNotMatch(models, /<dt>Available<\/dt>/);
-  assert.match(models, /This list is saved locally/);
-  assert.match(catalogSearch, /x-preview-f-free[^\n]+Ox Alpha Free/);
+  assert.match(catalogSearch, /export function catalogModelName\(modelId\)/);
+  assert.doesNotMatch(catalogSearch, /if \(modelId === "x-preview-f-free"\)/);
 
   const components = await readFile(new URL("../apps/control-center/src/components.tsx", import.meta.url), "utf8");
   assert.match(components, /export function SkeletonBlock/);
@@ -1209,7 +1350,7 @@ test("the model directory combines provider setup with de-duplicated model-famil
   }
   assert.match(branding, /"lmstudio": "lmstudio"/);
   assert.match(branding, /ornith[^\n]+BRANDS\.deepreinforce/);
-  assert.match(branding, /hy3[^\n]+BRANDS\.tencent/);
+  assert.match(branding, /hy\(\?:3\|4\)[^\n]+BRANDS\.tencent/);
   assert.match(branding, /laguna[^\n]+BRANDS\.poolside/);
   assert.match(branding, /export function brandForLocalModel/);
   const sources = await readFile(new URL("../apps/control-center/src/assets/providers/SOURCES.md", import.meta.url), "utf8");
@@ -1497,3 +1638,25 @@ for (const mode of ["timeout", "overflow"]) {
     }
   });
 }
+
+test("router children inherit the proxy opt-in this install recorded", async () => {
+  const runner = await readFile(
+    new URL("../apps/control-center/electron/command-runner.mjs", import.meta.url),
+    "utf8",
+  );
+  // The app is launched by the desktop session, so it inherits a proxy address
+  // but nothing saying Node may use it. Without the recorded opt-in a router
+  // child dials a proxied host directly and the connect timeout is reported as
+  // the provider failing -- a reachable Venice catalog came back as "fetch
+  // failed" that way.
+  assert.match(runner, /recordedInstall\.proxyOptIn === "1"/);
+  assert.match(runner, /childEnvironment\.NODE_USE_ENV_PROXY === undefined/);
+  assert.match(runner, /childEnvironment\.NODE_USE_ENV_PROXY = "1"/);
+  assert.match(runner, /recordedProxy\.NODE_USE_ENV_PROXY === "1"/);
+  // Only the opt-in is restored. Supplying an address the environment does not
+  // name is inheritedProxyEnvironment's decision to defer, and AGENTS.md says
+  // not to widen that trigger.
+  assert.doesNotMatch(runner, /childEnvironment\.HTTPS?_PROXY = /);
+  // It applies only to the install that recorded it.
+  assert.match(runner, /recordedInstall\?\.sourceRoot === sourceRoot\s*&&\s*recordedInstall\.proxyOptIn/);
+});

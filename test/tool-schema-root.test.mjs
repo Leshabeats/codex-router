@@ -10,7 +10,47 @@ import {
   normalizeSchemaLiterals,
   objectRootToolSchema,
   providerToolSchema,
+  stripCodexEncryptedSchemaAnnotation,
 } from "../src/tool-schema-root.mjs";
+
+test("Codex encrypted annotations are removed only from JSON-Schema nodes", () => {
+  const ordinary = {
+    type: "object",
+    properties: { value: { type: "string" } },
+  };
+  assert.equal(stripCodexEncryptedSchemaAnnotation(ordinary), ordinary);
+
+  const schema = {
+    type: "object",
+    encrypted: true,
+    properties: {
+      encrypted: {
+        type: "string",
+        description: "A legitimate user property named encrypted.",
+      },
+      nested: {
+        type: "object",
+        properties: {
+          value: { type: "string", encrypted: true },
+        },
+      },
+    },
+    default: { encrypted: true },
+    examples: [{ encrypted: true }],
+  };
+  const repaired = stripCodexEncryptedSchemaAnnotation(schema);
+  assert.notEqual(repaired, schema);
+  assert.equal("encrypted" in repaired, false);
+  assert.deepEqual(repaired.properties.encrypted, {
+    type: "string",
+    description: "A legitimate user property named encrypted.",
+  });
+  assert.equal("encrypted" in repaired.properties.nested.properties.value, false);
+  assert.deepEqual(repaired.default, { encrypted: true });
+  assert.deepEqual(repaired.examples, [{ encrypted: true }]);
+  assert.equal(schema.encrypted, true, "the caller's schema must not be mutated");
+  assert.equal(schema.properties.nested.properties.value.encrypted, true);
+});
 
 test("recursive local refs keep definitions and only the cycle edge becomes permissive", () => {
   const schema = {
@@ -552,6 +592,26 @@ test("a sibling-property ref is inlined with the target's constraints", () => {
   assert.deepEqual(schema, flightsSearchSchema());
 });
 
+// A foreign `$ref` plus a validation sibling is a conjunction. Blind object
+// spread is only lossless when overlapping keywords agree: replacing the
+// target's tighter maxLength with the sibling's looser value would widen what
+// the caller's tool accepts. When that conjunction cannot be represented by a
+// simple inline, keep the original ref and let the strict provider fail closed.
+test("a conflicting foreign ref validation sibling is not widened", () => {
+  const schema = {
+    type: "object",
+    properties: {
+      base: { type: "string", maxLength: 5 },
+      alias: { $ref: "#/properties/base", maxLength: 10 },
+    },
+  };
+  const inlined = inlineForeignRefs(schema);
+  assert.equal(inlined, schema);
+  assert.deepEqual(inlined.properties.alias, {
+    $ref: "#/properties/base",
+    maxLength: 10,
+  });
+});
 test("a $defs ref is the form Moonshot asks for and survives untouched", () => {
   const schema = {
     type: "object",
@@ -567,6 +627,122 @@ test("a $defs ref is the form Moonshot asks for and survives untouched", () => {
   // what it expands to is the `$defs` pointer the property itself carries.
   assert.equal(inlined.properties.alias.$ref, "#/$defs/range");
   assert.deepEqual(inlined.$defs, schema.$defs);
+});
+
+test("a $defs ref with sibling keywords is inlined for Moonshot", () => {
+  const schema = {
+    type: "object",
+    properties: {
+      targetThreadId: { $ref: "#/$defs/__schema20" },
+    },
+    $defs: {
+      __schema2: { type: "string", minLength: 1 },
+      __schema20: {
+        $ref: "#/$defs/__schema2",
+        type: "string",
+        minLength: 1,
+        format: "uuid",
+        description: "Target thread UUID for heartbeat automations.",
+      },
+    },
+  };
+  const inlined = inlineForeignRefs(schema);
+  assert.equal(inlined.properties.targetThreadId.$ref, "#/$defs/__schema20");
+  assert.deepEqual(inlined.$defs.__schema2, { type: "string", minLength: 1 });
+  assert.deepEqual(inlined.$defs.__schema20, {
+    type: "string",
+    minLength: 1,
+    format: "uuid",
+    description: "Target thread UUID for heartbeat automations.",
+  });
+  assert.deepEqual(schema.$defs.__schema20.$ref, "#/$defs/__schema2");
+});
+
+test("a decorated $defs alias chain resolves through pure aliases", () => {
+  const schema = {
+    type: "object",
+    properties: { value: { $ref: "#/$defs/decorated" } },
+    $defs: {
+      base: { type: "string", minLength: 2 },
+      alias: { $ref: "#/$defs/base" },
+      decorated: {
+        $ref: "#/$defs/alias",
+        type: "string",
+        minLength: 2,
+        format: "uuid",
+        description: "Decorated alias.",
+      },
+    },
+  };
+  const inlined = inlineForeignRefs(schema);
+  assert.equal(inlined.properties.value.$ref, "#/$defs/decorated");
+  assert.deepEqual(inlined.$defs.alias, { $ref: "#/$defs/base" });
+  assert.deepEqual(inlined.$defs.decorated, {
+    type: "string",
+    minLength: 2,
+    format: "uuid",
+    description: "Decorated alias.",
+  });
+  assert.deepEqual(schema.$defs.decorated.$ref, "#/$defs/alias");
+});
+
+test("a conflicting $defs ref sibling remains intact", () => {
+  const schema = {
+    type: "object",
+    properties: { value: { $ref: "#/$defs/narrow" } },
+    $defs: {
+      base: { type: "string", minLength: 2 },
+      narrow: {
+        $ref: "#/$defs/base",
+        type: "string",
+        minLength: 1,
+      },
+    },
+  };
+  assert.deepEqual(inlineForeignRefs(schema).$defs.narrow, {
+    $ref: "#/$defs/base",
+    type: "string",
+    minLength: 1,
+  });
+});
+
+test("a conflicting stricter $defs ref sibling also remains intact", () => {
+  const schema = {
+    type: "object",
+    properties: { value: { $ref: "#/$defs/narrow" } },
+    $defs: {
+      base: { type: "string", minLength: 1 },
+      narrow: {
+        $ref: "#/$defs/base",
+        type: "string",
+        minLength: 2,
+      },
+    },
+  };
+  assert.deepEqual(inlineForeignRefs(schema).$defs.narrow, {
+    $ref: "#/$defs/base",
+    type: "string",
+    minLength: 2,
+  });
+});
+
+test("a cyclic $defs ref sibling remains intact", () => {
+  const schema = {
+    type: "object",
+    properties: { node: { $ref: "#/$defs/node" } },
+    $defs: {
+      node: {
+        $ref: "#/$defs/node",
+        type: "object",
+        description: "Cyclic node.",
+      },
+    },
+  };
+  assert.deepEqual(inlineForeignRefs(schema).$defs.node, {
+    $ref: "#/$defs/node",
+    type: "object",
+    description: "Cyclic node.",
+  });
 });
 
 test("an unresolvable ref is left alone rather than guessed at", () => {

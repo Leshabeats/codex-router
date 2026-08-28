@@ -61,21 +61,6 @@ const OPENCODE_FREE_MODELS = Object.freeze({
       "The minimal/low/medium/high/xhigh ladder is that same record's `reasoning_options` " +
       "for this free id; Zen's /models endpoint advertises no effort control.",
   }),
-  "x-preview-f-free": Object.freeze({
-    contextWindow: 1_000_000,
-    outputLimit: 131_072,
-    reasoningLevels: Object.freeze(["low", "high", "max"]),
-    summary: "Ox Alpha Free through OpenCode Zen's anonymous Chat Completions route.",
-    contextNote:
-      "The 1,000,000-token window is OpenCode's own published figure for this exact free id " +
-      "(the `opencode` provider in models.dev/api.json); the catalog carries no paid Ox entry " +
-      "for a model-level number to have been copied from, and it publishes a smaller window " +
-      "on free ids whose route is capped lower. Zen's /models endpoint publishes no context " +
-      "limits.",
-    reasoningNote:
-      "The low/high/max ladder is that same record's `reasoning_options` for this free id; " +
-      "Zen's /models endpoint advertises no effort control.",
-  }),
   "nemotron-3-ultra-free": Object.freeze({
     contextWindow: 1_000_000,
     outputLimit: 128_000,
@@ -153,6 +138,7 @@ const CURATION_ROUTES = Object.freeze({
       "Qwen/Qwen3.7-Flash",
       "Qwen/Qwen3.7-Max",
       "Qwen/Qwen3.7-Plus",
+      "Qwen/Qwen3.8-Flash",
       "Qwen/Qwen3.8-Max",
       "deepseek/deepseek-v4-flash",
       "deepseek/deepseek-v4-pro",
@@ -179,6 +165,7 @@ const CURATION_ROUTES = Object.freeze({
       "xiaomi/mimo-v2.5-pro",
       "zai-org/GLM-5.2",
       "zai-org/GLM-5.2-Fast",
+      "zai-org/GLM-5.3",
     ]),
     models: Object.freeze({}),
   }),
@@ -203,21 +190,27 @@ const CURATION_ROUTES = Object.freeze({
     responsesModels: Object.freeze([
       "gpt-5.6-luna",
       "grok-4.5",
+      "grok-4.6",
       "muse-spark-1.2-contributor",
     ]),
     primaryModels: Object.freeze([
       "deepseek-v4-flash",
       "deepseek-v4-flash-vision-exp",
       "deepseek-v4-pro",
+      "glm-5",
       "glm-5.1",
       "glm-5.2",
       "glm-5.3",
+      "glm-5.3-flash",
       "hy3",
+      "kimi-k2.5",
       "kimi-k2.6",
       "kimi-k2.7-code",
       "kimi-k3",
+      "longcat-2.0",
       "mimo-v2.5",
       "mimo-v2.5-pro",
+      "qwen3.5-plus",
       "x-preview-f",
     ]),
     models: Object.freeze({}),
@@ -235,7 +228,6 @@ const CURATION_ROUTES = Object.freeze({
       "mimo-v2.5-free",
       "nemotron-3-ultra-free",
       "nemotron-3.5-lightning-free",
-      "x-preview-f-free",
     ]),
     models: OPENCODE_FREE_MODELS,
   }),

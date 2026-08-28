@@ -74,10 +74,9 @@ user.
    interactive terminal to choose models. If they did not specify and
    credentials already exist, use
    `configured` rather than showing providers that cannot authenticate.
-   `openrouter`, `venice`, and `nousresearch` behave the same way with one
-   exception: each ships the single checked-in Ox Alpha entry described under
-   "Ox Alpha ships on six routes" below, so their picker is not empty after the
-   key is stored, and everything else on them still has to be curated.
+   `openrouter`, `venice`, and `nousresearch` also ship live-reviewed checked-in
+   presets, so their picker is not empty after the key is stored; anything else
+   on their current account catalogs still has to be curated.
    `venice` and `nousresearch` are ordinary API-key providers — Venice keys come
    from venice.ai/settings/api and Nous Portal keys from
    portal.nousresearch.com; neither has a router-managed CLI sign-in path, and
@@ -87,9 +86,8 @@ user.
    (`opencode-free-responses` is an internal, single-model protocol variant of
    the former and is never selected or curated separately),
    but they need no credential only for their documented free model subsets.
-   `kilo-free` is catalog-only and needs `bin/curate-models kilo-free` after
-   selection; `opencode-free` ships only the Ox Alpha entry and needs curation
-   for anything else. `custom` is selectable on the
+   `kilo-free` and `opencode-free` are catalog-only and need
+   `bin/curate-models PROVIDER` after selection. `custom` is selectable on the
    same terms and is a container whose models each name their own endpoint, so
    enabling it asks for nothing and curating it is unnecessary. All three must
    be selected explicitly; never select one on the user's behalf just because
@@ -441,6 +439,48 @@ dependency tree. That tree is pinned and hashed rather than re-resolved.
    meaningless. Do not add a resolver cache there; a cache hit can serve an
    already-unpacked wheel and skip the hash check the job exists to perform.
 
+## `stop` and `start` act on the same layer, and the proxy survives either
+
+`bin/stop` unloads the background service. `bin/start` used to exec the
+supervisor in the foreground instead, so the obvious `stop; start` pair was
+asymmetric: it retired the managed service and left an unmanaged copy in its
+place. The copy carried the calling shell's environment rather than the
+installed one and died with the shell that started it.
+
+That is how a live installation lost its proxy. A `stop; start` issued from a
+`zsh -lc` that a desktop app had spawned produced a router with no
+`HTTP_PROXY` and no `NODE_USE_ENV_PROXY`, because the shell had neither. Every
+upstream was dialled directly, chatgpt.com timed out, and the router answered
+502 with the message from `src/transport-failure.mjs` telling the operator to
+set an opt-in that was already set -- in the LaunchAgent it had just unloaded.
+The service definition still looked correct at every glance.
+
+1. **Both verbs go through `src/service.mjs`.** `bin/start` starts the managed
+   service; `bin/stop` stops it. Never reintroduce a `bin/start` that execs
+   `src/start.mjs`, and never add a lifecycle verb that manages the service on
+   one side and bypasses it on the other.
+2. **The foreground supervisor stays reachable, never by accident.**
+   `bin/start --foreground` is the debugging path. It is opt-in because an
+   operator who types it has chosen to run unmanaged; an operator who types
+   `start` has not.
+3. **A silent environment adopts the recorded proxy.**
+   `inheritedProxyEnvironment()` in `src/proxy-environment.mjs` reads the
+   install manifest, and `src/start.mjs` applies it to `process.env` before it
+   reads anything or spawns a child, so the router and all three forwarders
+   inherit it. This is the belt to the service definition's braces: it makes
+   the foreground path, and any future path that execs the supervisor directly,
+   reach upstreams exactly as the managed one does.
+4. **Silence is the only trigger.** `proxyEnvironmentDeclared` already treats a
+   named proxy -- or any `NODE_USE_ENV_PROXY`, `0` included -- as the operator
+   speaking, and the restore defers to it. A deliberate unproxied run stays
+   unproxied. Do not widen the trigger to "no proxy reachable" or similar
+   inference; the manifest records a decision, not a guess.
+5. **Coverage.** `test/proxy-environment.test.mjs` holds the restore contract
+   and `test/service-lifecycle.test.mjs` holds the dispatch: that `bin/start`
+   reaches the service layer, that `--foreground` reaches the supervisor, and
+   that a supervisor booted with a silent environment comes up carrying the
+   manifest's proxy.
+
 ## The gateway is restarted in place; the router is not taken down with it
 
 `src/gateway-supervisor.mjs` watches the LiteLLM child and replaces it when it
@@ -696,6 +736,20 @@ so the unit of evidence is always the slug, never the model name.
    Codex collaboration: tool calls work, encrypted subagent payload relay works
    without disclosure, a marker-return spawn succeeds, and a same-thread
    follow-up succeeds. Otherwise omit it and retain conservative v1 behavior.
+   The registry is not the only way a route reaches v2. The operator's own
+   selection promotes it — `subagents mode selected` plus `subagents set <slug>
+   on`, or `mode all` — and so does a completed local verification of all five
+   checks recorded in `multi-agent-proofs.json`. Selection is the ordinary path
+   and the one the Control Center switch uses; the registry exists so nobody
+   has to select a proven route by hand. None of this loosens the gate: an
+   explicit `off` beats every mode, a hidden model is never promoted, a partial
+   verification or a mismatched slug promotes nothing, the legacy diagnostic
+   statuses promote nothing, and only the pull request that moves the registry
+   entry may accept a `v2_agent/` application. Read
+   `docs/SUBAGENT-CERTIFICATION.md` in full before changing
+   `src/subagent-*.mjs`, `src/multi-agent-state.mjs`, `v2_agent/`, or the
+   Subagents column — it records which questions have already been answered at
+   the cost of provider quota.
 5. Remember that Codex advertises only a small priority-ordered subset of native
    spawn-model overrides. Adjust priority intentionally and keep the desired
    Kimi/Grok/GPT choices in that visible subset; do not crowd them out
@@ -1098,72 +1152,64 @@ in `src/model-registry.mjs`, never by the registry fragment alone, and the
 point a credential-free provider at a model somebody would be billed for.
 `opencode-free` and `kilo-free` each expose a large free subset picked out by a
 naming rule that changes without notice, so neither ships that subset: discovery
-filters the provider's live `/models` response and the user curates locally. The
-one checked-in exception is `opencode-free/ox-alpha`, and it is an exception the
-rule itself permits — `x-preview-f-free` earns its place by ending in `-free`,
-the same test `anonymousModelAllowed` applies to everything else, so removing
-the fragment would not make the id any less routable.
+filters the provider's live `/models` response and the user curates locally.
 
-## Ox Alpha ships on six routes, and the ladder belongs to the model
+## Ox Alpha became GLM-5.3-Flash on OpenCode Go
 
-Ox Alpha is one stealth model that six of this repository's providers resell,
-each under its own id: `x-preview-f-free` on `opencode-free`, `ox-alpha-free`
-on `opencode-go`, `stealth/ox-alpha` on `openrouter`, `commandcode` and
-`nousresearch`, and `stealth-ox-alpha` on `venice`. Every one of those was read
-from that provider's own live `/models` response; `test/ox-alpha.test.mjs` pins
-the repository values against local drift. A later upstream rename or withdrawal
-still needs a fresh authenticated catalog read or live inference probe; a static
-test cannot discover remote state.
+Z.ai revealed the OpenCode Go Ox Alpha preview as GLM-5.3-Flash. OpenCode Go
+withdrew `ox-alpha-free` and now publishes `glm-5.3-flash` on Chat Completions.
+The checked-in route is `opencode-go/glm-5.3-flash`; the old public slug
+`opencode-go/ox-alpha` is a static migration alias so existing picker state and
+callers move to the live route instead of reaching a withdrawn upstream ID. The
+older curation slug `opencode-go/ox-alpha-free` is an alias to the same target.
+OpenCode Go publishes a 1,000,000-token context and 131,072-token output limit
+for the named route. Store the provider limit rather than the base model's
+1,048,576 architectural maximum. The ordinary 0.85 compaction ratio is not
+safe for this route in Codex: large live multimodal histories repeatedly
+returned empty completions before that point. Compact conservatively at 400,000
+while retaining the provider's advertised context as catalog metadata. This
+does not bypass provider moderation; a rejected remote compaction remains a
+provider limitation, not a router or stream crash.
 
-The effort ladder is `low`/`high`/`max` on all six, and it is the **model's**
-ladder rather than any reseller's. The model always thinks, and its upstream
-refuses an off-ladder rung by name:
+No checked-in route preserves the preview under the Ox Alpha name. OpenCode
+Free, OpenRouter, and Nous Research withdrew their preview ids. Direct
+exact-route probes then rejected `stealth/ox-alpha` on Command Code as
+`model_unavailable` on basic, streaming, forced-tool, stateless tool-result,
+and compact requests. The available Venice account returned its HTTP 402
+billing gate on all five surfaces before `stealth-ox-alpha` could be
+wire-certified. Exact probes disable cooldown, response-verdict, and compaction
+failover, so neither result can be a healthy alternate answering in disguise.
+The repository therefore ships neither preset.
+
+Command Code and Venice discovery still preserve the provider catalog for
+explicit operator curation. That is not compatibility certification: a local
+entry can fail when the catalog is stale or the account cannot reach inference.
+In particular, Venice curation retains the provider-advertised effort metadata;
+the repository does not replace it with a cross-provider inference for a route
+it could not execute.
+
+The named GLM-5.3-Flash routes on OpenCode Go, OpenRouter, and Z.ai Coding did
+pass direct basic, streaming, forced-tool, stateless tool-result, and compact
+probes. Their recorded effort ladder is `low`/`high`/`max`, and it is the
+**model's** ladder rather than a generic reseller default. The model always
+thinks, and its upstream refuses an off-ladder rung by name:
 
 ```
 HTTP 400 — [1210] This model always engages in thinking and cannot be
 disabled; please use low, high, or max
 ```
 
-`none`, `off`, `minimal`, `medium`, `xhigh`, `ultra`, `default` and `auto` all
-draw that response; `low`, `high` and `max` return 200 with monotonically rising
-reasoning-token counts, so the three rungs are real behavior and not just enum
-validation.
-
-**Venice is the one catalog that disagrees, and it is the one to distrust.** It
-advertises `none`/`low`/`medium`/`high` for this id. That is not a reseller
-knowing something the others do not: it is Venice's most generic shape, shared
-with eight unrelated models, and it contains `none` — a rung this model refuses
-by name. Venice is perfectly capable of publishing a model-specific ladder when
-it has one (`low`/`high`/`max` for GLM-5.3, `none`/`high`/`max` for GLM-5.2), so
-the generic shape here reads as an unverified onboarding default. OpenRouter's
-live API, Nous Portal's live API, and models.dev for `openrouter`,
-`opencode-go`, `opencode`, `kilo` and `nano-gpt` all say `low`/`high`/`max`.
-This is the standing exception to "the provider's own catalog decides": when a
-reseller's advertised ladder contains a rung the model itself rejects by name,
-the model wins, and the disagreement gets written down — here and in the
-fragment's `description` — rather than silently resolved.
-
 The ladder also collides with the effort clamp in `src/catalog.mjs`. Codex
 gained the `max` variant in 0.143.0, so on anything older the catalog rewrites
 this model's default down to `xhigh` — a rung every route refuses. The
-`ox-alpha` request profile in `src/api-forwarder.mjs` is what closes that loop:
-it clamps whatever Codex sent onto the rungs the model's own registry entry
-declares, so `xhigh` and `ultra` land back on `max`, and `medium` and `minimal`
-land on `low`. An absent effort stays absent so the upstream's own default
-applies, and `thinking` is always stripped because none of these routes document
-it and it cannot be switched off anyway.
-
-The window is 1,048,576 tokens with 131,072 of output on every route, and
-forced `tool_choice: "required"` is observed to work everywhere, so no route
-needs `auto-tool-choice`. Only `opencode-free/ox-alpha` carries curated
-`availabilityNux`: it is the one route with no credential to buy first, and
-curated announcement copy is seen by every installer. The other five rely on the
-automatic seven-day announcement, which fires only once their provider is
-actually credentialed and enabled.
-
-Free is a preview, not a property. If the providers start billing it, the
-honest change is to drop `isFree` and rewrite the descriptions, not to leave a
-"Free" badge on a metered model.
+legacy-named `ox-alpha` request profile in `src/api-forwarder.mjs` closes that
+loop for the OpenCode Go and OpenRouter named routes: it clamps whatever Codex
+sent onto the rungs the registry entry declares, so `xhigh` and `ultra` land on
+`max`, while `medium` and `minimal` land on `low`. An absent effort stays absent
+so the upstream default applies, and undocumented `thinking` is stripped. Z.ai
+Coding uses its own `glm-thinking` profile. All three named routes advertise a
+1,000,000-token window, compact at the directly proved conservative 400,000
+threshold, and preserve forced `tool_choice: "required"`.
 
 ## A provider whose models each name their own endpoint
 

@@ -12,22 +12,60 @@ shared with the existing command-line control plane.
 The tray focuses on Codex and does not disable, uninstall, or change the
 existing router configuration.
 
+## Desktop widget
+
+On macOS 14 or newer, add **Codex Router Usage** or **Codex Router Reset** from
+the system widget gallery. The Usage widget shows today's tokens and a true
+seven-day cumulative line graph; Medium also shows up to two quota windows.
+The Reset widget gives the next reset a large countdown and keeps the relevant
+quota windows beside it. Both use the same text-only **Codex Router** header.
+
+Clicking Usage opens that source on the Control Center Usage page. Clicking
+Reset opens the same page and focuses the selected account's allowance and
+reset details, whether Control Center is already running or starts on demand.
+
+Codex is the default usage source. To show another connected account,
+Control-click a widget, choose **Edit Widget**, and select its **Usage Source**.
+The picker is populated from the router's current connected providers, so it
+does not offer an account the host cannot measure.
+
+The native host publishes a small, size-bounded, secret-free JSON snapshot
+after normal status and usage polls. The WidgetKit extension only reads that
+snapshot: it does not run router commands and never receives provider
+credentials, API keys, prompts, model output, or caller capabilities. A stale
+snapshot is called out after 45 minutes instead of presenting old data as live.
+
+Local source builds use ad-hoc signing. Their signed storage mode writes one
+private file at
+`~/Library/Application Support/Codex Router Widget/usage-widget.json` and the
+extension receives only the matching home-relative, read-only temporary
+filesystem exception. That exception is local-source-only: it is not present in
+production entitlements, and neither process reads or writes the extension's
+`~/Library/Containers` directory. Set `MODEL_ROUTER_CODESIGN_IDENTITY` to a
+non-ad-hoc signing identity for a provisioned build; that selects the production
+storage mode, where both sides use only the `group.io.github.codex-router` App
+Group. A redistributable build still needs the host app and extension signed by
+the same Apple team with that App Group provisioned for both bundle identifiers.
+
 ## Opening it like an app
 
 `./bin/model-router-tray` installs **Codex Router.app** into `~/Applications`,
-where Finder, Spotlight, and Launchpad can all find it by name and icon. The
-icon is built from `apps/macos/ModelRouterTray/Resources/AppIcon.svg`; edit the
-SVG and run `scripts/build-app-icon.sh` to regenerate the committed
-`AppIcon.icns`. That script needs `sips` and `iconutil`, which is why the
-`.icns` is committed rather than rasterized during a normal tray build.
+where Finder, Spotlight, and Launchpad can all find it by name and icon. Every
+desktop icon is built from
+`apps/macos/ModelRouterTray/Resources/AppIcon.svg`; edit the SVG and run
+`scripts/build-app-icon.sh` to regenerate the committed native `.icns` plus
+the Control Center PNG and ICO assets used by the sidebar, Dock, Windows, and
+Linux. That script needs `sips` and `iconutil`, which is why the generated
+assets are committed rather than rasterized during a normal tray build.
 
-The Swift host stays `LSUIElement`, so it does not add a second Dock icon. A
-person opening `Codex Router.app` gets the embedded Control Center as a normal
-window and also reveals the native tray surfaces for 20 seconds if **With
-Codex** would otherwise hide them. Closing the Control Center window leaves the
-native host running; reopen the app or choose **Control Center** from the
-menu-bar panel to restore it. The temporary reveal also starts the router and
-pulses the status dot, then follow mode resumes on its own.
+The Swift host stays `LSUIElement`, so it does not add a Dock icon. A person
+opening `Codex Router.app` gets the embedded Control Center as a normal window;
+that window supplies the product's Dock and Command-Tab entry only while it is
+open. Opening the app also reveals the native tray surfaces for 20 seconds if
+**With Codex** would otherwise hide them. Closing the Control Center window
+leaves the native host running; reopen the app or choose **Control Center**
+from the menu-bar panel to restore it. The temporary reveal also starts the
+router and pulses the status dot, then follow mode resumes on its own.
 
 launchd passes `--supervised` when it starts the native host at login. That
 starts the menu-bar host without opening the Control Center window or forcing
@@ -82,11 +120,12 @@ under launchd continuously.
 The Settings tab's **Menu bar** controls allow configuring the menu bar layout and icon to reduce clutter or match your desktop aesthetics:
 
 - **Menu bar mode**:
-  - **Standard** (default): Displays the icon/activity dot alongside the active provider or model name and token usage text.
-  - **Icon only**: Displays a compact icon/indicator dot without model name text, taking minimal horizontal space in the macOS menu bar.
+  - **Standard**: Displays the icon/activity dot alongside the active provider or model name and token usage text.
+  - **Icon only** (default): Displays the compact Router mark without provider/model text, taking minimal horizontal space in the macOS menu bar.
 - **Show model name**: When using Standard mode, this toggle controls whether the active model/provider short name is rendered.
 - **Menu bar icon**:
-  - **Activity dot** (default, including existing installs): Renders a clean status circle tinted by router activity state (idle, thinking, starting, error).
+  - **Router mark** (default when no explicit preference is stored): Renders the smooth monochrome routing glyph from the bundled SVG and follows the menu bar's light or dark appearance. Active states add a status node to the upper route in the same template image.
+  - **Activity dot**: Renders a clean status circle tinted by router activity state (idle, thinking, starting, error).
   - **Provider icon**: Renders the logo of the provider handling the request, using the same `ProviderIcon` map as the rest of the tray.
   - **Preset icon**: Lets you choose from built-in SF Symbols (`cpu`, `brain`, `sparkles`, `terminal`, `bolt.horizontal.circle`, `network`).
   - **Custom image**: Copies a PNG, JPEG, SVG, or ICNS file into Application Support via "Choose Image…". If that copy later disappears, Settings shows that the image is missing instead of keeping a stale filename.
@@ -99,8 +138,8 @@ defaults write io.github.codex-router.tray ModelRouterTray.menuBarDisplayMode ic
 # Toggle model name visibility
 defaults write io.github.codex-router.tray ModelRouterTray.menuBarShowModelName -bool false
 
-# Set icon style (provider, indicator, preset, custom)
-defaults write io.github.codex-router.tray ModelRouterTray.menuBarIconStyle preset
+# Set icon style (router, provider, indicator, preset, custom)
+defaults write io.github.codex-router.tray ModelRouterTray.menuBarIconStyle router
 defaults write io.github.codex-router.tray ModelRouterTray.menuBarPresetIcon sparkles
 ```
 

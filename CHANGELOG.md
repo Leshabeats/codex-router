@@ -2,6 +2,168 @@
 
 ## Unreleased
 
+- **Reinstalling over a state directory owned by another checkout no longer
+  deadlocks.** The installers recorded the state directory's new owner only
+  after the background service reported healthy, while the service itself
+  refuses to boot for as long as the record still names another checkout
+  (`foreign_state_owner`): an install that followed one from a different
+  checkout crash-looped for the full 300-second readiness budget, rolled
+  back, and repeated on every retry, and deleting the whole state directory
+  -- every stored provider key with it -- was the only escape. The record now
+  precedes the service step it describes, so the service boots against its
+  own ownership. The ownership override the installers run under is scoped
+  to that full, ownership-transferring install on both platforms: a
+  prepare-only run meets the guard like any other writer (and the Windows
+  installer restores the caller's environment when it finishes). Linux
+  readiness also fails fast once the service manager's restart counter shows
+  a crash loop, instead of waiting out the whole budget, and names the
+  journal and the router log in the error; the counter query itself is
+  killed inside a bounded slice of the remaining budget, so a blocked
+  `systemctl` cannot stretch the wait, and a health answer that lands as the
+  threshold is crossed still wins over the crash-loop verdict.
+
+- **OpenCode Go Kimi K2.7 Code now accepts current Codex tool schemas.** Its
+  Moonshot-backed validator receives the same bounded decorated-`$defs` repair
+  as the first-party Kimi routes. The compatibility gate names only this
+  observed Console Go model, so unrelated OpenCode Go routes keep their tool
+  payloads unchanged.
+
+- **Translated tool streams no longer expose bridge-only assistant turns.**
+  Bounded, fail-open normalization removes only empty assistant envelopes that
+  LiteLLM's Chat Completions and Anthropic Messages bridges corroborate with a
+  completed tool lifecycle, then compacts the affected output indexes. Real
+  text, reasoning, refusals, malformed or ambiguous streams, and native
+  Responses routes remain untouched. Non-streaming bodies receive equivalent
+  bounded, fail-open handling under an exact terminal-output proof. Direct
+  DeepSeek keeps its narrower provider-specific proof: the historical
+  no-prelude bridge drops its corroborated private-reasoning blank, while the
+  current bridge reconstructs candidate-attached reasoning under the terminal
+  reasoning ID and removes only the separately corroborated blank output.
+
+- **Live model certification now proves the requested route.** Compatibility
+  and smoke probes disable router failover, so a healthy alternate can no
+  longer certify a broken preset. Direct probes retained GLM-5.3-Flash on
+  OpenCode Go, OpenRouter, and Z.ai Coding; the unproved Command Code, Nous
+  Research, and Venice Flash presets were withdrawn. Command Code's Ox Alpha
+  id returned `model_unavailable` on every exact surface, while the available
+  Venice account was billing-blocked before its Ox route could be certified,
+  so neither Ox preset ships. Provider discovery remains available for explicit
+  per-machine curation without presenting catalog presence as wire proof.
+  Curated models now inherit a request profile only when every checked-in route
+  in that provider family has the same non-empty profile, so a model-specific
+  repair such as OpenRouter Flash's `ox-alpha` profile cannot leak onto an
+  unrelated model selected from the same catalog.
+
+- **Router retention and concurrency now stay bounded without crossing native accounts.**
+  Request bodies and buffered upstream errors have explicit byte ceilings,
+  active turns retain truthful accounting after tray records expire, and a
+  separate 24-hour execution deadline protects abandoned work. Encrypted
+  collaboration relays coalesce only within the same resolved native account;
+  one canceled waiter cannot stop another, while the shared read is aborted
+  when every waiter leaves. Aggregate limits and cache counters are visible
+  only through caller-authenticated health.
+
+- **Qwen3.8 Flash and GLM-5.3 full are now pinned on listed providers.**
+  Live catalogs confirmed 2026-08-27: OpenRouter `qwen/qwen3.8-flash` and
+  `z-ai/glm-5.3`; Command Code `Qwen/Qwen3.8-Flash` and `zai-org/GLM-5.3`;
+  QwenCloud/DashScope `qwen3.8-flash`; Nous Research `qwen/qwen3.8-flash`;
+  Venice `z-ai-glm-5-3`; Z.ai API `glm-5.3-flash`. GLM-5.3-Flash was already
+  shipped in #466; this adds the full GLM-5.3 on OpenRouter, Command Code, and
+  Venice, plus Qwen3.8 Flash on OpenRouter, Command Code, Nous Research, and
+  Qwen Plan, plus GLM-5.3-Flash on zai-api.
+
+- **OpenCode Go's Ox Alpha preview has graduated to GLM-5.3-Flash.** The
+  authenticated catalog now publishes `glm-5.3-flash` and reports the old
+  `ox-alpha-free` ID unavailable, matching OpenCode's current Chat Completions
+  table and Z.ai's reveal. The picker now exposes
+  `opencode-go/glm-5.3-flash` as the named, metered 1M-context multimodal model;
+  existing `opencode-go/ox-alpha` and locally curated
+  `opencode-go/ox-alpha-free` selections migrate through static aliases,
+  and the preview's measured low/high/max effort normalization remains attached
+  to the named route. Codex now compacts this route conservatively at 400K after
+  large live multimodal histories returned empty completions before the generic
+  85% point of its advertised 1M window.
+
+- **OpenRouter now ships Grok 4.6 as a listed route.** The checked-in pin is
+  `openrouter/grok-4.6`, upstream id `x-ai/grok-4.6`, 500,000 context with
+  auto-compact at 440,000, text+image input, and the low/medium/high reasoning
+  ladder (matching Command Code, not Nous Research's xhigh-ladder route).
+
+- **README: Ox Alpha availability updated.** No checked-in Ox Alpha preset
+  remains. The withdrawn OpenCode Free, OpenRouter, and Nous routes are gone;
+  Command Code directly reported its id unavailable, and Venice could not be
+  wire-certified through the available account's billing gate. OpenCode Go,
+  OpenRouter, and Z.ai Coding retain their direct-proven named
+  GLM-5.3-Flash routes.
+
+## 0.5.0
+
+- **Grok 4.6 ships on opencode Go.** OpenCode's current Go list and endpoint
+  table publish `grok-4.6` on `/zen/go/v1/responses` (not chat, not messages).
+  The checked-in route is `opencode-go-responses/grok-4.6`, 500,000 context
+  with auto-compact at 440,000, text+image, and the low/medium/high/xhigh
+  ladder models.dev publishes for this id, defaulting to high. No Free twin
+  exists. Grok 4.5 stays on the same Responses variant.
+
+- **Nous Research now lists ~27 new models including Hermes 4, free portal
+  routes, and coding flagships.** The checked-in registry adds
+  `nousresearch/hermes-4-405b` and `nousresearch/hermes-4-70b`, six free-tier
+  routes (`longcat-2.0-free`, `laguna-s-2.1-free`, `laguna-xs-2.1-free`,
+  `step-3.7-flash-free`, `hy3-free`, `solar-pro4-free`) tagged Free in the Models
+  page, plus coding flagships (DeepSeek V4, Kimi K3, Qwen 3.8/3.7 Max, GLM-5.3/5.2,
+  MiniMax M3, Claude Opus/Sonnet/Fable 5, GPT-5.6 Terra, Gemini 3.7 Flash, Grok 4.6,
+  and others). 28 listed models total including the existing `ox-alpha`. Routing
+  still requires a Nous Portal API key (the `:free` ids are billed through the
+  portal credential, not anonymous like OpenCode Free). This is not the full
+  372-model catalog.
+- **Subagent selection is honoured again.** `applyMultiAgentSettings` only ever
+  demoted: it read `disabled` and `hidden` and nothing else, so the three modes
+  documented in `.claude/skills/codex-subagents/SKILL.md` — `proven`,
+  `selected`, `all` — were inert and every selection an operator had made was
+  silently discarded. An install running `mode: selected` with twenty routes
+  enabled had four spawnable and one agent definition on disk, while
+  `subagents status` cheerfully reported the twenty. The modes work as
+  documented again: an explicit `off` still beats every mode, a hidden model is
+  never promoted, and only an explicit choice promotes — a machine-local probe
+  still promotes nothing on its own. **On upgrade this changes what Codex is
+  offered**: an install sitting on `mode: all`, or on `selected` with a stale
+  `enabled` list, will advertise those routes as subagents again, which is what
+  the setting always said it would do. `mode all` remains "every non-hidden
+  model, regardless of whether it works" — verify a route with the agent check
+  before relying on it (PR #439).
+
+- **Running the test suite no longer clears the operator's subagent
+  definitions.** Four tests in `test/control.test.mjs` pointed
+  `MODEL_ROUTER_STATE_DIR` at a temporary directory but left `CODEX_HOME`
+  alone. `subagents set` republishes the catalog, and the agent definitions it
+  writes are keyed off `CODEX_HOME`, so every `npm test` emptied
+  `~/.codex/agents` on the machine running it — seventeen definitions before,
+  none after, restored by the next publish, with a doctor `FAIL` as the only
+  trace. The publish that clears them also says so now, rather than emptying
+  the directory in silence (PR #439).
+
+- **A provider reachable only through the proxy no longer reads as a broken
+  one.** The Control Center is launched by the desktop session, so it inherits
+  `HTTP_PROXY` from the login environment but nothing telling Node it may use
+  it — the address and the permission to use it are separate answers. A
+  discovery child then dialled the provider directly and its connect timeout
+  was reported as the provider failing, which is how a reachable Venice catalog
+  came back as `fetch failed`. Children spawned by the app now read the opt-in
+  the install manifest recorded, and only for the install that recorded it;
+  only the opt-in is restored, never an address (PR #439).
+
+- **The Models page is one list.** Two sections both changed what ended up in
+  the picker, six words described three concepts, and a row jumped to a
+  different group the moment its switch was flipped. Provider accounts collapse
+  into a connections strip, one **Add models** dialog searches every connected
+  catalog, and row order no longer depends on the switches. The Subagents
+  column stopped offering a compatibility test that could not enable anything —
+  turning the switch on now selects the route and the router publishes it, one
+  click from off to spawnable. `docs/SUBAGENT-CERTIFICATION.md` records what
+  the five-check certification can and cannot establish, including that checks
+  3-5 cannot complete while Codex is signed in with a ChatGPT account, so the
+  next reader does not spend provider quota re-learning it (PR #439).
+
 - **Windows startup now fails fast when the scheduled task is dead instead of
   polling health for its whole budget.** Task Scheduler can keep a stale
   instance entry (or a Running state) after the launcher tree behind it has
@@ -31,8 +193,8 @@
   fail closed. External model routes and Codex's own session pass-through are
   unchanged.
 
-- **Ox Alpha ships on six routes.** The stealth 1M-context reasoning model is
-  now checked in for `opencode-free` (no key), `opencode-go`, `openrouter`,
+- **Ox Alpha initially shipped on six routes.** The stealth 1M-context reasoning model was
+  checked in for `opencode-free` (no key), `opencode-go`, `openrouter`,
   `commandcode`, `nousresearch`, and `venice`, each under the upstream id that
   provider's own live catalog publishes. All six advertise 1,048,576 tokens
   with 131,072 of output, text+image input, and a low/high/max effort ladder
@@ -44,7 +206,7 @@
   load-bearing rather than defensive: a Codex older than 0.143 has no `max` in
   its enum, so the catalog sends the clamped `xhigh` and every turn would
   otherwise 400. Only the credential-free route carries curated announcement
-  copy; the other five use the automatic announcement once their provider is
+  copy; the other five used the automatic announcement once their provider was
   credentialed.
 
 - **Venice and Nous Research (Hermes) are new API-key providers.** Both are

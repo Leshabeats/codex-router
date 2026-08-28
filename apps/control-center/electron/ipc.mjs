@@ -17,6 +17,7 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   assertMutationCompatibility,
   discoverSourceRoot,
@@ -55,6 +56,10 @@ const SESSION_LIST_LIMIT = 500;
 // lock wait and the build itself; killing the lock holder at the old 30/120s
 // limits would strand a stale lock and force a rollback to race recovery.
 const CATALOG_MUTATION_TIMEOUT_MS = 330_000;
+// Five live checks, two of them a full Codex parent-and-child turn. The
+// catalog ceiling is not enough headroom for a slow provider, and a timeout
+// here reads to the operator as "your model failed" when it did not.
+const SUBAGENT_CERTIFY_TIMEOUT_MS = 600_000;
 // Repair reruns the installer with --force-deps, which rebuilds node_modules
 // and the Python environment from scratch. That is the slowest thing this app
 // can start, so it gets the runner's whole ceiling rather than a catalog-sized
@@ -473,6 +478,15 @@ async function snapshot() {
   return runControlJson(["--json"]);
 }
 
+async function readInstalledControlHealth({ fetchImpl = globalThis.fetch } = {}) {
+  const modulePath = path.join(discoverSourceRoot(), "src", "control-health.mjs");
+  const module = await import(pathToFileURL(modulePath).href);
+  if (typeof module.readControlHealth !== "function") {
+    throw new Error("The installed router does not expose direct health reads.");
+  }
+  return module.readControlHealth({ fetchImpl });
+}
+
 async function modelEntries() {
   const result = await snapshot();
   const entries = [];
@@ -587,7 +601,14 @@ async function updateProviderSelection(id, enabled) {
   return snapshot();
 }
 
-export function registerIpcHandlers({ ipcMain, BrowserWindow, shell, fetchImpl = globalThis.fetch, senderGuard = () => true } = {}) {
+export function registerIpcHandlers({
+  ipcMain,
+  BrowserWindow,
+  shell,
+  fetchImpl = globalThis.fetch,
+  healthReader = readInstalledControlHealth,
+  senderGuard = () => true,
+} = {}) {
   if (!ipcMain?.handle) throw new TypeError("ipcMain.handle is required.");
   const operations = new Map();
   // Every mutation is a fresh control.mjs process. Keep their read/modify/
@@ -744,10 +765,10 @@ export function registerIpcHandlers({ ipcMain, BrowserWindow, shell, fetchImpl =
     }
     return response;
   }, { requiresCompatibleRouter: false });
-  // The public health leaf deliberately omits per-service payloads. The
-  // control command reads the protected leaf with the local caller capability
-  // and returns only the redacted service summary the UI needs.
-  handle("getHealth", async () => runJson(["health"]));
+  // Read health in this trusted process instead of spawning a fresh
+  // ELECTRON_RUN_AS_NODE child for every one-second renderer poll. The shared
+  // reader owns the caller capability and preserves the CLI's redacted shape.
+  handle("getHealth", async () => healthReader({ fetchImpl }));
   handle("refreshAll", async () => ({
     snapshot: await snapshot(),
     providers: await runJson(["providers"]),
@@ -846,6 +867,18 @@ export function registerIpcHandlers({ ipcMain, BrowserWindow, shell, fetchImpl =
     const model = await validateModel(slug);
     if (typeof enabled !== "boolean") throw new Error("enabled must be boolean.");
     return runJson(["subagents", "set", model, enabled ? "on" : "off"], { timeoutMs: CATALOG_MUTATION_TIMEOUT_MS });
+  });
+  // A certification run makes live calls to the provider and to a native
+  // parent that delegates to it, so it needs its own ceiling rather than the
+  // catalog mutation one: the delegation alone can take a minute per turn.
+  handleAction("certifySubagentModels", async ({ slugs } = {}) => {
+    if (!Array.isArray(slugs) || !slugs.length) throw new Error("slugs must be a non-empty array.");
+    if (slugs.length > 24) throw new Error("Certify at most 24 routes at once.");
+    const models = [];
+    for (const slug of slugs) models.push(await validateModel(slug));
+    // One command for the whole batch: the runs fan out inside it, and the
+    // proofs write and catalog republish happen once, in that process.
+    return runJson(["subagents", "certify", ...models], { timeoutMs: SUBAGENT_CERTIFY_TIMEOUT_MS });
   });
   handleAction("setSubagentEffort", async ({ slug, effort } = {}) => {
     const model = await validateModel(slug);

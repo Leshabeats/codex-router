@@ -21,6 +21,7 @@ import {
   shouldQuitOnLastWindowClosed,
   writeLifecycleState,
 } from "./lifecycle-state.mjs";
+import { controlCenterDestination, controlCenterNavigationURL } from "./navigation.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEVELOPMENT_ICON = path.resolve(HERE, "..", "assets", "icon.png");
@@ -35,6 +36,7 @@ let applicationReady = false;
 let windowVisible = false;
 let windowContentReady = false;
 let showWhenContentReady = false;
+let pendingNavigationDestination = controlCenterDestination(process.argv);
 const lifecycleFile = lifecycleStatePath();
 
 // macOS keeps its existing Swift NSStatusItem. The Control Center is embedded
@@ -96,6 +98,17 @@ function appIconPath() {
   return app.isPackaged ? path.join(process.resourcesPath, "icon.png") : DEVELOPMENT_ICON;
 }
 
+function showDockForVisibleWindow() {
+  if (process.platform !== "darwin" || !nativeTrayOwnedByHost || !app.dock) return;
+  app.dock.setIcon(appIconPath());
+  void app.dock.show();
+}
+
+function hideDockForHiddenWindow() {
+  if (process.platform !== "darwin" || !nativeTrayOwnedByHost || !app.dock) return;
+  app.dock.hide();
+}
+
 function createWindow() {
   const createdWindow = new BrowserWindow({
     width: 1280,
@@ -105,19 +118,18 @@ function createWindow() {
     show: false,
     title: "Codex Router",
     icon: appIconPath(),
-    // Keep the platform-managed traffic lights while the renderer supplies
-    // the draggable toolbar surface. The renderer never recreates
-    // close/minimize/maximize buttons with HTML/CSS.
-    frame: process.platform !== "darwin",
-    // Codex keeps the native macOS traffic lights while letting its toolbar
-    // occupy the titlebar row. Other platforms retain their normal framed
-    // window chrome.
+    // macOS keeps native traffic lights. Windows/Linux are frameless with
+    // no overlay so the renderer can place left-side lights like macOS.
+    frame: false,
     ...(process.platform === "darwin"
       ? {
           titleBarStyle: "hiddenInset",
           trafficLightPosition: { x: 16, y: 16 },
         }
-      : {}),
+      : {
+          titleBarStyle: "hidden",
+          autoHideMenuBar: true,
+        }),
     backgroundColor: "#ffffff",
     webPreferences: {
       preload: path.join(HERE, "preload.cjs"),
@@ -175,6 +187,7 @@ function createWindow() {
   createdWindow.on("hide", () => {
     windowVisible = false;
     publishLifecycleState();
+    hideDockForHiddenWindow();
   });
   createdWindow.once("closed", () => {
     if (mainWindow !== createdWindow) return;
@@ -183,6 +196,7 @@ function createWindow() {
     showWhenContentReady = false;
     windowVisible = false;
     publishLifecycleState();
+    hideDockForHiddenWindow();
   });
   const loading = RENDERER.development
     ? createdWindow.loadURL(RENDERER.url)
@@ -194,10 +208,29 @@ function createWindow() {
 function revealWindow() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   if (mainWindow.isMinimized()) mainWindow.restore();
+  // The native host is an LSUIElement and never owns a Dock tile. Let its
+  // embedded Control Center represent the product in the Dock and Command-Tab
+  // while the actual application window is visible, then retire that tile
+  // when the window closes so the menu-bar host remains unobtrusive.
+  showDockForVisibleWindow();
   mainWindow.show();
   mainWindow.focus();
   windowVisible = true;
   publishLifecycleState();
+}
+
+function flushNavigationDestination() {
+  if (!pendingNavigationDestination || !mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send("router-control:navigate", pendingNavigationDestination);
+  pendingNavigationDestination = undefined;
+}
+
+function requestNavigation(navigation) {
+  if (!navigation) return false;
+  pendingNavigationDestination = navigation;
+  openRequests.requestOpen();
+  if (windowContentReady) flushNavigationDestination();
+  return true;
 }
 
 function showWindow() {
@@ -272,13 +305,21 @@ if (lifecycleQueryInvocation) {
 const primaryInstance = !lifecycleQueryInvocation && app.requestSingleInstanceLock();
 if (!lifecycleQueryInvocation && (!primaryInstance || quitForUpdateInvocation)) app.quit();
 
+if (primaryInstance) app.on("open-url", (event, url) => {
+  event.preventDefault();
+  requestNavigation(controlCenterNavigationURL(url));
+});
+
 if (primaryInstance && !quitForUpdateInvocation) {
   // Replace a stale record as soon as this process owns the single-instance
   // lock. The ready bit is raised only after the full Electron boundary is set.
   publishLifecycleState();
   app.whenReady().then(() => {
+    if (process.platform !== "darwin") {
+      Menu.setApplicationMenu(null);
+    }
     if (process.platform === "darwin") {
-      if (nativeTrayOwnedByHost) app.dock?.hide();
+      if (nativeTrayOwnedByHost) hideDockForHiddenWindow();
       else app.dock?.setIcon(appIconPath());
     }
     session.defaultSession.setPermissionCheckHandler(() => false);
@@ -315,6 +356,10 @@ if (primaryInstance && !quitForUpdateInvocation) {
       shell,
       senderGuard: trustedRendererSender,
     });
+    ipcMain.on("router-control:navigation-ready", (event) => {
+      if (!trustedRendererSender(event)) return;
+      flushNavigationDestination();
+    });
     // Even tray-only startup loads one hidden renderer before it publishes
     // ready. Otherwise a package with a missing/broken dist directory would
     // pass lifecycle validation merely because its tray icon was constructible.
@@ -327,7 +372,11 @@ if (primaryInstance && !quitForUpdateInvocation) {
 if (primaryInstance) app.on("second-instance", (_event, commandLine) => {
   if (commandLine.includes("--quit-for-update")) {
     app.quit();
-  } else openRequests.requestOpen();
+  } else {
+    const navigation = controlCenterDestination(commandLine);
+    if (navigation) requestNavigation(navigation);
+    else openRequests.requestOpen();
+  }
 });
 
 if (primaryInstance) app.on("before-quit", (event) => {

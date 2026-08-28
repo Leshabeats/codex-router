@@ -70,8 +70,16 @@ try {
   $PreviousIdentityDiscovery = $env:CSC_IDENTITY_AUTO_DISCOVERY
   $env:CSC_IDENTITY_AUTO_DISCOVERY = "false"
   try {
-    & (Join-Path $App "node_modules\.bin\electron-builder.cmd") --win dir --publish never "--config.directories.output=$StagingRoot"
-    if ($LASTEXITCODE -ne 0) { throw "Control Center packaging failed." }
+    # electron-builder resolves the project configuration from the current
+    # directory. The wrapper runs from the repository root, so enter the
+    # Control Center directory explicitly before packaging.
+    Push-Location -LiteralPath $App
+    try {
+      & (Join-Path $App "node_modules\.bin\electron-builder.cmd") --win dir --publish never "--config.directories.output=$StagingRoot"
+      if ($LASTEXITCODE -ne 0) { throw "Control Center packaging failed." }
+    } finally {
+      Pop-Location
+    }
   } finally {
     $env:CSC_IDENTITY_AUTO_DISCOVERY = $PreviousIdentityDiscovery
   }

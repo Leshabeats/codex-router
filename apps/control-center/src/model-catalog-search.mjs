@@ -3,7 +3,6 @@ function text(value) {
 }
 
 export function catalogModelName(modelId) {
-  if (modelId === "x-preview-f-free") return "Ox Alpha Free";
   return text(modelId)
     .split(/[\/_-]+/)
     .filter(Boolean)
@@ -33,6 +32,7 @@ export function loadedCatalogModels(directory, catalogStates) {
       for (const modelId of catalog.discovered) {
         const id = text(modelId);
         if (!id) continue;
+        const metadata = catalog.metadata?.[id];
         const blockedReason = text(catalog.blocked?.[id]);
         results.push({
           key: `${source.id}\0${id}`,
@@ -45,7 +45,19 @@ export function loadedCatalogModels(directory, catalogStates) {
           registered: registered.has(id),
           addable: addable.has(id),
           ...(blockedReason ? { blockedReason } : {}),
-          contextWindow: catalog.contextLengths?.[id],
+          contextWindow: metadata?.contextWindow ?? catalog.contextLengths?.[id],
+          ...(Number.isInteger(metadata?.maxOutputTokens)
+            ? { maxOutputTokens: metadata.maxOutputTokens }
+            : {}),
+          ...(Array.isArray(metadata?.inputModalities)
+            ? { inputModalities: metadata.inputModalities }
+            : {}),
+          ...(Array.isArray(metadata?.reasoning?.supportedEfforts)
+            ? { reasoningEfforts: metadata.reasoning.supportedEfforts }
+            : {}),
+          ...(typeof metadata?.supportsTools === "boolean"
+            ? { supportsTools: metadata.supportsTools }
+            : {}),
           isFree: free.has(id) || id === "big-pickle" || id.endsWith("-free"),
         });
       }

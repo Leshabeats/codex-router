@@ -23,7 +23,7 @@ test("provider and model-maker branding covers remote and local catalog families
 
   assert.match(branding, /muse spark[^\n]+BRANDS\.meta/);
   assert.match(branding, /ornith[^\n]+BRANDS\.deepreinforce/);
-  assert.match(branding, /hy3[^\n]+BRANDS\.tencent/);
+  assert.match(branding, /hy\(\?:3\|4\)[^\n]+BRANDS\.tencent/);
   assert.match(branding, /laguna[^\n]+BRANDS\.poolside/);
   assert.match(branding, /export function brandForLocalModel/);
   assert.match(local, /brandForLocalModel/);

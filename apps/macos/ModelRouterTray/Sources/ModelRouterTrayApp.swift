@@ -324,6 +324,15 @@ enum RouterActivityState: String, Decodable {
     }
   }
 
+  var menuBarColor: NSColor {
+    switch self {
+    case .idle: return .white
+    case .generating: return NSColor(calibratedRed: 0.68, green: 0.40, blue: 0.03, alpha: 1)
+    case .starting: return NSColor(calibratedRed: 0.12, green: 0.40, blue: 0.76, alpha: 1)
+    case .error: return NSColor(calibratedRed: 0.72, green: 0.16, blue: 0.12, alpha: 1)
+    }
+  }
+
   var label: String {
     switch self {
     case .idle: return routerLocalized("Idle")
@@ -331,6 +340,32 @@ enum RouterActivityState: String, Decodable {
     case .starting: return routerLocalized("Starting")
     case .error: return routerLocalized("Error")
     }
+  }
+}
+
+enum MenuBarActivityDotImage {
+  static func make(state: RouterActivityState, size: CGFloat) -> NSImage {
+    let image = NSImage(size: NSSize(width: size, height: size))
+    image.isTemplate = false
+    image.lockFocus()
+    state.menuBarColor.setFill()
+    NSBezierPath(ovalIn: NSRect(x: 1, y: 1, width: max(1, size - 2), height: max(1, size - 2))).fill()
+    image.unlockFocus()
+    return image
+  }
+}
+
+enum MenuBarRouterMarkImage {
+  static func make(resourceName: String = "RouterMark", size: CGFloat? = nil) -> NSImage? {
+    guard
+      let url = Bundle.module.url(forResource: resourceName, withExtension: "svg"),
+      let image = NSImage(contentsOf: url)
+    else { return nil }
+    if let size {
+      image.size = NSSize(width: size, height: size)
+    }
+    image.isTemplate = true
+    return image
   }
 }
 
@@ -361,6 +396,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private var islandController: IslandWindowController?
   private var desktopPanelController: DesktopPanelWindowController?
   private var surfaceVisibility: AnyCancellable?
+  private var widgetSnapshotPublishing: AnyCancellable?
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApp.setActivationPolicy(.accessory)
@@ -378,12 +414,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
           self?.desktopPanelController?.setVisible(visible && mode == .desktop)
         }
       }
+    widgetSnapshotPublishing = store.objectWillChange
+      .debounce(for: .milliseconds(450), scheduler: RunLoop.main)
+      .sink { [weak store] _ in
+        Task { @MainActor in
+          // ObservableObject announces immediately before it mutates. Yield so
+          // the Widget snapshot reads the committed values, not the old turn.
+          await Task<Never, Never>.yield()
+          store?.publishWidgetSnapshot()
+        }
+      }
     store.retireLoginItem()
     store.startHostAppObservation()
     Task { await store.startPolling() }
     Task { await store.startActivityPolling() }
     Task { await store.startAccountUsagePolling() }
     Task { await store.startProviderPolling() }
+    store.publishWidgetSnapshot()
     if Self.launchedByUser {
       store.revealForUserLaunch()
       ControlCenterLauncher.open()
@@ -398,6 +445,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     store.revealForUserLaunch()
     ControlCenterLauncher.open()
     return true
+  }
+
+  func application(_ application: NSApplication, open urls: [URL]) {
+    guard let navigation = urls.compactMap(ControlCenterNavigationRequest.init(url:)).first else { return }
+    store.revealForUserLaunch()
+    ControlCenterLauncher.open(navigation: navigation)
   }
 
   // launchd passes --supervised (see src/tray-service-macos.mjs) so a login
@@ -418,6 +471,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   }
 }
 
+enum ControlCenterDestination: String, Equatable {
+  case usage
+  case usageResets = "usage-resets"
+
+}
+
+struct ControlCenterNavigationRequest: Equatable {
+  static let scheme = "codex-router"
+  static let host = "control-center"
+  static let sourcePattern = try! NSRegularExpression(pattern: "^[a-z0-9][a-z0-9-]{0,63}$")
+
+  let destination: ControlCenterDestination
+  let sourceID: String?
+
+  init?(url: URL) {
+    guard url.scheme == Self.scheme,
+          url.host == Self.host,
+          url.user == nil,
+          url.password == nil,
+          url.port == nil,
+          url.fragment == nil
+    else { return nil }
+    let rawDestination: String
+    switch url.path {
+    case "/usage": rawDestination = "usage"
+    case "/usage-resets": rawDestination = "usage-resets"
+    default: return nil
+    }
+    guard let destination = ControlCenterDestination(rawValue: rawDestination),
+          let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+    else { return nil }
+    let items = components.queryItems ?? []
+    guard items.allSatisfy({ $0.name == "source" }), items.count <= 1 else { return nil }
+    let sourceID = items.first?.value
+    if let sourceID {
+      let range = NSRange(sourceID.startIndex..<sourceID.endIndex, in: sourceID)
+      guard Self.sourcePattern.firstMatch(in: sourceID, range: range)?.range == range else { return nil }
+    }
+    self.destination = destination
+    self.sourceID = sourceID
+  }
+
+  var arguments: [String] {
+    var result = ["--router-destination", destination.rawValue]
+    if let sourceID { result += ["--router-source", sourceID] }
+    return result
+  }
+
+  var url: URL {
+    var components = URLComponents()
+    components.scheme = Self.scheme
+    components.host = Self.host
+    components.path = "/\(destination.rawValue)"
+    if let sourceID { components.queryItems = [URLQueryItem(name: "source", value: sourceID)] }
+    return components.url!
+  }
+}
+
 @MainActor
 enum ControlCenterLauncher {
   private static let bundleName = "Control Center.app"
@@ -429,7 +540,7 @@ enum ControlCenterLauncher {
     return FileManager.default.fileExists(atPath: candidate.path) ? candidate : nil
   }
 
-  static func open() {
+  static func open(navigation: ControlCenterNavigationRequest? = nil) {
     guard let application = bundledApplicationURL else {
       RouterStore.shared.reportControlCenterLaunchFailure(
         "The embedded Control Center is missing. Rebuild Codex Router."
@@ -439,7 +550,7 @@ enum ControlCenterLauncher {
     Task { @MainActor in
       do {
         try await retireSupersededControlCenters(except: application)
-        openBundledApplication(application)
+        openBundledApplication(application, navigation: navigation)
       } catch {
         RouterStore.shared.reportControlCenterLaunchFailure(error.localizedDescription)
       }
@@ -471,20 +582,41 @@ enum ControlCenterLauncher {
     )
   }
 
-  private static func openBundledApplication(_ application: URL) {
+  private static func openBundledApplication(
+    _ application: URL,
+    navigation: ControlCenterNavigationRequest?
+  ) {
     let configuration = NSWorkspace.OpenConfiguration()
     configuration.activates = true
-    configuration.environment = embeddedEnvironment(
-      processEnvironment: ProcessInfo.processInfo.environment
-    )
-    NSWorkspace.shared.openApplication(at: application, configuration: configuration) { _, error in
+    configuration.environment = embeddedEnvironment(processEnvironment: ProcessInfo.processInfo.environment)
+    let completion: @Sendable (NSRunningApplication?, (any Error)?) -> Void = { _, error in
       guard let error else { return }
+      let message = error.localizedDescription
       Task { @MainActor in
         RouterStore.shared.reportControlCenterLaunchFailure(
-          "Control Center could not open: \(error.localizedDescription)"
+          "Control Center could not open: \(message)"
         )
       }
     }
+    if let navigation {
+      // Launch arguments are deterministic for a cold Electron start, while
+      // LaunchServices drops them when it merely activates a running process.
+      // The URL Apple Event covers that warm path, so carry both forms of the
+      // same validated, idempotent navigation request.
+      configuration.arguments = navigation.arguments
+      NSWorkspace.shared.open(
+        [navigation.url],
+        withApplicationAt: application,
+        configuration: configuration,
+        completionHandler: completion
+      )
+      return
+    }
+    NSWorkspace.shared.openApplication(
+      at: application,
+      configuration: configuration,
+      completionHandler: completion
+    )
   }
 
   nonisolated static func embeddedEnvironment(
@@ -701,8 +833,8 @@ final class RouterStore: ObservableObject {
     return hasLaunchedBefore ? .notch : .off
   }
 
-  // Missing keys keep the look that shipped before custom icons: standard
-  // width, model name on, activity dot. An explicit Settings choice always
+  // Missing keys use the compact product mark without provider/model text.
+  // An explicit Settings choice always
   // wins; garbage raw values fall through the same way island mode does.
   nonisolated static func resolveMenuBarSettings(
     storedDisplayMode: String?,
@@ -714,9 +846,9 @@ final class RouterStore: ObservableObject {
     let custom = storedCustomIconPath.flatMap { $0.isEmpty ? nil : $0 }
     let preset = storedPresetIcon.flatMap { $0.isEmpty ? nil : $0 } ?? "cpu"
     return MenuBarSettings(
-      displayMode: storedDisplayMode.flatMap(TrayMenuBarDisplayMode.init(rawValue:)) ?? .standard,
+      displayMode: storedDisplayMode.flatMap(TrayMenuBarDisplayMode.init(rawValue:)) ?? .iconOnly,
       showModelName: storedShowModelName ?? true,
-      iconStyle: storedIconStyle.flatMap(TrayMenuBarIconStyle.init(rawValue:)) ?? .indicator,
+      iconStyle: storedIconStyle.flatMap(TrayMenuBarIconStyle.init(rawValue:)) ?? .router,
       presetIcon: preset,
       customIconPath: custom
     )
@@ -1933,20 +2065,24 @@ final class RouterStore: ObservableObject {
   }
 
   func dailyUsage(days: Int) -> [DailyUsagePoint] {
+    dailyUsage(for: selectedUsageProviderID, days: days)
+  }
+
+  func dailyUsage(for providerID: String, days: Int) -> [DailyUsagePoint] {
     let buckets: [DailyUsageCacheBucket]
-    if selectedUsageUsesChatGPT {
+    if providerID == "openai" {
       buckets = accountUsage?.dailyUsageBuckets.map {
         DailyUsageCacheBucket(startDate: $0.startDate, tokens: $0.tokens)
       } ?? []
     } else {
-      buckets = selectedProviderUsage?.dailyUsageBuckets.map {
+      buckets = providerUsage(for: providerID)?.dailyUsageBuckets.map {
         DailyUsageCacheBucket(startDate: $0.startDate, tokens: $0.tokens)
       } ?? []
     }
     let calendar = Calendar.current
     let today = calendar.startOfDay(for: .now)
     let cacheKey = DailyUsageCacheKey(
-      providerID: selectedUsageProviderID,
+      providerID: providerID,
       days: days,
       today: today,
       buckets: buckets
@@ -3632,6 +3768,9 @@ enum ChatGptSessionControlPolicy {
 
 struct RouterSnapshot: Decodable {
   let targets: [String: RouterTarget]
+  // Metadata-only route summary. Older routers omit it and the tray falls
+  // back to the target snapshot below.
+  let dashboard: RouterDashboardSnapshot?
   // Absent from an older router's output, so the tray keeps working against one
   // rather than failing the whole decode over a field it gained later.
   let presence: RouterPresence?
@@ -3646,6 +3785,8 @@ struct RouterSnapshot: Decodable {
     case presence
     case harness
     case chatgptSession
+    case dashboard
+    case catalog
   }
 
   init(from decoder: Decoder) throws {
@@ -3661,15 +3802,22 @@ struct RouterSnapshot: Decodable {
     } catch {
       chatgptSession = nil
     }
+    if let directDashboard = try values.decodeIfPresent(RouterDashboardSnapshot.self, forKey: .dashboard) {
+      dashboard = directDashboard
+    } else {
+      dashboard = try values.decodeIfPresent(RouterDashboardCatalogEnvelope.self, forKey: .catalog)?.dashboard
+    }
   }
 
   init(
     targets: [String: RouterTarget],
     presence: RouterPresence?,
     harness: RouterHarness?,
-    chatgptSession: ChatGptSessionStatus?
+    chatgptSession: ChatGptSessionStatus?,
+    dashboard: RouterDashboardSnapshot? = nil
   ) {
     self.targets = targets
+    self.dashboard = dashboard
     self.presence = presence
     self.harness = harness
     self.chatgptSession = chatgptSession
@@ -3679,8 +3827,34 @@ struct RouterSnapshot: Decodable {
     targets: [:],
     presence: nil,
     harness: nil,
-    chatgptSession: nil
+    chatgptSession: nil,
+    dashboard: nil
   )
+}
+
+struct RouterDashboardSnapshot: Decodable {
+  let enabledProviders: [String]
+  let providers: [RouterDashboardProvider]
+  let models: [RouterDashboardModel]
+}
+
+private struct RouterDashboardCatalogEnvelope: Decodable {
+  let dashboard: RouterDashboardSnapshot?
+}
+
+struct RouterDashboardProvider: Decodable, Identifiable {
+  let id: String
+  let displayName: String
+  let kind: String
+  let enabled: Bool
+}
+
+struct RouterDashboardModel: Decodable {
+  let slug: String
+  let displayName: String
+  let provider: String
+  let enabled: Bool
+  let visible: Bool
 }
 
 struct HarnessStopResult: Decodable {
@@ -3758,7 +3932,7 @@ enum TokenDisplayUnit: String, CaseIterable, Identifiable {
     let normalized = value.isFinite ? max(0, value) : 0
     switch self {
     case .full:
-      return Int64(normalized.rounded()).formatted(.number.grouping(.automatic))
+      return RouterWidgetTokenCount.from(normalized).formatted(.number.grouping(.automatic))
     case .millions:
       return "\(String(format: "%.1f", normalized / 1_000_000))M"
     }
@@ -4421,6 +4595,7 @@ enum TrayMenuBarDisplayMode: String, CaseIterable, Identifiable, Equatable {
 }
 
 enum TrayMenuBarIconStyle: String, CaseIterable, Identifiable, Equatable {
+  case router
   case provider
   case indicator
   case preset
@@ -4429,6 +4604,7 @@ enum TrayMenuBarIconStyle: String, CaseIterable, Identifiable, Equatable {
   var id: String { rawValue }
   var label: String {
     switch self {
+    case .router: return routerLocalized("Router mark")
     case .provider: return routerLocalized("Provider icon")
     case .indicator: return routerLocalized("Activity dot")
     case .preset: return routerLocalized("Preset icon")
@@ -4451,14 +4627,32 @@ struct MenuBarSettings: Equatable {
 
 enum MenuBarLayoutMetrics {
   static let standardReservedWidth: CGFloat = 180
-  static let iconOnlyWidth: CGFloat = 24
+  static let standardHeight: CGFloat = 22
+  static let standardIconSize: CGFloat = 15
+  static let iconOnlyWidth: CGFloat = standardHeight
+  static let iconOnlyHeight: CGFloat = 22
+  static let iconOnlyIconSize: CGFloat = standardIconSize
+  static let attentionPulseScale: CGFloat = 1.4
+  static let standardIndicatorPulseScale: CGFloat = 2.1
 
-  nonisolated static func statusItemWidth(displayMode: TrayMenuBarDisplayMode) -> CGFloat {
-    displayMode == .iconOnly ? iconOnlyWidth : standardReservedWidth
+  nonisolated static func statusItemWidth(
+    displayMode: TrayMenuBarDisplayMode,
+    pulsing: Bool = false
+  ) -> CGFloat {
+    guard displayMode == .iconOnly else { return standardReservedWidth }
+    guard pulsing else { return iconOnlyWidth }
+    let iconWidth = iconOnlyIconSize * attentionPulseScale
+    return max(iconOnlyWidth, ceil(iconWidth))
   }
 
-  nonisolated static func showsActivityBadge(iconStyle: TrayMenuBarIconStyle, isIdle: Bool) -> Bool {
-    iconStyle != .indicator && !isIdle
+  nonisolated static func statusItemHeight(
+    displayMode: TrayMenuBarDisplayMode,
+    pulsing: Bool = false
+  ) -> CGFloat {
+    guard displayMode == .iconOnly, pulsing else {
+      return standardHeight
+    }
+    return max(iconOnlyHeight, ceil(iconOnlyIconSize * attentionPulseScale))
   }
 }
 
@@ -4630,11 +4824,25 @@ private struct MenuBarIconView: View {
 
   var body: some View {
     switch store.menuBarIconStyle {
+    case .router:
+      let resourceName = store.activityState == .idle ? "RouterMark" : "RouterMarkActive"
+      if let mark = MenuBarRouterMarkImage.make(resourceName: resourceName, size: size) {
+        Image(nsImage: mark)
+          .renderingMode(.template)
+          .foregroundStyle(Color.primary)
+          .frame(width: size, height: size)
+      } else {
+        Image(systemName: "network")
+          .font(.system(size: size, weight: .medium))
+          .foregroundStyle(Color.primary)
+          .frame(width: size, height: size)
+      }
     case .provider:
       ProviderIcon(providerID: providerID, size: size, showsHelp: false)
     case .indicator:
-      Circle()
-        .fill(store.activityState.tint)
+      Image(nsImage: MenuBarActivityDotImage.make(state: store.activityState, size: 6))
+        .resizable()
+        .interpolation(.high)
         .frame(width: 6, height: 6)
     case .preset:
       Image(systemName: store.menuBarPresetIcon)
@@ -4670,42 +4878,44 @@ private struct StatusItemLabel: View {
 
   var body: some View {
     if store.menuBarDisplayMode == .iconOnly {
-      HStack(spacing: 4) {
-        MenuBarIconView(store: store, size: 14)
-          .scaleEffect(pulsing ? 1.4 : 1)
-          .animation(.easeOut(duration: 0.45), value: pulsing)
-        if MenuBarLayoutMetrics.showsActivityBadge(
-          iconStyle: store.menuBarIconStyle,
-          isIdle: store.activityState == .idle
-        ) {
-          Circle()
-            .fill(store.activityState.tint)
-            .frame(width: 5, height: 5)
+      MenuBarIconView(store: store, size: MenuBarLayoutMetrics.iconOnlyIconSize)
+        .scaleEffect(pulsing ? MenuBarLayoutMetrics.attentionPulseScale : 1)
+        .animation(.easeOut(duration: 0.45), value: pulsing)
+        .frame(
+          width: MenuBarLayoutMetrics.statusItemWidth(
+            displayMode: store.menuBarDisplayMode,
+            pulsing: pulsing
+          ),
+          height: MenuBarLayoutMetrics.statusItemHeight(
+            displayMode: store.menuBarDisplayMode,
+            pulsing: pulsing
+          )
+        )
+        .clipped()
+        .contentShape(Rectangle())
+        .help(tooltipText)
+        .onChange(of: store.attentionPulse) { _ in
+          pulsing = true
+          Task {
+            try? await Task.sleep(for: .milliseconds(450))
+            pulsing = false
+          }
         }
-      }
-      .frame(width: MenuBarLayoutMetrics.statusItemWidth(displayMode: store.menuBarDisplayMode), height: 22)
-      .clipped()
-      .contentShape(Rectangle())
-      .help(tooltipText)
-      .onChange(of: store.attentionPulse) { _ in
-        pulsing = true
-        Task {
-          try? await Task.sleep(for: .milliseconds(450))
-          pulsing = false
-        }
-      }
     } else {
       HStack(spacing: 5) {
         if store.menuBarIconStyle == .indicator {
-          Circle()
-            .fill(store.activityState.tint)
+          Image(nsImage: MenuBarActivityDotImage.make(state: store.activityState, size: 6))
+            .resizable()
+            .interpolation(.high)
             .frame(width: 6, height: 6)
-            .scaleEffect(pulsing ? 2.1 : 1)
+            .aspectRatio(1, contentMode: .fit)
+            .clipShape(Circle())
+            .scaleEffect(pulsing ? MenuBarLayoutMetrics.standardIndicatorPulseScale : 1)
             .opacity(pulsing ? 0.55 : 1)
             .animation(.easeOut(duration: 0.45), value: pulsing)
         } else {
-          MenuBarIconView(store: store, size: 13)
-            .scaleEffect(pulsing ? 1.4 : 1)
+          MenuBarIconView(store: store, size: MenuBarLayoutMetrics.standardIconSize)
+            .scaleEffect(pulsing ? MenuBarLayoutMetrics.attentionPulseScale : 1)
             .animation(.easeOut(duration: 0.45), value: pulsing)
         }
         if store.menuBarShowModelName {
@@ -4728,7 +4938,14 @@ private struct StatusItemLabel: View {
             .truncationMode(.tail)
         }
       }
-      .frame(width: MenuBarLayoutMetrics.statusItemWidth(displayMode: store.menuBarDisplayMode), alignment: .leading)
+      .frame(
+        width: MenuBarLayoutMetrics.statusItemWidth(displayMode: store.menuBarDisplayMode, pulsing: pulsing),
+        height: MenuBarLayoutMetrics.statusItemHeight(
+          displayMode: store.menuBarDisplayMode,
+          pulsing: pulsing
+        ),
+        alignment: .leading
+      )
       .clipped()
       .help(tooltipText)
       .onChange(of: store.attentionPulse) { _ in
@@ -4804,6 +5021,14 @@ private struct TrayView: View {
         ))
       }
       .sorted { $0.id < $1.id }
+  }
+
+  private var providerDashboardSummary: String {
+    if let dashboard = store.snapshot.dashboard, !dashboard.providers.isEmpty {
+      let enabled = dashboard.providers.filter(\.enabled).count
+      return "\(enabled)/\(dashboard.providers.count) routes enabled"
+    }
+    return routerLocalized("Auto-saved")
   }
 
   // Vendors that publish more than one provider read as unrelated services in a
@@ -5776,7 +6001,7 @@ private struct TrayView: View {
     maintenanceRow
     AccordionPanel(
       title: routerLocalized("Providers"),
-      summary: store.providerOperation == nil ? routerLocalized("Auto-saved") : routerLocalized("Applying…"),
+      summary: store.providerOperation == nil ? providerDashboardSummary : routerLocalized("Applying…"),
       expanded: $providersExpanded
     ) {
       // Bound once per body pass. Reading the property inside the loop instead
@@ -5883,6 +6108,9 @@ private struct TrayView: View {
     // a subagent either, but dropping its row made it look deleted and left no
     // way back to it from this panel -- the tray must always show every model
     // it can still change.
+    // Every enabled model, the way the Models page lists them. Hiding the
+    // ones that cannot host a child does not make them easier to find; it
+    // makes the operator's own models look missing.
     private var subagentModels: [RouterModel] {
       target.models
         .filter(\.enabled)
@@ -7573,29 +7801,18 @@ private struct TrayView: View {
       Set(settings?.subagents.disabled ?? [])
     }
 
-    private var selectedSubagentSet: Set<String> {
-      Set(settings?.subagents.enabled ?? [])
-    }
-
+    // The capability the catalog actually published wins. A route the operator
+    // selected is v2 to Codex even though the registry never certified it, and
+    // asking the registry first told them a spawnable route could not be used.
     private func subagentCertification(for model: RouterModel) -> String {
-      if let certification = model.subagentCertification { return certification }
       if model.multiAgentVersion == "v2" { return "v2" }
+      if let certification = model.subagentCertification { return certification }
       if model.multiAgentVersion == "v1" { return "v1" }
       return "unknown"
     }
 
-    private func isKnownV1(_ model: RouterModel) -> Bool {
-      subagentCertification(for: model) == "v1"
-    }
-
     private func isCertifiedV2(_ model: RouterModel) -> Bool {
       subagentCertification(for: model) == "v2"
-    }
-
-    private func isCertificationCandidate(_ model: RouterModel) -> Bool {
-      guard subagentCertification(for: model) == "unknown" else { return false }
-      guard let status = settings?.subagents.proofs?[model.slug]?.status else { return false }
-      return ["candidate", "experimental", "proven"].contains(status)
     }
 
     // Status tags, effort controls, and enabled counts must reflect only the
@@ -7608,22 +7825,15 @@ private struct TrayView: View {
       return store.subagentModelEnabled(model.slug, authoritative: authoritative)
     }
 
-    // Unknown routes use the same row to request their one-time compatibility
-    // test. Keep that request checked while it runs (and after a failure so it
-    // can be switched off before retrying), but never feed it to isSubagent.
+    // The switch says one thing wherever it can be used: run this route as a
+    // subagent, or do not. On a route that cannot, it is simply unavailable --
+    // there is no test to request and no candidate state to decode.
     private func subagentToggleOn(_ model: RouterModel) -> Bool {
-      if isCertifiedV2(model) { return isSubagent(model) }
-      if !isPickerVisible(model) || isKnownV1(model) || isCertificationCandidate(model) {
-        return false
-      }
-      let authoritative = selectedSubagentSet.contains(model.slug)
-      return store.subagentModelEnabled(model.slug, authoritative: authoritative)
+      isSubagent(model)
     }
 
     private func subagentToggleDisabled(_ model: RouterModel) -> Bool {
-      if !isPickerVisible(model) { return true }
-      if isCertifiedV2(model) { return false }
-      return isKnownV1(model) || isCertificationCandidate(model)
+      !isPickerVisible(model) || !isCertifiedV2(model)
     }
 
     // Codex chooses which model a child runs on; this chooses how hard it
@@ -7680,22 +7890,12 @@ private struct TrayView: View {
 
     private func subagentDetail(for model: RouterModel) -> String {
       if !isPickerVisible(model) { return routerLocalized("Hidden from picker — show it below to use it here") }
-      if isKnownV1(model) { return routerLocalized("v1 only") }
-      if !isCertifiedV2(model), let proof = settings?.subagents.proofs?[model.slug] {
-        if proof.status == "checking" { return routerLocalized("Checking…") }
-        if isCertificationCandidate(model) {
-          return routerLocalized("Certification candidate")
-        }
-        if proof.status == "failed" {
-          return proof.reason ?? routerLocalized("Error")
-        }
-      }
-      if isCertifiedV2(model) && isSubagent(model) {
+      if !isCertifiedV2(model) { return routerLocalized("Cannot run subagents") }
+      if isSubagent(model) {
         let effort = settings?.subagents.efforts?[model.slug] ?? routerLocalized("Default")
-        return "\(routerLocalized("Proven v2")) · \(effort.capitalized) \(routerLocalized("thinking"))"
+        return "\(effort.capitalized) \(routerLocalized("thinking"))"
       }
-      if isCertifiedV2(model) { return routerLocalized("Proven v2") }
-      return routerLocalized("Not selected")
+      return routerLocalized("Off")
     }
 
   private var subagentSummary: String {
@@ -8616,12 +8816,14 @@ private struct ProviderUsageSection: View {
         }
       }
 
-      HStack(alignment: .firstTextBaseline) {
+      HStack(alignment: .center, spacing: 8) {
         Text(routerLocalized(store.selectedUsageUsesChatGPT ? "Daily token usage" : "Router traffic"))
           .font(.system(size: 10, weight: .medium))
           .foregroundStyle(routerMuted)
-        Spacer()
-        HStack(spacing: 5) {
+          .lineLimit(1)
+          .minimumScaleFactor(0.85)
+        Spacer(minLength: 8)
+        HStack(spacing: 6) {
           UsageRangePicker(selection: $range)
           TokenDisplayUnitPicker(selection: Binding(
             get: { self.tokenDisplayUnit },
@@ -9099,11 +9301,14 @@ struct UsageRangePicker: View {
   var body: some View {
     HStack(spacing: 2) {
       ForEach(UsageRange.allCases) { range in
-        Button(range.label) { selection = range }
+        Button { selection = range } label: {
+          Text(range.label)
+            .lineLimit(1)
+            .frame(minWidth: 26)
+        }
           .buttonStyle(.plain)
           .font(.system(size: 9, weight: .medium))
           .foregroundStyle(selection == range ? routerText : routerMuted)
-          .padding(.horizontal, 7)
           .padding(.vertical, 4)
           .background(
             selection == range ? Color.primary.opacity(0.10) : Color.clear,
@@ -9113,6 +9318,7 @@ struct UsageRangePicker: View {
     }
     .padding(2)
     .background(Color.primary.opacity(0.045), in: Capsule())
+    .fixedSize(horizontal: true, vertical: false)
   }
 }
 
@@ -9122,7 +9328,11 @@ struct TokenDisplayUnitPicker: View {
   var body: some View {
     HStack(spacing: 2) {
       ForEach(TokenDisplayUnit.allCases) { unit in
-        Button(unit.label) { self.selection = unit }
+        Button { self.selection = unit } label: {
+          Text(unit.label)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+        }
           .buttonStyle(.plain)
           .font(.system(size: 9, weight: .medium))
           .foregroundStyle(self.selection == unit ? routerText : routerMuted)
@@ -9138,6 +9348,7 @@ struct TokenDisplayUnitPicker: View {
     }
     .padding(2)
     .background(Color.primary.opacity(0.045), in: Capsule())
+    .fixedSize(horizontal: true, vertical: false)
     .accessibilityLabel(routerLocalized("Token unit"))
   }
 }

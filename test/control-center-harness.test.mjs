@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   getContextSessionsSnapshot,
@@ -94,6 +95,38 @@ test("session opening rejects traversal and non-UUID identifiers before launch",
   );
 });
 
+test("health IPC reads in-process and preserves the injected fetch boundary", async () => {
+  const handlers = new Map();
+  const fetchImpl = async () => { throw new Error("the reader owns fetch"); };
+  const expected = {
+    ok: true,
+    status: 200,
+    activity: { state: "idle", active: [], activeCount: 0 },
+    gateway: { reachable: true },
+  };
+  let calls = 0;
+  registerIpcHandlers({
+    ipcMain: { handle: (name, handler) => handlers.set(name, handler) },
+    BrowserWindow: { getAllWindows: () => [] },
+    shell: {},
+    fetchImpl,
+    healthReader: async (options) => {
+      calls += 1;
+      assert.equal(options.fetchImpl, fetchImpl);
+      return expected;
+    },
+    senderGuard: () => true,
+  });
+
+  const getHealth = handlers.get("router-control:getHealth");
+  assert.equal(typeof getHealth, "function");
+  assert.deepEqual(await getHealth({}), expected);
+  assert.equal(calls, 1);
+
+  const source = await readFile(new URL("../apps/control-center/electron/ipc.mjs", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /handle\("getHealth"[\s\S]{0,100}runJson\(\["health"\]\)/);
+});
+
 test("Deep Code installation is a fixed interactive command with no settings read", async () => {
   const source = await readFile(new URL("../apps/control-center/electron/ipc.mjs", import.meta.url), "utf8");
   assert.match(source, /openTerminalCommand\(npm, \["install", "-g", DEEPCODE_PACKAGE\], discoverSourceRoot\(\)\)/);
@@ -107,7 +140,10 @@ test("service stop and restart are rejected at the IPC boundary", async () => {
   const handlers = new Map();
   const priorRoot = process.env.CODEX_ROUTER_SOURCE_ROOT;
   try {
-    process.env.CODEX_ROUTER_SOURCE_ROOT = path.resolve(new URL("..", import.meta.url).pathname);
+    process.env.CODEX_ROUTER_SOURCE_ROOT = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      "..",
+    );
     registerIpcHandlers({
       ipcMain: { handle: (name, handler) => handlers.set(name, handler) },
       BrowserWindow: { getAllWindows: () => [] },

@@ -48,8 +48,10 @@ models, local runtime controls, health, usage, and settings are the cross-platfo
 contract for this beta.
 
 The macOS host sets `CODEX_ROUTER_EMBEDDED_CONTROL_CENTER=1` only for its
-bundled Electron child. That suppresses a duplicate Electron tray and Dock
-icon; standalone development and Windows/Linux packages keep their own tray.
+bundled Electron child. That suppresses a duplicate Electron tray. The child
+shows the shared product icon in the Dock and Command-Tab while its window is
+open, then hides that entry when the window closes; standalone development and
+Windows/Linux packages keep their own tray.
 
 Service stop and restart remain intentional terminal operations during the
 beta because either can interrupt active turns or downloads. The Control Center
@@ -77,11 +79,13 @@ The main window keeps the operating system's native window controls. On macOS,
 the frameless window uses a hidden-inset title bar so native traffic lights sit
 over the content while the sidebar controls and page toolbar share the same top
 row as Codex; the renderer marks that row draggable without recreating the
-controls. Other platforms retain their standard native frame. Close, minimize,
-maximize, keyboard shortcuts, accessibility behavior, and platform-specific
-placement remain native. The Hermes artwork is used consistently for the
-Electron window, standalone Dock entry, application bundle, and installer; the
-unified macOS host keeps its separate outer-bundle icon.
+controls. Windows and Linux hide the system title bar the same way so the
+toolbar occupies that row, and the renderer draws macOS-style traffic lights
+on the left. The File/Edit/View application menu is removed on Windows and
+Linux. macOS keeps native traffic lights. Close, minimize, maximize, keyboard
+shortcuts, and accessibility behavior still work. The routing mark from the
+native app's `AppIcon.svg` is used consistently for the sidebar, Electron
+window, Dock entry, application bundles, and installers.
 
 ## Development
 

@@ -1,10 +1,29 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 
 const { validateV2AgentApplications } = await import("../scripts/check-v2-agent-applications.mjs");
+
+const fixtureRoots = new Set();
+
+function temporaryRoot(prefix) {
+  const root = mkdtempSync(path.join(os.tmpdir(), prefix));
+  fixtureRoots.add(root);
+  return root;
+}
+
+after(() => {
+  for (const root of fixtureRoots) rmSync(root, { recursive: true, force: true });
+});
 
 const ACCEPTED_MODELS = Object.freeze([{
   slug: "example/alpha",
@@ -31,7 +50,7 @@ function acceptedProof() {
     status: "accepted",
     officialSources: ["https://api-docs.deepseek.com/models/alpha"],
     testedAt: now,
-    routerVersion: "0.4.0-beta.4",
+    routerVersion: "0.5.0",
     checks: Object.fromEntries(
       ["streaming", "toolCall", "encryptedRelay", "markerReturn", "sameThreadFollowUp"]
         .map((name) => [name, { outcome: "pass", status: 200, observedAt: now }]),
@@ -40,7 +59,7 @@ function acceptedProof() {
 }
 
 test("an accepted application requires all native collaboration evidence", () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "v2-agent-application-test-"));
+  const root = temporaryRoot("v2-agent-application-test-");
   application(root, acceptedProof());
   assert.deepEqual(validateV2AgentApplications(root, { models: ACCEPTED_MODELS }), [{
     provider: "example", model: "alpha", slug: "example/alpha", status: "accepted",
@@ -48,7 +67,7 @@ test("an accepted application requires all native collaboration evidence", () =>
 });
 
 test("a draft may be submitted before live evidence exists", () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "v2-agent-draft-test-"));
+  const root = temporaryRoot("v2-agent-draft-test-");
   application(root, {
     version: 1,
     provider: "example",
@@ -60,7 +79,7 @@ test("a draft may be submitted before live evidence exists", () => {
 });
 
 test("proofs fail closed on missing checks, identity drift, and credential-shaped content", () => {
-  const missing = mkdtempSync(path.join(os.tmpdir(), "v2-agent-missing-test-"));
+  const missing = temporaryRoot("v2-agent-missing-test-");
   const incomplete = acceptedProof();
   delete incomplete.checks.markerReturn;
   application(missing, incomplete);
@@ -69,7 +88,7 @@ test("proofs fail closed on missing checks, identity drift, and credential-shape
     /markerReturn/,
   );
 
-  const secret = mkdtempSync(path.join(os.tmpdir(), "v2-agent-secret-test-"));
+  const secret = temporaryRoot("v2-agent-secret-test-");
   application(secret, acceptedProof(), "# Proof\n\n## Evidence\n\nBearer token_abcdefghijklmnop\n");
   assert.throws(
     () => validateV2AgentApplications(secret, { models: ACCEPTED_MODELS }),
@@ -78,7 +97,7 @@ test("proofs fail closed on missing checks, identity drift, and credential-shape
 });
 
 test("accepted proof identity must match one exact v2 registry route", () => {
-  const absent = mkdtempSync(path.join(os.tmpdir(), "v2-agent-route-absent-test-"));
+  const absent = temporaryRoot("v2-agent-route-absent-test-");
   application(absent, acceptedProof());
   assert.throws(
     () => validateV2AgentApplications(absent, {
@@ -92,7 +111,7 @@ test("accepted proof identity must match one exact v2 registry route", () => {
     /does not match an exact registry route/,
   );
 
-  const unproven = mkdtempSync(path.join(os.tmpdir(), "v2-agent-route-v1-test-"));
+  const unproven = temporaryRoot("v2-agent-route-v1-test-");
   application(unproven, acceptedProof());
   assert.throws(
     () => validateV2AgentApplications(unproven, {
@@ -104,6 +123,69 @@ test("accepted proof identity must match one exact v2 registry route", () => {
     }),
     /requires the exact registry route to declare multiAgentVersion v2/,
   );
+
+  const upstreamDrift = temporaryRoot("v2-agent-route-upstream-test-");
+  application(upstreamDrift, acceptedProof());
+  assert.throws(
+    () => validateV2AgentApplications(upstreamDrift, {
+      models: [{
+        slug: "example/alpha",
+        provider: "example",
+        upstreamModel: "different-alpha",
+        multiAgentVersion: "v2",
+      }],
+    }),
+    /does not match an exact registry route/,
+  );
+});
+
+test("accepted applications fail closed on legacy versions, v1 routes, and unknown checks", () => {
+  const roots = [];
+  const fixture = (suffix) => {
+    const root = temporaryRoot(`v2-agent-contract-${suffix}-`);
+    roots.push(root);
+    return root;
+  };
+  try {
+    const legacy = acceptedProof();
+    legacy.version = 0;
+    const legacyRoot = fixture("version");
+    application(legacyRoot, legacy);
+    assert.throws(
+      () => validateV2AgentApplications(legacyRoot, { models: ACCEPTED_MODELS }),
+      /proof\.json version must be 1/,
+    );
+
+    const v1Root = fixture("v1");
+    application(v1Root, acceptedProof());
+    assert.throws(
+      () => validateV2AgentApplications(v1Root, {
+        models: [{
+          slug: "example/alpha",
+          provider: "example",
+          upstreamModel: "alpha",
+          multiAgentVersion: "v1",
+        }],
+      }),
+      /requires the exact registry route to declare multiAgentVersion v2/,
+    );
+
+    const unknownCheckRoot = fixture("check");
+    const unknownCheck = acceptedProof();
+    delete unknownCheck.checks.toolCall;
+    unknownCheck.checks.tools = {
+      outcome: "pass",
+      status: 200,
+      observedAt: unknownCheck.testedAt,
+    };
+    application(unknownCheckRoot, unknownCheck);
+    assert.throws(
+      () => validateV2AgentApplications(unknownCheckRoot, { models: ACCEPTED_MODELS }),
+      /checks\.toolCall must record outcome: "pass"/,
+    );
+  } finally {
+    for (const root of roots) fixtureRoots.delete(root);
+  }
 });
 
 test("accepted proofs reject placeholder sources and loose timestamps", () => {
@@ -113,7 +195,7 @@ test("accepted proofs reject placeholder sources and loose timestamps", () => {
     "https://localhost./models/alpha",
     "https://[::1]/models/alpha",
   ]) {
-    const placeholder = mkdtempSync(path.join(os.tmpdir(), "v2-agent-source-test-"));
+    const placeholder = temporaryRoot("v2-agent-source-test-");
     const placeholderProof = acceptedProof();
     placeholderProof.officialSources = [source];
     application(placeholder, placeholderProof);
@@ -124,7 +206,7 @@ test("accepted proofs reject placeholder sources and loose timestamps", () => {
     );
   }
 
-  const timestamp = mkdtempSync(path.join(os.tmpdir(), "v2-agent-timestamp-test-"));
+  const timestamp = temporaryRoot("v2-agent-timestamp-test-");
   const timestampProof = acceptedProof();
   timestampProof.testedAt = "August 22, 2026 UTC";
   application(timestamp, timestampProof);
@@ -146,7 +228,7 @@ test("proof artifacts reject common credential shapes", () => {
     ["gl", "pat-abcdefghijklmnopqrstuvwxyz0123456789"],
     ["np", "m_abcdefghijklmnopqrstuvwxyz0123456789"],
   ].map((parts) => parts.join(""))) {
-    const root = mkdtempSync(path.join(os.tmpdir(), "v2-agent-secret-shape-test-"));
+    const root = temporaryRoot("v2-agent-secret-shape-test-");
     application(
       root,
       acceptedProof(),
@@ -161,7 +243,7 @@ test("proof artifacts reject common credential shapes", () => {
 });
 
 test("proof slugs contain exactly two safe path segments", () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "v2-agent-slug-test-"));
+  const root = temporaryRoot("v2-agent-slug-test-");
   const proof = acceptedProof();
   proof.slug = "example/alpha/extra";
   application(root, proof);
@@ -169,7 +251,7 @@ test("proof slugs contain exactly two safe path segments", () => {
 });
 
 test("the route directory is independent of slash-bearing upstream model ids", () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "v2-agent-upstream-id-test-"));
+  const root = temporaryRoot("v2-agent-upstream-id-test-");
   application(root, {
     version: 1,
     provider: "example",
@@ -186,7 +268,7 @@ test("the route directory is independent of slash-bearing upstream model ids", (
 });
 
 test("a new registry v2 declaration requires an accepted exact-route application", () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "v2-agent-reverse-gate-test-"));
+  const root = temporaryRoot("v2-agent-reverse-gate-test-");
   assert.throws(
     () => validateV2AgentApplications(root, {
       models: [{
@@ -204,7 +286,7 @@ test(
   "proof artifacts must be regular files rather than symlinks",
   { skip: process.platform === "win32" },
   () => {
-    const root = mkdtempSync(path.join(os.tmpdir(), "v2-agent-symlink-test-"));
+    const root = temporaryRoot("v2-agent-symlink-test-");
     const proof = acceptedProof();
     application(root, proof);
     const markdown = path.join(root, proof.provider, "alpha", "proof.md");

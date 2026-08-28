@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   existsSync,
@@ -15,6 +16,7 @@ import { isManagedCallerBaseUrl } from "./caller-auth.mjs";
 import { applyInstructionOverlay } from "./instruction-overlays.mjs";
 import {
   ANNOUNCED_MODELS_PATH,
+  CODEX_PROVIDER_MODE_PATH,
   CONFIG_PATH,
   MERGED_CATALOG_PATH,
   MODELS_CACHE_PATH,
@@ -420,9 +422,30 @@ function loginFreeConfigured() {
   if (!existsSync(CONFIG_PATH)) return false;
   try {
     const document = scanTomlDocument(readFileSync(CONFIG_PATH, "utf8"));
-    return tomlStringValue(document, [], "model_provider") === "codex-router";
+    if (tomlStringValue(document, [], "model_provider") === "codex-router") {
+      return true;
+    }
+    if (!existsSync(CODEX_PROVIDER_MODE_PATH)) return false;
+    // Identity-preserving login-free mode deliberately leaves model_provider
+    // unchanged, so the root assignment alone can no longer identify it.
+    // Ask the config manager for its ownership-validated snapshot rather than
+    // trusting state-file presence: a drifted provider table or base URL must
+    // not publish external aliases onto a transport the router no longer owns.
+    const result = spawnSync(
+      process.execPath,
+      [fileURLToPath(new URL("./config-manager.mjs", import.meta.url)), "status"],
+      { encoding: "utf8", env: process.env },
+    );
+    if (result.status !== 0) {
+      throw new Error(
+        (result.stderr || "Codex provider-mode state could not be validated.").trim(),
+      );
+    }
+    return JSON.parse(result.stdout).login_free === true;
   } catch {
-    return false;
+    throw new Error(
+      "Could not validate Codex login-free provider ownership; refusing to rebuild the catalog.",
+    );
   }
 }
 
@@ -945,10 +968,11 @@ function main() {
   const pickerState = modelPickerSnapshot();
   const visibleModels = new Set(pickerState.visible);
   const multiAgentSettings = readMultiAgentSettings();
-  // Settings can disable a certified route, but machine-local proof records
-  // are diagnostic only: neither a compatibility probe nor an observed child
-  // turn may manufacture a v2 claim. That capability belongs to the exact
-  // checked-in registry route and its reviewed v2_agent application.
+  // Settings can disable a certified route. A v2 claim itself comes from one
+  // of exactly two places: the checked-in registry route, or a completed local
+  // verification of that same route -- all five v2_agent checks passing in one
+  // run on this build. The older diagnostic records stay diagnostic: neither a
+  // compatibility probe nor an observed child turn may manufacture the claim.
   const allMultiAgentModels = applyMultiAgentCapabilities(
     selectedModels,
     multiAgentSettings,
@@ -1070,11 +1094,25 @@ function main() {
     // switched off as a subagent needs its definition gone as well. Without
     // this, switching it off changes multi_agent_version and nothing else, and
     // the model still answers when it is spawned by name.
-    routedAgents = syncRoutedCodexAgents(
-      routedCatalog || loginFree
-        ? subagentEligibleModels(routedModels, multiAgentSettings)
-        : [],
-    );
+    const eligibleAgents = routedCatalog || loginFree
+      ? subagentEligibleModels(routedModels, multiAgentSettings)
+      : [];
+    routedAgents = syncRoutedCodexAgents(eligibleAgents);
+    // Removing every definition is how an operator's subagents disappear, and
+    // it is the only code path that does it. Say so on the way out: a publish
+    // that read the routed catalog as inactive has just emptied a directory
+    // the next publish will refill, and until this line the only trace was a
+    // doctor FAIL some time later with nothing to attribute it to.
+    if (!routedCatalog && !loginFree && routedAgents.removed.length) {
+      process.stderr.write(
+        `${JSON.stringify({
+          warning: "routed_agents_cleared",
+          removed: routedAgents.removed.length,
+          reason: "the routed catalog read as inactive",
+          config: CONFIG_PATH,
+        })}\n`,
+      );
+    }
   } catch (error) {
     const restoreErrors = [];
     for (const [target, snapshot] of [...snapshots].reverse()) {

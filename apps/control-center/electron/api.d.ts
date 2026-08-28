@@ -122,5 +122,9 @@ export interface RouterControl {
   installHarness(harnessId: "deepcode"): Promise<unknown>;
   openHarnessSession(harnessId: HarnessId, sessionId: string, surface: HarnessSurface, model?: string): Promise<unknown>;
   openExternal(url: string): Promise<void>;
+  onNavigation?(listener: (request: {
+    destination: "usage" | "usage-resets";
+    sourceId?: string;
+  }) => void): () => void;
   onOperation(listener: (event: { id?: string; name?: string; action?: string; status: string; message?: string; error?: string }) => void): () => void;
 }

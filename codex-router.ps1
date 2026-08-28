@@ -13,8 +13,8 @@ $Command = if ($args.Count) { [string]$args[0] } else { "status" }
 # failed with "Unknown tray action 's'".
 $Arguments = @(if ($args.Count -gt 1) { $args[1..($args.Count - 1)] })
 $Commands = @(
-  "setup", "install", "doctor", "status", "providers", "provider-key", "enable",
-  "disable", "chatgpt-session", "uninstall", "update", "rollback", "support-bundle",
+  "setup", "install", "doctor", "status", "providers", "provider-key", "key-pool", "enable",
+  "disable", "chatgpt-session", "skills", "uninstall", "update", "rollback", "support-bundle",
   "smoke-test", "start", "stop", "test-model", "discover-models", "local-mlx",
   "signed-routing", "refresh-catalog", "media", "tray", "panel", "companion"
 )
@@ -84,6 +84,37 @@ function Assert-ControlCenterTransactionPath([string]$Target, [string]$Label, [s
   }
   if ($Kind -eq "File" -and $Item.PSIsContainer) {
     throw "Control Center recovery was refused: $Label is not a file at $Target."
+  }
+}
+
+function Replace-ControlCenterTransactionJournal([string]$Temporary, [string]$JournalPath) {
+  # Prefer the atomic NTFS replacement. Some Windows PowerShell/.NET hosts have
+  # nevertheless rejected valid journal paths here with ArgumentException, so
+  # retain a recoverable same-volume fallback for that compatibility case.
+  try {
+    [IO.File]::Replace($Temporary, $JournalPath, $null)
+    return
+  } catch [ArgumentException] {
+    $FallbackBackup = $JournalPath + ".replace-backup-" + [Guid]::NewGuid().ToString("N")
+    Move-Item -LiteralPath $JournalPath -Destination $FallbackBackup -ErrorAction Stop
+    try {
+      Move-Item -LiteralPath $Temporary -Destination $JournalPath -ErrorAction Stop
+    } catch {
+      $ReplacementFailure = $_
+      try {
+        Move-Item -LiteralPath $FallbackBackup -Destination $JournalPath -ErrorAction Stop
+      } catch {
+        throw "Could not replace the Control Center transaction journal and could not restore its prior copy. $($_.Exception.Message)"
+      }
+      throw $ReplacementFailure
+    }
+    try {
+      Remove-Item -LiteralPath $FallbackBackup -Force -ErrorAction Stop
+    } catch {
+      # The new journal is already durable. A protected stale backup is safer
+      # than reporting a failed transaction after the replacement succeeded.
+      Write-Warning "Control Center transaction journal was replaced, but its stale fallback backup could not be removed: $FallbackBackup"
+    }
   }
 }
 
@@ -171,7 +202,7 @@ function Write-ControlCenterTransactionJournal($Transaction, [string]$Phase) {
     Assert-ControlCenterTransactionPath $Temporary "temporary transaction journal" "File"
     if ([IO.File]::Exists($Transaction.JournalPath)) {
       Assert-ControlCenterTransactionPath $Transaction.JournalPath "transaction journal" "File"
-      [IO.File]::Replace($Temporary, $Transaction.JournalPath, $null)
+      Replace-ControlCenterTransactionJournal $Temporary $Transaction.JournalPath
     } else {
       [IO.File]::Move($Temporary, $Transaction.JournalPath)
     }
@@ -827,7 +858,9 @@ switch ($Command) {
   }
   "providers" { Invoke-RouterNode "src\providers.mjs" $Arguments }
   "provider-key" { Invoke-RouterNode "src\provider-key.mjs" $Arguments }
+  "key-pool" { Invoke-RouterNode "src\control.mjs" (@("key-pool") + $Arguments) }
   "chatgpt-session" { Invoke-RouterNode "src\chatgpt-session.mjs" $Arguments }
+  "skills" { Invoke-RouterNode "src\skills-install.mjs" $Arguments }
   # `bin/install` accepts --prepare-only/--migrate-known/--force-deps, so the
   # Windows wrapper has to pass the equivalent switches through instead of
   # dropping them; `./model-router.ps1 codex install -ForceDeps` was silently

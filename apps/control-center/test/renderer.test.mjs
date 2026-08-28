@@ -13,6 +13,8 @@ const dist = path.join(appRoot, "dist");
 const bridgeSource = String.raw`
 (() => {
   const calls = [];
+  let navigationListener;
+  let usageDelayMs = 0;
   const subagents = { mode: "all", enabled: [], disabled: [], efforts: {}, proofs: {} };
   const selectedModel = {
     slug: "deepseek/deepseek-chat",
@@ -21,8 +23,8 @@ const bridgeSource = String.raw`
     provider: "deepseek",
     enabled: true,
     visible: true,
-    multiAgentVersion: "v1",
-    subagentCertification: "v1",
+    multiAgentVersion: "v2",
+    subagentCertification: "v2",
     reasoningLevels: ["low", "medium", "high"],
     contextWindow: 128000,
     inputModalities: ["text"],
@@ -144,8 +146,54 @@ const bridgeSource = String.raw`
     getProviders: async () => providers,
     getPresence: async () => ({ mode: "always" }),
     getHealth: async () => ({ ok: true, activity: { state: "idle", active: [], activeCount: 0 } }),
-    getAccountUsage: async () => ({}),
-    getProviderUsage: async () => ({ providers: [] }),
+    getAccountUsage: async () => {
+      await new Promise((resolve) => setTimeout(resolve, usageDelayMs));
+      return {
+        fetchedAt: "2026-08-27T08:00:00.000Z",
+        planType: "pro",
+        primary: {
+          usedPercent: 34,
+          remainingPercent: 66,
+          windowDurationMins: 300,
+          resetsAt: 1800000000,
+        },
+        dailyUsageBuckets: [{ startDate: "2026-08-27", tokens: 24000 }],
+        summary: { lifetimeTokens: 24000, peakDailyTokens: 24000, currentStreakDays: 1 },
+      };
+    },
+    getProviderUsage: async () => {
+      await new Promise((resolve) => setTimeout(resolve, usageDelayMs));
+      return {
+        fetchedAt: "2026-08-27T08:00:00.000Z",
+        providers: [{
+          id: "deepseek",
+          displayName: "DeepSeek",
+          credentialType: "api",
+          totalTokens: 12000,
+          requests: 8,
+          dailyUsageBuckets: [{ startDate: "2026-08-27", tokens: 12000, requests: 8 }],
+          account: {
+            status: "available",
+            metrics: [
+              {
+                kind: "quota",
+                label: "Monthly credits",
+                usedPercent: 25,
+                remainingPercent: 75,
+                resetAt: 1800000000,
+              },
+              {
+                kind: "quota",
+                label: "Rolling window",
+                usedPercent: 40,
+                remainingPercent: 60,
+                resetAt: 1790000000,
+              },
+            ],
+          },
+        }],
+      };
+    },
     discoverProviderModels: async (providerId) => catalog(providerId),
     addProviderModels: async (providerId, modelIds) => {
       record("addProviderModels", providerId, [...modelIds]);
@@ -159,10 +207,21 @@ const bridgeSource = String.raw`
     setProviderEnabled: async () => ({ ok: true }),
     setSubagentModel: async () => ({ ok: true }),
     setSubagentEffort: async () => ({ ok: true }),
+    onNavigation: (listener) => {
+      navigationListener = listener;
+      return () => { if (navigationListener === listener) navigationListener = undefined; };
+    },
     onOperation: () => () => {},
   });
   window.routerControlTest = Object.freeze({
     calls: () => calls.map((call) => ({ name: call.name, args: call.args })),
+    navigationReady: () => Boolean(navigationListener),
+    navigate: (destination) => {
+      if (!navigationListener) return false;
+      navigationListener(destination);
+      return true;
+    },
+    setUsageDelay: (milliseconds) => { usageDelayMs = milliseconds; },
   });
 })();
 `;
@@ -231,7 +290,7 @@ const chromiumPath = [
   process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, "Google", "Chrome", "Application", "chrome.exe"),
 ].find((candidate) => candidate && existsSync(candidate));
 
-test("the production renderer exposes model discovery and picker actions", { timeout: 60_000 }, async () => {
+test("the production renderer exposes model discovery and picker actions", { timeout: 120_000 }, async () => {
   assert.equal(existsSync(path.join(dist, "index.html")), true, "npm test must build the renderer first");
   assert.ok(chromiumPath, "No Chromium executable is available for the Control Center renderer test.");
 
@@ -244,6 +303,10 @@ test("the production renderer exposes model discovery and picker actions", { tim
   const pageErrors = [];
   try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 840 } });
+    // Windows hosted runners routinely spend about 30 seconds starting the
+    // browser. Keep UI waits short and diagnostic without letting that startup
+    // consume the whole integration-test deadline.
+    page.setDefaultTimeout(10_000);
     page.on("pageerror", (error) => pageErrors.push(error.message));
     page.on("console", (message) => {
       if (message.type() === "error") pageErrors.push(message.text());
@@ -251,79 +314,141 @@ test("the production renderer exposes model discovery and picker actions", { tim
 
     await page.goto(url, { waitUntil: "domcontentloaded" });
     await page.getByRole("navigation", { name: "Control center sections" }).waitFor();
-    await page.getByRole("button", { name: "Models", exact: true }).click();
-    const providerSearch = page.locator('input[placeholder="Search providers or known models"]');
-    await providerSearch.waitFor();
-
-    await providerSearch.fill("Ox Alpha");
-    const oxProviderRows = page.locator(".pm-provider-row");
-    await oxProviderRows.filter({ hasText: "Command Code" }).waitFor();
-    assert.equal(await oxProviderRows.count(), 6);
-    assert.deepEqual(
-      (await oxProviderRows.locator(".pm-provider-title-line > strong").allTextContents()).sort(),
-      ["Command Code", "Nous Research", "OpenCode Free", "OpenRouter", "Venice", "opencode Go/Zen"].sort(),
+    const wordmark = page.locator(".router-wordmark");
+    assert.equal((await wordmark.locator("strong").innerText()).trim(), "Codex Router");
+    assert.equal(await wordmark.locator("img").count(), 0);
+    await page.waitForFunction(() => window.routerControlTest.navigationReady());
+    await page.evaluate(() => window.routerControlTest.setUsageDelay(600));
+    assert.equal(
+      await page.evaluate(() => window.routerControlTest.navigate({ destination: "usage", sourceId: "deepseek" })),
+      true,
     );
-    assert.equal(await oxProviderRows.filter({ hasText: "not connected" }).count(), 4);
-    assert.equal(await oxProviderRows.filter({ hasText: "1 known match" }).count(), 6);
+    await page.getByRole("heading", { name: "Usage", exact: true }).waitFor();
+    assert.equal(
+      await page.evaluate(() => window.routerControlTest.navigate({ destination: "usage-resets", sourceId: "deepseek" })),
+      true,
+    );
+    await page.waitForFunction(() => {
+      const active = document.activeElement;
+      return active?.classList.contains("us-metric-card")
+        && active.getAttribute("aria-label")?.startsWith("DeepSeek, Rolling window");
+    });
+    assert.match(
+      await page.evaluate(() => document.activeElement?.getAttribute("aria-label")),
+      /DeepSeek, Rolling window.*Resets/,
+    );
+    assert.equal(
+      await page.evaluate(() => window.routerControlTest.navigate({ destination: "usage", sourceId: "openai" })),
+      true,
+    );
+    await page.waitForFunction(() => document.activeElement?.getAttribute("aria-label") === "Usage overview");
+    assert.equal(await page.getByLabel("Usage source").inputValue(), "chatgpt-subscription");
+    await page.getByRole("button", { name: "Models", exact: true }).click();
 
-    const knownModelSearch = page.locator('input[placeholder="Search active, known, or loaded catalog models"]');
-    await knownModelSearch.fill("Ox Alpha");
+    // The connections strip carries every account: connected providers as
+    // chips, the rest behind one menu.
+    const connections = page.locator(".pm-connections");
+    await connections.waitFor();
+    assert.match(await connections.innerText(), /3 of 8 connected/);
+    assert.deepEqual(
+      (await connections.locator(".pm-chip:not(.pm-chip-add)").allTextContents()).map((text) => text.trim()).sort(),
+      ["DeepSeek", "OpenCode Free", "opencode Go/Zen"].sort(),
+    );
+    await connections.getByRole("button", { name: "Connect provider", exact: true }).click();
+    const connectMenu = page.locator(".pm-connect-menu");
+    await connectMenu.waitFor();
+    // An anonymous endpoint is not connected until it is explicitly enabled,
+    // so it belongs with the providers still waiting for a connection.
+    assert.match(await connectMenu.innerText(), /Kilo Free/);
+    assert.equal(await connectMenu.getByRole("menuitem").count(), 5);
+    await page.keyboard.press("Escape");
+
+    // A single-route model's thinking menu opens below its definition-list
+    // cell. The menu used to be clipped by that cell's generic text-overflow
+    // rule, leaving only its top edge visible.
+    const selectedFamily = page.locator(".pm-family-row").filter({ hasText: "DeepSeek Chat" });
+    await selectedFamily.locator(".pm-family-open").click();
+    const thinkingTrigger = selectedFamily.getByRole("button", {
+      name: "DeepSeek Chat DeepSeek subagent thinking effort",
+    });
+    await thinkingTrigger.click();
+    const thinkingMenu = selectedFamily.locator(".pm-effort-menu");
+    await thinkingMenu.waitFor();
+    const detailsCell = selectedFamily.locator(".pm-model-details-controls");
+    assert.equal(await detailsCell.evaluate((element) => getComputedStyle(element).overflow), "visible");
+    const [cellBox, menuBox] = await Promise.all([detailsCell.boundingBox(), thinkingMenu.boundingBox()]);
+    assert.ok(cellBox && menuBox);
+    assert.ok(menuBox.y + menuBox.height > cellBox.y + cellBox.height);
+    assert.equal(await page.evaluate(({ x, y }) => (
+      Boolean(document.elementFromPoint(x, y)?.closest(".pm-effort-menu"))
+    ), {
+      x: menuBox.x + menuBox.width / 2,
+      y: menuBox.y + menuBox.height - 2,
+    }), true);
+    await page.keyboard.press("Escape");
+    await selectedFamily.locator(".pm-family-open").click();
+
+    // A route that is only known to the registry still has to be findable, and
+    // has to say which connection it is waiting for.
+    const modelSearch = page.locator('input[placeholder="Search models"]');
+    await modelSearch.fill("Ox Alpha");
     const oxFamily = page.locator(".pm-family-row").filter({ hasText: "Ox Alpha" });
     await oxFamily.waitFor();
     assert.match(await oxFamily.innerText(), /6 providers/);
     assert.match(await oxFamily.innerText(), /6 routes/i);
-    await oxFamily.locator(".pm-family-summary").click();
+    await oxFamily.locator(".pm-family-open").click();
     assert.equal(await oxFamily.locator(".pm-route-row").count(), 6);
     assert.equal(await oxFamily.locator('.pm-route-row[data-availability="known"]').count(), 4);
-    assert.equal(await oxFamily.getByText("Enable or connect provider", { exact: true }).count(), 4);
+    // Every row ends in the same slot: a switch you can use, or the button
+    // that would make it usable.
+    assert.equal(await oxFamily.getByRole("button", { name: /^Connect / }).count(), 4);
+    const columns = await oxFamily.locator(".pm-route-head > span").allTextContents();
+    assert.deepEqual(columns, ["Account", "Context", "Input", "In picker", "Subagents", "Thinking"]);
+    await modelSearch.fill("");
 
-    await providerSearch.fill("");
-    await knownModelSearch.fill("");
-
-    const anonymousRow = page.locator(".pm-provider-row").filter({ hasText: "Kilo Free" });
-    await anonymousRow.waitFor();
-    assert.equal(await anonymousRow.getAttribute("data-connection"), "setup");
-    assert.match(await anonymousRow.innerText(), /not connected/i);
-
-    await page.getByRole("button", { name: "Load connected catalogs", exact: true }).click();
-    await page.waitForFunction(() => [...document.querySelectorAll("button")]
-      .some((button) => button.textContent?.trim() === "Load connected catalogs"));
+    // Adding reads every connected provider's catalog at once. Only a provider
+    // that is both connected and publishes a catalog is asked.
+    await page.getByRole("button", { name: "Add models", exact: true }).click();
+    const addDialog = page.locator(".pm-add-models");
+    await addDialog.waitFor();
+    await page.waitForFunction(() => window.routerControlTest.calls()
+      .some((call) => call.name === "discoverProviderModels"));
     const bulkCatalogProviders = await page.evaluate(() => window.routerControlTest.calls()
       .filter((call) => call.name === "discoverProviderModels")
       .map((call) => call.args[0]));
     assert.deepEqual(bulkCatalogProviders, ["deepseek"]);
 
-    const deepseekProvider = page.locator(".pm-provider-row").filter({ hasText: "DeepSeek" });
-    await deepseekProvider.locator(".pm-provider-summary").click();
-    const providerBlockedRow = deepseekProvider
-      .locator(".pm-live-catalog-row")
-      .filter({ hasText: "blocked-preview" });
-    await providerBlockedRow.waitFor();
-    assert.equal(await providerBlockedRow.getAttribute("data-blocked"), "true");
-    assert.equal(
-      await providerBlockedRow.getByText("Not yet supported", { exact: true }).count(),
-      1,
-    );
-
-    const search = page.locator('input[placeholder="Search active, known, or loaded catalog models"]');
-    await search.fill("catalog-addable");
-    const addableRow = page.locator(".pm-catalog-search-row").filter({ hasText: "catalog-addable" });
-    await addableRow.waitFor();
-    await addableRow.getByRole("button", { name: "Add", exact: true }).click();
-    await page.waitForFunction(() => window.routerControlTest.calls()
-      .some((call) => call.name === "addProviderModels"));
-
-    await search.fill("blocked-preview");
-    const blockedRow = page.locator(".pm-catalog-search-row").filter({ hasText: "blocked-preview" });
+    const blockedRow = addDialog.locator(".pm-add-models-row").filter({ hasText: "blocked-preview" });
     await blockedRow.waitFor();
-    const blockedButton = blockedRow.getByRole("button", { name: "Not yet supported", exact: true });
-    assert.equal(await blockedButton.isDisabled(), true);
+    assert.equal(await blockedRow.getAttribute("data-blocked"), "true");
+    assert.equal(await blockedRow.locator("input[type=checkbox]").isDisabled(), true);
+    assert.equal(await blockedRow.getByText("Not yet supported", { exact: true }).count(), 1);
     assert.equal(
       await blockedRow.locator(".pm-catalog-block-reason").innerText(),
       "No certified protocol route is available.",
     );
 
-    await page.getByRole("button", { name: "Show all", exact: true }).click();
+    const addableRow = addDialog.locator(".pm-add-models-row").filter({ hasText: "catalog-addable" });
+    await addableRow.locator("input[type=checkbox]").check();
+    await addDialog.getByRole("button", { name: "Add 1 model", exact: true }).click();
+    await page.waitForFunction(() => window.routerControlTest.calls()
+      .some((call) => call.name === "addProviderModels"));
+
+    // Flipping a model must never move it. Sorting by the switch would throw
+    // the row across the list at the moment the reader looks for confirmation.
+    const modelNames = () => page.locator(".pm-family-main > strong").allTextContents();
+    const orderBefore = await modelNames();
+    assert.deepEqual(orderBefore, ["DeepSeek Chat", "Ox Alpha"]);
+    const deepseekRow = page.locator(".pm-family-row").filter({ hasText: "DeepSeek Chat" });
+    assert.equal((await deepseekRow.locator(".pm-family-state").innerText()).trim(), "On");
+    await deepseekRow.locator('.pm-family-action input[type="checkbox"]').click();
+    // Scope to the row's own state, not any "Off" inside its expanded panel.
+    await deepseekRow.locator(".pm-family-state").filter({ hasText: "Off" }).waitFor();
+    assert.deepEqual(await modelNames(), orderBefore);
+
+    // Bulk switches live behind the overflow menu, off the main toolbar.
+    await page.getByRole("button", { name: "More model actions", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Turn all on", exact: true }).click();
     await page.waitForFunction(() => window.routerControlTest.calls()
       .some((call) => call.name === "setPickerModels" && call.args[0] === true));
 

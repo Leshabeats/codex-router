@@ -247,6 +247,33 @@ export interface RouterSnapshot {
   chatgptSession?: ChatGptSessionStatus;
 }
 
+export interface RouterDashboardProvider {
+  id: string;
+  displayName: string;
+  kind: string;
+  enabled: boolean;
+  ownedBy?: string;
+  authMode?: string;
+}
+
+export interface RouterDashboardModel {
+  slug: string;
+  displayName: string;
+  provider: string;
+  enabled: boolean;
+  visible: boolean;
+  native?: boolean;
+  isFree?: boolean;
+}
+
+export interface RouterDashboardSnapshot {
+  version: number;
+  source: string;
+  enabledProviders: string[];
+  providers: RouterDashboardProvider[];
+  models: RouterDashboardModel[];
+}
+
 export interface ChatGptSessionStatus {
   sharing: "enabled" | "disabled";
   session: "usable" | "expired" | "unavailable";
@@ -263,6 +290,8 @@ export interface RouterCatalogSnapshot {
   knownModels?: RouterKnownModel[];
   picker: { hidden: string[]; visible?: string[]; hasExplicitVisibility?: boolean; path?: string };
   subagents: SubagentSettings;
+  /** Metadata-only route dashboard. No credentials, endpoints, or sessions. */
+  dashboard?: RouterDashboardSnapshot;
 }
 
 export interface ProviderSetup {
@@ -296,6 +325,26 @@ export interface ProviderCatalog {
   blocked: Record<string, string>;
   unavailable: string[];
   contextLengths?: Record<string, number>;
+  metadata?: Record<string, {
+    contextWindow?: number;
+    maxOutputTokens?: number;
+    inputModalities?: string[];
+    outputModalities?: string[];
+    supportsTools?: boolean;
+    supportsToolChoice?: boolean;
+    reasoning?: {
+      supported?: boolean;
+      configurable?: boolean;
+      supportedEfforts?: string[];
+      defaultEffort?: string;
+      mandatory?: boolean;
+      defaultEnabled?: boolean;
+      advertisedSupportedEfforts?: string[];
+      advertisedDefaultEffort?: string;
+      effectiveMetadataSource?: string;
+    };
+    metadataSource?: string;
+  }>;
   free?: string[];
   /** True when the list came from the stored copy rather than a live request. */
   cached?: boolean;
@@ -591,6 +640,17 @@ export interface RouterControlApi {
   setSubagentMode(mode: "all" | "selected" | "proven"): Promise<unknown>;
   setSubagentModel(slug: string, enabled: boolean): Promise<unknown>;
   setSubagentEffort(slug: string, effort: string): Promise<unknown>;
+  /** Runs the five live checks for each route in parallel; a complete pass promotes that route here. */
+  certifySubagentModels(slugs: string[]): Promise<{
+    results?: Array<{
+      slug: string;
+      certified?: boolean;
+      /** The run never reached a verdict: rate limit, outage, or a harness refusal. */
+      deferred?: boolean;
+      failedLabel?: string;
+      reason?: string;
+    }>;
+  }>;
   setSubagentSelection(selectAll: boolean): Promise<unknown>;
   setPickerModel(slug: string, visible: boolean): Promise<unknown>;
   setPickerModels(showAll: boolean): Promise<unknown>;
@@ -622,6 +682,10 @@ export interface RouterControlApi {
   installHarness(harnessId: "deepcode"): Promise<unknown>;
   openHarnessSession(harnessId: HarnessId, sessionId: string, surface: HarnessSurface, model?: string): Promise<unknown>;
   openExternal(url: string): Promise<void>;
+  onNavigation?(listener: (request: {
+    destination: "usage" | "usage-resets";
+    sourceId?: string;
+  }) => void): () => void;
   onOperation?(listener: (event: OperationEvent) => void): () => void;
 }
 

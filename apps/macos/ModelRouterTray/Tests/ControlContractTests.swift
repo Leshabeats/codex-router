@@ -6,7 +6,7 @@ import Testing
 @Suite("Native control contract")
 struct ControlContractTests {
   private static func fixture(
-    version: String = "0.4.0-beta.4",
+    version: String = "0.5.0",
     protocolVersion: Int = 1
   ) throws -> (root: URL, package: URL) {
     let root = FileManager.default.temporaryDirectory
@@ -85,18 +85,18 @@ struct ControlContractTests {
     let fixture = try Self.fixture()
     defer { try? FileManager.default.removeItem(at: fixture.root) }
     let installed = RouterControlContractPolicy.installedContract(sourceRoot: fixture.root)
-    #expect(installed == RouterControlContract(version: "0.4.0-beta.4", controlProtocol: 1))
+    #expect(installed == RouterControlContract(version: "0.5.0", controlProtocol: 1))
     #expect(
       RouterControlContractPolicy.matches(
         installed: installed,
-        expectedVersion: "0.4.0-beta.4",
+        expectedVersion: "0.5.0",
         expectedProtocol: 1
       )
     )
     #expect(
       !RouterControlContractPolicy.matches(
         installed: installed,
-        expectedVersion: "0.4.0-beta.5",
+        expectedVersion: "0.4.0-beta.4",
         expectedProtocol: 1
       )
     )
@@ -157,6 +157,37 @@ struct ControlContractTests {
     }
     #expect(forwarded["ANTHROPIC_API_KEY"] == nil)
     #expect(forwarded["EMPTY_ALIAS"] == nil)
+  }
+
+  @Test("widget URLs map only to fixed Control Center destinations")
+  func validatesWidgetDestinations() {
+    let usage = ControlCenterNavigationRequest(
+      url: URL(string: "codex-router://control-center/usage?source=deepseek")!
+    )
+    #expect(usage?.destination == .usage)
+    #expect(usage?.sourceID == "deepseek")
+    #expect(usage?.arguments == [
+      "--router-destination", "usage", "--router-source", "deepseek",
+    ])
+    #expect(usage?.url.absoluteString == "codex-router://control-center/usage?source=deepseek")
+    let reset = ControlCenterNavigationRequest(
+      url: URL(string: "codex-router://control-center/usage-resets?source=openai")!
+    )
+    #expect(reset?.destination == .usageResets)
+    #expect(reset?.sourceID == "openai")
+    for unsafe in [
+      "https://control-center/usage",
+      "codex-router://other/usage",
+      "codex-router://control-center/settings",
+      "codex-router://control-center/usage?source=deep_seek",
+      "codex-router://control-center/usage?source=openai&source=deepseek",
+      "codex-router://control-center/usage?next=settings",
+      "codex-router://control-center//usage",
+      "codex-router://user@control-center/usage",
+      "codex-router://control-center/usage#reset",
+    ] {
+      #expect(ControlCenterNavigationRequest(url: URL(string: unsafe)!) == nil)
+    }
   }
 
   @Test("the private install-owner manifest resolves and unsafe copies do not")

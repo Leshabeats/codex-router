@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { pickerCommandArgs } from "./control-args.mjs";
+import { readControlHealth } from "./control-health.mjs";
 import { nativeSubagentCertification, promoteNativeMultiAgent } from "./catalog.mjs";
 import {
   applyModelOverlayPublication,
@@ -15,10 +16,10 @@ import { withNativeContextVariants } from "./native-context-variants.mjs";
 // vary by target, so reading it here does not disturb the per-target probes
 // below that re-import paths with their own MODEL_ROUTER_TARGET.
 import {
-  CALLER_SECRET_PATH,
   DSH_CATALOG_PATH,
   GEMINI_CATALOG_PATH,
-  PORTS,
+  PROVIDER_API_KEY_POOL_PATH,
+  PROVIDER_CREDENTIAL_STORE_PATH,
   PROVIDER_SELECTION_PATH,
 } from "./paths.mjs";
 // Same reasoning: presence is a property of the shared plane, not of a target,
@@ -408,6 +409,7 @@ async function routerCatalogSnapshot() {
   const { modelPickerSnapshot } = await import("./model-picker-state.mjs");
   const { subagentSettingsSnapshot } = await import("./multi-agent-state.mjs");
   const { applySubagentProofs } = await import("./subagent-proofs.mjs");
+  const { routerDashboardState } = await import("./router-dashboard.mjs");
   const settings = subagentSettingsSnapshot();
   const picker = modelPickerSnapshot();
   const hidden = new Set(picker.hidden);
@@ -453,6 +455,7 @@ async function routerCatalogSnapshot() {
     knownModels,
     picker,
     subagents: settings,
+    dashboard: routerDashboardState({ models }),
   };
 }
 
@@ -483,6 +486,7 @@ async function printOverview(asJson) {
     // The harness snapshot joins it for the same reason -- and it has to be
     // the variant that probes the web port, or the tray reads every running
     // harness as stopped and offers to start one that is already up.
+    const catalog = await routerCatalogSnapshot();
     process.stdout.write(
       `${JSON.stringify(
         {
@@ -490,7 +494,7 @@ async function printOverview(asJson) {
           // Keep this separate from `targets.codex`: native Codex entries and
           // login-free aliases are client concerns, while this catalog is the
           // durable router policy shared by Codex, DSH, and Gemini.
-          catalog: await routerCatalogSnapshot(),
+          catalog,
           // Explicit sharing consent and login usability are separate facts.
           // This projection contains no token, account id, credential path, or
           // filesystem age even though the underlying doctor status does.
@@ -658,6 +662,15 @@ async function printProviderOnboarding() {
   process.stdout.write(`${JSON.stringify(providerOnboardingSnapshot(), null, 2)}\n`);
 }
 
+async function handleGenericProviders(...commandArgs) {
+  // The control center and the provider CLI must cross the same publication
+  // boundary. Calling the descriptor CRUD layer directly here can leave a
+  // running route and every installed client's picker on the pre-mutation
+  // registry until some unrelated later apply.
+  const { runGenericCommand } = await import("./providers.mjs");
+  await runGenericCommand(commandArgs);
+}
+
 async function installProviderCli(providerId) {
   const { installOauthCli, providerOnboardingSnapshot } = await import("./provider-onboarding.mjs");
   installOauthCli(providerId);
@@ -737,6 +750,105 @@ async function deleteProviderCredential(providerId) {
   process.stdout.write(
     `${JSON.stringify({ ...providerOnboardingSnapshot(), removal })}\n`,
   );
+}
+
+async function handleProviderKeyPool(providerId, action, value) {
+  const {
+    addEnvironmentCredentialToPool,
+    addStoredCredentialToPool,
+    deleteStoredCredentialPool,
+    removeStoredCredentialFromPool,
+    setStoredCredentialPoolPolicy,
+    setStoredCredentialPoolState,
+    storedCredentialPoolUsesServiceEnvironment,
+    storedCredentialRequiresServiceEnvironment,
+    storedCredentialPoolStatus,
+  } = await import("./provider-api-key-control.mjs");
+  if (!action || action === "status") {
+    // Status is deliberately lock-free and read-only. It must remain usable
+    // while a catalog publication is slow or recovering an abandoned owner.
+    process.stdout.write(`${JSON.stringify(storedCredentialPoolStatus(providerId), null, 2)}\n`);
+    return;
+  }
+  let mutation;
+  if (action === "add" && value) {
+    mutation = () => addStoredCredentialToPool(providerId, value);
+  } else if (action === "add-env" && value) {
+    mutation = () => addEnvironmentCredentialToPool(providerId, value);
+  } else if (action === "remove" && value) {
+    mutation = () => removeStoredCredentialFromPool(providerId, value);
+  } else if (action === "delete" && !value) {
+    mutation = () => deleteStoredCredentialPool(providerId);
+  } else if ((action === "pause" || action === "resume") && value) {
+    mutation = () => setStoredCredentialPoolState(providerId, value, action === "pause");
+  } else if (action === "policy" && value) {
+    mutation = () => setStoredCredentialPoolPolicy(providerId, value);
+  } else {
+    throw new Error("Usage: control key-pool <provider> status|add|add-env|remove|delete|pause|resume|policy [credential-id|environment-name|strategy]");
+  }
+  const addition = action === "add" || action === "add-env";
+  const removal = action === "remove" || action === "delete";
+  let environmentBacked = false;
+  let serviceEnvironmentStatus;
+  let result;
+  // Pool readiness decides whether this provider's models are routable. Treat
+  // its two metadata files, the gateway, and every installed client as one
+  // publication: a failed rebuild restores the exact previous pool/store and
+  // republishes that state rather than leaving a half-adopted credential.
+  const transact = (lock = true) => transactModelOverlayMutation({
+    files: [PROVIDER_API_KEY_POOL_PATH, PROVIDER_CREDENTIAL_STORE_PATH],
+    mutate: async () => { result = await mutation(); },
+    lock,
+  });
+  if (addition || removal) {
+    // Classify against the same pool/store generation the transaction will
+    // change. In particular, a concurrent pause/remove must not turn an opaque
+    // remove id from environment-backed into apparently ordinary metadata.
+    await withModelOverlayLock(async () => {
+      environmentBacked = action === "add-env" || (
+        action === "add" && storedCredentialRequiresServiceEnvironment(providerId, value)
+      ) || (
+        removal && storedCredentialPoolUsesServiceEnvironment(providerId, {
+          ...(action === "remove" ? { credentialId: value } : {}),
+        })
+      );
+      if (!environmentBacked) {
+        await transact(false);
+        return;
+      }
+
+      // Keep lock ordering consistent with model-overlay operations that
+      // restart the service: publication ownership first, service ownership
+      // second. The service lock stays held through publication, serializing
+      // both a new variable and removal of a retired one with service renders.
+      const { withServiceOperationLock } = await import("./service-operation-lock.mjs");
+      await withServiceOperationLock(async () => {
+        const {
+          environmentPoolMutationServiceStatus,
+          routerServiceStatus,
+        } = await import("./router-restart.mjs");
+        serviceEnvironmentStatus = addition
+          ? await environmentPoolMutationServiceStatus()
+          : routerServiceStatus();
+        await transact(false);
+      });
+    });
+  } else {
+    await transact();
+  }
+  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  if (environmentBacked) {
+    if (removal) {
+      const { environmentPoolRemovalReminder } = await import("./router-restart.mjs");
+      process.stderr.write(environmentPoolRemovalReminder(serviceEnvironmentStatus));
+    } else {
+      process.stderr.write(
+        serviceEnvironmentStatus.serviceReinstallRequired
+          ? "Environment-backed pool entry staged. Rerun the installer from this same environment; a service restart alone will not persist the variable.\n"
+          : "Environment-backed pool entry registered. Start the foreground router from this environment, or install the managed service from it.\n",
+      );
+    }
+  }
 }
 
 async function setLoginFreeMode(desired) {
@@ -1239,6 +1351,125 @@ async function handleSubagents(action, value, flag, rest = []) {
     refreshModelSettingsCatalog();
     process.stdout.write(`${JSON.stringify({ verified })}\n`);
     return;
+  } else if (action === "certify") {
+    // The whole five-check run, for one route or several. Unlike `verify`
+    // above, whose two-request probe is diagnostic, a complete pass here
+    // promotes the route on this machine. It spends real quota on each route's
+    // own provider and on the native parent that delegates to it.
+    //
+    // The runs go in parallel because nothing about one route's checks touches
+    // another's: separate credentials, separate ephemeral Codex homes,
+    // separate application artifacts. What they do share is the proofs file
+    // and the catalog, so the recording and the republish stay here, in one
+    // process, after the fan-out -- two control processes racing
+    // read-modify-write on the proofs file would silently drop a verdict.
+    const slugs = [...new Set([value, ...rest].map((slug) => String(slug || "").trim()).filter(Boolean))];
+    if (!slugs.length) throw new Error("Usage: control subagents certify <model-slug> [<model-slug> ...]");
+    for (const slug of slugs) {
+      if (!(await knownModelSlug(slug))) throw new Error(`Unknown model slug: ${slug}`);
+    }
+    const [
+      { verifySubagentRoute, firstFailure, recordApplicationEvidence, runDeferred },
+      { recordVerification, recordVerificationStarted, clearSubagentProof },
+      { assertCallerSecret, callerBaseUrl },
+      { CALLER_SECRET_PATH, PORTS },
+      { findCodexBinary },
+      { VERSION },
+    ] = await Promise.all([
+      import("./subagent-certify.mjs"),
+      import("./subagent-proofs.mjs"),
+      import("./caller-auth.mjs"),
+      import("./paths.mjs"),
+      import("./codex-binary.mjs"),
+      import("./version.mjs"),
+    ]);
+    const { existsSync, readFileSync } = await import("node:fs");
+    if (!existsSync(CALLER_SECRET_PATH)) {
+      throw new Error(
+        "The local router caller key is missing; run ./bin/doctor --fix (.\\codex-router.ps1 doctor --fix on Windows).",
+      );
+    }
+    const secret = assertCallerSecret(readFileSync(CALLER_SECRET_PATH, "utf8").trim());
+    const codexBin = findCodexBinary();
+    const baseUrl = callerBaseUrl(PORTS.router, secret);
+    const { CODEX_HOME, MERGED_CATALOG_PATH } = await import("./paths.mjs");
+    for (const slug of slugs) recordVerificationStarted(slug);
+    const outcomes = await Promise.all(
+      slugs.map(async (slug) => {
+        try {
+          return {
+            slug,
+            result: await verifySubagentRoute(slug, {
+              baseUrl,
+              secret,
+              codexBin,
+              codexHome: CODEX_HOME,
+              catalogPath: MERGED_CATALOG_PATH,
+              routerVersion: VERSION,
+            }),
+          };
+        } catch (error) {
+          // One route's crash is not a verdict on the others, and must not
+          // reject the whole fan-out.
+          return { slug, error: error instanceof Error ? error.message : String(error) };
+        }
+      }),
+    );
+    const results = [];
+    let promoted = false;
+    for (const { slug, result, error } of outcomes) {
+      if (!result) {
+        recordVerification(slug, { checks: {}, routerVersion: VERSION, reason: error });
+        results.push({ slug, certified: false, reason: error });
+        continue;
+      }
+      // A run that only met a rate limit, an outage, or a missing entitlement
+      // learned nothing about the route. Clearing the record leaves the switch
+      // retryable instead of leaving "No" next to a model that was never
+      // actually refused.
+      if (!result.ok && runDeferred(result.checks)) {
+        clearSubagentProof(slug);
+        const detail = firstFailure(result.checks)?.detail;
+        results.push({ slug, certified: false, deferred: true, reason: detail });
+        continue;
+      }
+      recordVerification(slug, {
+        checks: result.checks,
+        routerVersion: VERSION,
+        ...(result.ok ? {} : { reason: firstFailure(result.checks)?.detail }),
+      });
+      // A pass is evidence worth more than this machine. Filing it as a
+      // v2_agent application is what lets a review promote the route for every
+      // installer, so nobody -- including this operator on their next machine
+      // -- pays to measure it again.
+      let application;
+      if (result.ok) {
+        promoted = true;
+        try {
+          application = recordApplicationEvidence(slug, {
+            checks: result.checks,
+            routerVersion: VERSION,
+            at: new Date().toISOString(),
+          });
+        } catch {
+          // A read-only or relocated checkout must not turn a genuine pass
+          // into a failure; the machine-local record already stands on its own.
+        }
+      }
+      const failure = result.ok ? undefined : firstFailure(result.checks);
+      results.push({
+        slug,
+        certified: result.ok,
+        ...(application ? { application } : {}),
+        ...(failure ? { failed: failure.check, failedLabel: failure.label, reason: failure.detail } : {}),
+      });
+    }
+    // One republish for the whole fan-out, and only when something was
+    // promoted: publication rewrites the merged catalog and the agents
+    // directory, which is far too much work to repeat per failed route.
+    if (promoted) refreshModelSettingsCatalog();
+    process.stdout.write(`${JSON.stringify({ results })}\n`);
+    return;
   } else if (action === "set") {
     if (!["on", "off"].includes(flag)) {
       throw new Error("Usage: control subagents set <model-slug> <on|off>");
@@ -1309,7 +1540,7 @@ async function handleSubagents(action, value, flag, rest = []) {
     throw new Error(
       "Usage: control subagents status|select-all|unselect-all|mode <all|selected|proven>|" +
         "set <model-slug> <on|off>|effort <model-slug> <level|default>|" +
-        "provider <provider-id> <on|off>|verify [model-slug ...]|" +
+        "provider <provider-id> <on|off>|verify [model-slug ...]|certify <model-slug>|" +
         "policy status|provider <provider-id> <on|off>|model <model-slug> <on|off>|family <name> <on|off>",
     );
   }
@@ -2593,6 +2824,19 @@ async function handleHarness(action) {
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 
+async function handleClientExport() {
+  const values = args.slice(1);
+  let secretEnv;
+  for (let index = 0; index < values.length; index += 1) {
+    if (values[index] !== "--secret-env" || !values[index + 1]) {
+      throw new Error("Usage: control client-export [--secret-env NAME]");
+    }
+    secretEnv = values[++index];
+  }
+  const { renderRouterEndpointExport } = await import("./client-exports.mjs");
+  process.stdout.write(renderRouterEndpointExport(secretEnv ? { secretEnv } : {}));
+}
+
 async function handlePresence(action, value) {
   const { PRESENCE_MODES, presenceSnapshot, setPresenceMode } = await import(
     "./presence-state.mjs"
@@ -2627,55 +2871,7 @@ async function handleChatGptSession(action) {
 // metadata. Read the protected health leaf here, then project it to the small
 // contract the tray and Control Center render.
 async function printHealth() {
-  const { assertCallerSecret, callerBaseUrl } = await import("./caller-auth.mjs");
-  let callerSecret;
-  try {
-    callerSecret = assertCallerSecret(readFileSync(CALLER_SECRET_PATH, "utf8").trim());
-  } catch {
-    process.stdout.write(`${JSON.stringify({
-      ok: false,
-      status: 0,
-      error: "The local router caller key is unavailable.",
-      activity: { state: "offline", active: [], activeCount: 0 },
-    })}\n`);
-    return;
-  }
-
-  const safeService = (service) => {
-    if (!service || typeof service !== "object") return undefined;
-    return {
-      reachable: service.reachable === true,
-      ...(typeof service.enabled === "boolean" ? { enabled: service.enabled } : {}),
-    };
-  };
-  try {
-    const response = await fetch(`${callerBaseUrl(PORTS.router, callerSecret)}/health`, {
-      headers: { Accept: "application/json" },
-      signal: AbortSignal.timeout(3_000),
-    });
-    const raw = await response.json().catch(() => ({}));
-    const body = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
-    process.stdout.write(`${JSON.stringify({
-      ok: response.ok,
-      status: response.status,
-      ...(typeof body.service === "string" ? { service: body.service } : {}),
-      ...(typeof body.version === "string" ? { version: body.version } : {}),
-      ...(typeof body.router === "string" ? { router: body.router } : {}),
-      ...(Array.isArray(body.degraded) ? { degraded: body.degraded } : {}),
-      ...(body.activity && typeof body.activity === "object" ? { activity: body.activity } : {}),
-      ...(safeService(body.gateway) ? { gateway: safeService(body.gateway) } : {}),
-      ...(safeService(body.oauth) ? { oauth: safeService(body.oauth) } : {}),
-      ...(safeService(body.api) ? { api: safeService(body.api) } : {}),
-      ...(safeService(body.grokOauth) ? { grokOauth: safeService(body.grokOauth) } : {}),
-    })}\n`);
-  } catch (error) {
-    process.stdout.write(`${JSON.stringify({
-      ok: false,
-      status: 0,
-      error: error?.name === "AbortError" ? "Health check timed out." : "Router is unreachable.",
-      activity: { state: "offline", active: [], activeCount: 0 },
-    })}\n`);
-  }
+  process.stdout.write(`${JSON.stringify(await readControlHealth())}\n`);
 }
 
 // --- dispatch ---------------------------------------------------------------
@@ -2700,6 +2896,8 @@ if (args.includes("--probe")) {
   await printProviderUsage();
 } else if (args[0] === "providers") {
   await printProviderOnboarding();
+} else if (args[0] === "generic-providers") {
+  await handleGenericProviders(...args.slice(1));
 } else if (args[0] === "install-cli") {
   if (!args[1]) throw new Error("Usage: control install-cli <oauth-provider>");
   await installProviderCli(args[1]);
@@ -2718,6 +2916,9 @@ if (args.includes("--probe")) {
   } else {
     await saveProviderCredential(args[1]);
   }
+} else if (args[0] === "key-pool") {
+  if (!args[1]) throw new Error("Usage: control key-pool <provider> status|add|add-env|remove|delete|pause|resume|policy [credential-id|environment-name|strategy]");
+  await handleProviderKeyPool(args[1], args[2], args[3]);
 } else if (args[0] === "auth-mode") {
   await setLoginFreeMode(args[1]);
 } else if (args[0] === "signed-routing") {
@@ -2746,6 +2947,8 @@ if (args.includes("--probe")) {
   handleTray(args[1]);
 } else if (args[0] === "harness") {
   await handleHarness(args[1]);
+} else if (args[0] === "client-export") {
+  await handleClientExport();
 } else if (args[0] === "presence") {
   await handlePresence(args[1], args[2]);
 } else if (args[0] === "chatgpt-session") {

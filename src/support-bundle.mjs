@@ -2,6 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   statSync,
@@ -17,7 +18,12 @@ import { readInstallManifest } from "./install-manifest.mjs";
 import { redactProxyCredentials } from "./proxy-environment.mjs";
 import { protectPrivateFile } from "./file-security.mjs";
 import { detectLegacyInstallations } from "./legacy-migration.mjs";
-import { PROVIDERS, providerNeedsNoKey } from "./model-registry.mjs";
+import {
+  PROVIDERS,
+  RUNTIME_PROVIDERS,
+  providerNeedsNoKey,
+} from "./model-registry.mjs";
+import { genericProviderConfigured } from "./generic-provider-readiness.mjs";
 import {
   CALLER_SECRET_PATH,
   CONFIG_PATH,
@@ -29,8 +35,15 @@ import {
 import {
   credentialPaths,
   credentialStatus,
+  genericProviderCredentialPath,
 } from "./provider-credentials.mjs";
 import { providerSelectionStatus } from "./provider-selection.mjs";
+import {
+  readProviderCredentialStore,
+  redactCredentialText,
+} from "./provider-credential-store.mjs";
+import { providerApiKeyPoolsSupportSnapshot } from "./provider-api-key-pool.mjs";
+import { resolveStoredCredential } from "./provider-api-key-routing.mjs";
 
 function runJson(script, args = []) {
   const result = spawnSync(
@@ -69,12 +82,18 @@ function fileMetadata(target) {
   };
 }
 
+function privateText(target) {
+  try {
+    const metadata = lstatSync(target);
+    if (metadata.isSymbolicLink() || !metadata.isFile()) return undefined;
+    return readFileSync(target, "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
 function redactLogs(contents) {
-  return redactCallerUrl(contents)
-    .replace(/(authorization\s*[:=]\s*bearer\s+)[^\s"']+/gi, "$1[REDACTED]")
-    .replace(/("(?:api[_-]?key|access[_-]?token|refresh[_-]?token)"\s*:\s*")[^"]+/gi, "$1[REDACTED]")
-    .replace(/((?:api[_-]?key|access[_-]?token|refresh[_-]?token)\s*[=:]\s*["']?)[^\s"',}]+/gi, "$1[REDACTED]")
-    .replace(/\bsk-[A-Za-z0-9_-]{12,}\b/g, "[REDACTED_KEY]");
+  return redactCredentialText(redactCallerUrl(contents));
 }
 
 function logTail() {
@@ -97,9 +116,16 @@ function knownLocalSecrets() {
       if (value) values.add(value);
     }
   }
+  for (const entry of readProviderCredentialStore().credentials) {
+    if (entry.providerType !== "generic") continue;
+    try {
+      files.push(genericProviderCredentialPath(entry.providerId));
+    } catch {
+      // Invalid generic metadata is already ignored by the fail-closed store reader.
+    }
+  }
   for (const target of files) {
-    if (!existsSync(target)) continue;
-    const value = readFileSync(target, "utf8").trim();
+    const value = privateText(target)?.trim();
     if (value) values.add(value);
   }
   // Not a provider credential and not stored in the state directory, but a
@@ -108,9 +134,10 @@ function knownLocalSecrets() {
   const clientSecret = process.env.ANTIGRAVITY_CLIENT_SECRET?.trim();
   if (clientSecret) values.add(clientSecret);
   const oauthPath = antigravityTokenPath();
-  if (existsSync(oauthPath)) {
+  const oauthContents = privateText(oauthPath);
+  if (oauthContents !== undefined) {
     try {
-      const token = JSON.parse(readFileSync(oauthPath, "utf8"));
+      const token = JSON.parse(oauthContents);
       for (const field of ["access_token", "refresh_token"]) {
         const value = token?.[field];
         if (typeof value === "string" && value.trim()) values.add(value.trim());
@@ -142,11 +169,7 @@ function sharableInstallManifest() {
 }
 
 function redactBundle(contents) {
-  let redacted = redactCallerUrl(contents);
-  for (const secret of knownLocalSecrets()) {
-    redacted = redacted.replaceAll(secret, "[REDACTED]");
-  }
-  return redacted;
+  return redactCredentialText(redactCallerUrl(contents), knownLocalSecrets());
 }
 
 function outputOption() {
@@ -164,6 +187,17 @@ export function createSupportBundle(options = {}) {
     const status = credentialStatus(provider);
     credentialSources[provider.id] = status.configured
       ? { configured: true, source: status.source, persistent: status.persistent }
+      : { configured: false };
+  }
+  for (const provider of RUNTIME_PROVIDERS.values()) {
+    if (provider.generic !== true) continue;
+    const configured = genericProviderConfigured(provider.id);
+    credentialSources[provider.id] = configured
+      ? {
+          configured: true,
+          source: provider.credentialRef ? "bound credential reference" : "not required",
+          persistent: Boolean(provider.credentialRef),
+        }
       : { configured: false };
   }
   let selection;
@@ -201,6 +235,12 @@ export function createSupportBundle(options = {}) {
     service: runJson("service.mjs", ["status"]),
     selection,
     credentialSources,
+    apiKeyPools: providerApiKeyPoolsSupportSnapshot({
+      resolveCredential: (providerId, credentialId) => {
+        const provider = PROVIDERS.get(providerId);
+        return provider ? resolveStoredCredential(provider, credentialId) : undefined;
+      },
+    }),
     ownership: detectLegacyInstallations(),
     install: sharableInstallManifest(),
     files: {
