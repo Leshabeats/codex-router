@@ -2165,3 +2165,30 @@ test("caller capability refresh preserves Codex policy while replacing managed U
     rmSync(codexHome, { recursive: true, force: true });
   }
 });
+
+test("status exposes residual managed router artifacts even when mode is native", () => {
+  const codexHome = mkdtempSync(path.join(os.tmpdir(), "codex-router-residual-status-"));
+  const stateDir = path.join(codexHome, "router-state");
+  const configPath = path.join(codexHome, "config.toml");
+  writeFileSync(
+    configPath,
+    `openai_base_url = "http://127.0.0.1:46192/_codex-router/${CALLER_KEY}/v1"\n`,
+    { mode: 0o600 },
+  );
+  try {
+    const status = run("status", codexHome, stateDir);
+    assert.equal(status.mode, "native");
+    assert.equal(status.managed_router_artifacts_present, true);
+
+    writeFileSync(
+      configPath,
+      `[model_providers.custom]\nbase_url = "http://127.0.0.1:46192/_codex-router/${CALLER_KEY}/v1"\n`,
+      { mode: 0o600 },
+    );
+    const providerStatus = run("status", codexHome, stateDir);
+    assert.equal(providerStatus.mode, "native");
+    assert.equal(providerStatus.managed_router_artifacts_present, true);
+  } finally {
+    rmSync(codexHome, { recursive: true, force: true });
+  }
+});

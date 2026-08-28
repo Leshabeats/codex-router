@@ -1179,6 +1179,22 @@ function snapshot(contents) {
     ? providerModeStateIsOwned(contents, providerModeState)
     : false;
   const routerDefault = readCodexRouterDefault();
+  const managedRouterUrlPresent = contents.split("\n").some((line) => {
+    if (!/^\s*(?:openai_base_url|base_url)\s*=/.test(line)) return false;
+    return isManagedRouterBaseUrl(assignmentValue(line));
+  });
+  const managedRouterArtifactsPresent =
+    managedRouterUrlPresent ||
+    catalog === MERGED_CATALOG_PATH ||
+    [
+      startMarker,
+      endMarker,
+      providerStartMarker,
+      providerEndMarker,
+      signedProviderStartMarker,
+      signedProviderEndMarker,
+      signedProviderSlotPrefix,
+    ].some((marker) => contents.includes(marker));
   return {
     mode:
       isManagedRouterBaseUrl(baseUrl) && catalog === MERGED_CATALOG_PATH
@@ -1196,6 +1212,7 @@ function snapshot(contents) {
       signedActive && privateFileIsProtected(SIGNED_PROVIDER_MODE_PATH),
     ),
     signed_provider_state_present: existsSync(SIGNED_PROVIDER_MODE_PATH),
+    managed_router_artifacts_present: managedRouterArtifactsPresent,
     router_default_model: routerDefault?.model || null,
     router_default_managed: Boolean(routerDefault),
     openai_base_url: baseUrl ? redactCallerUrl(baseUrl) : null,

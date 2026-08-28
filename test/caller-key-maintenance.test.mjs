@@ -11,6 +11,7 @@ const cli = await import("../src/caller-key.mjs").catch(() => ({}));
 const journal = await import("../src/caller-key-rotation-journal.mjs").catch(() => ({}));
 const lock = await import("../src/caller-key-rotation-lock.mjs").catch(() => ({}));
 const rotation = await import("../src/caller-key-rotation.mjs").catch(() => ({}));
+const serviceLock = await import("../src/service-operation-lock.mjs").catch(() => ({}));
 
 const oldKey = "o".repeat(48);
 const newKey = "n".repeat(48);
@@ -28,7 +29,7 @@ test("managed target detection refuses partial client state", () => {
   assert.deepEqual(cli.installedTargetsFromStatus({
     codex: { mode: "router", config_protected: true },
     dsh: { routeInstalled: true, credentialInstalled: true },
-    gemini: { installed: true, baseUrlManaged: true, envExists: true, documentReadable: true, conflicts: [] },
+    gemini: { installed: true, baseUrlManaged: true, envExists: true, documentReadable: true, conflicts: [], managedBlockPresent: true },
   }), ["codex", "dsh", "gemini"]);
   assert.throws(() => cli.installedTargetsFromStatus({
     codex: { mode: "native" },
@@ -37,7 +38,14 @@ test("managed target detection refuses partial client state", () => {
   }), /DeepSeek Harness.*partial/i);
   assert.throws(() => cli.installedTargetsFromStatus({
     codex: { mode: "native" }, dsh: {},
-    gemini: { installed: true, baseUrlManaged: false, envExists: true, documentReadable: true, conflicts: [] },
+    gemini: { installed: true, baseUrlManaged: false, envExists: true, documentReadable: true, conflicts: [], managedBlockPresent: true },
+  }), /Gemini.*partial/i);
+  assert.throws(() => cli.installedTargetsFromStatus({
+    codex: { mode: "native", managed_router_artifacts_present: true }, dsh: {}, gemini: {},
+  }), /Codex.*partial/i);
+  assert.throws(() => cli.installedTargetsFromStatus({
+    codex: { mode: "native" }, dsh: {},
+    gemini: { installed: false, baseUrlManaged: false, envExists: true, documentReadable: true, conflicts: [], managedBlockPresent: true },
   }), /Gemini.*partial/i);
 });
 
@@ -74,7 +82,7 @@ test("rotation preserves a stopped installed service and uses capability-only cl
     readClientStatuses: async () => ({
       codex: { mode: "router", config_protected: true },
       dsh: { routeInstalled: true, credentialInstalled: true },
-      gemini: { installed: true, baseUrlManaged: true, envExists: true, documentReadable: true, conflicts: [] },
+      gemini: { installed: true, baseUrlManaged: true, envExists: true, documentReadable: true, conflicts: [], managedBlockPresent: true },
     }),
     readServiceStatus: async () => ({ installed: true, state: "stopped" }),
     runNode: async (script, args) => calls.push([script, ...args]),
@@ -105,6 +113,7 @@ test("running service is stopped before swap, then started and verified", async 
     readClientStatuses: async () => ({ codex: { mode: "router", config_protected: true }, dsh: {}, gemini: {} }),
     readServiceStatus: async () => ({ installed: true, state: "running" }),
     runNode: async (script, args) => order.push(`${script}:${args.join(" ")}`),
+    runServiceMutation: async (command) => order.push(`src/service.mjs:${command}`),
     rotateSecret: async () => { order.push("swap"); return { previousSecret: oldKey, currentSecret: newKey }; },
     beginJournal: async () => ({ operationId: "2".repeat(32), phase: "prepared", targets: ["codex"], serviceWasRunning: true }),
     updateJournal: async (state, phase) => ({ ...state, phase }),
@@ -115,6 +124,43 @@ test("running service is stopped before swap, then started and verified", async 
     "src/service.mjs:stop", "swap", "src/config-manager.mjs:caller-capability-refresh",
     "src/service.mjs:start", "verify", "finalize",
   ]);
+});
+
+test("rotation holds service lifecycle ownership through a stopped-service transaction", async (t) => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "caller-key-service-lock-"));
+  const secretPath = path.join(directory, "caller-secret");
+  writeFileSync(secretPath, `${oldKey}\n`, { mode: 0o600 });
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  let contenderEntered = false;
+  let contender;
+  const result = await cli.runCallerKeyRotation({
+    secretPath,
+    assertOwnership: () => {},
+    withLock: async (run) => run(),
+    withMutationLocks: async (run) => run(),
+    withServiceLock: async (run) => serviceLock.withServiceOperationLock(run, {
+      stateDir: directory, waitMs: 2_000, retryMs: 20, staleMs: 5_000,
+    }),
+    recoverPending: async () => {},
+    readClientStatuses: async () => ({ codex: { mode: "router", config_protected: true }, dsh: {}, gemini: {} }),
+    readServiceStatus: async () => ({ installed: true, state: "stopped" }),
+    runNode: async () => {},
+    rotateSecret: async () => {
+      contender = serviceLock.withServiceOperationLock(async () => { contenderEntered = true; }, {
+        stateDir: directory, waitMs: 2_000, retryMs: 20, staleMs: 5_000,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      assert.equal(contenderEntered, false, "concurrent service start must wait until rotation finalizes");
+      return { previousSecret: oldKey, currentSecret: newKey };
+    },
+    beginJournal: async () => ({ operationId: "3".repeat(32), phase: "prepared", targets: ["codex"], serviceWasRunning: false }),
+    updateJournal: async (state, phase) => ({ ...state, phase }),
+    finalizeRotation: async () => {},
+    recoverAfterFailure: async () => {},
+  });
+  assert.equal(result.serviceRestarted, false);
+  await contender;
+  assert.equal(contenderEntered, true);
 });
 
 test("caller rotation lock serializes competing operations", async () => {
@@ -199,6 +245,45 @@ test("pending secret-swapped rotation restores the prior generation and refreshe
     });
     assert.deepEqual(repeated, { recovered: false });
   } finally { rmSync(stateDir, { recursive: true, force: true }); }
+});
+
+test("recovery holds service lifecycle ownership while restoring a stopped-service generation", async () => {
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "caller-key-recover-service-lock-"));
+  const secretPath = path.join(stateDir, "caller-secret");
+  const journalPath = path.join(stateDir, "caller-key-rotation.json");
+  writeFileSync(secretPath, `${oldKey}\n`, { mode: 0o600 });
+  try {
+    journal.beginCallerKeyRotationJournal({
+      targets: ["codex"], serviceWasRunning: false,
+      operationId: "9".repeat(32), previousSecretSha256: digest(oldKey), journalPath,
+    });
+    let contenderEntered = false;
+    let contender;
+    const result = await cli.recoverPendingCallerKeyRotation({
+      secretPath,
+      withServiceLock: async (run) => serviceLock.withServiceOperationLock(run, {
+        stateDir, waitMs: 2_000, retryMs: 20, staleMs: 5_000,
+      }),
+      readJournal: () => journal.readCallerKeyRotationJournal({ journalPath }),
+      readServiceStatus: async () => ({ installed: true, state: "stopped" }),
+      runNode: async () => {
+        if (!contender) {
+          contender = serviceLock.withServiceOperationLock(async () => { contenderEntered = true; }, {
+            stateDir, waitMs: 2_000, retryMs: 20, staleMs: 5_000,
+          });
+          await new Promise((resolve) => setTimeout(resolve, 80));
+          assert.equal(contenderEntered, false, "concurrent service start must wait until recovery finalizes");
+        }
+      },
+      secretIsProtected: () => true,
+      clearJournal: ({ operationId }) => journal.clearCallerKeyRotationJournal({ operationId, journalPath }),
+    });
+    assert.deepEqual(result, { recovered: true, committed: false });
+    await contender;
+    assert.equal(contenderEntered, true);
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
 });
 
 test("verified rotation recovery commits the new generation without republishing", async () => {

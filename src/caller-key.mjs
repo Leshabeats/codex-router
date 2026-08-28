@@ -21,6 +21,8 @@ import { withCallerKeyRotationLock } from "./caller-key-rotation-lock.mjs";
 import { withModelOverlayLock } from "./model-overlay-lock.mjs";
 import { withLoginFreeRefreshLock } from "./login-free-refresh-lock.mjs";
 import { privateFileIsProtected } from "./file-security.mjs";
+import { withServiceOperationLock } from "./service-operation-lock.mjs";
+import { runServiceCommandUnlocked } from "./service.mjs";
 import { CALLER_SECRET_PATH, PORTS } from "./paths.mjs";
 import { assertStateOwnership } from "./state-owner.mjs";
 
@@ -42,12 +44,13 @@ function partialClient(label) {
 export function installedTargetsFromStatus({ codex = {}, dsh = {}, gemini = {} } = {}) {
   const targets = [];
   const codexStatePresent = codex.provider_mode_state_present === true || codex.signed_provider_state_present === true;
+  const codexManagedArtifacts = codex.managed_router_artifacts_present === true;
   if (codex.mode === "router") {
-    if (codex.config_protected === false) partialClient("Codex");
+    if (codex.config_protected !== true) partialClient("Codex");
     if (codex.provider_mode_state_present && !codex.login_free_managed) partialClient("Codex");
     if (codex.signed_provider_state_present && !codex.signed_routing_managed) partialClient("Codex");
     targets.push("codex");
-  } else if (codexStatePresent) {
+  } else if (codexStatePresent || codexManagedArtifacts) {
     partialClient("Codex");
   }
 
@@ -58,9 +61,17 @@ export function installedTargetsFromStatus({ codex = {}, dsh = {}, gemini = {} }
 
   const geminiCatalog = gemini.installed === true;
   const geminiBase = gemini.baseUrlManaged === true;
-  if (geminiCatalog !== geminiBase) partialClient("Gemini");
-  if (geminiCatalog) {
-    if (gemini.envExists === false || gemini.documentReadable === false || gemini.managedBlockPresent === false || (Array.isArray(gemini.conflicts) && gemini.conflicts.length)) {
+  const geminiBlock = gemini.managedBlockPresent === true;
+  const geminiManagedEvidence = geminiCatalog || geminiBase || geminiBlock;
+  if (geminiManagedEvidence) {
+    if (
+      !geminiCatalog ||
+      !geminiBase ||
+      !geminiBlock ||
+      gemini.envExists !== true ||
+      gemini.documentReadable !== true ||
+      (Array.isArray(gemini.conflicts) && gemini.conflicts.length)
+    ) {
       partialClient("Gemini");
     }
     targets.push("gemini");
@@ -147,12 +158,23 @@ async function withCallerMutationLocks(operation) {
   return withModelOverlayLock(() => withLoginFreeRefreshLock(operation));
 }
 
+function callerServiceLock(secretPath, override) {
+  return override || ((operation) => withServiceOperationLock(operation, {
+    stateDir: path.dirname(secretPath),
+  }));
+}
+
+async function runRouterServiceMutationUnlocked(command) {
+  const status = await runServiceCommandUnlocked(command, [command]);
+  if (status !== 0) throw new Error(`Router service ${command} failed.`);
+}
+
 export async function finalizeCallerKeyRotation({ journal, secretPath = CALLER_SECRET_PATH } = {}) {
   discardCallerCapabilityBackup({ secretPath, operationId: journal.operationId });
   clearCallerKeyRotationJournal({ operationId: journal.operationId });
 }
 
-export async function recoverPendingCallerKeyRotation({
+async function recoverPendingCallerKeyRotationUnlocked({
   secretPath = CALLER_SECRET_PATH,
   runNode = runNodeCommand,
   readServiceStatus = () => readRouterServiceStatus({ runNode }),
@@ -163,6 +185,7 @@ export async function recoverPendingCallerKeyRotation({
   verifyServiceKeys = verifyCallerRotation,
   verifyCurrentKey = verifyCurrentCallerCapability,
   secretIsProtected = privateFileIsProtected,
+  runServiceMutation = runRouterServiceMutationUnlocked,
 } = {}) {
   const journal = await readJournal();
   if (!journal) return { recovered: false };
@@ -182,7 +205,7 @@ export async function recoverPendingCallerKeyRotation({
 
   if (journal.serviceWasRunning) {
     const service = await readServiceStatus();
-    if (service?.state === "running") await runNode("src/service.mjs", ["stop"]);
+    if (service?.state === "running") await runServiceMutation("stop");
   }
 
   const backupPath = callerCapabilityBackupPath(secretPath, journal.operationId);
@@ -212,7 +235,7 @@ export async function recoverPendingCallerKeyRotation({
 
   await refreshTargets(journal.targets, runNode);
   if (journal.serviceWasRunning) {
-    await runNode("src/service.mjs", ["start"]);
+    await runServiceMutation("start");
     if (restored.displacedSecret && restored.displacedSecret !== restored.currentSecret) {
       await verifyServiceKeys({ previousSecret: restored.displacedSecret, currentSecret: restored.currentSecret });
     } else {
@@ -224,25 +247,39 @@ export async function recoverPendingCallerKeyRotation({
   return { recovered: true, committed: false };
 }
 
+export async function recoverPendingCallerKeyRotation(options = {}) {
+  const secretPath = options.secretPath || CALLER_SECRET_PATH;
+  const withServiceLock = callerServiceLock(secretPath, options.withServiceLock);
+  return withServiceLock(() => recoverPendingCallerKeyRotationUnlocked({
+    ...options,
+    secretPath,
+  }));
+}
+
 export async function runCallerKeyRotation({
   readClientStatuses = () => readManagedClientStatuses(),
   readServiceStatus = () => readRouterServiceStatus(),
   runNode = runNodeCommand,
   withLock = withCallerKeyRotationLock,
   withMutationLocks = withCallerMutationLocks,
-  recoverPending = recoverPendingCallerKeyRotation,
+  withServiceLock,
+  recoverPending = recoverPendingCallerKeyRotationUnlocked,
   rotateSecret = swapCallerCapability,
   beginJournal = beginCallerKeyRotationJournal,
   updateJournal = updateCallerKeyRotationJournal,
   finalizeRotation = finalizeCallerKeyRotation,
-  recoverAfterFailure = recoverPendingCallerKeyRotation,
+  recoverAfterFailure = recoverPendingCallerKeyRotationUnlocked,
   verifyServiceKeys = verifyCallerRotation,
+  runServiceMutation = runRouterServiceMutationUnlocked,
   secretPath = CALLER_SECRET_PATH,
   assertOwnership = () => assertStateOwnership("rotate the router caller capability"),
 } = {}) {
   assertOwnership();
-  return withLock(() => withMutationLocks(async () => {
-    await recoverPending({ secretPath, runNode, readServiceStatus, verifyServiceKeys });
+  const serviceLock = callerServiceLock(secretPath, withServiceLock);
+  return withLock(() => withMutationLocks(() => serviceLock(async () => {
+    await recoverPending({
+      secretPath, runNode, readServiceStatus, verifyServiceKeys, runServiceMutation,
+    });
     const statuses = await readClientStatuses();
     const targets = installedTargetsFromStatus(statuses);
     const service = await readServiceStatus();
@@ -252,7 +289,7 @@ export async function runCallerKeyRotation({
     let swapped;
     try {
       if (serviceWasRunning) {
-        await runNode("src/service.mjs", ["stop"]);
+        await runServiceMutation("stop");
         journal = await updateJournal(journal, "service-stopped");
       }
       swapped = await rotateSecret({ secretPath, operationId: journal.operationId });
@@ -260,7 +297,7 @@ export async function runCallerKeyRotation({
       await refreshTargets(targets, runNode);
       journal = await updateJournal(journal, "clients-refreshed");
       if (serviceWasRunning) {
-        await runNode("src/service.mjs", ["start"]);
+        await runServiceMutation("start");
         journal = await updateJournal(journal, "service-started");
         await verifyServiceKeys({ previousSecret: swapped.previousSecret, currentSecret: swapped.currentSecret });
       }
@@ -270,7 +307,7 @@ export async function runCallerKeyRotation({
     } catch (error) {
       let recoveryError;
       try {
-        await recoverAfterFailure({ secretPath, runNode, readServiceStatus, verifyServiceKeys });
+        await recoverAfterFailure({ secretPath, runNode, readServiceStatus, verifyServiceKeys, runServiceMutation });
       } catch (caught) {
         recoveryError = caught;
       }
@@ -279,7 +316,7 @@ export async function runCallerKeyRotation({
       }
       throw error;
     }
-  }));
+  })));
 }
 
 function restartNotice(targets, serviceRestarted) {

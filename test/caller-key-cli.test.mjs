@@ -22,6 +22,14 @@ test("caller-key rotation selects only complete managed integrations", () => {
     codex: { mode: "native" }, dsh: {}, gemini: {},
   }), []);
   assert.throws(() => installedTargetsFromStatus({
+    codex: { mode: "native", managed_router_artifacts_present: true },
+    dsh: {}, gemini: {},
+  }), /Codex.*partial/i);
+  assert.throws(() => installedTargetsFromStatus({
+    codex: { mode: "native" }, dsh: {},
+    gemini: { installed: false, baseUrlManaged: false, envExists: true, documentReadable: true, conflicts: [], managedBlockPresent: true },
+  }), /Gemini.*partial/i);
+  assert.throws(() => installedTargetsFromStatus({
     codex: { mode: "native" },
     dsh: { routeInstalled: false, credentialInstalled: true },
     gemini: {},
