@@ -170,6 +170,8 @@ test("the generated formula owns upgrades and preserves one-time setup", () => {
   assert.match(formula, /exec "\$source_root\/bin\/install" "\$@"/);
   assert.match(formula, /manifest\.dig\("current", "packageManager"\) != "homebrew"/);
   assert.match(formula, /codex-router setup --guided/);
+  assert.match(formula, /router and CLI only/);
+  assert.match(formula, /does not build or\s+download the Electron Control Center/);
   assert.match(formula, /codex-router uninstall/);
   assert.match(formula, /codex-router providers list --json/);
   assert.match(formula, /resource "litellm" do/);

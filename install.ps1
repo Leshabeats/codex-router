@@ -243,11 +243,11 @@ $ConfigDisableCommand = if ($Target -eq "codex") { "disable" } else { "uninstall
 $ConfigEnabled = $false
 $ServiceInstalled = $false
 $AdoptionPending = $false
-# The foreign-state override below is set inside the try and must be undone in
-# the finally even when a step throws first, so both halves of the caller's
-# environment are captured up front.
-$SavedForeignStateOverride = $null
-$HadForeignStateOverride = $false
+# The foreign-state override below is set only for a full install, but the
+# finally runs for prepare-only and for failures that happen before that point
+# too. Snapshot the caller's environment before any installer step can throw.
+$HadForeignStateOverride = $null -ne (Get-Item Env:\MODEL_ROUTER_ALLOW_FOREIGN_STATE -ErrorAction SilentlyContinue)
+$SavedForeignStateOverride = $env:MODEL_ROUTER_ALLOW_FOREIGN_STATE
 $ConfigWasEnabled = $false
 $ServiceWasInstalled = $false
 $TrayWasInstalled = $false
@@ -407,8 +407,6 @@ try {
   # let a second checkout rebuild foreign-owned state with no ownership
   # transfer ever recorded. The caller's own value is restored in the finally.
   if (-not $PrepareOnly) {
-    $HadForeignStateOverride = $null -ne (Get-Item Env:\MODEL_ROUTER_ALLOW_FOREIGN_STATE -ErrorAction SilentlyContinue)
-    $SavedForeignStateOverride = $env:MODEL_ROUTER_ALLOW_FOREIGN_STATE
     $env:MODEL_ROUTER_ALLOW_FOREIGN_STATE = "1"
   }
   & node src/secret.mjs ensure
@@ -466,7 +464,11 @@ try {
 
   if ($PrepareOnly) {
     Write-Host "Dependencies and generated files are prepared; application configuration was not changed."
-    exit 0
+    # Return from the script instead of terminating the caller's PowerShell
+    # host. The outer finally still has to restore the caller environment, and
+    # an invoked prepare-only install must hand control back so its caller can
+    # observe that restoration.
+    return
   }
 
   $ConfigEnabled = $true
