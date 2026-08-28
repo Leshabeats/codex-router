@@ -110,16 +110,25 @@ function terminateWindowsChild(child) {
   // by Node rather than user input and taskkill's output is discarded.
   child.kill();
   if (Number.isInteger(child.pid) && child.pid > 0) {
+    // Do not wait synchronously for taskkill: Windows can hold it while a
+    // descendant is inside the same ACL call, which would turn our bounded
+    // timeout into an unbounded event-loop stall.  The original child has
+    // already received kill(); taskkill is only best-effort tree cleanup.
+    let treeKiller;
     try {
-      execFileSync(
+      treeKiller = spawn(
         "taskkill.exe",
         ["/PID", String(child.pid), "/T", "/F"],
         { stdio: "ignore", windowsHide: true },
       );
     } catch {
-      // The process may have exited between kill and taskkill.  The original
-      // operation's bounded error is the useful diagnostic in either case.
+      return;
     }
+    treeKiller.on("error", () => {});
+    treeKiller.unref?.();
+    const timer = setTimeout(() => treeKiller.kill(), 5_000);
+    timer.unref?.();
+    treeKiller.on("close", () => clearTimeout(timer));
   }
 }
 
