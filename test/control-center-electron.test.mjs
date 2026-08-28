@@ -1362,6 +1362,8 @@ test("the model directory combines provider setup with de-duplicated model-famil
   assert.doesNotMatch(sources, /avatars\.githubusercontent\.com/);
   assert.match(branding, /cognition:[^\n]+name: "Devin"/);
   assert.match(branding, /deepreinforce:[^\n]+name: "Ornith"/);
+  assert.match(branding, /nanogpt:[^\n]+name: "NanoGPT"/);
+  assert.match(branding, /tencent:[^\n]+name: "Tencent"/);
   const local = await readFile(new URL("../apps/control-center/src/pages/LocalPage.tsx", import.meta.url), "utf8");
   assert.match(local, /brandForLocalModel/);
   assert.match(local, /<BrandLogo brand=\{brandForLocalModel\(model\)\}/);

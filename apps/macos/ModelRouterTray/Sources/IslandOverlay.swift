@@ -1073,6 +1073,7 @@ struct ProviderIcon: View {
     if providerID == "venice" { return "venice" }
     if providerID == "nousresearch" { return "nousresearch" }
     if providerID == "openrouter" { return "openrouter" }
+    if providerID == "nano-gpt" { return "nano-gpt" }
     // opencode-free plus the opencode-go API/Messages/Responses routes.
     if providerID.hasPrefix("opencode") { return "opencode-free" }
     if providerID == "kilo-free" { return "kilo-free" }
@@ -1089,7 +1090,7 @@ struct ProviderIcon: View {
   private var assetExtension: String {
     // Keyed off the asset, not the provider id, so every route sharing a mark
     // (opencode-go and friends) resolves the same file type.
-    ["github-copilot", "chutes", "opencode-free", "kilo-free"].contains(assetName ?? "") ? "svg" : "png"
+    ["github-copilot", "chutes", "opencode-free", "kilo-free", "nano-gpt"].contains(assetName ?? "") ? "svg" : "png"
   }
 
   private var providerName: String {
@@ -1108,6 +1109,7 @@ struct ProviderIcon: View {
     if providerID == "venice" { return "Venice" }
     if providerID == "nousresearch" { return "Nous Research" }
     if providerID == "openrouter" { return "OpenRouter" }
+    if providerID == "nano-gpt" { return "NanoGPT" }
     if providerID == "opencode-free" { return "OpenCode Free" }
     if providerID == "kilo-free" { return "Kilo Free" }
     // Deliberately not a vendor name: this provider is a container for

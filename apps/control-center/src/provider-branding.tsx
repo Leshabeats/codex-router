@@ -21,6 +21,7 @@ import lmStudioLogo from "./assets/providers/lmstudio.svg";
 import metaLogo from "./assets/providers/meta.svg";
 import minimaxLogo from "./assets/providers/minimax.svg";
 import mistralLogo from "./assets/providers/mistral.svg";
+import nanoGptLogo from "./assets/providers/nanogpt.svg";
 import nousResearchLogo from "./assets/providers/nousresearch.png";
 import nvidiaLogo from "./assets/providers/nvidia.svg";
 import ollamaLogo from "./assets/providers/ollama.png";
@@ -91,6 +92,7 @@ const BRANDS: Record<string, ProviderBrand> = {
   qwen: { key: "qwen", name: "Qwen", shortName: "Q", color: "#6950ef", logo: qwenLogo },
   siliconflow: { key: "siliconflow", name: "SiliconFlow", shortName: "SF", color: "#6736f1", logo: siliconFlowLogo, logoMode: "artwork" },
   stepfun: { key: "stepfun", name: "StepFun", shortName: "ST", color: "#5167f4", logo: stepFunLogo },
+  nanogpt: { key: "nanogpt", name: "NanoGPT", shortName: "NG", color: "#0db7b1", logo: nanoGptLogo, logoMode: "artwork" },
   tencent: { key: "tencent", name: "Tencent", shortName: "T", color: "#0052d9", logo: tencentLogo, logoMode: "artwork" },
   together: { key: "together", name: "Together AI", shortName: "TA", color: "#d84a15", logo: togetherLogo, logoMode: "artwork" },
   venice: { key: "venice", name: "Venice", shortName: "VE", color: "#0e2942", logo: veniceLogo },
@@ -130,6 +132,7 @@ const PROVIDER_BRANDS: Record<string, string> = {
   meta: "meta",
   "minimax-token-plan": "minimax",
   mistral: "mistral",
+  "nano-gpt": "nanogpt",
   nousresearch: "nousresearch",
   "nvidia-nim": "nvidia",
   "ollama-cloud": "ollama",

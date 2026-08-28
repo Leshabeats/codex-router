@@ -142,6 +142,21 @@ function ollamaCloudEffort(value) {
   return "high";
 }
 
+// HY4 itself documents two native modes: high and no_think. OpenAI-compatible
+// relays expose the off switch as `none`; the relays that offer an intermediate
+// tier add `low`. Codex's picker has no `none` rung, so these checked-in routes
+// advertise `minimal` as the no-thinking choice and translate it here. Do not
+// borrow the rest of Codex's ladder: medium and above collapse to HY4's native
+// high mode, while low is forwarded only when the route explicitly publishes it.
+function hy4Effort(value, levels) {
+  if (["none", "minimal"].includes(value)) return "none";
+  if (value === "low" && levels.includes("low")) return "low";
+  if (["low", "medium", "high", "xhigh", "max", "ultra"].includes(value)) {
+    return "high";
+  }
+  return undefined;
+}
+
 // Some upstreams document reasoning_effort per model rather than per vendor:
 // GLM-5.2 answers to high/max, while GLM-5.3 and the certified GLM-5.3-Flash
 // routes add a low tier (low/high/max, max the upstream default). So the
@@ -763,6 +778,15 @@ function normalizeBody(buffer, contentType, route) {
       payload.tool_choice !== "none"
     ) {
       payload.tool_choice = "auto";
+    }
+  } else if (model.requestProfile === "hy4-reasoning") {
+    if (payload.reasoning_effort !== undefined) {
+      const effort = hy4Effort(
+        payload.reasoning_effort,
+        (model.reasoningLevels || []).map((level) => level.effort),
+      );
+      if (effort) payload.reasoning_effort = effort;
+      else delete payload.reasoning_effort;
     }
   } else if (model.requestProfile === "qwen-plan") {
     // DashScope documents reasoning_effort only for the cross-vendor

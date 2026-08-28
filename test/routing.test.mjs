@@ -8991,6 +8991,92 @@ test("canceling a Zen Free Muse custom-tool stream stops the transformed pipelin
 });
 
 
+test("API forwarder maps HY4's truthful Codex effort menus onto relay controls", async () => {
+  const upstreamRequests = [];
+  const upstream = await mockServer(async (request, response) => {
+    upstreamRequests.push({ headers: request.headers, body: await bodyJson(request) });
+    json(response, 200, { choices: [] });
+  });
+  const forwarderPort = await openPort();
+  const forwarder = run("api-forwarder.mjs", {
+    CODEX_ROUTER_API_PORT: String(forwarderPort),
+    OPENROUTER_API_BASE_URL: `http://127.0.0.1:${upstream.port}`,
+    OPENROUTER_API_KEY: "TEST_OPENROUTER_HY4_KEY",
+    NANOGPT_API_BASE_URL: `http://127.0.0.1:${upstream.port}`,
+    NANOGPT_API_KEY: "TEST_NANOGPT_HY4_KEY",
+    NOUS_API_BASE_URL: `http://127.0.0.1:${upstream.port}`,
+    NOUS_API_KEY: "TEST_NOUS_HY4_KEY",
+    OPENCODE_GO_BASE_URL: `http://127.0.0.1:${upstream.port}`,
+    OPENCODE_API_KEY: "TEST_OPENCODE_HY4_KEY",
+    OPENCODE_GO_API_KEY: "TEST_OPENCODE_HY4_KEY",
+    CODEX_ROUTER_QUIET: "1",
+  });
+
+  try {
+    await waitFor(`http://127.0.0.1:${forwarderPort}/health`, forwarder, {
+      Authorization: `Bearer ${INTERNAL_KEY}`,
+    });
+    const cases = [
+      ["openrouter-tencent-hy4-preview", "tencent/hy4-preview", "TEST_OPENROUTER_HY4_KEY", "minimal", "none"],
+      ["openrouter-tencent-hy4-preview", "tencent/hy4-preview", "TEST_OPENROUTER_HY4_KEY", "low", "low"],
+      ["openrouter-tencent-hy4-preview", "tencent/hy4-preview", "TEST_OPENROUTER_HY4_KEY", "high", "high"],
+      ["nano-gpt-tencent-hy4-preview", "tencent/hy4-preview", "TEST_NANOGPT_HY4_KEY", "minimal", "none"],
+      ["nano-gpt-tencent-hy4-preview", "tencent/hy4-preview", "TEST_NANOGPT_HY4_KEY", "low", "low"],
+      ["nano-gpt-tencent-hy4-preview", "tencent/hy4-preview", "TEST_NANOGPT_HY4_KEY", "high", "high"],
+      ["nousresearch-tencent-hy4-preview", "tencent/hy4-preview", "TEST_NOUS_HY4_KEY", "minimal", "none"],
+      ["nousresearch-tencent-hy4-preview", "tencent/hy4-preview", "TEST_NOUS_HY4_KEY", "low", "low"],
+      ["nousresearch-tencent-hy4-preview", "tencent/hy4-preview", "TEST_NOUS_HY4_KEY", "high", "high"],
+      ["opencode-go-hy4-preview", "hy4-preview", "TEST_OPENCODE_HY4_KEY", "minimal", "none"],
+      ["opencode-go-hy4-preview", "hy4-preview", "TEST_OPENCODE_HY4_KEY", "high", "high"],
+      // A direct client can send a rung the picker does not advertise. HY4's
+      // binary Go route must keep reasoning on rather than turn medium into off.
+      ["opencode-go-hy4-preview", "hy4-preview", "TEST_OPENCODE_HY4_KEY", "medium", "high"],
+    ];
+    for (const [gatewayModel, upstreamModel, credential, sentEffort, expectedEffort] of cases) {
+      const response = await fetch(
+        `http://127.0.0.1:${forwarderPort}/v1/chat/completions`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${INTERNAL_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: gatewayModel,
+            reasoning_effort: sentEffort,
+            messages: [{ role: "user", content: "test" }],
+          }),
+        },
+      );
+      assert.equal(response.status, 200);
+      const request = upstreamRequests.at(-1);
+      assert.equal(request.body.model, upstreamModel);
+      assert.equal(request.headers.authorization, `Bearer ${credential}`);
+      assert.equal(request.body.reasoning_effort, expectedEffort);
+    }
+
+    const withoutOverride = await fetch(
+      `http://127.0.0.1:${forwarderPort}/v1/chat/completions`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${INTERNAL_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "openrouter-tencent-hy4-preview",
+          messages: [{ role: "user", content: "test" }],
+        }),
+      },
+    );
+    assert.equal(withoutOverride.status, 200);
+    assert.equal(upstreamRequests.at(-1).body.reasoning_effort, undefined);
+  } finally {
+    await stopChild(forwarder);
+    await closeServer(upstream.server);
+  }
+});
+
 // The direct-proven GLM-5.3-Flash routes reject an off-ladder reasoning_effort with
 // HTTP 400 rather than ignoring it -- its upstream answers "[1210] This model
 // always engages in thinking and cannot be disabled; please use low, high, or max".

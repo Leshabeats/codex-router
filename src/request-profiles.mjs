@@ -10,6 +10,7 @@ export const REQUEST_PROFILES = Object.freeze([
   "deepseek-nonthinking",
   "deepseek-thinking",
   "glm-thinking",
+  "hy4-reasoning",
   "kimi-k3",
   "kimi-oauth",
   "minimax-m3",
