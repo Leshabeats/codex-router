@@ -375,7 +375,15 @@ function withManagedMultiAgentV2(input) {
   }
   let tableEnd = featuresHeader + 1;
   while (tableEnd < lines.length && !/^\s*\[/.test(lines[tableEnd])) tableEnd += 1;
-  lines.splice(tableEnd, 0, ...managedLines, "");
+  // Keep the managed feature inside the table content and reuse the table's
+  // existing trailing separator. Inserting after those blanks and appending
+  // another one made every disable -> enable cycle grow the config by one line.
+  let insertionIndex = tableEnd;
+  while (insertionIndex > featuresHeader + 1 && !lines[insertionIndex - 1].trim()) {
+    insertionIndex -= 1;
+  }
+  const hasTableSeparator = insertionIndex < tableEnd;
+  lines.splice(insertionIndex, 0, ...managedLines, ...(hasTableSeparator ? [] : [""]));
   return `${lines.join("\n").trimEnd()}\n`;
 }
 

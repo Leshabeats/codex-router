@@ -448,6 +448,37 @@ test("config manager enables multi_agent_v2 and skips the legacy agents scalar w
   }
 });
 
+test("multi_agent_v2 management is byte-idempotent around an existing features table", () => {
+  const codexHome = mkdtempSync(path.join(os.tmpdir(), "codex-router-v2-idempotence-"));
+  const configPath = path.join(codexHome, "config.toml");
+  const original = `model = "gpt-5.5"
+
+[features]
+multi_agent = true
+memories = true
+js_repl = false
+
+[plugins."example"]
+enabled = true
+`;
+  writeFileSync(configPath, original, { mode: 0o600 });
+
+  try {
+    run("enable", codexHome);
+    const first = readFileSync(configPath, "utf8");
+    run("disable", codexHome);
+    run("enable", codexHome);
+    const second = readFileSync(configPath, "utf8");
+    run("disable", codexHome);
+    run("enable", codexHome);
+    const third = readFileSync(configPath, "utf8");
+
+    assert.equal(second, first);
+    assert.equal(third, first);
+  } finally {
+    rmSync(codexHome, { recursive: true, force: true });
+  }
+});
 test("the managed multi_agent_v2 line tells the parent to interrupt finished children", () => {
   const codexHome = mkdtempSync(path.join(os.tmpdir(), "codex-router-v2-hint-"));
   const configPath = path.join(codexHome, "config.toml");
