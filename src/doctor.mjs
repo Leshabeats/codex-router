@@ -544,7 +544,7 @@ add(
 // The same installed-native gate used by catalog/control keeps this diagnostic
 // aligned with what the running Codex route can actually resolve.
 const visionSettings = readVisionBridgeSettings();
-const visionCandidates = codexTarget
+const visionCandidates = codexTarget && codexAuth?.authenticated === true
   ? [...requiredRoutedModels, ...installedNativeVisionEngines({ hidden: readHiddenModels() })]
   : requiredRoutedModels;
 const visionEngine = resolveVisionEngine(() => visionCandidates, visionSettings);
