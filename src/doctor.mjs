@@ -3,13 +3,15 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
 import { validCallerSecret } from "./caller-auth.mjs";
-import { codexAuthStatus, findCodexBinary, runCodex } from "./codex-binary.mjs";
+import { codexAuthStatus, codexVersion, findCodexBinary, runCodex } from "./codex-binary.mjs";
 import { commandOnPath, spawnableCommand } from "./spawnable-command.mjs";
 import { routedCodexAgentStatus } from "./codex-agent-catalog.mjs";
 import { privateFileIsProtected } from "./file-security.mjs";
 import { grokCliPreflight } from "./grok-cli.mjs";
 import { detectLegacyInstallations } from "./legacy-migration.mjs";
 import { routedCatalogConfigured } from "./catalog.mjs";
+import { nativeCatalogVersionDrift } from "./native-catalog-freshness.mjs";
+import { readNativeCatalogSource } from "./native-catalog-source.mjs";
 import {
   MODEL_BY_SLUG,
   MODELS,
@@ -44,6 +46,7 @@ import {
   INTERNAL_SECRET_PATH,
   LITELLM_CONFIG_PATH,
   MERGED_CATALOG_PATH,
+  NATIVE_CATALOG_PATH,
   PORTS,
   SEARCH_SIDECARS_PATH,
   SOURCE_ROOT,
@@ -467,22 +470,44 @@ const catalogOk =
     ? requiredModels.size > 0 &&
       [...requiredModels].every((slug) => catalogModels.some((model) => model.slug === slug))
     : !catalogModels.some((model) => MODEL_BY_SLUG.has(String(model.slug))));
+let nativeCaptureDrift;
+if (codexTarget && codex && existsSync(NATIVE_CATALOG_PATH)) {
+  let adopted = false;
+  try {
+    adopted = Boolean(readNativeCatalogSource());
+  } catch {
+    // Invalid source state is not adoption proof; keep checking the router-owned capture.
+  }
+  try {
+    nativeCaptureDrift = nativeCatalogVersionDrift(
+      JSON.parse(readFileSync(NATIVE_CATALOG_PATH, "utf8")),
+      codexVersion(),
+      { adopted },
+    );
+  } catch {
+    // The merged-catalog check below remains authoritative for unreadable files.
+  }
+}
 // The merged catalog is the file Codex reads. A harness install has no
 // equivalent: its offer is the settings route, checked by "Harness routing
 // config" below. An idle install deliberately publishes no routed models, so
 // its catalog is held to the same standard as inactive transport: nothing
 // routable may be offered.
 if (codexTarget) add(
-  catalogOk ? "ok" : "fail",
+  !catalogOk ? "fail" : nativeCaptureDrift ? "warn" : "ok",
   "Merged catalog",
-  catalogOk
-    ? idleInstall
-      ? "idle install; no routed models"
-      : routedTransportActive
-        ? `${requiredModels.size} routed models`
-        : "native-only; routed transport is inactive"
-    : MERGED_CATALOG_PATH,
-  "Run ./bin/refresh-catalog, or ./bin/doctor --fix if files are missing.",
+  !catalogOk
+    ? MERGED_CATALOG_PATH
+    : nativeCaptureDrift
+      ? `native catalog captured by ${nativeCaptureDrift.captured}; installed ${nativeCaptureDrift.current}`
+      : idleInstall
+        ? "idle install; no routed models"
+        : routedTransportActive
+          ? `${requiredModels.size} routed models`
+          : "native-only; routed transport is inactive",
+  nativeCaptureDrift
+    ? "Run ./bin/refresh-catalog, then fully quit and reopen Codex."
+    : "Run ./bin/refresh-catalog, or ./bin/doctor --fix if files are missing.",
 );
 // The catalog tells Codex which models to offer; the gateway config decides
 // which it can actually route. When a second checkout writes one of them the
