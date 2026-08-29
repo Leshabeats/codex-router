@@ -28,6 +28,7 @@ const {
   nativeSessionSharingEnabled,
   nativeSessionAvailable,
   nativeSessionHeaders,
+  nativeSessionTokenMatches,
   nativeSessionStatus,
   setNativeSessionSharingEnabled,
   tokenExpiryMs,
@@ -80,6 +81,25 @@ test("a signed-in session stays private until the user authorizes sharing once",
   assert.doesNotMatch(readFileSync(NATIVE_SESSION_CONSENT_PATH, "utf8"), /access|account/i);
 });
 
+test("the current Codex session authenticates only its own bearer without enabling sharing", () => {
+  writeAuth({ access_token: ACCESS, account_id: ACCOUNT });
+  assert.equal(nativeSessionSharingEnabled(), false);
+  assert.equal(nativeSessionTokenMatches(ACCESS), true);
+  assert.equal(nativeSessionTokenMatches("different-session-token"), false);
+  clearAuth();
+  assert.equal(nativeSessionTokenMatches(ACCESS), false);
+});
+
+test("direct Codex authentication uses actual expiry rather than fallback skew", () => {
+  const seconds = Math.floor(Date.now() / 1000);
+  const nearlyExpired = jwtWithExp(seconds + 30);
+  writeAuth({ access_token: nearlyExpired, account_id: ACCOUNT });
+  assert.equal(nativeSessionTokenMatches(nearlyExpired), true);
+  assert.equal(nativeSessionHeaders(), undefined, "fallback still withholds the near-expiry token");
+  const expired = jwtWithExp(seconds - 1);
+  writeAuth({ access_token: expired, account_id: ACCOUNT });
+  assert.equal(nativeSessionTokenMatches(expired), false);
+});
 test("sharing cannot be enabled before the user signs in", () => {
   assert.throws(
     () => setNativeSessionSharingEnabled(true),

@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 
+import { secretEqual } from "./caller-auth.mjs";
 import { discoveryDisabled } from "./discovery-mode.mjs";
 import { writePrivateJson } from "./file-security.mjs";
 import { CODEX_HOME, NATIVE_SESSION_CONSENT_PATH } from "./paths.mjs";
@@ -103,6 +104,15 @@ function readSession() {
     // the way it did before, with the upstream's own 401.
     return undefined;
   }
+}
+
+// Authenticate a bearer that claims to be the already-signed-in Codex client.
+// This never enables session sharing; it only verifies the caller's own token.
+export function nativeSessionTokenMatches(token) {
+  if (typeof token !== "string" || !token) return false;
+  const session = readSession();
+  const actuallyExpired = session?.expiresAtMs !== undefined && session.expiresAtMs <= Date.now();
+  return Boolean(session && !actuallyExpired && secretEqual(token, session.accessToken));
 }
 
 /**
