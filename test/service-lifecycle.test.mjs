@@ -52,7 +52,7 @@ test("start and stop act on the same layer", { skip: process.platform === "win32
 test("the foreground supervisor is reachable, but only on purpose", { skip: process.platform === "win32" }, () => {
   withNodeShim(({ env, readLog }) => {
     execFileSync(path.join(root, "bin", "start"), ["--foreground"], { env, encoding: "utf8" });
-    assert.match(readLog(), /src\/start\.mjs$/);
+    assert.match(readLog(), /src\/foreground-start\.mjs$/);
   });
 
   // An unrecognized argument is refused rather than quietly falling through to
