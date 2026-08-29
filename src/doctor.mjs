@@ -72,6 +72,7 @@ import {
   selectedConfiguredListedModels,
 } from "./provider-selection.mjs";
 import { resolveVisionEngine } from "./vision-bridge.mjs";
+import { installedNativeVisionEngines } from "./vision-engines.mjs";
 import {
   readVisionBridgeSettings,
   visionBridgeConfigured,
@@ -539,21 +540,24 @@ add(
 // DeepSeek-only install for a feature nobody switched on. It still reports what
 // is true, just at the severity the situation has.
 //
-// This check sees routed models only, so a native (ChatGPT-plan) engine is
-// invisible to it and a signed-in install may well read images fine while this
-// says nothing resolves.
+// Codex may spend a signed-in native vision engine on the caller's behalf.
+// The same installed-native gate used by catalog/control keeps this diagnostic
+// aligned with what the running Codex route can actually resolve.
 const visionSettings = readVisionBridgeSettings();
-const visionEngine = resolveVisionEngine(() => requiredRoutedModels, visionSettings);
+const visionCandidates = codexTarget && codexAuth?.authenticated === true
+  ? [...requiredRoutedModels, ...installedNativeVisionEngines({ hidden: readHiddenModels() })]
+  : requiredRoutedModels;
+const visionEngine = resolveVisionEngine(() => visionCandidates, visionSettings);
 if (visionSettings.enabled && !visionEngine) {
   const asked = visionBridgeConfigured();
   add(
     asked ? "warn" : "ok",
     "Vision bridge",
-    visionSettings.engine
+    visionSettings.engine && !visionSettings.defaulted
       ? `pinned engine ${visionSettings.engine} is not an enabled model that reads images`
       : asked
-        ? "enabled, but no enabled provider offers a model that reads images"
-        : "on by default, but no enabled provider offers a model that reads images yet",
+        ? "enabled, but no enabled vision engine is available"
+        : "on by default, but no enabled vision engine is available yet",
     "Enable a provider with a vision model, sign in to ChatGPT, or run ./bin/model-router codex control vision-bridge setup for a local reader.",
   );
 } else if (visionEngine?.local) {
