@@ -897,7 +897,15 @@ switch ($Command) {
   "smoke-test" {
     Invoke-RouterNode "src\smoke-test.mjs" $Arguments
   }
-  "start" { Invoke-RouterNode "src\start.mjs" $Arguments }
+  "start" {
+    if ($Arguments.Count -eq 0) {
+      Invoke-RouterNode "src\service.mjs" @("start")
+    } elseif ($Arguments.Count -eq 1 -and [string]$Arguments[0] -eq "--foreground") {
+      Invoke-RouterNode "src\foreground-start.mjs" @()
+    } else {
+      throw "Usage: codex-router.ps1 start [--foreground]."
+    }
+  }
   "stop" { Invoke-RouterNode "src\service.mjs" @("stop") }
   "test-model" { Invoke-RouterNode "src\compatibility-test.mjs" $Arguments }
   "discover-models" { Invoke-RouterNode "src\model-discovery.mjs" $Arguments }

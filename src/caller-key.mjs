@@ -203,38 +203,53 @@ async function recoverPendingCallerKeyRotationUnlocked({
     return { recovered: true, committed: true };
   }
 
-  if (journal.serviceWasRunning) {
-    const service = await readServiceStatus();
-    if (service?.state === "running") await runServiceMutation("stop");
-  }
-
+  // Prove the rollback generation before touching a running service. A corrupt
+  // or unprotected rollback must fail closed without taking a healthy router
+  // down merely because recovery was attempted.
   const backupPath = callerCapabilityBackupPath(secretPath, journal.operationId);
-  let restored;
-  if (existsSync(backupPath)) {
+  const backupExists = existsSync(backupPath);
+  let rollbackSecret;
+  if (backupExists) {
     if (!secretIsProtected(backupPath)) {
       throw new Error("Pending caller rotation rollback generation is not private; refusing recovery.");
     }
-    const rollbackSecret = currentSecret(backupPath);
+    rollbackSecret = currentSecret(backupPath);
     if (secretDigest(rollbackSecret) !== journal.previousSecretSha256) {
       throw new Error("Pending caller rotation rollback generation does not match its protected journal; refusing recovery.");
     }
-    restored = restoreSecret({ secretPath, operationId: journal.operationId });
-    if (!restored.restored || restored.currentSecret !== rollbackSecret || !secretIsProtected(secretPath)) {
-      throw new Error("Pending caller rotation could not restore a private prior capability; refusing cleanup.");
-    }
   } else {
-    const live = currentSecret(secretPath);
-    if (secretDigest(live) !== journal.previousSecretSha256) {
+    rollbackSecret = currentSecret(secretPath);
+    if (secretDigest(rollbackSecret) !== journal.previousSecretSha256) {
       throw new Error("Pending caller rotation has no rollback generation matching the live capability; refusing recovery.");
     }
     if (!secretIsProtected(secretPath)) {
       throw new Error("Pending caller rotation live rollback capability is not private; refusing recovery.");
     }
-    restored = { restored: false, currentSecret: live };
+  }
+
+  // Recovery owns the service lifecycle lock, so the current state is stable
+  // while we inspect it. The journal records the pre-rotation intent, but a
+  // service may have been started after the crashed rotation released its locks.
+  // Stop that live generation before restoring disk/client state, then preserve
+  // whichever running intent is newer: the journal's original state or the
+  // operator-visible state observed at recovery time.
+  const service = await readServiceStatus();
+  const serviceRunningAtRecovery = service?.state === "running";
+  if (serviceRunningAtRecovery) await runServiceMutation("stop");
+  const shouldRunAfterRecovery = journal.serviceWasRunning || serviceRunningAtRecovery;
+
+  let restored;
+  if (backupExists) {
+    restored = restoreSecret({ secretPath, operationId: journal.operationId });
+    if (!restored.restored || restored.currentSecret !== rollbackSecret || !secretIsProtected(secretPath)) {
+      throw new Error("Pending caller rotation could not restore a private prior capability; refusing cleanup.");
+    }
+  } else {
+    restored = { restored: false, currentSecret: rollbackSecret };
   }
 
   await refreshTargets(journal.targets, runNode);
-  if (journal.serviceWasRunning) {
+  if (shouldRunAfterRecovery) {
     await runServiceMutation("start");
     if (restored.displacedSecret && restored.displacedSecret !== restored.currentSecret) {
       await verifyServiceKeys({ previousSecret: restored.displacedSecret, currentSecret: restored.currentSecret });

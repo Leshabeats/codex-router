@@ -247,6 +247,46 @@ test("pending secret-swapped rotation restores the prior generation and refreshe
   } finally { rmSync(stateDir, { recursive: true, force: true }); }
 });
 
+test("recovery restarts a service that started after a stopped-service rotation crashed", async () => {
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "caller-key-recover-prestarted-"));
+  const secretPath = path.join(stateDir, "caller-secret");
+  const journalPath = path.join(stateDir, "caller-key-rotation.json");
+  writeFileSync(secretPath, `${oldKey}\n`, { mode: 0o600 });
+  try {
+    let state = journal.beginCallerKeyRotationJournal({
+      targets: ["codex"], serviceWasRunning: false,
+      operationId: "7".repeat(32), previousSecretSha256: digest(oldKey), journalPath,
+    });
+    const swapped = rotation.swapCallerCapability({
+      secretPath, operationId: state.operationId,
+      generateSecret: () => newKey, protect: () => {},
+    });
+    state = journal.updateCallerKeyRotationJournal(state, "secret-swapped", {
+      journalPath, patch: { currentSecretSha256: digest(swapped.currentSecret) },
+    });
+    const serviceMutations = [];
+    const verifications = [];
+    const result = await cli.recoverPendingCallerKeyRotation({
+      secretPath,
+      withServiceLock: async (run) => run(),
+      readJournal: () => journal.readCallerKeyRotationJournal({ journalPath }),
+      readServiceStatus: async () => ({ installed: true, state: "running" }),
+      runNode: async () => {},
+      runServiceMutation: async (command) => serviceMutations.push(command),
+      verifyServiceKeys: async (keys) => verifications.push(keys),
+      secretIsProtected: () => true,
+      clearJournal: ({ operationId }) => journal.clearCallerKeyRotationJournal({ operationId, journalPath }),
+    });
+    assert.deepEqual(result, { recovered: true, committed: false });
+    assert.deepEqual(serviceMutations, ["stop", "start"]);
+    assert.deepEqual(verifications, [{ previousSecret: newKey, currentSecret: oldKey }]);
+    assert.equal(readFileSync(secretPath, "utf8").trim(), oldKey);
+    assert.equal(existsSync(journalPath), false);
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
 test("recovery holds service lifecycle ownership while restoring a stopped-service generation", async () => {
   const stateDir = mkdtempSync(path.join(os.tmpdir(), "caller-key-recover-service-lock-"));
   const secretPath = path.join(stateDir, "caller-secret");
@@ -332,12 +372,16 @@ test("recovery never clears a journal for an unprotected live rollback capabilit
       targets: [], serviceWasRunning: false,
       operationId: "e".repeat(32), previousSecretSha256: digest(oldKey), journalPath,
     });
+    const serviceMutations = [];
     await assert.rejects(cli.recoverPendingCallerKeyRotation({
       secretPath,
       readJournal: () => journal.readCallerKeyRotationJournal({ journalPath }),
+      readServiceStatus: async () => ({ installed: true, state: "running" }),
+      runServiceMutation: async (command) => serviceMutations.push(command),
       secretIsProtected: () => false,
       clearJournal: ({ operationId }) => journal.clearCallerKeyRotationJournal({ operationId, journalPath }),
     }), /not private/i);
+    assert.deepEqual(serviceMutations, []);
     assert.equal(existsSync(journalPath), true);
     assert.equal(readFileSync(secretPath, "utf8").trim(), oldKey);
   } finally { rmSync(stateDir, { recursive: true, force: true }); }
@@ -392,11 +436,15 @@ test("recovery refuses an unprotected rollback generation and preserves the jour
       journalPath, patch: { currentSecretSha256: digest(swapped.currentSecret) },
     });
     const backup = rotation.callerCapabilityBackupPath(secretPath, state.operationId);
+    const serviceMutations = [];
     await assert.rejects(cli.recoverPendingCallerKeyRotation({
       secretPath,
       readJournal: () => journal.readCallerKeyRotationJournal({ journalPath }),
+      readServiceStatus: async () => ({ installed: true, state: "running" }),
+      runServiceMutation: async (command) => serviceMutations.push(command),
       secretIsProtected: (target) => target !== backup,
     }), /rollback generation is not private/i);
+    assert.deepEqual(serviceMutations, []);
     assert.equal(readFileSync(secretPath, "utf8").trim(), newKey);
     assert.equal(existsSync(backup), true);
     assert.equal(journal.readCallerKeyRotationJournal({ journalPath }).phase, "secret-swapped");
