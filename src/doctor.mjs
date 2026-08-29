@@ -614,8 +614,8 @@ if (!failoverSettings.enabled) {
     "ok",
     "Model failover",
     failoverCounts.free
-      ? `on, ${failoverCounts.free} free model(s) first then ${failoverCounts.subscription} of your own`
-      : `on, ${failoverCounts.subscription} of your own providers -- no free model is curated, so nothing cheaper is tried first`,
+      ? `on, ${failoverCounts.free} free model(s) first then ${failoverCounts.subscription} model(s) on your own providers`
+      : `on, ${failoverCounts.subscription} model(s) on your own providers -- no free model is curated, so nothing cheaper is tried first`,
     failoverCounts.free
       ? "Run ./bin/model-router codex control failover chain <model-slug,...> to choose the order yourself."
       : "Free catalogs change without notice so none are checked in. Run ./bin/model-router codex curate-models opencode-free to give failover a free first stop.",
