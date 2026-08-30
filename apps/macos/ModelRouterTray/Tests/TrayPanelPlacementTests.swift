@@ -47,28 +47,20 @@ struct TrayPanelPlacementTests {
     #expect(frame.maxY <= visible.maxY)
   }
 
-  @Test("placement uses the screen that contains the extra, not the fallback")
-  func prefersScreenContainingTheButton() {
-    let left = CGRect(x: -1920, y: 0, width: 1920, height: 1080)
-    let right = CGRect(x: 0, y: 0, width: 1680, height: 1020)
-    let buttonPoint = CGPoint(x: -100, y: 500)
-    let chosen = TrayPanelPlacement.visibleFrame(
-      containing: buttonPoint,
-      screens: [right, left],
-      fallback: right
+  @Test("a menu-bar item on a secondary display stays on that display")
+  func secondaryDisplayMenuBarItemStaysOnSecondaryDisplay() {
+    // The menu-bar strip starts at visible.maxY. A hit test against visibleFrame
+    // cannot select this display, but AppKit's buttonWindow.screen can.
+    let secondaryVisible = CGRect(x: -1920, y: 0, width: 1920, height: 1057)
+    let button = CGRect(x: -180, y: 1057, width: 180, height: 23)
+    let frame = TrayPanelPlacement.frame(
+      buttonScreenRect: button,
+      visibleFrame: secondaryVisible
     )
-    #expect(chosen == left)
-  }
-
-  @Test("a point on no screen uses the fallback visible frame")
-  func missingScreenUsesFallback() {
-    let fallback = CGRect(x: 0, y: 0, width: 1680, height: 1020)
-    let chosen = TrayPanelPlacement.visibleFrame(
-      containing: CGPoint(x: 50_000, y: 50_000),
-      screens: [fallback],
-      fallback: fallback
-    )
-    #expect(chosen == fallback)
+    #expect(frame.maxX == button.maxX)
+    #expect(frame.maxY == secondaryVisible.maxY)
+    #expect(secondaryVisible.contains(frame))
+    #expect(frame.maxX <= 0)
   }
 
   @Test("the panel size matches the SwiftUI tray frame")

@@ -517,11 +517,12 @@ final class TrayMenuController: NSObject {
   private func reposition() {
     guard let buttonWindow = statusItem.button?.window else { return }
     let buttonRect = buttonWindow.frame
-    let visible = TrayPanelPlacement.visibleFrame(
-      containing: CGPoint(x: buttonRect.midX, y: buttonRect.midY),
-      screens: NSScreen.screens.map(\.visibleFrame),
-      fallback: NSScreen.main?.visibleFrame ?? buttonRect
-    )
+    // A status-item window sits in the menu-bar strip, outside visibleFrame.
+    // Ask AppKit which screen owns that window instead of hit-testing a point
+    // that no screen's visible frame is expected to contain.
+    let visible = buttonWindow.screen?.visibleFrame
+      ?? NSScreen.main?.visibleFrame
+      ?? buttonRect
     let frame = TrayPanelPlacement.frame(
       buttonScreenRect: buttonRect,
       visibleFrame: visible

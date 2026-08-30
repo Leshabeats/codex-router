@@ -11,14 +11,6 @@ import Foundation
 enum TrayPanelPlacement {
   static let panelSize = CGSize(width: 352, height: 560)
 
-  static func visibleFrame(
-    containing point: CGPoint,
-    screens: [CGRect],
-    fallback: CGRect
-  ) -> CGRect {
-    screens.first { $0.contains(point) } ?? fallback
-  }
-
   static func frame(
     buttonScreenRect: CGRect,
     panelSize: CGSize = panelSize,
