@@ -484,6 +484,24 @@ forced choice for that model only (`--request-profile auto-tool-choice` in the
 which models exist. Curated models are local to your machine and are not
 vetted by the repository's compatibility tests.
 
+The same managed OpenAI base URL also serves `/v1/embeddings`, but only for a
+model whose local or checked-in metadata explicitly names the capability. A
+model that is both conversational and embedding-capable declares its normal
+provider route plus `"/embeddings"`, for example:
+
+```json
+"supportedEndpoints": ["/chat/completions", "/embeddings"]
+```
+
+A dedicated embedding model uses only `"/embeddings"` and must set
+`"listed": false` so it never appears as a conversational Codex model. Live
+catalog discovery does not infer this capability. Requests and responses are
+bounded to 8 MiB by default, caller cancellation reaches the provider, query
+parameters on the secret-bearing capability URL are dropped, and embedding
+requests are never retried or passed through a chat adapter. The provider's
+normal credential isolation and generic-provider DNS/redirect checks still
+apply.
+
 ### opencode (Go subscription and Zen)
 
 The opencode provider family covers both of opencode's endpoints with one

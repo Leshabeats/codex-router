@@ -1,0 +1,50 @@
+// Additional OpenAI-compatible endpoint policy.
+//
+// Chat, Responses, and Messages remain provider protocol contracts. A model
+// may receive an additional endpoint only when its own reviewed/user-owned
+// metadata names it. A shared base URL or provider name grants nothing.
+
+export const OPENAI_MODEL_ENDPOINTS = Object.freeze([
+  "/chat/completions",
+  "/responses",
+  "/embeddings",
+]);
+
+const ENDPOINTS = new Set(OPENAI_MODEL_ENDPOINTS);
+
+export function normalizeSupportedEndpoints(value, { field = "supportedEndpoints" } = {}) {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(`${field} must be a non-empty array.`);
+  }
+  const result = [];
+  for (const entry of value) {
+    if (typeof entry !== "string" || !ENDPOINTS.has(entry)) {
+      throw new Error(`${field} contains an unsupported endpoint.`);
+    }
+    if (!result.includes(entry)) result.push(entry);
+  }
+  return result;
+}
+
+export function providerModelEndpoint(provider) {
+  if (provider?.protocol === "anthropic") return undefined;
+  return provider?.protocol === "openai-responses"
+    ? "/responses"
+    : "/chat/completions";
+}
+
+export function supportsOpenAIModelEndpoint(route, { model, provider } = {}) {
+  if (!ENDPOINTS.has(route)) return false;
+  const declared = normalizeSupportedEndpoints(model?.supportedEndpoints);
+  if (declared !== undefined) return declared.includes(route);
+  return route === providerModelEndpoint(provider);
+}
+
+export function endpointCapabilityError(route, model) {
+  const label = model?.displayName || model?.gatewayModel || model?.slug || "model";
+  const error = new Error(`${label} does not support ${route}.`);
+  error.status = 400;
+  error.code = "unsupported_model_endpoint";
+  return error;
+}
