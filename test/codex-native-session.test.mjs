@@ -39,9 +39,14 @@ const { dshNativeModels } = await import("../src/dsh-catalog.mjs");
 
 const ACCESS = "sk-test-access-token";
 const ACCOUNT = "acct-0123456789";
+const API_KEY = "sk-test-codex-api-key";
 
 function writeAuth(tokens) {
   writeFileSync(authPath, JSON.stringify({ auth_mode: "chatgpt", tokens }), "utf8");
+}
+
+function writeAuthDocument(document) {
+  writeFileSync(authPath, JSON.stringify(document), "utf8");
 }
 
 function clearAuth() {
@@ -88,6 +93,27 @@ test("the current Codex session authenticates only its own bearer without enabli
   assert.equal(nativeSessionTokenMatches("different-session-token"), false);
   clearAuth();
   assert.equal(nativeSessionTokenMatches(ACCESS), false);
+});
+
+test("the current Codex API key authenticates requests but never becomes a shared session", () => {
+  writeAuthDocument({ auth_mode: "apikey", OPENAI_API_KEY: API_KEY });
+  assert.equal(nativeSessionTokenMatches(API_KEY), true);
+  assert.equal(nativeSessionTokenMatches("sk-different-api-key"), false);
+  assert.equal(nativeSessionHeaders(), undefined);
+  assert.equal(nativeSessionAvailable(), false);
+  const status = nativeSessionStatus();
+  assert.deepEqual(
+    {
+      present: status.present,
+      usable: status.usable,
+      hasAccountId: status.hasAccountId,
+    },
+    { present: true, usable: false, hasAccountId: false },
+  );
+
+  // A top-level key in another auth mode is not authority for this route.
+  writeAuthDocument({ auth_mode: "chatgpt", OPENAI_API_KEY: API_KEY });
+  assert.equal(nativeSessionTokenMatches(API_KEY), false);
 });
 
 test("direct Codex authentication uses actual expiry rather than fallback skew", () => {
