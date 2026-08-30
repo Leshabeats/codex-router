@@ -658,6 +658,12 @@ test("projects successful HTTP response headers into official Codex metadata eve
     response.setHeader("x-codex-credits-has-credits", "true");
     response.setHeader("x-codex-credits-unlimited", "false");
     response.setHeader("x-codex-credits-balance", "12.50");
+    response.setHeader("x-codex-bengalfox-primary-used-percent", "80");
+    response.setHeader("x-codex-bengalfox-primary-window-minutes", "1440");
+    response.setHeader("x-codex-bengalfox-primary-reset-at", "1700000100");
+    response.setHeader("x-codex-bengalfox-secondary-used-percent", "10");
+    response.setHeader("x-codex-bengalfox-limit-name", "gpt-5.2-codex-sonic");
+    response.setHeader("x-codex-secondary-primary-used-percent", "25");
     response.setHeader("x-private-header", "must-not-cross");
     sse(response, [
       { type: "response.created", response: { id: "resp-headers" } },
@@ -688,13 +694,72 @@ test("projects successful HTTP response headers into official Codex metadata eve
   });
   assert.deepEqual(await peer.nextJson(), {
     type: "codex.rate_limits",
+    metered_limit_name: "codex",
     rate_limits: {
       primary: { used_percent: 42.5, window_minutes: 60, reset_at: 1_700_000_000 },
       secondary: { used_percent: 5, window_minutes: 10_080 },
     },
     credits: { has_credits: true, unlimited: false, balance: "12.50" },
   });
+  assert.deepEqual(await peer.nextJson(), {
+    type: "codex.rate_limits",
+    metered_limit_name: "codex_bengalfox",
+    limit_name: "gpt-5.2-codex-sonic",
+    rate_limits: {
+      primary: { used_percent: 80, window_minutes: 1440, reset_at: 1_700_000_100 },
+      secondary: { used_percent: 10 },
+    },
+    credits: { has_credits: true, unlimited: false, balance: "12.50" },
+  });
+  assert.deepEqual(await peer.nextJson(), {
+    type: "codex.rate_limits",
+    metered_limit_name: "codex_secondary",
+    rate_limits: { primary: { used_percent: 25 } },
+    credits: { has_credits: true, unlimited: false, balance: "12.50" },
+  });
   assert.equal((await peer.nextJson()).type, "response.created");
+  assert.equal((await peer.nextJson()).type, "response.completed");
+  peer.close();
+});
+
+test("bounds named rate-limit discovery and drops malformed family data", async (t) => {
+  const longFamilyId = "a".repeat(65);
+  const { server, port } = await startServer(async (request, response) => {
+    for await (const _chunk of request) {}
+    for (let index = 0; index < 18; index += 1) {
+      const family = `limit-${String(index).padStart(2, "0")}`;
+      response.setHeader(`x-${family}-primary-used-percent`, String(index + 1));
+      response.setHeader(`x-${family}-limit-name`, `safe-${index}`);
+    }
+    response.setHeader("x-a-malformed-primary-used-percent", "NaN");
+    response.setHeader("x-a-malformed-secondary-used-percent", "also-not-a-number");
+    response.setHeader("x-a-secondary-only-secondary-used-percent", "10");
+    response.setHeader("x-a-oversized-primary-used-percent", "1".repeat(65));
+    response.setHeader("x-a--bad-primary-used-percent", "99");
+    response.setHeader(`x-${longFamilyId}-primary-used-percent`, "99");
+    response.setHeader("x-limit-00-limit-name", "x".repeat(257));
+    sse(response, [
+      { type: "response.created", response: { id: "resp-rate-bounds" } },
+      { type: "response.completed", response: { id: "resp-rate-bounds", usage: {} } },
+    ]);
+  });
+  t.after(() => server.close());
+
+  const { peer } = await connect(port);
+  peer.sendJson(createRequest());
+  const rateLimitEvents = [];
+  for (;;) {
+    const event = await peer.nextJson();
+    if (event.type === "response.created") break;
+    rateLimitEvents.push(event);
+  }
+  assert.equal(rateLimitEvents.length, 16);
+  assert.deepEqual(
+    rateLimitEvents.map((event) => event.metered_limit_name),
+    Array.from({ length: 16 }, (_value, index) => `limit_${String(index).padStart(2, "0")}`),
+  );
+  assert.equal(rateLimitEvents[0].limit_name, undefined);
+  assert.ok(rateLimitEvents.every((event) => event.type === "codex.rate_limits"));
   assert.equal((await peer.nextJson()).type, "response.completed");
   peer.close();
 });

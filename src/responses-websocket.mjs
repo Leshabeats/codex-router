@@ -77,6 +77,12 @@ const PER_REQUEST_IDENTITY_HEADERS = new Set([
 const MAX_QUEUED_REQUESTS = 2;
 const MAX_FRAGMENT_FRAMES = 1_024;
 const MAX_TURN_METADATA_HEADER_BYTES = 8 * 1_024;
+const MAX_RATE_LIMIT_FAMILIES = 16;
+const MAX_RATE_LIMIT_FAMILY_CANDIDATES = 64;
+const MAX_RATE_LIMIT_ID_BYTES = 64;
+const MAX_RATE_LIMIT_NUMBER_BYTES = 64;
+const MAX_RATE_LIMIT_TEXT_BYTES = 256;
+const RATE_LIMIT_FAMILY_ANCHOR = /^x-([a-z0-9]+(?:-[a-z0-9]+)*)-primary-used-percent$/;
 
 function headerTokens(value) {
   return String(value || "")
@@ -330,8 +336,7 @@ function responseHeaders(response) {
 }
 
 async function sendSuccessfulResponseHeaders(peer, response) {
-  const headers = responseHeaders(response);
-  if (!headers) return true;
+  const headers = responseHeaders(response) || {};
   const turnState = headers["x-codex-turn-state"];
   if (turnState !== undefined) {
     // Current Codex accepts sticky state only from response.metadata.
@@ -357,8 +362,9 @@ async function sendSuccessfulResponseHeaders(peer, response) {
     }))) return false;
   }
 
-  const rateLimits = rateLimitEvent(headers);
-  if (rateLimits && !(await peer.sendJsonWithBackpressure(rateLimits))) return false;
+  for (const rateLimits of rateLimitEvents(response.headers)) {
+    if (!(await peer.sendJsonWithBackpressure(rateLimits))) return false;
+  }
 
   if (headers["x-reasoning-included"] !== undefined) {
     // Codex reads this flag only from the HTTP 101 response. The internal HTTP
@@ -368,9 +374,20 @@ async function sendSuccessfulResponseHeaders(peer, response) {
   return true;
 }
 
+function boundedRateLimitHeader(headers, name, maxBytes = MAX_RATE_LIMIT_TEXT_BYTES) {
+  const raw = headers.get(name);
+  if (
+    raw === null ||
+    raw.length === 0 ||
+    Buffer.byteLength(raw, "utf8") > maxBytes ||
+    /[\u0000-\u001f\u007f]/.test(raw)
+  ) return undefined;
+  return raw;
+}
+
 function finiteHeaderNumber(headers, name, { integer = false } = {}) {
-  const raw = headers[name];
-  if (typeof raw !== "string" || raw.length === 0) return undefined;
+  const raw = boundedRateLimitHeader(headers, name, MAX_RATE_LIMIT_NUMBER_BYTES);
+  if (raw === undefined) return undefined;
   const pattern = integer
     ? /^[+-]?\d+$/
     : /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
@@ -382,7 +399,7 @@ function finiteHeaderNumber(headers, name, { integer = false } = {}) {
 }
 
 function booleanHeader(headers, name) {
-  const value = String(headers[name] ?? "").toLowerCase();
+  const value = boundedRateLimitHeader(headers, name, 5)?.toLowerCase();
   if (value === "true" || value === "1") return true;
   if (value === "false" || value === "0") return false;
   return undefined;
@@ -405,12 +422,14 @@ function rateLimitWindow(headers, prefix) {
   };
 }
 
-function rateLimitEvent(headers) {
-  const primary = rateLimitWindow(headers, "x-codex-primary");
-  const secondary = rateLimitWindow(headers, "x-codex-secondary");
+function rateLimitSnapshot(headers, familyId) {
+  const headerFamilyId = familyId.replaceAll("_", "-");
+  const prefix = `x-${headerFamilyId}`;
+  const primary = rateLimitWindow(headers, `${prefix}-primary`);
+  const secondary = rateLimitWindow(headers, `${prefix}-secondary`);
   const hasCredits = booleanHeader(headers, "x-codex-credits-has-credits");
   const unlimited = booleanHeader(headers, "x-codex-credits-unlimited");
-  const balance = safeHeaderValue(headers["x-codex-credits-balance"])?.trim();
+  const balance = boundedRateLimitHeader(headers, "x-codex-credits-balance")?.trim();
   const credits = hasCredits !== undefined && unlimited !== undefined
     ? {
       has_credits: hasCredits,
@@ -418,14 +437,53 @@ function rateLimitEvent(headers) {
       ...(balance ? { balance } : {}),
     }
     : undefined;
-  if (!primary && !secondary && !credits) return undefined;
+  const limitName = boundedRateLimitHeader(headers, `${prefix}-limit-name`)?.trim();
+  return {
+    familyId,
+    primary,
+    secondary,
+    credits,
+    ...(limitName ? { limitName } : {}),
+  };
+}
+
+function rateLimitEvent(snapshot) {
+  const { familyId, primary, secondary, credits, limitName } = snapshot;
   return {
     type: "codex.rate_limits",
+    metered_limit_name: familyId,
+    ...(limitName ? { limit_name: limitName } : {}),
     ...(primary || secondary
       ? { rate_limits: { ...(primary ? { primary } : {}), ...(secondary ? { secondary } : {}) } }
       : {}),
     ...(credits ? { credits } : {}),
   };
+}
+
+function rateLimitEvents(headers) {
+  const familyIds = new Set();
+  for (const [name] of headers) {
+    const match = RATE_LIMIT_FAMILY_ANCHOR.exec(name);
+    if (!match) continue;
+    const rawFamilyId = match[1];
+    if (Buffer.byteLength(rawFamilyId, "ascii") > MAX_RATE_LIMIT_ID_BYTES) continue;
+    const familyId = rawFamilyId.replaceAll("-", "_");
+    if (familyId === "codex") continue;
+    familyIds.add(familyId);
+    if (familyIds.size >= MAX_RATE_LIMIT_FAMILY_CANDIDATES) break;
+  }
+
+  const snapshots = [];
+  const defaultSnapshot = rateLimitSnapshot(headers, "codex");
+  if (defaultSnapshot.primary || defaultSnapshot.secondary || defaultSnapshot.credits) {
+    snapshots.push(defaultSnapshot);
+  }
+  for (const familyId of [...familyIds].sort()) {
+    const snapshot = rateLimitSnapshot(headers, familyId);
+    if (snapshot.primary || snapshot.secondary || snapshot.credits) snapshots.push(snapshot);
+    if (snapshots.length >= MAX_RATE_LIMIT_FAMILIES) break;
+  }
+  return snapshots.map(rateLimitEvent);
 }
 
 function continuationState(input, output, maxBytes) {
