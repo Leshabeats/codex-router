@@ -2174,3 +2174,52 @@ accent = "#4e96d1"
     rmSync(codexHome, { recursive: true, force: true });
   }
 });
+
+test("caller capability refresh preserves Codex policy while replacing managed URLs", () => {
+  const codexHome = mkdtempSync(path.join(os.tmpdir(), "codex-router-caller-refresh-"));
+  const stateDir = path.join(codexHome, "router-state");
+  const configPath = path.join(codexHome, "config.toml");
+  const original = `model = "keep-model"\n\n[desktop]\nambient-suggestions-enabled = false\n`;
+  writeFileSync(configPath, original, { mode: 0o600 });
+  try {
+    run("enable", codexHome, stateDir);
+    const before = readFileSync(configPath, "utf8");
+    const nextSecret = "n".repeat(48);
+    writeFileSync(path.join(stateDir, "caller-secret"), `${nextSecret}\n`, { mode: 0o600 });
+    const result = run("caller-capability-refresh", codexHome, stateDir);
+    assert.equal(result.refreshed, true);
+    const after = readFileSync(configPath, "utf8");
+    assert.equal(after, before.replaceAll(CALLER_KEY, nextSecret));
+    assert.match(after, /model = "keep-model"/);
+    assert.match(after, /ambient-suggestions-enabled = false/);
+  } finally {
+    rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
+test("status exposes residual managed router artifacts even when mode is native", () => {
+  const codexHome = mkdtempSync(path.join(os.tmpdir(), "codex-router-residual-status-"));
+  const stateDir = path.join(codexHome, "router-state");
+  const configPath = path.join(codexHome, "config.toml");
+  writeFileSync(
+    configPath,
+    `openai_base_url = "http://127.0.0.1:46192/_codex-router/${CALLER_KEY}/v1"\n`,
+    { mode: 0o600 },
+  );
+  try {
+    const status = run("status", codexHome, stateDir);
+    assert.equal(status.mode, "native");
+    assert.equal(status.managed_router_artifacts_present, true);
+
+    writeFileSync(
+      configPath,
+      `[model_providers.custom]\nbase_url = "http://127.0.0.1:46192/_codex-router/${CALLER_KEY}/v1"\n`,
+      { mode: 0o600 },
+    );
+    const providerStatus = run("status", codexHome, stateDir);
+    assert.equal(providerStatus.mode, "native");
+    assert.equal(providerStatus.managed_router_artifacts_present, true);
+  } finally {
+    rmSync(codexHome, { recursive: true, force: true });
+  }
+});

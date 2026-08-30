@@ -27,6 +27,10 @@ import {
   protectPrivateFile,
 } from "./file-security.mjs";
 import {
+  refreshCodexCallerCapabilityContents,
+  refreshCodexCallerCapabilityState,
+} from "./caller-key-client-refresh.mjs";
+import {
   clearCodexRouterDefault,
   readCodexRouterDefault,
   writeCodexRouterDefault,
@@ -1183,6 +1187,22 @@ function snapshot(contents) {
     ? providerModeStateIsOwned(contents, providerModeState)
     : false;
   const routerDefault = readCodexRouterDefault();
+  const managedRouterUrlPresent = contents.split("\n").some((line) => {
+    if (!/^\s*(?:openai_base_url|base_url)\s*=/.test(line)) return false;
+    return isManagedRouterBaseUrl(assignmentValue(line));
+  });
+  const managedRouterArtifactsPresent =
+    managedRouterUrlPresent ||
+    catalog === MERGED_CATALOG_PATH ||
+    [
+      startMarker,
+      endMarker,
+      providerStartMarker,
+      providerEndMarker,
+      signedProviderStartMarker,
+      signedProviderEndMarker,
+      signedProviderSlotPrefix,
+    ].some((marker) => contents.includes(marker));
   return {
     mode:
       isManagedRouterBaseUrl(baseUrl) && catalog === MERGED_CATALOG_PATH
@@ -1200,6 +1220,7 @@ function snapshot(contents) {
       signedActive && privateFileIsProtected(SIGNED_PROVIDER_MODE_PATH),
     ),
     signed_provider_state_present: existsSync(SIGNED_PROVIDER_MODE_PATH),
+    managed_router_artifacts_present: managedRouterArtifactsPresent,
     router_default_model: routerDefault?.model || null,
     router_default_managed: Boolean(routerDefault),
     openai_base_url: baseUrl ? redactCallerUrl(baseUrl) : null,
@@ -1361,6 +1382,7 @@ if (!new Set([
   "enable",
   "disable",
   "status",
+  "caller-capability-refresh",
   "login-free-enable",
   "login-free-disable",
   "signed-enable",
@@ -1369,7 +1391,7 @@ if (!new Set([
   "router-default-clear",
 ]).has(command)) {
   console.error(
-    "Usage: config-manager.mjs enable|disable|status|login-free-enable|login-free-disable|signed-enable|signed-disable|router-default-set MODEL|router-default-clear [--adopt-native-catalog]",
+    "Usage: config-manager.mjs enable|disable|status|caller-capability-refresh|login-free-enable|login-free-disable|signed-enable|signed-disable|router-default-set MODEL|router-default-clear [--adopt-native-catalog]",
   );
   process.exit(2);
 }
@@ -1417,6 +1439,23 @@ if (
     completeLoginFreeRefresh)
 ) {
   throw new Error("No login-free catalog refresh is pending; refusing internal refresh step.");
+}
+if (command === "caller-capability-refresh") {
+  const currentStatus = snapshot(current);
+  if (currentStatus.mode !== "router") {
+    throw new Error("Codex Router is not the active managed route; refusing caller capability refresh.");
+  }
+  const nextBase = configuredRouterBaseUrl();
+  const nextContents = refreshCodexCallerCapabilityContents(current, nextBase, { port: PORTS.router, legacyPort: LEGACY_PORTS.router });
+  const providerState = readProviderModeState();
+  const signedState = readSignedProviderModeState();
+  const nextProviderState = providerState ? refreshCodexCallerCapabilityState(providerState, nextBase, { port: PORTS.router, legacyPort: LEGACY_PORTS.router }) : undefined;
+  const nextSignedState = signedState ? refreshCodexCallerCapabilityState(signedState, nextBase, { port: PORTS.router, legacyPort: LEGACY_PORTS.router }) : undefined;
+  atomicWrite(nextContents);
+  if (nextProviderState) writeProviderModeState(nextProviderState);
+  if (nextSignedState) writeSignedProviderModeState(nextSignedState);
+  process.stdout.write(`${JSON.stringify({ refreshed: true })}\n`);
+  process.exit(0);
 }
 let next;
 let pendingProviderModeState;
