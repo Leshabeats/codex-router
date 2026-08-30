@@ -658,6 +658,13 @@ function authenticatedDirectV1Route(request, pathname) {
   return undefined;
 }
 
+function authenticatedCallerRoute(request, requestUrl) {
+  return (
+    authenticatedRoute(requestUrl.pathname, CALLER_KEY) ||
+    authenticatedDirectV1Route(request, requestUrl.pathname)
+  );
+}
+
 // ChatGPT's own backend accepts a narrower request than the public Responses
 // API does. Codex knows the difference and complies; a generic OpenAI client
 // does not, and every one of these comes back as a bare 400 that names a single
@@ -4421,9 +4428,7 @@ async function handleRequest(request, response) {
     return;
   }
 
-  const route =
-    authenticatedRoute(requestUrl.pathname, CALLER_KEY) ||
-    authenticatedDirectV1Route(request, requestUrl.pathname);
+  const route = authenticatedCallerRoute(request, requestUrl);
   if (!route) {
     writeJson(response, 401, {
       error: {
@@ -4534,6 +4539,7 @@ const server = http.createServer((request, response) => {
 server.on("upgrade", (request, socket, head) => {
   handleResponsesWebSocketUpgrade(request, socket, head, {
     callerKey: CALLER_KEY,
+    authenticateUpgrade: authenticatedCallerRoute,
     // The WebSocket is an edge translation only. Every complete request
     // re-enters this caller-authenticated HTTP route, so routing, provider
     // credentials, retries, failover, transforms, usage, and cancellation all

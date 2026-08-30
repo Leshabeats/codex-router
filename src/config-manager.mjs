@@ -635,6 +635,7 @@ function managedLoginFreeProviderBlock(providerId, baseUrl) {
     "requires_openai_auth = false",
     "supports_standalone_web_search = true",
     "supports_websockets = true",
+    managedCallerAuthBlock(providerId),
     signedProviderEndMarker,
   ].join("\n");
 }
