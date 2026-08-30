@@ -478,11 +478,15 @@ The log tail is mechanically redacted but may still contain private prompt or
 response text. Inspect it before uploading or attaching it anywhere. The tool
 never uploads a bundle automatically.
 
-## WebSocket warning followed by HTTP fallback
+## Responses WebSocket does not connect
 
-This is expected. Codex Router declines the optional Responses WebSocket
-upgrade, and current Codex falls back to compressed HTTP. A warning alone is not
-a failed model request.
+Current Codex Router releases accept the Responses WebSocket v2 upgrade on the
+managed caller-capability URL. A 401 means Codex is using a stale managed URL;
+run `./bin/doctor --fix`, then fully quit and reopen Codex. A 400 mentioning
+`OpenAI-Beta` means the client is too old or is not speaking the supported
+`responses_websockets=2026-02-06` contract. The WebSocket adapter re-enters the
+ordinary HTTP Responses route, so provider and model failures are reported as
+normal Responses error events rather than by a separate provider path.
 
 ## Voice Mode reports an unsupported `/v1/live` route
 

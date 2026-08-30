@@ -17,6 +17,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { codexCandidatePaths, findCodexBinary } from "../src/codex-binary.mjs";
+import { handleResponsesWebSocketUpgrade } from "../src/responses-websocket.mjs";
 import { spawnableCommand } from "../src/spawnable-command.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -272,10 +273,19 @@ async function verifySignedOutTurn(binary, { initialProvider = "openai" } = {}) 
       response.end(responseStream(requests.at(-1).body.model));
     });
   });
+  const upgradedSockets = new Set();
 
   try {
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
     const port = server.address().port;
+    server.on("upgrade", (request, socket, head) => {
+      upgradedSockets.add(socket);
+      socket.once("close", () => upgradedSockets.delete(socket));
+      handleResponsesWebSocketUpgrade(request, socket, head, {
+        callerKey: CALLER_KEY,
+        responsesUrl: `http://127.0.0.1:${port}/_codex-router/${CALLER_KEY}/v1/responses`,
+      });
+    });
     const env = cleanCredentialEnvironment({
       CODEX_BIN: binary,
       CODEX_HOME: codexHome,
@@ -328,6 +338,7 @@ async function verifySignedOutTurn(binary, { initialProvider = "openai" } = {}) 
     assert.equal(requests[0].body.model, model);
     assert.match(JSON.stringify(notifications), new RegExp(MARKER));
   } finally {
+    for (const socket of upgradedSockets) socket.destroy();
     await new Promise((resolve) => server.close(resolve));
     rmSync(codexHome, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 });
   }

@@ -179,6 +179,7 @@ import {
   installStableFetchTransport,
   loopbackProbeFetch,
 } from "./fetch-transport.mjs";
+import { handleResponsesWebSocketUpgrade } from "./responses-websocket.mjs";
 
 installStableFetchTransport();
 
@@ -4530,11 +4531,15 @@ const server = http.createServer((request, response) => {
   });
 });
 
-server.on("upgrade", (_request, socket) => {
-  socket.on("error", () => {});
-  socket.end(
-    "HTTP/1.1 426 Upgrade Required\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
-  );
+server.on("upgrade", (request, socket, head) => {
+  handleResponsesWebSocketUpgrade(request, socket, head, {
+    callerKey: CALLER_KEY,
+    // The WebSocket is an edge translation only. Every complete request
+    // re-enters this caller-authenticated HTTP route, so routing, provider
+    // credentials, retries, failover, transforms, usage, and cancellation all
+    // continue to have one implementation.
+    responsesUrl: `${callerBaseUrl(LISTEN_PORT, CALLER_KEY)}/responses`,
+  });
 });
 // Without this an 'error' event is unhandled and the process exits silently.
 // Under a supervisor that reads as a crash loop with the port never bound and
