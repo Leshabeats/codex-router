@@ -76,6 +76,7 @@ const PER_REQUEST_IDENTITY_HEADERS = new Set([
 ]);
 const MAX_QUEUED_REQUESTS = 2;
 const MAX_FRAGMENT_FRAMES = 1_024;
+const MAX_TURN_METADATA_HEADER_BYTES = 8 * 1_024;
 
 function headerTokens(value) {
   return String(value || "")
@@ -201,6 +202,30 @@ function canonicalClientMetadata(value) {
   return Object.keys(canonical).length > 0 ? canonical : undefined;
 }
 
+function compatibilityTurnMetadataHeader(value) {
+  const encoded = safeHeaderValue(value);
+  if (encoded === undefined) return undefined;
+  let parsed;
+  try {
+    parsed = JSON.parse(encoded);
+  } catch {
+    return undefined;
+  }
+  const metadata = metadataObject(parsed);
+  if (!metadata) return undefined;
+  const compatibility = { ...metadata };
+  // Official Codex deliberately keeps this unbounded inventory in canonical
+  // client_metadata only. Projecting it into a header can exceed Node's
+  // aggregate header limit before the loopback request reaches the router.
+  delete compatibility.tool_namespaces_info;
+  const headerValue = JSON.stringify(compatibility).replace(/[\u007f-\uffff]/g, (character) =>
+    `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`
+  );
+  return Buffer.byteLength(headerValue, "utf8") <= MAX_TURN_METADATA_HEADER_BYTES
+    ? headerValue
+    : undefined;
+}
+
 function metadataHeaderProjections(value) {
   const metadata = metadataObject(value);
   if (!metadata) return new Map();
@@ -223,7 +248,9 @@ function metadataHeaderProjections(value) {
       ["x-openai-internal-codex-responses-lite"],
     ],
   ]) {
-    const headerValue = safeHeaderValue(metadata[metadataName]);
+    const headerValue = metadataName === "x-codex-turn-metadata"
+      ? compatibilityTurnMetadataHeader(metadata[metadataName])
+      : safeHeaderValue(metadata[metadataName]);
     if (headerValue !== undefined) {
       for (const headerName of headerNames) projected.set(headerName, headerValue);
     }

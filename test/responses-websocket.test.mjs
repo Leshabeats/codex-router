@@ -416,6 +416,71 @@ test("relays canonical per-request metadata through HTTP and never forwards the 
   upstreamAuth.peer.close();
 });
 
+test("keeps unbounded tool inventory in the body and bounds its compatibility header", async (t) => {
+  const bodies = [];
+  const requestHeaders = [];
+  const { server, port } = await startServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    bodies.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+    requestHeaders.push(request.headers);
+    const id = `resp-metadata-${bodies.length}`;
+    sse(response, [
+      { type: "response.created", response: { id } },
+      { type: "response.completed", response: { id, usage: {} } },
+    ]);
+  });
+  t.after(() => server.close());
+  const { peer } = await connect(port);
+  t.after(() => peer.socket.destroy());
+  const toolNamespaces = Object.fromEntries(Array.from({ length: 128 }, (_, index) => [
+    `namespace_${index}`,
+    {
+      name: `namespace_${index}`,
+      functions: { [`tool_${index}`]: { name: `tool_${index}`, description: "x".repeat(256) } },
+    },
+  ]));
+  const fullTurnMetadata = JSON.stringify({
+    request_kind: "turn",
+    turn_id: "turn-large-inventory",
+    workspaces: { workspace: { has_changes: true } },
+    tool_namespaces_info: toolNamespaces,
+  });
+  assert.ok(
+    Buffer.byteLength(fullTurnMetadata, "utf8") > http.maxHeaderSize,
+    "fixture must exceed Node's default aggregate header limit",
+  );
+  peer.sendJson(createRequest({
+    client_metadata: { "x-codex-turn-metadata": fullTurnMetadata },
+  }));
+  assert.equal((await peer.nextJson()).type, "response.created");
+  assert.equal((await peer.nextJson()).type, "response.completed");
+  assert.equal(bodies[0].client_metadata["x-codex-turn-metadata"], fullTurnMetadata);
+  assert.deepEqual(JSON.parse(requestHeaders[0]["x-codex-turn-metadata"]), {
+    request_kind: "turn",
+    turn_id: "turn-large-inventory",
+    workspaces: { workspace: { has_changes: true } },
+  });
+
+  const malformedTurnMetadata = "{malformed";
+  const unboundedTurnMetadata = JSON.stringify({
+    turn_id: "turn-unbounded",
+    extra: "x".repeat(9 * 1_024),
+  });
+  for (const invalidTurnMetadata of [malformedTurnMetadata, unboundedTurnMetadata]) {
+    peer.sendJson(createRequest({
+      client_metadata: { "x-codex-turn-metadata": invalidTurnMetadata },
+    }));
+    assert.equal((await peer.nextJson()).type, "response.created");
+    assert.equal((await peer.nextJson()).type, "response.completed");
+  }
+  assert.equal(bodies[1].client_metadata["x-codex-turn-metadata"], malformedTurnMetadata);
+  assert.equal(bodies[2].client_metadata["x-codex-turn-metadata"], unboundedTurnMetadata);
+  assert.equal(requestHeaders[1]["x-codex-turn-metadata"], undefined);
+  assert.equal(requestHeaders[2]["x-codex-turn-metadata"], undefined);
+  peer.close();
+});
+
 test("prewarms locally and reconstructs incremental turns without losing history", async (t) => {
   const bodies = [];
   const requestHeaders = [];
