@@ -101,7 +101,7 @@ test("rotation preserves a stopped installed service and uses capability-only cl
   assert.equal(result.serviceRestarted, false);
 });
 
-test("running service is stopped before swap, then started and verified", async (t) => {
+test("systemd active service is stopped before swap, then started and verified", async (t) => {
   const directory = mkdtempSync(path.join(os.tmpdir(), "caller-key-running-"));
   const secretPath = path.join(directory, "caller-secret");
   writeFileSync(secretPath, `${oldKey}\n`, { mode: 0o600 });
@@ -111,7 +111,7 @@ test("running service is stopped before swap, then started and verified", async 
     secretPath,
     assertOwnership: () => {}, withLock: async (run) => run(), withMutationLocks: async (run) => run(), recoverPending: async () => {},
     readClientStatuses: async () => ({ codex: { mode: "router", config_protected: true }, dsh: {}, gemini: {} }),
-    readServiceStatus: async () => ({ installed: true, state: "running" }),
+    readServiceStatus: async () => ({ installed: true, loaded: true, state: "active" }),
     runNode: async (script, args) => order.push(`${script}:${args.join(" ")}`),
     runServiceMutation: async (command) => order.push(`src/service.mjs:${command}`),
     rotateSecret: async () => { order.push("swap"); return { previousSecret: oldKey, currentSecret: newKey }; },
@@ -124,6 +124,15 @@ test("running service is stopped before swap, then started and verified", async 
     "src/service.mjs:stop", "swap", "src/config-manager.mjs:caller-capability-refresh",
     "src/service.mjs:start", "verify", "finalize",
   ]);
+});
+
+test("an uninstalled service is never treated as running", () => {
+  for (const status of [
+    { installed: false, loaded: true, state: "active" },
+    { installed: false, loaded: true, state: "running" },
+  ]) {
+    assert.equal(cli.managedServiceIsRunning(status), false);
+  }
 });
 
 test("rotation holds service lifecycle ownership through a stopped-service transaction", async (t) => {
@@ -247,7 +256,7 @@ test("pending secret-swapped rotation restores the prior generation and refreshe
   } finally { rmSync(stateDir, { recursive: true, force: true }); }
 });
 
-test("recovery restarts a service that started after a stopped-service rotation crashed", async () => {
+test("recovery restarts a launchd job loaded in a non-running transitional state", async () => {
   const stateDir = mkdtempSync(path.join(os.tmpdir(), "caller-key-recover-prestarted-"));
   const secretPath = path.join(stateDir, "caller-secret");
   const journalPath = path.join(stateDir, "caller-key-rotation.json");
@@ -270,7 +279,7 @@ test("recovery restarts a service that started after a stopped-service rotation 
       secretPath,
       withServiceLock: async (run) => run(),
       readJournal: () => journal.readCallerKeyRotationJournal({ journalPath }),
-      readServiceStatus: async () => ({ installed: true, state: "running" }),
+      readServiceStatus: async () => ({ installed: true, loaded: true, state: "waiting" }),
       runNode: async () => {},
       runServiceMutation: async (command) => serviceMutations.push(command),
       verifyServiceKeys: async (keys) => verifications.push(keys),

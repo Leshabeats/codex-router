@@ -111,6 +111,16 @@ export async function readRouterServiceStatus({ runNode = runNodeCommand } = {})
   return parseJsonCommand("src/service.mjs", ["status"], runNode);
 }
 
+export function managedServiceIsRunning(service) {
+  if (service?.installed !== true) return false;
+  // All platform status renderers expose `loaded` as the service manager's
+  // process-ownership signal. Linux names that state `active`, while launchd
+  // can keep a job loaded through waiting, spawning, or shutdown transitions.
+  // Retain the named running states for older callers and deterministic
+  // fixtures that predate the shared `loaded` field.
+  return service.loaded === true || service.state === "running" || service.state === "active";
+}
+
 async function validModelList(response) {
   if (response.status !== 200) return false;
   try {
@@ -234,7 +244,7 @@ async function recoverPendingCallerKeyRotationUnlocked({
   // whichever running intent is newer: the journal's original state or the
   // operator-visible state observed at recovery time.
   const service = await readServiceStatus();
-  const serviceRunningAtRecovery = service?.state === "running";
+  const serviceRunningAtRecovery = managedServiceIsRunning(service);
   if (serviceRunningAtRecovery) await runServiceMutation("stop");
   const shouldRunAfterRecovery = journal.serviceWasRunning || serviceRunningAtRecovery;
 
@@ -298,7 +308,7 @@ export async function runCallerKeyRotation({
     const statuses = await readClientStatuses();
     const targets = installedTargetsFromStatus(statuses);
     const service = await readServiceStatus();
-    const serviceWasRunning = service?.installed === true && service?.state === "running";
+    const serviceWasRunning = managedServiceIsRunning(service);
     const previousSecret = currentSecret(secretPath);
     let journal = await beginJournal({ targets, serviceWasRunning, previousSecretSha256: secretDigest(previousSecret) });
     let swapped;
