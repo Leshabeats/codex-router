@@ -616,6 +616,17 @@ test("wraps HTTP failures and serializes requests on a reused connection", async
       response.writeHead(429, {
         "content-type": "application/json",
         "retry-after": "7",
+        "x-codex-bengalfox-primary-used-percent": "100",
+        "x-codex-bengalfox-primary-window-minutes": "60",
+        "x-codex-bengalfox-primary-reset-at": "1700000200",
+        "x-codex-bengalfox-limit-name": "gpt-5.2-codex-sonic",
+        "x-codex-zero-primary-used-percent": "0",
+        "x-codex-zero-limit-name": "zero-window-plan",
+        "x-codex-credits-has-credits": "false",
+        "x-codex-credits-unlimited": "false",
+        "x-codex-credits-balance": "0",
+        "x-codex-rate-limit-reached-type": "workspace_member_usage_limit_reached",
+        "x-private-header": "must-not-cross",
       });
       response.end(JSON.stringify({ error: { type: "usage_limit", message: "limit" } }));
     } else {
@@ -634,10 +645,69 @@ test("wraps HTTP failures and serializes requests on a reused connection", async
   assert.equal(error.type, "error");
   assert.equal(error.status, 429);
   assert.equal(error.error.type, "usage_limit");
-  assert.equal(error.headers["retry-after"], "7");
+  assert.deepEqual(error.headers, {
+    "retry-after": "7",
+    "x-codex-credits-has-credits": "false",
+    "x-codex-credits-unlimited": "false",
+    "x-codex-credits-balance": "0",
+    "x-codex-bengalfox-primary-used-percent": "100",
+    "x-codex-bengalfox-primary-window-minutes": "60",
+    "x-codex-bengalfox-primary-reset-at": "1700000200",
+    "x-codex-bengalfox-limit-name": "gpt-5.2-codex-sonic",
+    "x-codex-zero-primary-used-percent": "0",
+    "x-codex-zero-limit-name": "zero-window-plan",
+    "x-codex-rate-limit-reached-type": "workspace_member_usage_limit_reached",
+  });
   assert.equal((await peer.nextJson()).type, "response.created");
   assert.equal((await peer.nextJson()).type, "response.completed");
   assert.equal(maximumActive, 1);
+  peer.close();
+});
+
+test("bounds reconstructed rate-limit headers on wrapped HTTP failures", async (t) => {
+  const longFamilyId = "a".repeat(65);
+  const { server, port } = await startServer(async (request, response) => {
+    for await (const _chunk of request) {}
+    response.statusCode = 429;
+    response.setHeader("content-type", "application/json");
+    response.setHeader("retry-after", "3");
+    for (let index = 0; index < 18; index += 1) {
+      const family = `limit-${String(index).padStart(2, "0")}`;
+      response.setHeader(`x-${family}-primary-used-percent`, String(index + 1));
+      response.setHeader(`x-${family}-limit-name`, `safe-${index}`);
+    }
+    response.setHeader("x-a-malformed-primary-used-percent", "NaN");
+    response.setHeader("x-a-secondary-only-secondary-used-percent", "10");
+    response.setHeader("x-a-oversized-primary-used-percent", "1".repeat(65));
+    response.setHeader("x-a--bad-primary-used-percent", "99");
+    response.setHeader(`x-${longFamilyId}-primary-used-percent`, "99");
+    response.setHeader("x-limit-00-limit-name", "x".repeat(257));
+    response.setHeader("x-codex-rate-limit-reached-type", "invented_limit_type");
+    response.setHeader("x-private-header", "must-not-cross");
+    response.end(JSON.stringify({ error: { type: "usage_limit", message: "limit" } }));
+  });
+  t.after(() => server.close());
+
+  const { peer } = await connect(port);
+  peer.sendJson(createRequest());
+  const error = await peer.nextJson();
+  assert.equal(error.type, "error");
+  assert.equal(error.status, 429);
+  assert.equal(error.headers["retry-after"], "3");
+  assert.deepEqual(
+    Object.keys(error.headers)
+      .filter((name) => name.endsWith("-primary-used-percent"))
+      .sort(),
+    Array.from(
+      { length: 16 },
+      (_value, index) => `x-limit-${String(index).padStart(2, "0")}-primary-used-percent`,
+    ),
+  );
+  assert.equal(error.headers["x-limit-00-limit-name"], undefined);
+  assert.equal(error.headers["x-a-malformed-primary-used-percent"], undefined);
+  assert.equal(error.headers["x-a-secondary-only-secondary-used-percent"], undefined);
+  assert.equal(error.headers["x-codex-rate-limit-reached-type"], undefined);
+  assert.equal(error.headers["x-private-header"], undefined);
   peer.close();
 });
 

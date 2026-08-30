@@ -38,17 +38,8 @@ const FORWARDED_REQUEST_HEADERS = new Set([
 const SAFE_RESPONSE_HEADERS = new Set([
   "openai-model",
   "retry-after",
-  "x-codex-credits-balance",
-  "x-codex-credits-has-credits",
-  "x-codex-credits-unlimited",
-  "x-codex-primary-used-percent",
-  "x-codex-primary-window-minutes",
-  "x-codex-primary-reset-at",
   "x-codex-safety-buffering-enabled",
   "x-codex-safety-buffering-faster-model",
-  "x-codex-secondary-used-percent",
-  "x-codex-secondary-window-minutes",
-  "x-codex-secondary-reset-at",
   "x-codex-turn-state",
   "x-models-etag",
   "x-reasoning-included",
@@ -83,6 +74,13 @@ const MAX_RATE_LIMIT_ID_BYTES = 64;
 const MAX_RATE_LIMIT_NUMBER_BYTES = 64;
 const MAX_RATE_LIMIT_TEXT_BYTES = 256;
 const RATE_LIMIT_FAMILY_ANCHOR = /^x-([a-z0-9]+(?:-[a-z0-9]+)*)-primary-used-percent$/;
+const RATE_LIMIT_REACHED_TYPES = new Set([
+  "rate_limit_reached",
+  "workspace_owner_credits_depleted",
+  "workspace_member_credits_depleted",
+  "workspace_owner_usage_limit_reached",
+  "workspace_member_usage_limit_reached",
+]);
 
 function headerTokens(value) {
   return String(value || "")
@@ -326,12 +324,13 @@ function loopbackHeaders(
   return headers;
 }
 
-function responseHeaders(response) {
+function responseHeaders(response, { includeRateLimits = false } = {}) {
   const headers = {};
   for (const name of SAFE_RESPONSE_HEADERS) {
     const value = response.headers.get(name);
     if (value !== null) headers[name] = value;
   }
+  if (includeRateLimits) Object.assign(headers, rateLimitResponseHeaders(response.headers));
   return Object.keys(headers).length > 0 ? headers : undefined;
 }
 
@@ -460,7 +459,7 @@ function rateLimitEvent(snapshot) {
   };
 }
 
-function rateLimitEvents(headers) {
+function rateLimitSnapshots(headers) {
   const familyIds = new Set();
   for (const [name] of headers) {
     const match = RATE_LIMIT_FAMILY_ANCHOR.exec(name);
@@ -483,7 +482,55 @@ function rateLimitEvents(headers) {
     if (snapshot.primary || snapshot.secondary || snapshot.credits) snapshots.push(snapshot);
     if (snapshots.length >= MAX_RATE_LIMIT_FAMILIES) break;
   }
-  return snapshots.map(rateLimitEvent);
+  return snapshots;
+}
+
+function rateLimitEvents(headers) {
+  return rateLimitSnapshots(headers).map(rateLimitEvent);
+}
+
+function rateLimitResponseHeaders(headers) {
+  const projected = {};
+  for (const snapshot of rateLimitSnapshots(headers)) {
+    const prefix = `x-${snapshot.familyId.replaceAll("_", "-")}`;
+    const discoveryUsedPercent = finiteHeaderNumber(headers, `${prefix}-primary-used-percent`);
+    if (snapshot.familyId !== "codex" && discoveryUsedPercent === undefined) continue;
+    if (snapshot.familyId !== "codex" && !snapshot.primary) {
+      // A valid all-zero primary window is still the header that lets Codex
+      // rediscover this named family after unwrapping the WebSocket error.
+      projected[`${prefix}-primary-used-percent`] = String(discoveryUsedPercent);
+    }
+    for (const [windowName, window] of [
+      ["primary", snapshot.primary],
+      ["secondary", snapshot.secondary],
+    ]) {
+      if (!window) continue;
+      projected[`${prefix}-${windowName}-used-percent`] = String(window.used_percent);
+      if (window.window_minutes !== undefined) {
+        projected[`${prefix}-${windowName}-window-minutes`] = String(window.window_minutes);
+      }
+      if (window.reset_at !== undefined) {
+        projected[`${prefix}-${windowName}-reset-at`] = String(window.reset_at);
+      }
+    }
+    if (snapshot.limitName) projected[`${prefix}-limit-name`] = snapshot.limitName;
+    if (snapshot.credits) {
+      projected["x-codex-credits-has-credits"] = String(snapshot.credits.has_credits);
+      projected["x-codex-credits-unlimited"] = String(snapshot.credits.unlimited);
+      if (snapshot.credits.balance !== undefined) {
+        projected["x-codex-credits-balance"] = snapshot.credits.balance;
+      }
+    }
+  }
+  const reachedType = boundedRateLimitHeader(
+    headers,
+    "x-codex-rate-limit-reached-type",
+    MAX_RATE_LIMIT_ID_BYTES,
+  )?.trim();
+  if (RATE_LIMIT_REACHED_TYPES.has(reachedType)) {
+    projected["x-codex-rate-limit-reached-type"] = reachedType;
+  }
+  return projected;
 }
 
 function continuationState(input, output, maxBytes) {
@@ -910,7 +957,7 @@ class ResponsesWebSocketPeer {
             type: "local_router_error",
             message: "The local router rejected the Responses request.",
           }),
-          responseHeaders(upstream),
+          responseHeaders(upstream, { includeRateLimits: true }),
         );
         return;
       }
