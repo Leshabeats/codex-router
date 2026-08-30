@@ -73,7 +73,13 @@ const MAX_RATE_LIMIT_FAMILY_CANDIDATES = 64;
 const MAX_RATE_LIMIT_ID_BYTES = 64;
 const MAX_RATE_LIMIT_NUMBER_BYTES = 64;
 const MAX_RATE_LIMIT_TEXT_BYTES = 256;
+const MAX_ERROR_PLAN_TYPE_BYTES = 128;
+// openai/codex@63d2138 deserializes `resets_at` as an i64, then accepts it
+// only when chrono 0.4.43 can construct a DateTime<Utc> from the seconds.
+const MIN_CODEX_RESET_AT = -8_334_601_228_800;
+const MAX_CODEX_RESET_AT = 8_210_266_876_799;
 const RATE_LIMIT_FAMILY_ANCHOR = /^x-([a-z0-9]+(?:-[a-z0-9]+)*)-primary-used-percent$/;
+const RATE_LIMIT_FAMILY_ID = /^[a-z0-9]+(?:[-_][a-z0-9]+)*$/i;
 const RATE_LIMIT_REACHED_TYPES = new Set([
   "rate_limit_reached",
   "workspace_owner_credits_depleted",
@@ -491,6 +497,7 @@ function rateLimitEvents(headers) {
 
 function rateLimitResponseHeaders(headers) {
   const projected = {};
+  const projectedFamilyIds = new Set();
   for (const snapshot of rateLimitSnapshots(headers)) {
     const prefix = `x-${snapshot.familyId.replaceAll("_", "-")}`;
     const discoveryUsedPercent = finiteHeaderNumber(headers, `${prefix}-primary-used-percent`);
@@ -521,6 +528,18 @@ function rateLimitResponseHeaders(headers) {
         projected["x-codex-credits-balance"] = snapshot.credits.balance;
       }
     }
+    projectedFamilyIds.add(snapshot.familyId);
+  }
+  const activeLimit = boundedRateLimitHeader(
+    headers,
+    "x-codex-active-limit",
+    MAX_RATE_LIMIT_ID_BYTES,
+  )?.trim();
+  if (activeLimit && RATE_LIMIT_FAMILY_ID.test(activeLimit)) {
+    const normalizedActiveLimit = activeLimit.toLowerCase().replaceAll("-", "_");
+    if (projectedFamilyIds.has(normalizedActiveLimit)) {
+      projected["x-codex-active-limit"] = normalizedActiveLimit;
+    }
   }
   const reachedType = boundedRateLimitHeader(
     headers,
@@ -550,10 +569,21 @@ function errorShape(body, fallback) {
     : parsed && typeof parsed === "object"
       ? parsed
       : {};
+  const planType = typeof source.plan_type === "string" &&
+      Buffer.byteLength(source.plan_type, "utf8") <= MAX_ERROR_PLAN_TYPE_BYTES
+    ? source.plan_type
+    : undefined;
+  const resetsAt = Number.isSafeInteger(source.resets_at) &&
+      source.resets_at >= MIN_CODEX_RESET_AT &&
+      source.resets_at <= MAX_CODEX_RESET_AT
+    ? source.resets_at
+    : undefined;
   return {
     type: typeof source.type === "string" ? source.type : fallback.type,
     ...(typeof source.code === "string" ? { code: source.code } : {}),
     message: typeof source.message === "string" ? source.message : fallback.message,
+    ...(planType !== undefined ? { plan_type: planType } : {}),
+    ...(resetsAt !== undefined ? { resets_at: resetsAt } : {}),
   };
 }
 

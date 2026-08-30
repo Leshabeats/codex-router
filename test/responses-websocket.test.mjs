@@ -616,6 +616,7 @@ test("wraps HTTP failures and serializes requests on a reused connection", async
       response.writeHead(429, {
         "content-type": "application/json",
         "retry-after": "7",
+        "x-codex-active-limit": "codex_bengalfox",
         "x-codex-bengalfox-primary-used-percent": "100",
         "x-codex-bengalfox-primary-window-minutes": "60",
         "x-codex-bengalfox-primary-reset-at": "1700000200",
@@ -628,7 +629,16 @@ test("wraps HTTP failures and serializes requests on a reused connection", async
         "x-codex-rate-limit-reached-type": "workspace_member_usage_limit_reached",
         "x-private-header": "must-not-cross",
       });
-      response.end(JSON.stringify({ error: { type: "usage_limit", message: "limit" } }));
+      response.end(JSON.stringify({
+        error: {
+          type: "usage_limit",
+          message: "limit",
+          plan_type: "pro",
+          resets_at: 1_700_000_200,
+          private_diagnostic: "must-not-cross",
+        },
+        request_debug: "must-not-cross",
+      }));
     } else {
       sse(response, [
         { type: "response.created", response: { id: `resp-${calls}` } },
@@ -644,9 +654,15 @@ test("wraps HTTP failures and serializes requests on a reused connection", async
   const error = await peer.nextJson();
   assert.equal(error.type, "error");
   assert.equal(error.status, 429);
-  assert.equal(error.error.type, "usage_limit");
+  assert.deepEqual(error.error, {
+    type: "usage_limit",
+    message: "limit",
+    plan_type: "pro",
+    resets_at: 1_700_000_200,
+  });
   assert.deepEqual(error.headers, {
     "retry-after": "7",
+    "x-codex-active-limit": "codex_bengalfox",
     "x-codex-credits-has-credits": "false",
     "x-codex-credits-unlimited": "false",
     "x-codex-credits-balance": "0",
@@ -662,6 +678,142 @@ test("wraps HTTP failures and serializes requests on a reused connection", async
   assert.equal((await peer.nextJson()).type, "response.completed");
   assert.equal(maximumActive, 1);
   peer.close();
+});
+
+test("projects an active limit only when it names a validated projected family", async (t) => {
+  const cases = [
+    {
+      name: "named family",
+      activeLimit: "CoDeX_OtHeR",
+      responseHeaders: { "x-codex-other-primary-used-percent": "100" },
+      expected: "codex_other",
+    },
+    {
+      name: "default family",
+      activeLimit: "codex",
+      responseHeaders: { "x-codex-primary-used-percent": "100" },
+      expected: "codex",
+    },
+    {
+      name: "malformed family",
+      activeLimit: "codex/other",
+      responseHeaders: { "x-codex-other-primary-used-percent": "100" },
+      expected: undefined,
+    },
+    {
+      name: "oversized family",
+      activeLimit: "a".repeat(65),
+      responseHeaders: { "x-codex-other-primary-used-percent": "100" },
+      expected: undefined,
+    },
+    {
+      name: "unprojected family",
+      activeLimit: "codex_missing",
+      responseHeaders: { "x-codex-other-primary-used-percent": "100" },
+      expected: undefined,
+    },
+  ];
+
+  for (const testCase of cases) {
+    await t.test(testCase.name, async (subtest) => {
+      const { server, port } = await startServer(async (request, response) => {
+        for await (const _chunk of request) {}
+        response.writeHead(429, {
+          "content-type": "application/json",
+          "x-codex-active-limit": testCase.activeLimit,
+          ...testCase.responseHeaders,
+        });
+        response.end(JSON.stringify({
+          error: { type: "usage_limit_reached", message: "limit" },
+        }));
+      });
+      subtest.after(() => server.close());
+
+      const { peer } = await connect(port);
+      peer.sendJson(createRequest());
+      const error = await peer.nextJson();
+      assert.equal(error.status, 429);
+      assert.equal(error.headers?.["x-codex-active-limit"], testCase.expected);
+      peer.close();
+    });
+  }
+});
+
+test("preserves only bounded Codex usage-limit error metadata", async (t) => {
+  const cases = [
+    {
+      name: "known plan and ordinary reset",
+      planType: "plus",
+      resetsAt: 1_738_888_888,
+      expected: { plan_type: "plus", resets_at: 1_738_888_888 },
+    },
+    {
+      name: "forward-compatible unknown plan and lower chrono boundary",
+      planType: "future_workspace_plan",
+      resetsAt: -8_334_601_228_800,
+      expected: {
+        plan_type: "future_workspace_plan",
+        resets_at: -8_334_601_228_800,
+      },
+    },
+    {
+      name: "malformed plan and fractional reset",
+      planType: { tier: "pro" },
+      resetsAt: 1_738_888_888.5,
+      expected: {},
+    },
+    {
+      name: "oversized plan and unsafe integer overflow",
+      planType: "p".repeat(129),
+      resetsAt: 9_007_199_254_740_992,
+      expected: {},
+    },
+    {
+      name: "chrono upper boundary",
+      planType: "future_plan",
+      resetsAt: 8_210_266_876_799,
+      expected: { plan_type: "future_plan", resets_at: 8_210_266_876_799 },
+    },
+    {
+      name: "timestamp outside chrono range",
+      planType: 42,
+      resetsAt: 8_210_266_876_800,
+      expected: {},
+    },
+  ];
+
+  for (const testCase of cases) {
+    await t.test(testCase.name, async (subtest) => {
+      const { server, port } = await startServer(async (request, response) => {
+        for await (const _chunk of request) {}
+        response.writeHead(429, { "content-type": "application/json" });
+        response.end(JSON.stringify({
+          error: {
+            type: "usage_limit_reached",
+            code: "usage_limit_reached",
+            message: "limit",
+            plan_type: testCase.planType,
+            resets_at: testCase.resetsAt,
+            private_diagnostic: "must-not-cross",
+          },
+          request_debug: "must-not-cross",
+        }));
+      });
+      subtest.after(() => server.close());
+
+      const { peer } = await connect(port);
+      peer.sendJson(createRequest());
+      const error = await peer.nextJson();
+      assert.equal(error.status, 429);
+      assert.deepEqual(error.error, {
+        type: "usage_limit_reached",
+        code: "usage_limit_reached",
+        message: "limit",
+        ...testCase.expected,
+      });
+      peer.close();
+    });
+  }
 });
 
 test("bounds reconstructed rate-limit headers on wrapped HTTP failures", async (t) => {
@@ -682,6 +834,7 @@ test("bounds reconstructed rate-limit headers on wrapped HTTP failures", async (
     response.setHeader("x-a--bad-primary-used-percent", "99");
     response.setHeader(`x-${longFamilyId}-primary-used-percent`, "99");
     response.setHeader("x-limit-00-limit-name", "x".repeat(257));
+    response.setHeader("x-codex-active-limit", "limit-17");
     response.setHeader("x-codex-rate-limit-reached-type", "invented_limit_type");
     response.setHeader("x-private-header", "must-not-cross");
     response.end(JSON.stringify({ error: { type: "usage_limit", message: "limit" } }));
@@ -704,6 +857,7 @@ test("bounds reconstructed rate-limit headers on wrapped HTTP failures", async (
     ),
   );
   assert.equal(error.headers["x-limit-00-limit-name"], undefined);
+  assert.equal(error.headers["x-codex-active-limit"], undefined);
   assert.equal(error.headers["x-a-malformed-primary-used-percent"], undefined);
   assert.equal(error.headers["x-a-secondary-only-secondary-used-percent"], undefined);
   assert.equal(error.headers["x-codex-rate-limit-reached-type"], undefined);
