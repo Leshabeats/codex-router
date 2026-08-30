@@ -489,6 +489,11 @@ WebSocket adapter re-enters the ordinary HTTP Responses route, so provider and
 model failures are reported as normal Responses error events rather than by a
 separate provider path.
 
+`X-Reasoning-Included` is a WebSocket-upgrade response flag in Codex. The
+adapter cannot truthfully add a value learned from its later internal HTTP
+response to an already-completed upgrade, so that one accounting hint is not
+projected as a per-request WebSocket event.
+
 ## Voice Mode reports an unsupported `/v1/live` route
 
 Codex Voice uses native realtime endpoints that are separate from the Responses

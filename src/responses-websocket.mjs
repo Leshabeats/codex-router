@@ -38,10 +38,17 @@ const FORWARDED_REQUEST_HEADERS = new Set([
 const SAFE_RESPONSE_HEADERS = new Set([
   "openai-model",
   "retry-after",
+  "x-codex-credits-balance",
+  "x-codex-credits-has-credits",
+  "x-codex-credits-unlimited",
   "x-codex-primary-used-percent",
   "x-codex-primary-window-minutes",
+  "x-codex-primary-reset-at",
+  "x-codex-safety-buffering-enabled",
+  "x-codex-safety-buffering-faster-model",
   "x-codex-secondary-used-percent",
   "x-codex-secondary-window-minutes",
+  "x-codex-secondary-reset-at",
   "x-codex-turn-state",
   "x-models-etag",
   "x-reasoning-included",
@@ -52,11 +59,20 @@ const WS_ONLY_CLIENT_METADATA_KEYS = new Set([
   "ws_request_header_x_openai_internal_codex_responses_lite",
   "x-codex-ws-stream-request-start-ms",
 ]);
-const PER_REQUEST_COMPATIBILITY_HEADERS = new Set([
+const PER_REQUEST_IDENTITY_HEADERS = new Set([
+  "session_id",
+  "session-id",
+  "thread-id",
   "traceparent",
   "tracestate",
+  "x-client-request-id",
+  "x-codex-installation-id",
+  "x-codex-parent-thread-id",
   "x-codex-turn-metadata",
   "x-codex-turn-state",
+  "x-codex-window-id",
+  "x-openai-internal-codex-responses-lite",
+  "x-openai-subagent",
 ]);
 const MAX_QUEUED_REQUESTS = 2;
 const MAX_FRAGMENT_FRAMES = 1_024;
@@ -189,26 +205,28 @@ function metadataHeaderProjections(value) {
   const metadata = metadataObject(value);
   if (!metadata) return new Map();
   const projected = new Map();
-  for (const [metadataName, headerName] of [
-    ["session_id", "session_id"],
-    ["thread_id", "thread-id"],
-    ["traceparent", "traceparent"],
-    ["tracestate", "tracestate"],
-    ["x-codex-installation-id", "x-codex-installation-id"],
-    ["x-codex-parent-thread-id", "x-codex-parent-thread-id"],
-    ["x-codex-turn-metadata", "x-codex-turn-metadata"],
-    ["x-codex-turn-state", "x-codex-turn-state"],
-    ["x-codex-window-id", "x-codex-window-id"],
-    ["x-openai-subagent", "x-openai-subagent"],
-    ["ws_request_header_traceparent", "traceparent"],
-    ["ws_request_header_tracestate", "tracestate"],
+  for (const [metadataName, headerNames] of [
+    ["session_id", ["session-id"]],
+    ["thread_id", ["thread-id", "x-client-request-id"]],
+    ["traceparent", ["traceparent"]],
+    ["tracestate", ["tracestate"]],
+    ["x-codex-installation-id", ["x-codex-installation-id"]],
+    ["x-codex-parent-thread-id", ["x-codex-parent-thread-id"]],
+    ["x-codex-turn-metadata", ["x-codex-turn-metadata"]],
+    ["x-codex-turn-state", ["x-codex-turn-state"]],
+    ["x-codex-window-id", ["x-codex-window-id"]],
+    ["x-openai-subagent", ["x-openai-subagent"]],
+    ["ws_request_header_traceparent", ["traceparent"]],
+    ["ws_request_header_tracestate", ["tracestate"]],
     [
       "ws_request_header_x_openai_internal_codex_responses_lite",
-      "x-openai-internal-codex-responses-lite",
+      ["x-openai-internal-codex-responses-lite"],
     ],
   ]) {
     const headerValue = safeHeaderValue(metadata[metadataName]);
-    if (headerValue !== undefined) projected.set(headerName, headerValue);
+    if (headerValue !== undefined) {
+      for (const headerName of headerNames) projected.set(headerName, headerValue);
+    }
   }
   return projected;
 }
@@ -258,7 +276,7 @@ function loopbackHeaders(
   // authoritative paid-turn metadata. Never let compatibility headers frozen
   // at upgrade time win over the per-request projection (or survive when the
   // current frame deliberately omits them).
-  for (const name of PER_REQUEST_COMPATIBILITY_HEADERS) delete headers[name];
+  for (const name of PER_REQUEST_IDENTITY_HEADERS) delete headers[name];
   for (const [name, value] of metadataHeaderProjections(clientMetadata)) {
     headers[name] = value;
   }
@@ -287,20 +305,100 @@ function responseHeaders(response) {
 async function sendSuccessfulResponseHeaders(peer, response) {
   const headers = responseHeaders(response);
   if (!headers) return true;
-  // Current Codex reads per-request turn state and general response headers
-  // from response.metadata. Its model-catalog etag path intentionally listens
-  // to the separate codex.response.metadata event used by the first-party
-  // service, so preserve that exact split rather than inventing one envelope.
-  if (!(await peer.sendJsonWithBackpressure({ type: "response.metadata", headers }))) {
-    return false;
+  const turnState = headers["x-codex-turn-state"];
+  if (turnState !== undefined) {
+    // Current Codex accepts sticky state only from response.metadata.
+    if (!(await peer.sendJsonWithBackpressure({
+      type: "response.metadata",
+      headers: { "x-codex-turn-state": turnState },
+    }))) return false;
   }
-  if (headers["x-models-etag"] !== undefined) {
-    return peer.sendJsonWithBackpressure({
+
+  const codexMetadataHeaders = {};
+  for (const name of [
+    "openai-model",
+    "x-codex-safety-buffering-enabled",
+    "x-codex-safety-buffering-faster-model",
+    "x-models-etag",
+  ]) {
+    if (headers[name] !== undefined) codexMetadataHeaders[name] = headers[name];
+  }
+  if (Object.keys(codexMetadataHeaders).length > 0) {
+    if (!(await peer.sendJsonWithBackpressure({
       type: "codex.response.metadata",
-      headers: { "x-models-etag": headers["x-models-etag"] },
-    });
+      headers: codexMetadataHeaders,
+    }))) return false;
+  }
+
+  const rateLimits = rateLimitEvent(headers);
+  if (rateLimits && !(await peer.sendJsonWithBackpressure(rateLimits))) return false;
+
+  if (headers["x-reasoning-included"] !== undefined) {
+    // Codex reads this flag only from the HTTP 101 response. The internal HTTP
+    // response arrives after that handshake, so no truthful WebSocket event can
+    // retrofit it. Intentionally omit it instead of claiming transport parity.
   }
   return true;
+}
+
+function finiteHeaderNumber(headers, name, { integer = false } = {}) {
+  const raw = headers[name];
+  if (typeof raw !== "string" || raw.length === 0) return undefined;
+  const pattern = integer
+    ? /^[+-]?\d+$/
+    : /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
+  if (!pattern.test(raw)) return undefined;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return undefined;
+  if (integer && !Number.isSafeInteger(value)) return undefined;
+  return value;
+}
+
+function booleanHeader(headers, name) {
+  const value = String(headers[name] ?? "").toLowerCase();
+  if (value === "true" || value === "1") return true;
+  if (value === "false" || value === "0") return false;
+  return undefined;
+}
+
+function rateLimitWindow(headers, prefix) {
+  const usedPercent = finiteHeaderNumber(headers, `${prefix}-used-percent`);
+  if (usedPercent === undefined) return undefined;
+  const windowMinutes = finiteHeaderNumber(headers, `${prefix}-window-minutes`, {
+    integer: true,
+  });
+  const resetAt = finiteHeaderNumber(headers, `${prefix}-reset-at`, { integer: true });
+  if (usedPercent === 0 && (!windowMinutes || windowMinutes === 0) && resetAt === undefined) {
+    return undefined;
+  }
+  return {
+    used_percent: usedPercent,
+    ...(windowMinutes !== undefined ? { window_minutes: windowMinutes } : {}),
+    ...(resetAt !== undefined ? { reset_at: resetAt } : {}),
+  };
+}
+
+function rateLimitEvent(headers) {
+  const primary = rateLimitWindow(headers, "x-codex-primary");
+  const secondary = rateLimitWindow(headers, "x-codex-secondary");
+  const hasCredits = booleanHeader(headers, "x-codex-credits-has-credits");
+  const unlimited = booleanHeader(headers, "x-codex-credits-unlimited");
+  const balance = safeHeaderValue(headers["x-codex-credits-balance"])?.trim();
+  const credits = hasCredits !== undefined && unlimited !== undefined
+    ? {
+      has_credits: hasCredits,
+      unlimited,
+      ...(balance ? { balance } : {}),
+    }
+    : undefined;
+  if (!primary && !secondary && !credits) return undefined;
+  return {
+    type: "codex.rate_limits",
+    ...(primary || secondary
+      ? { rate_limits: { ...(primary ? { primary } : {}), ...(secondary ? { secondary } : {}) } }
+      : {}),
+    ...(credits ? { credits } : {}),
+  };
 }
 
 function continuationState(input, output, maxBytes) {

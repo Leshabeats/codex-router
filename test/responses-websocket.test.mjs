@@ -345,9 +345,14 @@ test("relays canonical per-request metadata through HTTP and never forwards the 
   const turnMetadata = JSON.stringify({ request_kind: "turn", turn_id: "turn-paid" });
   peer.sendJson(createRequest({
     client_metadata: {
+      session_id: "session-paid",
+      thread_id: "thread-paid",
+      "x-codex-installation-id": "installation-paid",
+      "x-codex-parent-thread-id": "parent-paid",
       "x-codex-turn-metadata": turnMetadata,
       "x-codex-turn-state": "turn-state-paid",
       "x-codex-window-id": "window-paid",
+      "x-openai-subagent": "review",
       ws_request_header_traceparent:
         "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
       ws_request_header_tracestate: "vendor=value",
@@ -363,13 +368,25 @@ test("relays canonical per-request metadata through HTTP and never forwards the 
   assert.equal(bodies[0].type, undefined);
   assert.equal(bodies[0].previous_response_id, undefined);
   assert.deepEqual(bodies[0].client_metadata, {
+    session_id: "session-paid",
+    thread_id: "thread-paid",
+    "x-codex-installation-id": "installation-paid",
+    "x-codex-parent-thread-id": "parent-paid",
     "x-codex-turn-metadata": turnMetadata,
     "x-codex-turn-state": "turn-state-paid",
     "x-codex-window-id": "window-paid",
+    "x-openai-subagent": "review",
   });
+  assert.equal(requestHeaders[0]["session-id"], "session-paid");
+  assert.equal(requestHeaders[0].session_id, undefined);
+  assert.equal(requestHeaders[0]["thread-id"], "thread-paid");
+  assert.equal(requestHeaders[0]["x-client-request-id"], "thread-paid");
+  assert.equal(requestHeaders[0]["x-codex-installation-id"], "installation-paid");
+  assert.equal(requestHeaders[0]["x-codex-parent-thread-id"], "parent-paid");
   assert.equal(requestHeaders[0]["x-codex-turn-metadata"], turnMetadata);
   assert.equal(requestHeaders[0]["x-codex-turn-state"], "turn-state-paid");
   assert.equal(requestHeaders[0]["x-codex-window-id"], "window-paid");
+  assert.equal(requestHeaders[0]["x-openai-subagent"], "review");
   assert.equal(
     requestHeaders[0].traceparent,
     "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
@@ -427,8 +444,16 @@ test("prewarms locally and reconstructs incremental turns without losing history
   const staleTurnMetadata = JSON.stringify({ request_kind: "prewarm", turn_id: "turn-stale" });
   const { peer } = await connect(port, {
     headers: {
+      "Session-Id": "session-stale",
+      "Thread-Id": "thread-stale",
+      "X-Client-Request-Id": "thread-stale",
+      "X-Codex-Installation-Id": "installation-stale",
+      "X-Codex-Parent-Thread-Id": "parent-stale",
       "X-Codex-Turn-Metadata": staleTurnMetadata,
       "X-Codex-Turn-State": "stale-handshake-state",
+      "X-Codex-Window-Id": "window-stale",
+      "X-OpenAI-Subagent": "stale-subagent",
+      "X-OpenAI-Internal-Codex-Responses-Lite": "stale-lite",
       Traceparent: "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01",
       Tracestate: "stale=value",
     },
@@ -450,9 +475,16 @@ test("prewarms locally and reconstructs incremental turns without losing history
     previous_response_id: prewarm.response.id,
     input: [],
     client_metadata: {
+      session_id: "session-current",
+      thread_id: "thread-current",
+      "x-codex-installation-id": "installation-current",
+      "x-codex-parent-thread-id": "parent-current",
       "x-codex-turn-metadata": paidTurnMetadata,
+      "x-codex-window-id": "window-current",
+      "x-openai-subagent": "review",
       ws_request_header_traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
       ws_request_header_tracestate: "current=value",
+      ws_request_header_x_openai_internal_codex_responses_lite: "true",
     },
   }));
   const responseMetadata = await peer.nextJson();
@@ -467,8 +499,17 @@ test("prewarms locally and reconstructs incremental turns without losing history
     "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
   );
   assert.equal(requestHeaders[0].tracestate, "current=value");
+  assert.equal(requestHeaders[0]["session-id"], "session-current");
+  assert.equal(requestHeaders[0].session_id, undefined);
+  assert.equal(requestHeaders[0]["thread-id"], "thread-current");
+  assert.equal(requestHeaders[0]["x-client-request-id"], "thread-current");
+  assert.equal(requestHeaders[0]["x-codex-installation-id"], "installation-current");
+  assert.equal(requestHeaders[0]["x-codex-parent-thread-id"], "parent-current");
   assert.equal(requestHeaders[0]["x-codex-turn-metadata"], paidTurnMetadata);
   assert.equal(requestHeaders[0]["x-codex-turn-state"], undefined);
+  assert.equal(requestHeaders[0]["x-codex-window-id"], "window-current");
+  assert.equal(requestHeaders[0]["x-openai-subagent"], "review");
+  assert.equal(requestHeaders[0]["x-openai-internal-codex-responses-lite"], "true");
   assert.equal(bodies[0].client_metadata["x-codex-turn-metadata"], paidTurnMetadata);
   assert.equal(bodies[0].client_metadata.ws_request_header_traceparent, undefined);
 
@@ -477,8 +518,14 @@ test("prewarms locally and reconstructs incremental turns without losing history
     previous_response_id: "resp-one",
     input: [toolResult],
     client_metadata: {
+      session_id: "session-current",
+      thread_id: "thread-current",
+      "x-codex-installation-id": "installation-current",
+      "x-codex-parent-thread-id": "parent-current",
       "x-codex-turn-metadata": paidTurnMetadata,
       "x-codex-turn-state": "sticky-turn-one",
+      "x-codex-window-id": "window-current",
+      "x-openai-subagent": "review",
     },
   }));
   assert.equal((await peer.nextJson()).type, "response.created");
@@ -536,6 +583,16 @@ test("projects successful HTTP response headers into official Codex metadata eve
     response.setHeader("x-codex-turn-state", "turn-state-1");
     response.setHeader("x-models-etag", "models-etag-1");
     response.setHeader("x-reasoning-included", "true");
+    response.setHeader("x-codex-safety-buffering-enabled", "true");
+    response.setHeader("x-codex-safety-buffering-faster-model", "gpt-faster");
+    response.setHeader("x-codex-primary-used-percent", "42.5");
+    response.setHeader("x-codex-primary-window-minutes", "60");
+    response.setHeader("x-codex-primary-reset-at", "1700000000");
+    response.setHeader("x-codex-secondary-used-percent", "5");
+    response.setHeader("x-codex-secondary-window-minutes", "10080");
+    response.setHeader("x-codex-credits-has-credits", "true");
+    response.setHeader("x-codex-credits-unlimited", "false");
+    response.setHeader("x-codex-credits-balance", "12.50");
     response.setHeader("x-private-header", "must-not-cross");
     sse(response, [
       { type: "response.created", response: { id: "resp-headers" } },
@@ -553,16 +610,24 @@ test("projects successful HTTP response headers into official Codex metadata eve
   const responseMetadata = await peer.nextJson();
   assert.deepEqual(responseMetadata, {
     type: "response.metadata",
-    headers: {
-      "openai-model": "gpt-server-selected",
-      "x-codex-turn-state": "turn-state-1",
-      "x-models-etag": "models-etag-1",
-      "x-reasoning-included": "true",
-    },
+    headers: { "x-codex-turn-state": "turn-state-1" },
   });
   assert.deepEqual(await peer.nextJson(), {
     type: "codex.response.metadata",
-    headers: { "x-models-etag": "models-etag-1" },
+    headers: {
+      "openai-model": "gpt-server-selected",
+      "x-codex-safety-buffering-enabled": "true",
+      "x-codex-safety-buffering-faster-model": "gpt-faster",
+      "x-models-etag": "models-etag-1",
+    },
+  });
+  assert.deepEqual(await peer.nextJson(), {
+    type: "codex.rate_limits",
+    rate_limits: {
+      primary: { used_percent: 42.5, window_minutes: 60, reset_at: 1_700_000_000 },
+      secondary: { used_percent: 5, window_minutes: 10_080 },
+    },
+    credits: { has_credits: true, unlimited: false, balance: "12.50" },
   });
   assert.equal((await peer.nextJson()).type, "response.created");
   assert.equal((await peer.nextJson()).type, "response.completed");
