@@ -455,14 +455,17 @@ upstream was dialled directly, chatgpt.com timed out, and the router answered
 set an opt-in that was already set -- in the LaunchAgent it had just unloaded.
 The service definition still looked correct at every glance.
 
-1. **Both verbs go through `src/service.mjs`.** `bin/start` starts the managed
-   service; `bin/stop` stops it. Never reintroduce a `bin/start` that execs
-   `src/start.mjs`, and never add a lifecycle verb that manages the service on
-   one side and bypasses it on the other.
+1. **Both verbs go through `src/service.mjs`.** `bin/start`, Windows
+   `codex-router.ps1 start`, and their corresponding stop paths manage the same
+   background-service layer. Never add a lifecycle verb that manages the service
+   on one side and bypasses it on the other.
 2. **The foreground supervisor stays reachable, never by accident.**
-   `bin/start --foreground` is the debugging path. It is opt-in because an
-   operator who types it has chosen to run unmanaged; an operator who types
-   `start` has not.
+   `bin/start --foreground` and `codex-router.ps1 start --foreground` are the
+   explicit debugging paths. They enter through `src/foreground-start.mjs`,
+   which holds the shared service-operation lock for the supervisor's lifetime.
+   That keeps caller-capability rotation/recovery from swapping generations
+   underneath an unmanaged foreground router. Direct `src/start.mjs` remains the
+   OS-service payload; do not route the managed service through the lifetime lock.
 3. **A silent environment adopts the recorded proxy.**
    `inheritedProxyEnvironment()` in `src/proxy-environment.mjs` reads the
    install manifest, and `src/start.mjs` applies it to `process.env` before it
@@ -476,10 +479,11 @@ The service definition still looked correct at every glance.
    unproxied. Do not widen the trigger to "no proxy reachable" or similar
    inference; the manifest records a decision, not a guess.
 5. **Coverage.** `test/proxy-environment.test.mjs` holds the restore contract
-   and `test/service-lifecycle.test.mjs` holds the dispatch: that `bin/start`
-   reaches the service layer, that `--foreground` reaches the supervisor, and
-   that a supervisor booted with a silent environment comes up carrying the
-   manifest's proxy.
+   and `test/service-lifecycle.test.mjs` holds the dispatch/ownership boundary:
+   normal start reaches the managed service layer, Windows matches POSIX, and
+   explicit foreground startup cannot boot while another service lifecycle
+   operation owns the shared lock. The same file keeps the silent-environment
+   proxy restore regression.
 
 ## The gateway is restarted in place; the router is not taken down with it
 
