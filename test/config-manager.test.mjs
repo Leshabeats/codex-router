@@ -2187,7 +2187,7 @@ accent = "#4e96d1"
   }
 });
 
-test("caller capability refresh preserves Codex policy while replacing managed URLs", () => {
+test("caller capability refresh preserves Codex policy without embedding the rotated key", () => {
   const codexHome = mkdtempSync(path.join(os.tmpdir(), "codex-router-caller-refresh-"));
   const stateDir = path.join(codexHome, "router-state");
   const configPath = path.join(codexHome, "config.toml");
@@ -2201,7 +2201,9 @@ test("caller capability refresh preserves Codex policy while replacing managed U
     const result = run("caller-capability-refresh", codexHome, stateDir);
     assert.equal(result.refreshed, true);
     const after = readFileSync(configPath, "utf8");
-    assert.equal(after, before.replaceAll(CALLER_KEY, nextSecret));
+    assert.equal(after, before);
+    assert.doesNotMatch(after, new RegExp(CALLER_KEY));
+    assert.doesNotMatch(after, new RegExp(nextSecret));
     assert.match(after, /model = "keep-model"/);
     assert.match(after, /ambient-suggestions-enabled = false/);
   } finally {
