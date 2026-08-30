@@ -245,9 +245,24 @@ test("authenticates the capability and beta contract before switching protocols"
     ),
   );
   const noBeta = await new Promise((resolve) => noBetaSocket.once("data", resolve));
-  assert.match(String(noBeta), /^HTTP\/1\.1 400 /);
+  assert.match(String(noBeta), /^HTTP\/1\.1 426 /);
+  assert.match(String(noBeta), new RegExp(`OpenAI-Beta: ${RESPONSES_WEBSOCKET_BETA}`, "i"));
   assert.doesNotMatch(String(noBeta), /101 Switching Protocols/);
   noBetaSocket.destroy();
+
+  const oldBetaSocket = net.createConnection({ host: "127.0.0.1", port });
+  await new Promise((resolve) => oldBetaSocket.once("connect", resolve));
+  oldBetaSocket.write(
+    handshakeRequest(port, `/_codex-router/${CALLER_KEY}/v1/responses`).replace(
+      RESPONSES_WEBSOCKET_BETA,
+      "responses_websockets=2025-01-01",
+    ),
+  );
+  const oldBeta = await new Promise((resolve) => oldBetaSocket.once("data", resolve));
+  assert.match(String(oldBeta), /^HTTP\/1\.1 426 /);
+  assert.match(String(oldBeta), new RegExp(`OpenAI-Beta: ${RESPONSES_WEBSOCKET_BETA}`, "i"));
+  assert.doesNotMatch(String(oldBeta), /101 Switching Protocols/);
+  oldBetaSocket.destroy();
 
   const browser = await connect(port, { headers: { Origin: "https://attacker.invalid" } });
   assert.match(browser.head, /^HTTP\/1\.1 403 /);
@@ -294,13 +309,15 @@ test("accepts an injected direct-bearer policy without weakening pre-upgrade aut
   accepted.peer.close();
 });
 
-test("relays a full request through HTTP SSE and never forwards the caller capability", async (t) => {
+test("relays canonical per-request metadata through HTTP and never forwards the caller capability", async (t) => {
   const bodies = [];
   const authorizations = [];
   const betaHeaders = [];
+  const requestHeaders = [];
   const { server, port } = await startServer(async (request, response) => {
     authorizations.push(request.headers.authorization);
     betaHeaders.push(request.headers["openai-beta"]);
+    requestHeaders.push(request.headers);
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
     bodies.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
@@ -325,7 +342,19 @@ test("relays a full request through HTTP SSE and never forwards the caller capab
     headers: { Authorization: `Bearer ${CALLER_KEY}` },
   });
   assert.match(head, /^HTTP\/1\.1 101 Switching Protocols/);
-  peer.sendJson(createRequest());
+  const turnMetadata = JSON.stringify({ request_kind: "turn", turn_id: "turn-paid" });
+  peer.sendJson(createRequest({
+    client_metadata: {
+      "x-codex-turn-metadata": turnMetadata,
+      "x-codex-turn-state": "turn-state-paid",
+      "x-codex-window-id": "window-paid",
+      ws_request_header_traceparent:
+        "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+      ws_request_header_tracestate: "vendor=value",
+      ws_request_header_x_openai_internal_codex_responses_lite: "true",
+      "x-codex-ws-stream-request-start-ms": "1234",
+    },
+  }));
   assert.equal((await peer.nextJson()).type, "response.created");
   assert.equal((await peer.nextJson()).type, "response.output_item.done");
   assert.equal((await peer.nextJson()).type, "response.completed");
@@ -333,7 +362,24 @@ test("relays a full request through HTTP SSE and never forwards the caller capab
   assert.equal(betaHeaders[0], undefined, "the edge-only WebSocket beta must stop at the edge");
   assert.equal(bodies[0].type, undefined);
   assert.equal(bodies[0].previous_response_id, undefined);
-  assert.equal(bodies[0].client_metadata, undefined);
+  assert.deepEqual(bodies[0].client_metadata, {
+    "x-codex-turn-metadata": turnMetadata,
+    "x-codex-turn-state": "turn-state-paid",
+    "x-codex-window-id": "window-paid",
+  });
+  assert.equal(requestHeaders[0]["x-codex-turn-metadata"], turnMetadata);
+  assert.equal(requestHeaders[0]["x-codex-turn-state"], "turn-state-paid");
+  assert.equal(requestHeaders[0]["x-codex-window-id"], "window-paid");
+  assert.equal(
+    requestHeaders[0].traceparent,
+    "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+  );
+  assert.equal(requestHeaders[0].tracestate, "vendor=value");
+  assert.equal(requestHeaders[0]["x-openai-internal-codex-responses-lite"], "true");
+  assert.equal(
+    bodies[0].client_metadata.ws_request_header_x_openai_internal_codex_responses_lite,
+    undefined,
+  );
   assert.deepEqual(bodies[0].input, createRequest().input);
 
   peer.sendFrame(0x9, "ping");
@@ -378,7 +424,15 @@ test("prewarms locally and reconstructs incremental turns without losing history
     ]);
   });
   t.after(() => server.close());
-  const { peer } = await connect(port);
+  const staleTurnMetadata = JSON.stringify({ request_kind: "prewarm", turn_id: "turn-stale" });
+  const { peer } = await connect(port, {
+    headers: {
+      "X-Codex-Turn-Metadata": staleTurnMetadata,
+      "X-Codex-Turn-State": "stale-handshake-state",
+      Traceparent: "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01",
+      Tracestate: "stale=value",
+    },
+  });
   peer.sendJson(createRequest({ previous_response_id: "resp-missing", input: [] }));
   const missing = await peer.nextJson();
   assert.equal(missing.type, "error");
@@ -391,13 +445,19 @@ test("prewarms locally and reconstructs incremental turns without losing history
   assert.equal(prewarm.type, "response.completed");
   assert.equal(bodies.length, 0, "generate=false must not spend a provider request");
 
+  const paidTurnMetadata = JSON.stringify({ request_kind: "turn", turn_id: "turn-current" });
   peer.sendJson(createRequest({
     previous_response_id: prewarm.response.id,
     input: [],
     client_metadata: {
+      "x-codex-turn-metadata": paidTurnMetadata,
       ws_request_header_traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+      ws_request_header_tracestate: "current=value",
     },
   }));
+  const responseMetadata = await peer.nextJson();
+  assert.equal(responseMetadata.type, "response.metadata");
+  assert.equal(responseMetadata.headers["x-codex-turn-state"], "sticky-turn-one");
   assert.equal((await peer.nextJson()).type, "response.created");
   assert.equal((await peer.nextJson()).type, "response.output_item.done");
   assert.equal((await peer.nextJson()).type, "response.completed");
@@ -406,9 +466,21 @@ test("prewarms locally and reconstructs incremental turns without losing history
     requestHeaders[0].traceparent,
     "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
   );
+  assert.equal(requestHeaders[0].tracestate, "current=value");
+  assert.equal(requestHeaders[0]["x-codex-turn-metadata"], paidTurnMetadata);
+  assert.equal(requestHeaders[0]["x-codex-turn-state"], undefined);
+  assert.equal(bodies[0].client_metadata["x-codex-turn-metadata"], paidTurnMetadata);
+  assert.equal(bodies[0].client_metadata.ws_request_header_traceparent, undefined);
 
   const toolResult = { type: "function_call_output", call_id: "call_1", output: "done" };
-  peer.sendJson(createRequest({ previous_response_id: "resp-one", input: [toolResult] }));
+  peer.sendJson(createRequest({
+    previous_response_id: "resp-one",
+    input: [toolResult],
+    client_metadata: {
+      "x-codex-turn-metadata": paidTurnMetadata,
+      "x-codex-turn-state": "sticky-turn-one",
+    },
+  }));
   assert.equal((await peer.nextJson()).type, "response.created");
   assert.equal((await peer.nextJson()).type, "response.completed");
   assert.deepEqual(bodies[1].input, [...initial.input, assistant, toolResult]);
@@ -457,6 +529,84 @@ test("wraps HTTP failures and serializes requests on a reused connection", async
   peer.close();
 });
 
+test("projects successful HTTP response headers into official Codex metadata events", async (t) => {
+  const { server, port } = await startServer(async (request, response) => {
+    for await (const _chunk of request) {}
+    response.setHeader("openai-model", "gpt-server-selected");
+    response.setHeader("x-codex-turn-state", "turn-state-1");
+    response.setHeader("x-models-etag", "models-etag-1");
+    response.setHeader("x-reasoning-included", "true");
+    response.setHeader("x-private-header", "must-not-cross");
+    sse(response, [
+      { type: "response.created", response: { id: "resp-headers" } },
+      { type: "response.completed", response: { id: "resp-headers", usage: {} } },
+    ]);
+  });
+  t.after(() => server.close());
+
+  const { peer } = await connect(port);
+  peer.sendJson(createRequest({
+    client_metadata: {
+      "x-codex-turn-metadata": JSON.stringify({ turn_id: "turn-headers" }),
+    },
+  }));
+  const responseMetadata = await peer.nextJson();
+  assert.deepEqual(responseMetadata, {
+    type: "response.metadata",
+    headers: {
+      "openai-model": "gpt-server-selected",
+      "x-codex-turn-state": "turn-state-1",
+      "x-models-etag": "models-etag-1",
+      "x-reasoning-included": "true",
+    },
+  });
+  assert.deepEqual(await peer.nextJson(), {
+    type: "codex.response.metadata",
+    headers: { "x-models-etag": "models-etag-1" },
+  });
+  assert.equal((await peer.nextJson()).type, "response.created");
+  assert.equal((await peer.nextJson()).type, "response.completed");
+  peer.close();
+});
+
+test("drops oversized continuation state so Codex retries the full request", async (t) => {
+  let calls = 0;
+  const { server, port } = await startServer(
+    async (request, response) => {
+      for await (const _chunk of request) {}
+      calls += 1;
+      sse(response, [
+        { type: "response.created", response: { id: "resp-large-state" } },
+        {
+          type: "response.output_item.done",
+          item: { type: "message", role: "assistant", content: "a".repeat(300) },
+        },
+        {
+          type: "response.output_item.done",
+          item: { type: "message", role: "assistant", content: "b".repeat(300) },
+        },
+        { type: "response.completed", response: { id: "resp-large-state", usage: {} } },
+      ]);
+    },
+    { maxContinuationBytes: 512 },
+  );
+  t.after(() => server.close());
+
+  const { peer } = await connect(port);
+  peer.sendJson(createRequest());
+  assert.equal((await peer.nextJson()).type, "response.created");
+  assert.equal((await peer.nextJson()).type, "response.output_item.done");
+  assert.equal((await peer.nextJson()).type, "response.output_item.done");
+  assert.equal((await peer.nextJson()).type, "response.completed");
+  peer.sendJson(createRequest({ previous_response_id: "resp-large-state", input: [] }));
+  const retry = await peer.nextJson();
+  assert.equal(retry.type, "error");
+  assert.equal(retry.status, 409);
+  assert.equal(retry.error.code, "previous_response_not_found");
+  assert.equal(calls, 1, "the missing baseline must fail before another provider request");
+  peer.close();
+});
+
 test("turns malformed internal SSE into a bounded WebSocket error", async (t) => {
   const { server, port } = await startServer(async (request, response) => {
     for await (const _chunk of request) {}
@@ -482,7 +632,7 @@ test("accepts fragmented text and closes on unmasked or oversized frames", async
         { type: "response.completed", response: { id: "resp-fragment", usage: {} } },
       ]);
     },
-    { maxMessageBytes: 1_024 },
+    { maxMessageBytes: 1_024, maxFragmentFrames: 3 },
   );
   t.after(() => server.close());
 
@@ -508,6 +658,15 @@ test("accepts fragmented text and closes on unmasked or oversized frames", async
   const sizeClose = await oversized.peer.nextFrame();
   assert.equal(sizeClose.opcode, 0x8);
   assert.equal(sizeClose.payload.readUInt16BE(0), 1009);
+
+  const fragmentFlood = await connect(port);
+  fragmentFlood.peer.sendFrame(0x1, "", { fin: false });
+  fragmentFlood.peer.sendFrame(0x0, "", { fin: false });
+  fragmentFlood.peer.sendFrame(0x0, "", { fin: false });
+  fragmentFlood.peer.sendFrame(0x0, "", { fin: false });
+  const fragmentClose = await fragmentFlood.peer.nextFrame();
+  assert.equal(fragmentClose.opcode, 0x8);
+  assert.equal(fragmentClose.payload.readUInt16BE(0), 1009);
 });
 
 test("aborts the internal HTTP request when the WebSocket disappears", async (t) => {

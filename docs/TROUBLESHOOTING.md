@@ -482,11 +482,12 @@ never uploads a bundle automatically.
 
 Current Codex Router releases accept the Responses WebSocket v2 upgrade on the
 managed caller-capability URL. A 401 means Codex is using a stale managed URL;
-run `./bin/doctor --fix`, then fully quit and reopen Codex. A 400 mentioning
-`OpenAI-Beta` means the client is too old or is not speaking the supported
-`responses_websockets=2026-02-06` contract. The WebSocket adapter re-enters the
-ordinary HTTP Responses route, so provider and model failures are reported as
-normal Responses error events rather than by a separate provider path.
+run `./bin/doctor --fix`, then fully quit and reopen Codex. A 426 carrying the
+supported `OpenAI-Beta: responses_websockets=2026-02-06` hint means Codex will
+fall back to HTTP because the attempted WebSocket contract did not match. The
+WebSocket adapter re-enters the ordinary HTTP Responses route, so provider and
+model failures are reported as normal Responses error events rather than by a
+separate provider path.
 
 ## Voice Mode reports an unsupported `/v1/live` route
 

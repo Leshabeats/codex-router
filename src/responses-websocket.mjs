@@ -31,6 +31,7 @@ const FORWARDED_REQUEST_HEADERS = new Set([
   "x-codex-turn-state",
   "x-codex-window-id",
   "x-oai-attestation",
+  "x-openai-internal-codex-responses-lite",
   "x-openai-subagent",
   "x-responsesapi-include-timing-metrics",
 ]);
@@ -45,7 +46,20 @@ const SAFE_RESPONSE_HEADERS = new Set([
   "x-models-etag",
   "x-reasoning-included",
 ]);
+const WS_ONLY_CLIENT_METADATA_KEYS = new Set([
+  "ws_request_header_traceparent",
+  "ws_request_header_tracestate",
+  "ws_request_header_x_openai_internal_codex_responses_lite",
+  "x-codex-ws-stream-request-start-ms",
+]);
+const PER_REQUEST_COMPATIBILITY_HEADERS = new Set([
+  "traceparent",
+  "tracestate",
+  "x-codex-turn-metadata",
+  "x-codex-turn-state",
+]);
 const MAX_QUEUED_REQUESTS = 2;
+const MAX_FRAGMENT_FRAMES = 1_024;
 
 function headerTokens(value) {
   return String(value || "")
@@ -159,6 +173,58 @@ function safeHeaderValue(value) {
     : undefined;
 }
 
+function metadataObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+}
+
+function canonicalClientMetadata(value) {
+  const metadata = metadataObject(value);
+  if (!metadata) return value;
+  const canonical = { ...metadata };
+  for (const name of WS_ONLY_CLIENT_METADATA_KEYS) delete canonical[name];
+  return Object.keys(canonical).length > 0 ? canonical : undefined;
+}
+
+function metadataHeaderProjections(value) {
+  const metadata = metadataObject(value);
+  if (!metadata) return new Map();
+  const projected = new Map();
+  for (const [metadataName, headerName] of [
+    ["session_id", "session_id"],
+    ["thread_id", "thread-id"],
+    ["traceparent", "traceparent"],
+    ["tracestate", "tracestate"],
+    ["x-codex-installation-id", "x-codex-installation-id"],
+    ["x-codex-parent-thread-id", "x-codex-parent-thread-id"],
+    ["x-codex-turn-metadata", "x-codex-turn-metadata"],
+    ["x-codex-turn-state", "x-codex-turn-state"],
+    ["x-codex-window-id", "x-codex-window-id"],
+    ["x-openai-subagent", "x-openai-subagent"],
+    ["ws_request_header_traceparent", "traceparent"],
+    ["ws_request_header_tracestate", "tracestate"],
+    [
+      "ws_request_header_x_openai_internal_codex_responses_lite",
+      "x-openai-internal-codex-responses-lite",
+    ],
+  ]) {
+    const headerValue = safeHeaderValue(metadata[metadataName]);
+    if (headerValue !== undefined) projected.set(headerName, headerValue);
+  }
+  return projected;
+}
+
+function metadataTurnId(value) {
+  const metadata = metadataObject(value);
+  const encoded = metadata?.["x-codex-turn-metadata"];
+  if (typeof encoded !== "string") return undefined;
+  try {
+    const parsed = JSON.parse(encoded);
+    return typeof parsed?.turn_id === "string" && parsed.turn_id ? parsed.turn_id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function loopbackHeaders(
   request,
   callerKey,
@@ -188,13 +254,21 @@ function loopbackHeaders(
     }
     headers[name] = Array.isArray(value) ? value.join(", ") : value;
   }
-  const traceparent = safeHeaderValue(clientMetadata?.ws_request_header_traceparent);
-  const tracestate = safeHeaderValue(clientMetadata?.ws_request_header_tracestate);
-  const metadataTurnState = safeHeaderValue(clientMetadata?.["x-codex-turn-state"]);
-  if (traceparent) headers.traceparent = traceparent;
-  if (tracestate) headers.tracestate = tracestate;
-  if (metadataTurnState || turnState) {
-    headers["x-codex-turn-state"] = metadataTurnState || turnState;
+  // The handshake can be a startup prewarm, while each frame carries the
+  // authoritative paid-turn metadata. Never let compatibility headers frozen
+  // at upgrade time win over the per-request projection (or survive when the
+  // current frame deliberately omits them).
+  for (const name of PER_REQUEST_COMPATIBILITY_HEADERS) delete headers[name];
+  for (const [name, value] of metadataHeaderProjections(clientMetadata)) {
+    headers[name] = value;
+  }
+  const currentTurnId = metadataTurnId(clientMetadata);
+  const storedTurnState =
+    turnState && (!currentTurnId || !turnState.turnId || currentTurnId === turnState.turnId)
+      ? turnState.value
+      : undefined;
+  if (!headers["x-codex-turn-state"] && storedTurnState) {
+    headers["x-codex-turn-state"] = storedTurnState;
   }
   const internalAuth = safeHeaderValue(internalAuthorization);
   if (internalAuth) headers.authorization = internalAuth;
@@ -208,6 +282,30 @@ function responseHeaders(response) {
     if (value !== null) headers[name] = value;
   }
   return Object.keys(headers).length > 0 ? headers : undefined;
+}
+
+async function sendSuccessfulResponseHeaders(peer, response) {
+  const headers = responseHeaders(response);
+  if (!headers) return true;
+  // Current Codex reads per-request turn state and general response headers
+  // from response.metadata. Its model-catalog etag path intentionally listens
+  // to the separate codex.response.metadata event used by the first-party
+  // service, so preserve that exact split rather than inventing one envelope.
+  if (!(await peer.sendJsonWithBackpressure({ type: "response.metadata", headers }))) {
+    return false;
+  }
+  if (headers["x-models-etag"] !== undefined) {
+    return peer.sendJsonWithBackpressure({
+      type: "codex.response.metadata",
+      headers: { "x-models-etag": headers["x-models-etag"] },
+    });
+  }
+  return true;
+}
+
+function continuationState(input, output, maxBytes) {
+  const encoded = Buffer.from(JSON.stringify({ input, output }), "utf8");
+  return encoded.length <= maxBytes ? { input, output } : undefined;
 }
 
 function errorShape(body, fallback) {
@@ -299,6 +397,7 @@ class ResponsesWebSocketPeer {
     this.fragmentOpcode = undefined;
     this.fragments = [];
     this.fragmentBytes = 0;
+    this.fragmentFrames = 0;
     this.closed = false;
     this.closeSent = false;
     this.pendingRequests = 0;
@@ -462,6 +561,11 @@ class ResponsesWebSocketPeer {
       this.fragmentOpcode = opcode;
     }
     this.fragmentBytes += payload.length;
+    this.fragmentFrames += 1;
+    if (this.fragmentFrames > this.options.maxFragmentFrames) {
+      this.fail(1009, "WebSocket message has too many fragments.");
+      return;
+    }
     if (this.fragmentBytes > this.options.maxMessageBytes) {
       this.fail(1009, "WebSocket message is too large.");
       return;
@@ -471,6 +575,7 @@ class ResponsesWebSocketPeer {
     const complete = Buffer.concat(this.fragments, this.fragmentBytes);
     this.fragments = [];
     this.fragmentBytes = 0;
+    this.fragmentFrames = 0;
     this.fragmentOpcode = undefined;
     let text;
     try {
@@ -535,11 +640,14 @@ class ResponsesWebSocketPeer {
     delete fullRequest.type;
     delete fullRequest.generate;
     delete fullRequest.previous_response_id;
-    // WebSocket client_metadata carries edge timing, trace, and sticky-routing
-    // transport values. Translate the documented header values above, but do
-    // not put the envelope on the ordinary Responses body where a native or
-    // routed upstream could receive WebSocket-only metadata.
-    delete fullRequest.client_metadata;
+    // client_metadata is the canonical per-request Codex metadata transport.
+    // Keep it on the internal HTTP body so native traffic receives it; the
+    // ordinary router path already removes it from routed-provider payloads.
+    // Only WebSocket timing/trace projections are translated to headers and
+    // removed from the HTTP body.
+    const canonicalMetadata = canonicalClientMetadata(clientMetadata);
+    if (canonicalMetadata === undefined) delete fullRequest.client_metadata;
+    else fullRequest.client_metadata = canonicalMetadata;
     const previousId = typeof request.previous_response_id === "string"
       ? request.previous_response_id
       : undefined;
@@ -608,7 +716,6 @@ class ResponsesWebSocketPeer {
         body: encoded,
         signal: controller.signal,
       });
-      this.turnState ||= safeHeaderValue(upstream.headers.get("x-codex-turn-state"));
       if (!upstream.ok) {
         const body = await readResponseBody(upstream, {
           maxBytes: this.options.maxErrorBytes,
@@ -624,6 +731,14 @@ class ResponsesWebSocketPeer {
         );
         return;
       }
+      const responseTurnState = safeHeaderValue(upstream.headers.get("x-codex-turn-state"));
+      const currentTurnId = metadataTurnId(clientMetadata);
+      if (
+        responseTurnState &&
+        (!this.turnState?.value || (currentTurnId && currentTurnId !== this.turnState.turnId))
+      ) {
+        this.turnState = { value: responseTurnState, turnId: currentTurnId };
+      }
       if (!String(upstream.headers.get("content-type") || "").toLowerCase().includes("text/event-stream")) {
         await readResponseBody(upstream, {
           maxBytes: this.options.maxErrorBytes,
@@ -635,7 +750,10 @@ class ResponsesWebSocketPeer {
         });
         return;
       }
+      if (!(await sendSuccessfulResponseHeaders(this, upstream))) return;
       const outputItems = [];
+      let outputItemsBytes = 0;
+      let continuationOverflow = false;
       let completed;
       let terminalFailure = false;
       let terminalSeen = false;
@@ -658,7 +776,13 @@ class ResponsesWebSocketPeer {
           if (terminalSeen) return true;
           if (!(await this.sendJsonWithBackpressure(event))) return false;
           if (event.type === "response.output_item.done" && event.item) {
-            outputItems.push(event.item);
+            const itemBytes = Buffer.byteLength(JSON.stringify(event.item), "utf8");
+            if (outputItemsBytes + itemBytes <= this.options.maxContinuationBytes) {
+              outputItems.push(event.item);
+              outputItemsBytes += itemBytes;
+            } else {
+              continuationOverflow = true;
+            }
           }
           if (event.type === "response.completed") {
             completed = event.response;
@@ -680,7 +804,14 @@ class ResponsesWebSocketPeer {
       if (completed?.id && !terminalFailure) {
         const output = Array.isArray(completed.output) ? completed.output : outputItems;
         this.continuations.clear();
-        this.continuations.set(completed.id, { input: fullRequest.input, output });
+        const continuation = !continuationOverflow
+          ? continuationState(
+            fullRequest.input,
+            output,
+            this.options.maxContinuationBytes,
+          )
+          : undefined;
+        if (continuation) this.continuations.set(completed.id, continuation);
       } else if (!terminalFailure && !this.closed) {
         this.sendError(502, {
           type: "local_router_stream_failed",
@@ -714,6 +845,8 @@ export function handleResponsesWebSocketUpgrade(
     maxMessageBytes = MAX_BODY_BYTES,
     maxEventBytes = MAX_BUFFERED_RESPONSE_BYTES,
     maxErrorBytes = MAX_BUFFERED_RESPONSE_BYTES,
+    maxContinuationBytes = maxMessageBytes,
+    maxFragmentFrames = MAX_FRAGMENT_FRAMES,
   },
 ) {
   maxMessageBytes = Number.isFinite(maxMessageBytes) && maxMessageBytes > 0
@@ -725,6 +858,12 @@ export function handleResponsesWebSocketUpgrade(
   maxErrorBytes = Number.isFinite(maxErrorBytes) && maxErrorBytes > 0
     ? Math.floor(maxErrorBytes)
     : MAX_BUFFERED_RESPONSE_BYTES;
+  maxContinuationBytes = Number.isFinite(maxContinuationBytes) && maxContinuationBytes > 0
+    ? Math.floor(maxContinuationBytes)
+    : maxMessageBytes;
+  maxFragmentFrames = Number.isFinite(maxFragmentFrames) && maxFragmentFrames > 0
+    ? Math.floor(maxFragmentFrames)
+    : MAX_FRAGMENT_FRAMES;
   socket.on("error", () => {});
   let requestUrl;
   try {
@@ -774,7 +913,12 @@ export function handleResponsesWebSocketUpgrade(
     return false;
   }
   if (!requestHasBeta(request)) {
-    rejectUpgrade(socket, 400, `OpenAI-Beta: ${RESPONSES_WEBSOCKET_BETA} is required.`);
+    rejectUpgrade(
+      socket,
+      426,
+      `OpenAI-Beta: ${RESPONSES_WEBSOCKET_BETA} is required.`,
+      { "OpenAI-Beta": RESPONSES_WEBSOCKET_BETA },
+    );
     return false;
   }
   acceptUpgrade(request, socket);
@@ -786,6 +930,8 @@ export function handleResponsesWebSocketUpgrade(
     maxMessageBytes,
     maxEventBytes,
     maxErrorBytes,
+    maxContinuationBytes,
+    maxFragmentFrames,
   }).start(head);
   return true;
 }

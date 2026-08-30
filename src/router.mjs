@@ -461,6 +461,8 @@ const FORWARD_HEADERS = new Set([
   "session_id",
   "session-id",
   "thread-id",
+  "traceparent",
+  "tracestate",
   "x-client-request-id",
   "x-codex-beta-features",
   "x-codex-installation-id",
@@ -469,6 +471,7 @@ const FORWARD_HEADERS = new Set([
   "x-codex-turn-state",
   "x-codex-window-id",
   "x-oai-attestation",
+  "x-openai-internal-codex-responses-lite",
   "x-openai-subagent",
   "x-responsesapi-include-timing-metrics",
 ]);
