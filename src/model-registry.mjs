@@ -584,6 +584,9 @@ function modelProblem(model, providers, slugs, gatewayModels) {
       return error instanceof Error ? error.message : String(error);
     }
     const conversational = providerModelEndpoint(provider);
+    if (!conversational && supported.includes("/embeddings")) {
+      return `model ${model.slug} cannot declare OpenAI endpoints for provider protocol ${provider.protocol}`;
+    }
     if (model.listed && (!conversational || !supported.includes(conversational))) {
       return `listed model ${model.slug} must support its provider's conversational endpoint`;
     }

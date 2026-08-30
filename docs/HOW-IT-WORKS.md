@@ -171,6 +171,8 @@ internal and provider requests, caller query parameters are not relayed, and
 the route performs no automatic retry because a provider may already have
 billed the input before a transport failure. Endpoint-only models stay
 unlisted so the Codex picker cannot advertise them as conversational models.
+Both hops refuse redirects so a 307/308 cannot replay the POST, and
+Messages-native providers cannot declare this OpenAI endpoint.
 
 ## Credential boundaries
 

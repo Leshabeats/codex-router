@@ -247,10 +247,11 @@ translation layer and nothing else.
    integration deliberately departs from the harness's opt-in rule, because
    there the default is a convenience and here it is the difference between a
    working install and a broken one.
-8. **`embedContent` is refused, not faked.** No routed provider exposes an
-   embedding endpoint through this router. Gemini CLI calls it only from
-   `baseLlmClient`, never from the turn loop, so a named 501 is the honest
-   answer and a fabricated vector would be the dishonest one.
+8. **`embedContent` is refused, not faked.** The separate OpenAI-compatible
+   `/v1/embeddings` surface is model-gated and is not a Gemini translation
+   contract. Gemini CLI calls `embedContent` only from `baseLlmClient`, never
+   from the turn loop, so a named 501 is the honest answer and a fabricated
+   vector would be the dishonest one.
 9. **`countTokens` is estimated.** There is no upstream to ask, and spending a
    real turn to answer a count would bill the user for a question they asked for
    free. A client that gets no number cannot decide whether to compact, so the
@@ -1380,7 +1381,9 @@ minutes later. Do not quietly drop the label because a check happened to pass.
 4. **The caller secret never leaves loopback.** Query parameters on the
    capability URL are dropped, only a bounded request id may cross the internal
    hop, and the API forwarder replaces internal auth with the provider's own
-   credential inside its established boundary.
+   credential inside its established boundary. Both the router-to-forwarder
+   and forwarder-to-provider hops refuse redirects so a 307/308 cannot replay
+   the POST body onto another destination.
 5. **Bound and cancel both directions; never retry.** The public request and
    provider response default to 8 MiB limits, and client cancellation aborts
    both hops. A transport failure may occur after the provider billed the

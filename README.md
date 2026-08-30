@@ -498,9 +498,11 @@ A dedicated embedding model uses only `"/embeddings"` and must set
 catalog discovery does not infer this capability. Requests and responses are
 bounded to 8 MiB by default, caller cancellation reaches the provider, query
 parameters on the secret-bearing capability URL are dropped, and embedding
-requests are never retried or passed through a chat adapter. The provider's
-normal credential isolation and generic-provider DNS/redirect checks still
-apply.
+requests are never retried or passed through a chat adapter. Redirects are
+refused on both internal and provider hops so 307/308 cannot replay the POST.
+The provider's normal credential isolation and generic-provider DNS checks
+still apply. Messages-native provider protocols cannot opt into this OpenAI
+endpoint.
 
 ### opencode (Go subscription and Zen)
 
@@ -1812,10 +1814,11 @@ one run; `GEMINI_MODEL` in the block is the default for the rest. Pass
 out entirely, in which case the CLI falls back to its own Gemini default — which
 this router does not route, so a turn without `--model` will be refused by name.
 
-**What is not served.** Embeddings (`:embedContent`) are refused with a named
-501: no routed provider exposes an embedding endpoint through the router, and a
-fabricated vector would be worse than an error. `:countTokens` is answered from
-a byte-count estimate rather than by spending a real turn upstream.
+**What is not served.** Gemini embeddings (`:embedContent`) are refused with a
+named 501. The separate OpenAI-compatible `/v1/embeddings` surface is explicitly
+model-gated and is not translated into Gemini's contract; a fabricated vector
+would be worse than an error. `:countTokens` is answered from a byte-count
+estimate rather than by spending a real turn upstream.
 
 **Native GPT models** publish here under the same rule as the harness, described
 above: after the one-time shared-plane authorization, while this machine has a

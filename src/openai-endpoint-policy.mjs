@@ -28,14 +28,19 @@ export function normalizeSupportedEndpoints(value, { field = "supportedEndpoints
 }
 
 export function providerModelEndpoint(provider) {
-  if (provider?.protocol === "anthropic") return undefined;
-  return provider?.protocol === "openai-responses"
-    ? "/responses"
-    : "/chat/completions";
+  if (provider?.protocol === undefined || provider?.protocol === "openai") {
+    return "/chat/completions";
+  }
+  if (provider?.protocol === "openai-responses") return "/responses";
+  return undefined;
 }
 
 export function supportsOpenAIModelEndpoint(route, { model, provider } = {}) {
   if (!ENDPOINTS.has(route)) return false;
+  // Messages-native providers do not expose OpenAI endpoint contracts. A
+  // hand-edited model declaration must not turn Anthropic's /v1 base into an
+  // embeddings base merely because both happen to carry JSON.
+  if (providerModelEndpoint(provider) === undefined) return false;
   const declared = normalizeSupportedEndpoints(model?.supportedEndpoints);
   if (declared !== undefined) return declared.includes(route);
   return route === providerModelEndpoint(provider);

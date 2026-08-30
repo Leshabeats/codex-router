@@ -4519,6 +4519,10 @@ async function handleEmbeddings(request, response, requestUrl) {
           "utf8",
         ),
         signal: controller.signal,
+        // A 307/308 replays the POST body. The internal capability hop must
+        // never let a replaced or misconfigured forwarder redirect a billable
+        // embeddings request to another destination.
+        redirect: "error",
       },
     );
     const responseBody = await readResponseBody(upstream, {

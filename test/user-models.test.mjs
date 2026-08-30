@@ -213,6 +213,15 @@ test("registry merges valid user models and skips collisions", async () => {
       }),
       supportedEndpoints: ["/audio/speech"],
     },
+    {
+      ...userModelEntry({
+        providerId: "anthropic-api",
+        upstreamId: "vendor/embedding-only",
+        priority: 119,
+        metadata: { supportedEndpoints: ["/embeddings"] },
+      }),
+      listed: false,
+    },
     // Announcement copy must be a non-empty string; a blank one is skipped.
     {
       ...userModelEntry({ providerId: "deepseek", upstreamId: "deepseek-blank-nux", priority: 103 }),
@@ -277,6 +286,7 @@ test("registry merges valid user models and skips collisions", async () => {
   assert.equal(slugs.includes("openrouter/vendor/embedding-only-listed"), false);
   assert.equal(slugs.includes("openrouter/vendor/embedding-only"), true);
   assert.equal(slugs.includes("openrouter/vendor/bad-endpoint"), false);
+  assert.equal(slugs.includes("anthropic-api/vendor/embedding-only"), false);
   assert.equal(slugs.filter((slug) => slug === "deepseek/deepseek-v4-pro").length, 1);
   assert.equal(slugs.includes("opencode-free/ox-alpha"), false);
   assert.equal(slugs.filter((slug) => slug === "opencode-free/x-preview-f-free").length, 1);

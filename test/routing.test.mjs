@@ -4266,6 +4266,12 @@ test("caller embeddings stay capability-gated, bounded, cancelable, and credenti
   );
   const upstreamRequests = [];
   let canceledUpstream = false;
+  let redirectedProviderRequests = 0;
+  const providerRedirectSink = await mockServer(async (request, response) => {
+    redirectedProviderRequests += 1;
+    request.resume();
+    json(response, 200, { stolen: true });
+  });
   const upstream = await mockServer(async (request, response) => {
     const body = await bodyJson(request);
     upstreamRequests.push({ url: request.url, headers: request.headers, body });
@@ -4277,6 +4283,13 @@ test("caller embeddings stay capability-gated, bounded, cancelable, and credenti
     }
     if (body.input === "oversize-response") {
       json(response, 200, { object: "list", data: [], padding: "x".repeat(2_048) });
+      return;
+    }
+    if (body.input === "provider-redirect") {
+      response.writeHead(307, {
+        Location: `http://127.0.0.1:${providerRedirectSink.port}/replayed`,
+      });
+      response.end();
       return;
     }
     json(response, 200, {
@@ -4401,10 +4414,80 @@ test("caller embeddings stay capability-gated, bounded, cancelable, and credenti
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     assert.equal(canceledUpstream, true);
+
+    const providerRedirect = await fetch(`${routerBase(routerPort)}/embeddings`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ model: curated.embeddingsSlug, input: "provider-redirect" }),
+    });
+    assert.equal(providerRedirect.status, 502);
+    assert.equal(upstreamRequests.length, 4);
+    assert.equal(redirectedProviderRequests, 0);
   } finally {
     await stopChild(router);
     await stopChild(forwarder);
     await closeServer(upstream.server);
+    await closeServer(providerRedirectSink.server);
+    rmSync(curated.dir, { recursive: true, force: true });
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("caller embeddings never follow a redirect from the internal API hop", async () => {
+  const curated = curatedOpenRouterModels();
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "routing-embedding-api-redirect-state-"));
+  writeFileSync(
+    path.join(stateDir, "enabled-providers.json"),
+    `${JSON.stringify({ version: 1, providers: ["openrouter"] })}\n`,
+    { mode: 0o600 },
+  );
+  let redirectedRequests = 0;
+  const redirectSink = await mockServer(async (request, response) => {
+    redirectedRequests += 1;
+    request.resume();
+    json(response, 200, { stolen: true });
+  });
+  const internalRequests = [];
+  const internalApi = await mockServer(async (request, response) => {
+    if (request.url === "/health") {
+      json(response, 200, { ok: true });
+      return;
+    }
+    internalRequests.push({ url: request.url, body: await bodyJson(request) });
+    response.writeHead(308, {
+      Location: `http://127.0.0.1:${redirectSink.port}/replayed`,
+    });
+    response.end();
+  });
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_STATE_DIR: stateDir,
+    MODEL_ROUTER_USER_MODELS: curated.file,
+    CODEX_ROUTER_API_BASE_URL: `http://127.0.0.1:${internalApi.port}/v1`,
+    CODEX_ROUTER_API_HEALTH_URL: `http://127.0.0.1:${internalApi.port}/health`,
+    CODEX_ROUTER_QUIET: "1",
+  });
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const response = await fetch(`${routerBase(routerPort)}/embeddings`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${CALLER_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ model: curated.embeddingsSlug, input: "do not replay" }),
+    });
+    assert.equal(response.status, 502, router.testErrors());
+    assert.deepEqual(internalRequests, [{
+      url: "/v1/embeddings",
+      body: { model: curated.embeddings, input: "do not replay" },
+    }]);
+    assert.equal(redirectedRequests, 0);
+  } finally {
+    await stopChild(router);
+    await closeServer(internalApi.server);
+    await closeServer(redirectSink.server);
     rmSync(curated.dir, { recursive: true, force: true });
     rmSync(stateDir, { recursive: true, force: true });
   }

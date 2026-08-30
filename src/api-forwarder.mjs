@@ -1372,6 +1372,7 @@ async function handleRequest(request, response) {
           ),
           body: upstreamBody,
           signal: controller.signal,
+          redirect: route === "/embeddings" ? "error" : "follow",
         });
         let attemptResponse = await sendAttempt();
         // The source credential can still be valid when Copilot changes the
@@ -1502,6 +1503,7 @@ async function handleRequest(request, response) {
       ),
       body: upstreamBody,
       signal: controller.signal,
+      redirect: route === "/embeddings" ? "error" : "follow",
     });
     // Embeddings can be billed even when the response never reaches the
     // caller. Select one pool credential above and record its outcome, but do
