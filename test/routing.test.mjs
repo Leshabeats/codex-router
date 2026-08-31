@@ -7512,13 +7512,21 @@ test("router ages consumed large tool results but preserves the newest result fr
   }
 });
 
-test("token maxxing shapes the newest result and injects terse instructions only under pressure", async () => {
+test("RTK shaping is reserved for routed compaction and ordinary turns keep newest results exact", async () => {
   const gatewayBodies = [];
   const gateway = await mockServer(async (request, response) => {
     gatewayBodies.push(await bodyJson(request));
-    json(response, 200, { output: [{ type: "message", role: "assistant", content: "ok" }] });
+    json(response, 200, {
+      output: [
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "compact summary" }],
+        },
+      ],
+    });
   });
-  const stateDir = mkdtempSync(path.join(os.tmpdir(), "routing-token-maxxing-"));
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "routing-rtk-compaction-"));
   writeFileSync(
     path.join(stateDir, "tool-result-aging.json"),
     JSON.stringify({ version: 1, enabled: true, nativeEnabled: false }),
@@ -7530,7 +7538,12 @@ test("token maxxing shapes the newest result and injects terse instructions only
     CODEX_ROUTER_QUIET: "1",
     MODEL_ROUTER_STATE_DIR: stateDir,
   });
-  const turn = (value) => ({
+  const value = [
+    "starting build",
+    ...Array(110_000).fill("repeated build progress"),
+    "ERROR final link failed",
+  ].join("\n");
+  const turn = {
     model: "deepseek/deepseek-v4-pro",
     stream: false,
     instructions: "Base instructions.",
@@ -7538,91 +7551,40 @@ test("token maxxing shapes the newest result and injects terse instructions only
       { type: "function_call", call_id: "latest", name: "exec_command", arguments: "{}" },
       { type: "function_call_output", call_id: "latest", output: value },
     ],
-  });
-  const lowPressure = "ordinary noise\n".repeat(10_000);
-  const highPressure = "repeated build progress\n".repeat(110_000);
+  };
 
   try {
     await waitFor(`${routerBase(routerPort)}/models`, router);
-    for (const value of [lowPressure, highPressure]) {
-      const response = await fetch(`${routerBase(routerPort)}/responses`, {
-        method: "POST",
-        headers: {
-          Authorization: "Bearer CODEX_CALLER_SECRET",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(turn(value)),
-      });
-      assert.equal(response.status, 200, await response.text());
-    }
+    const headers = {
+      Authorization: "Bearer CODEX_CALLER_SECRET",
+      "Content-Type": "application/json",
+    };
+    const ordinary = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(turn),
+    });
+    assert.equal(ordinary.status, 200, await ordinary.text());
+    const compact = await fetch(`${routerBase(routerPort)}/responses/compact`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(turn),
+    });
+    assert.equal(compact.status, 200, await compact.text());
 
-    assert.equal(gatewayBodies[0].input[1].output, lowPressure);
+    assert.equal(gatewayBodies[0].input[1].output, value);
     assert.equal(gatewayBodies[0].instructions, "Base instructions.");
-    assert.match(gatewayBodies[1].input[1].output, /Tool result shaped by Codex Router token maxxing/u);
+    assert.doesNotMatch(gatewayBodies[0].instructions, /Token maxxing pressure|decision packet|Be terse/u);
+    assert.match(gatewayBodies[1].input[1].output, /Tool result shaped by Codex Router RTK-style compaction/u);
     assert.match(gatewayBodies[1].input[1].output, /same line repeated 109999 more times/u);
-    assert.match(gatewayBodies[1].instructions, /## Context pressure mode/u);
-    assert.match(gatewayBodies[1].instructions, /Be terse in commentary and final prose/u);
+    assert.match(gatewayBodies[1].input[1].output, /ERROR final link failed/u);
+    assert.match(gatewayBodies[1].input[1].output, /Repeat the preceding exec_command call/u);
+    assert.doesNotMatch(gatewayBodies[1].instructions, /Token maxxing pressure|decision packet|Be terse/u);
 
     const events = await waitForUsageEvents(stateDir, 2, router);
     assert.equal(events[0].toolResultsShaped, undefined);
     assert.equal(events[1].toolResultsShaped, 1);
     assert.ok(events[1].toolResultShapeBytesSaved > 2_000_000);
-  } finally {
-    await stopChild(router);
-    await closeServer(gateway.server);
-    rmSync(stateDir, { recursive: true, force: true });
-  }
-});
-
-test("token maxxing counts collaboration payloads after they become model-visible", async () => {
-  const gatewayBodies = [];
-  const gateway = await mockServer(async (request, response) => {
-    gatewayBodies.push(await bodyJson(request));
-    json(response, 200, { output: [{ type: "message", role: "assistant", content: "ok" }] });
-  });
-  const stateDir = mkdtempSync(path.join(os.tmpdir(), "routing-token-maxxing-agent-"));
-  writeFileSync(
-    path.join(stateDir, "tool-result-aging.json"),
-    JSON.stringify({ version: 1, enabled: true, nativeEnabled: false }),
-  );
-  const routerPort = await openPort();
-  const router = run("router.mjs", {
-    CODEX_ROUTER_PORT: String(routerPort),
-    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
-    CODEX_ROUTER_QUIET: "1",
-    MODEL_ROUTER_STATE_DIR: stateDir,
-  });
-  const payloadText = "repeated delegated payload\n".repeat(100_000);
-  const input = [
-    {
-      type: "message",
-      role: "user",
-      content: [
-        { type: "input_text", text: "Message Type: NEW_TASK\nPayload:" },
-        { type: "encrypted_content", encrypted_content: payloadText },
-      ],
-    },
-  ];
-
-  try {
-    await waitFor(`${routerBase(routerPort)}/models`, router);
-    const response = await fetch(`${routerBase(routerPort)}/responses`, {
-      method: "POST",
-      headers: {
-        Authorization: "Bearer CODEX_CALLER_SECRET",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "deepseek/deepseek-v4-pro",
-        stream: false,
-        instructions: "Base instructions.",
-        input,
-      }),
-    });
-    assert.equal(response.status, 200, await response.text());
-    assert.equal(gatewayBodies.length, 1);
-    assert.equal(gatewayBodies[0].input[0].content.at(-1).text, payloadText);
-    assert.match(gatewayBodies[0].instructions, /## Context pressure mode/u);
   } finally {
     await stopChild(router);
     await closeServer(gateway.server);
