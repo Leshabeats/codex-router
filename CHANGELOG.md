@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **OpenCode Console Go chat models no longer reject ambient hosted-search
+  options.** Codex can attach `web_search_options` even when the selected
+  OpenCode Go model does not advertise hosted search; Console Go forwards the
+  unknown field to its strict Chat Completions backend, which rejects the
+  entire turn with HTTP 400. The router now removes only that unsupported
+  option for the `opencode-go` provider on ordinary and compaction requests,
+  with the API forwarder enforcing the same boundary. Other search payloads
+  and providers that accept the option remain unchanged.
+
 - **Strict generic providers no longer receive unadvertised hosted-search
   extensions.** Codex may attach `web_search`, `web_search_preview`,
   `web_search_options`, and search-only `include` entries even when the chosen
