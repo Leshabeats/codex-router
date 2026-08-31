@@ -6336,6 +6336,49 @@ test("API forwarder strips web_search_options for Fireworks", async () => {
   }
 });
 
+test("API forwarder strips web_search_options for OpenCode Go chat models", async () => {
+  const upstreamRequests = [];
+  const upstream = await mockServer(async (request, response) => {
+    upstreamRequests.push(await bodyJson(request));
+    json(response, 200, { choices: [] });
+  });
+  const forwarderPort = await openPort();
+  const forwarder = run("api-forwarder.mjs", {
+    CODEX_ROUTER_API_PORT: String(forwarderPort),
+    OPENCODE_GO_BASE_URL: `http://127.0.0.1:${upstream.port}/v1`,
+    OPENCODE_API_KEY: "TEST_OPENCODE_GO_API_KEY",
+    OPENCODE_GO_API_KEY: "TEST_OPENCODE_GO_API_KEY",
+    CODEX_ROUTER_QUIET: "1",
+  });
+
+  try {
+    await waitFor(`http://127.0.0.1:${forwarderPort}/health`, forwarder, {
+      Authorization: `Bearer ${INTERNAL_KEY}`,
+    });
+    const response = await fetch(
+      `http://127.0.0.1:${forwarderPort}/v1/chat/completions`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${INTERNAL_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "opencode-go-glm-5-3",
+          web_search_options: { search_context_size: "medium" },
+          messages: [{ role: "user", content: "test" }],
+        }),
+      },
+    );
+    assert.equal(response.status, 200, forwarder.testErrors());
+    assert.equal(upstreamRequests[0].model, "glm-5.3");
+    assert.equal(upstreamRequests[0].web_search_options, undefined);
+  } finally {
+    await stopChild(forwarder);
+    await closeServer(upstream.server);
+  }
+});
+
 test("API forwarder keeps Xiaomi MiMo web search options on chat completions", async () => {
   const upstreamRequests = [];
   const upstream = await mockServer(async (request, response) => {
@@ -6549,6 +6592,70 @@ test("router strips Fireworks web_search_options on routed and compaction reques
     await stopChild(router);
     await closeServer(gateway.server);
     rmSync(curated.dir, { recursive: true, force: true });
+  }
+});
+
+test("router strips unsupported web_search_options from OpenCode Go turns", async () => {
+  const gatewayRequests = [];
+  const gateway = await mockServer(async (request, response) => {
+    gatewayRequests.push(await bodyJson(request));
+    json(response, 200, {
+      id: "resp-summary",
+      object: "response",
+      output: [
+        {
+          type: "message",
+          content: [{ type: "output_text", text: "compact summary" }],
+        },
+      ],
+    });
+  });
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_QUIET: "1",
+  });
+  const headers = {
+    Authorization: `Bearer ${CALLER_KEY}`,
+    "Content-Type": "application/json",
+  };
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const routed = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: "opencode-go/glm-5.3",
+        input: "routed test",
+        web_search_options: { search_context_size: "medium" },
+      }),
+    });
+    assert.equal(routed.status, 200, router.testErrors());
+    assert.equal(gatewayRequests[0].model, "opencode-go-glm-5-3");
+    assert.equal(gatewayRequests[0].web_search_options, undefined);
+
+    const compact = await fetch(`${routerBase(routerPort)}/responses/compact`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: "opencode-go/glm-5.3",
+        input: [
+          {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "keep me" }],
+          },
+        ],
+        web_search_options: { search_context_size: "medium" },
+      }),
+    });
+    assert.equal(compact.status, 200, router.testErrors());
+    assert.equal(gatewayRequests[1].web_search_options, undefined);
+  } finally {
+    await stopChild(router);
+    await closeServer(gateway.server);
   }
 });
 

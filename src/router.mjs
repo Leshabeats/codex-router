@@ -879,6 +879,10 @@ function needsConsoleGoResponsesToolCompatibility(route) {
   return providerForModel(route)?.id === "opencode-go-responses";
 }
 
+function rejectsWebSearchOptions(route) {
+  return ["fireworks", "opencode-go"].includes(providerForModel(route)?.id);
+}
+
 function needsStrictOpenCodeToolCompatibility(route) {
   return (
     needsZenFreeToolCompatibility(route) ||
@@ -2382,9 +2386,10 @@ async function summarizeWith(
   normalizeAutoToolChoice(body, route);
   delete body.previous_response_id;
   delete body.client_metadata;
-  // Compaction re-enters the same provider as the routed turn; Fireworks
-  // rejects this OpenAI search parameter at that boundary too.
-  if (providerForModel(route)?.id === "fireworks") delete body.web_search_options;
+  // Compaction re-enters the same provider as the routed turn. Strict Chat
+  // Completions surfaces reject this OpenAI search parameter even though it
+  // is unrelated to the compaction body.
+  if (rejectsWebSearchOptions(route)) delete body.web_search_options;
   const searchCompatibility = routedSearchCompatibility(body, route);
   const serialized = JSON.stringify(searchCompatibility.payload);
   // Candidate capability may depend on a sidecar credential or binding that
@@ -3085,7 +3090,7 @@ async function buildRoutedRequest({ request, payload, route, agedInput, tokenMax
     delete routed.reasoning;
     delete routed.reasoning_effort;
   }
-  if (provider?.id === "fireworks") delete routed.web_search_options;
+  if (rejectsWebSearchOptions(route)) delete routed.web_search_options;
   routed.instructions = applyTokenMaxxingOverlay(routed.instructions, {
     active: tokenMaxxing,
   });
