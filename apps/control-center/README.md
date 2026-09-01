@@ -27,7 +27,7 @@ credentials, or service logic in the renderer.
   with search, filters, context use, and resume actions in the owning harness.
 - Settings: signed routing, presence, safe service start/status,
   tray, language,
-  appearance, old tool-result compaction, vision, and read-only maintenance
+  appearance, Token maxxing, vision, and read-only maintenance
   guidance. Updates and repairs remain interactive-terminal workflows.
 
 The Control Center and tray ship as one visible application on every platform.
