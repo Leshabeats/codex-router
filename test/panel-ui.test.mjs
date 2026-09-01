@@ -372,6 +372,37 @@ test("the macOS tray tool-result-aging switch mirrors the same off default", () 
   assert.doesNotMatch(source, /toolResultAging\?\.enabled \?\? true/);
 });
 
+test("the macOS tray panel follows the system appearance", () => {
+  const source = readFileSync(
+    path.join(root, "apps", "macos", "ModelRouterTray", "Sources", "ModelRouterTrayApp.swift"),
+    "utf8",
+  );
+  const trayStart = source.indexOf("private struct TrayView");
+  const trayEnd = source.indexOf("private struct ProviderSetupRow", trayStart);
+  assert.ok(trayStart > 0 && trayEnd > trayStart, "TrayView should remain readable");
+  assert.doesNotMatch(
+    source.slice(trayStart, trayEnd),
+    /\.preferredColorScheme\(\.dark\)/,
+    "the menu-bar panel must not override the operator's macOS appearance",
+  );
+});
+
+test("the macOS tray does not redraw a hidden or unchanged settings tree", () => {
+  const source = readFileSync(
+    path.join(root, "apps", "macos", "ModelRouterTray", "Sources", "ModelRouterTrayApp.swift"),
+    "utf8",
+  );
+  const closePanel = source.match(/private func closePanel\(\)[\s\S]*?\r?\n  }/)?.[0];
+  const refreshActivity = source.match(/private func refreshActivity\(\)[\s\S]*?\r?\n  }\r?\n\r?\n  private func recordActivityHealthFailure/)?.[0];
+
+  assert.ok(closePanel, "tray close helper should be readable");
+  assert.match(closePanel, /panel\.contentViewController = nil/);
+  assert.ok(refreshActivity, "activity refresh helper should be readable");
+  assert.match(refreshActivity, /if routerHealth != health \{ routerHealth = health \}/);
+  assert.match(source, /private struct RouterHealth: Decodable, Equatable/);
+  assert.match(source, /private struct RouterActivity: Decodable, Equatable/);
+});
+
 test("the macOS tray provider toggle uses the atomic selection command", () => {
   const swift = readFileSync(
     path.join(root, "apps", "macos", "ModelRouterTray", "Sources", "ModelRouterTrayApp.swift"),

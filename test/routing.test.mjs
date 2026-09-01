@@ -464,6 +464,106 @@ test("plain Codex provider routes accept the caller key as a bearer token", asyn
   }
 });
 
+test("ChatGPT Web routes bypass the gateway and preserve the native Codex envelope", async () => {
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "chatgpt-web-direct-route-"));
+  const userModelsPath = path.join(testRoot, "user-models.json");
+  writeFileSync(userModelsPath, JSON.stringify({
+    version: 1,
+    models: [{
+      slug: "chatgpt-web/light",
+      gatewayModel: "chatgpt-web-light",
+      upstreamModel: "chatgpt-web/light",
+      provider: "chatgpt-web",
+      listed: true,
+      displayName: "ChatGPT Web — Instant",
+      description: "Test ChatGPT Web direct Responses route.",
+      priority: 100,
+      reasoningLevels: [{ effort: "low", description: "Quick reasoning" }],
+      defaultEffort: "low",
+      contextWindow: 41_000,
+      autoCompact: 32_000,
+      inputModalities: ["text", "image"],
+      compHash: "chatgpt-web-light-routing-test-v1"
+    }],
+  }));
+  const bridgeRequests = [];
+  const exactTurnResponse = '{ "id": "resp_chatgpt_web_test", "object": "response", "status": "completed", "model": "chatgpt-web/light", "output": [], "usage": { "input_tokens": 12, "output_tokens": 3, "total_tokens": 15 } }\n';
+  const bridge = await mockServer(async (request, response) => {
+    const body = await bodyJson(request);
+    bridgeRequests.push({ url: request.url, headers: request.headers, body });
+    if (request.url.startsWith("/v1/responses/compact")) {
+      json(response, 409, {
+        error: {
+          type: "invalid_request_error",
+          message: "browser bridge retained-source compaction is unavailable",
+        },
+      });
+      return;
+    }
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(exactTurnResponse);
+  });
+  const gatewayRequests = [];
+  const gateway = await mockServer(async (request, response) => {
+    gatewayRequests.push(request.url);
+    json(response, 200, { object: "response", status: "completed", output: [] });
+  });
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_STATE_DIR: path.join(testRoot, "state"),
+    MODEL_ROUTER_USER_MODELS: userModelsPath,
+    MODEL_ROUTER_CHATGPT_WEB_BASE_URL: `http://127.0.0.1:${bridge.port}/v1`,
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_QUIET: "1",
+  });
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const turnPayload = {
+      model: "chatgpt-web/light",
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hello" }] }],
+      tools: [{ type: "function", name: "workspace_tool", parameters: { type: "object" } }],
+      client_metadata: { "x-codex-turn-metadata": "body-turn-authority" },
+      stream: false,
+    };
+    const turn = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer CHATGPT_SESSION_MUST_NOT_LEAK",
+        "Content-Type": "application/json",
+        "X-Codex-Turn-Metadata": "header-turn-authority",
+      },
+      body: JSON.stringify(turnPayload),
+    });
+    const turnText = await turn.text();
+    assert.equal(turn.status, 200, turnText);
+    assert.equal(turnText, exactTurnResponse);
+    assert.equal(bridgeRequests.length, 1);
+    assert.equal(bridgeRequests[0].url, "/v1/responses");
+    assert.equal(bridgeRequests[0].headers.authorization, "Bearer local");
+    assert.equal(bridgeRequests[0].headers["x-codex-turn-metadata"], "header-turn-authority");
+    assert.deepEqual(bridgeRequests[0].body, turnPayload);
+    assert.deepEqual(gatewayRequests, []);
+
+    const compact = await fetch(`${routerBase(routerPort)}/responses/compact`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...turnPayload, stream: false }),
+    });
+    assert.equal(compact.status, 409);
+    assert.match(await compact.text(), /retained-source compaction is unavailable/);
+    assert.equal(bridgeRequests.length, 2, "a failed browser compaction was sent more than once");
+    assert.equal(bridgeRequests[1].url, "/v1/responses/compact");
+    assert.deepEqual(gatewayRequests, []);
+  } finally {
+    await stopChild(router);
+    await closeServer(bridge.server);
+    await closeServer(gateway.server);
+    rmSync(testRoot, { recursive: true, force: true });
+  }
+});
+
 test("plain signed Codex routes accept the current Codex API key", async () => {
   const testRoot = mkdtempSync(path.join(os.tmpdir(), "signed-codex-api-key-route-"));
   const authPath = path.join(testRoot, "auth.json");
@@ -3852,6 +3952,9 @@ test("API forwarder routes Ollama Cloud models without unsupported parameters", 
       ["ollama-cloud-glm-5-2", "glm-5.2", "xhigh", "max"],
       ["ollama-cloud-glm-5-2", "glm-5.2", "minimal", "none"],
       ["ollama-cloud-glm-5-2", "glm-5.2", "bogus", "high"],
+      ["ollama-cloud-glm-5-3-flash", "glm-5.3-flash:cloud", "minimal", "low"],
+      ["ollama-cloud-glm-5-3-flash", "glm-5.3-flash:cloud", "medium", "low"],
+      ["ollama-cloud-glm-5-3-flash", "glm-5.3-flash:cloud", "xhigh", "max"],
       ["ollama-cloud-kimi-k2-7-code", "kimi-k2.7-code", "high", "high"],
       ["ollama-cloud-kimi-k3", "kimi-k3:cloud", "low", "low"],
       ["ollama-cloud-kimi-k3", "kimi-k3:cloud", "max", "max"],
@@ -6785,30 +6888,44 @@ test("router normalizes forced tool choices before LiteLLM for auto-tool-choice 
 
     // LiteLLM does its Responses -> Chat Completions translation after the
     // router, so this must already be auto when it reaches the gateway.
-    const required = await route("ollama-cloud/minimax-m3", "required");
-    assert.equal(required.model, "ollama-cloud-minimax-m3");
-    assert.equal(required.tool_choice, "auto");
+    for (const [slug, gatewayModel] of [
+      ["ollama-cloud/minimax-m3", "ollama-cloud-minimax-m3"],
+      ["commandcode/muse-spark-1.2", "commandcode-muse-spark-1-2"],
+      [
+        "opencode-go-responses/muse-spark-1.2-contributor",
+        "opencode-go-responses-muse-spark-1-2-contributor",
+      ],
+    ]) {
+      const required = await route(slug, "required");
+      assert.equal(required.model, gatewayModel);
+      assert.equal(required.tool_choice, "auto");
+    }
 
     // The collaboration relay uses an object form; it has the same upstream
     // restriction and therefore must not survive the Responses hop either.
-    const forcedFunction = await route("ollama-cloud/minimax-m3", {
-      type: "function",
-      name: "relay_external_agent_payload",
-    });
-    assert.equal(forcedFunction.tool_choice, "auto");
+    for (const slug of ["ollama-cloud/minimax-m3", "commandcode/muse-spark-1.2"]) {
+      const forcedFunction = await route(slug, {
+        type: "function",
+        name: "relay_external_agent_payload",
+      });
+      assert.equal(forcedFunction.tool_choice, "auto");
+    }
 
     // Suppressing tools is not forcing one, and remains necessary for turns
     // such as compaction that deliberately disable tools.
-    const suppressed = await route("ollama-cloud/minimax-m3", "none");
+    const suppressed = await route("commandcode/muse-spark-1.2", "none");
     assert.equal(suppressed.tool_choice, "none");
 
-    const absent = await route("ollama-cloud/minimax-m3");
+    const absent = await route("commandcode/muse-spark-1.2");
     assert.equal("tool_choice" in absent, false);
 
-    // The profile remains model-scoped: other Ollama Cloud models preserve a
-    // forced choice so their capability probe and collaboration relay work.
-    const sibling = await route("ollama-cloud/glm-5.2", "required");
-    assert.equal(sibling.tool_choice, "required");
+    // The profile remains model-scoped: siblings behind both providers
+    // preserve a forced choice so their capability probes and collaboration
+    // relays keep the stronger contract they support.
+    for (const slug of ["ollama-cloud/glm-5.2", "commandcode/gpt-5.6-sol"]) {
+      const sibling = await route(slug, "required");
+      assert.equal(sibling.tool_choice, "required");
+    }
   } finally {
     await stopChild(router);
     await closeServer(gateway.server);

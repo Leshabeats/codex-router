@@ -30,6 +30,9 @@ import {
 } from "./compaction-checkpoint.mjs";
 import { handlePanelRequest, isPanelRoute } from "./desktop-panel.mjs";
 import { handleGeminiRequest, isGeminiRoute } from "./gemini-surface.mjs";
+import { handleCursorRequest, isCursorRoute } from "./cursor-surface.mjs";
+import { handleClaudeRequest, isClaudeRoute } from "./claude-surface.mjs";
+import { routedClientModels } from "./routed-client-models.mjs";
 import {
   applyKeepAliveTimeouts,
   copyResponseHeaders,
@@ -189,6 +192,12 @@ import {
   loopbackProbeFetch,
 } from "./fetch-transport.mjs";
 import { handleResponsesWebSocketUpgrade } from "./responses-websocket.mjs";
+import {
+  directResponsesBody,
+  directResponsesHeaders,
+  directResponsesTarget,
+  isDirectResponsesProvider,
+} from "./direct-responses-provider.mjs";
 
 installStableFetchTransport();
 
@@ -2354,7 +2363,10 @@ function compactionAttempts(route, aged, searchContract, { allowFailover = true 
   const settings = readFailoverSettings();
   if (!settings.enabled) return [route];
   const candidates = rankFailoverCandidates(
-    selectedConfiguredListedModels().filter((model) => !readHiddenModels().has(model.slug)),
+    selectedConfiguredListedModels().filter((model) => (
+      !readHiddenModels().has(model.slug) &&
+      !isDirectResponsesProvider(providerForModel(model))
+    )),
     {
       from: route,
       // The transcript being summarized is nearly all of the request, so its
@@ -3189,7 +3201,10 @@ async function prepareRoutedRequest({
 function failoverCandidates({ route, agedInput, flattenedNamespaces, searchContract, chain }) {
   const hidden = readHiddenModels();
   return rankFailoverCandidates(
-    selectedConfiguredListedModels().filter((model) => !hidden.has(model.slug)),
+    selectedConfiguredListedModels().filter((model) => (
+      !hidden.has(model.slug) &&
+      !isDirectResponsesProvider(providerForModel(model))
+    )),
     {
       from: route,
       // Context fit is checked after rebuilding the request for each
@@ -3221,7 +3236,10 @@ function subagentTransportFailoverCandidates({ request, route, agedInput, search
   if (subagentEligibility(route)) return [];
   const hidden = readHiddenModels();
   let ranked = rankSubagentCandidates(
-    selectedConfiguredListedModels().filter((model) => !hidden.has(model.slug)),
+    selectedConfiguredListedModels().filter((model) => (
+      !hidden.has(model.slug) &&
+      !isDirectResponsesProvider(providerForModel(model))
+    )),
     {
       chain,
       requiredCapabilities: [
@@ -3420,6 +3438,7 @@ async function handleResponses(request, response, requestUrl) {
   let clientGone = false;
   let requestedModel = "";
   let route;
+  let directResponses = false;
   let upstreamRetries;
   let upstreamStatus;
   let upstreamLatencyMs;
@@ -3502,6 +3521,9 @@ async function handleResponses(request, response, requestUrl) {
       model: route?.slug || requestedModel || undefined,
       ...activityMetadataFromHeaders(request.headers),
     });
+    directResponses = route
+      ? isDirectResponsesProvider(providerForModel(route))
+      : false;
     const compactV1 = /\/responses\/compact$/.test(requestUrl.pathname);
     // Codex remote compaction V2 uses the ordinary Responses endpoint with a
     // terminal trigger. Detect the protocol shape before route dispatch so the
@@ -3510,7 +3532,7 @@ async function handleResponses(request, response, requestUrl) {
       Array.isArray(payload.input) &&
       payload.input.at(-1)?.type === "compaction_trigger";
 
-    if (route && (compactV1 || compactV2)) {
+    if (route && !directResponses && (compactV1 || compactV2)) {
       const compaction = await handleRoutedCompaction(
         request,
         response,
@@ -3579,7 +3601,12 @@ async function handleResponses(request, response, requestUrl) {
         ...activityMetadataFromHeaders(request.headers),
       });
     };
-    if (route) {
+    if (route && directResponses) {
+      const provider = providerForModel(route);
+      target = directResponsesTarget(provider, requestUrl.pathname, requestUrl.search);
+      headers = directResponsesHeaders(request.headers);
+      routedBody = directResponsesBody(payload, route);
+    } else if (route) {
       // Resolve the selected route's search contract once, before encrypted
       // handoff normalization or any other external work. A later failover may
       // not reintroduce ambient search that this route never advertised.
@@ -3739,7 +3766,9 @@ async function handleResponses(request, response, requestUrl) {
     // live capability contract as every fallback. This catches unsupported
     // search history and sidecar changes after normalization before any
     // provider-bound bytes leave the router.
-    if (route) assertRoutedSearchContract(route, builtSearchMode, searchContract);
+    if (route && !directResponses) {
+      assertRoutedSearchContract(route, builtSearchMode, searchContract);
+    }
     let { response: upstream, retries } = await fetchWithRetry(
       target,
       {
@@ -3769,7 +3798,7 @@ async function handleResponses(request, response, requestUrl) {
     // and the error translation below both need it, and it can only be read
     // once. Nothing is relayed either way, so reading it is free.
     let failedBodyText;
-    if (route && !upstream.ok) {
+    if (route && !directResponses && !upstream.ok) {
       failedBodyText = await boundedResponseText(
         upstream,
         MAX_BUFFERED_RESPONSE_BYTES,
@@ -3822,7 +3851,25 @@ async function handleResponses(request, response, requestUrl) {
     // recorded earlier: a quota that refilled early, a limit the operator
     // raised, or a reset time the provider got wrong all end the same way, and
     // a real answer is better evidence than anything on disk.
-    if (route && upstream.ok) clearProviderCooldown(route.provider);
+    if (route && !directResponses && upstream.ok) clearProviderCooldown(route.provider);
+    // The direct bridge owns its own explicit failure vocabulary. It has not
+    // passed through LiteLLM, so translating the body as a gateway exception
+    // would erase the actionable browser/login/UI-drift error it produced.
+    if (route && directResponses && !upstream.ok) {
+      await pipeResponse(upstream, response, HOP_BY_HOP_HEADERS);
+      recordUsageEvent({
+        model: route.slug,
+        provider: canonicalProviderId(route.provider),
+        status: upstream.status,
+        durationMs: Date.now() - startedAt,
+        responseStartMs: upstreamLatencyMs,
+      });
+      observeSubagentOutcome(request, route, upstream.status);
+      finalStatus = upstream.status;
+      activityStatus = upstream.status;
+      usageRecorded = true;
+      return;
+    }
     // Gateway error bodies leak LiteLLM's internal exception chain, which
     // reads like a router bug. Rewrite them to name the provider that failed.
     // Native traffic passes through untouched: OpenAI errors are already clear.
@@ -3889,12 +3936,12 @@ async function handleResponses(request, response, requestUrl) {
     const createResponsePipeline = (contentType) => {
       const usageObserver = new ResponseUsageTransform(contentType, {
         estimatedInputTokens:
-          ZERO_INPUT_ESTIMATE && route
+          ZERO_INPUT_ESTIMATE && route && !directResponses
             ? estimateInputTokens(routedBody, { contextWindow: route.contextWindow })
             : undefined,
       });
       const transforms = [usageObserver];
-      let envelopeCompat = route
+      let envelopeCompat = !directResponses && route
         ? zaiResponsesCompatTransform(route.provider, contentType)
         : undefined;
       // Z.ai Responses streams from GLM-5.3 can start assistant text after
@@ -3910,14 +3957,14 @@ async function handleResponses(request, response, requestUrl) {
       // LiteLLM can add blank assistant envelopes while translating either
       // Chat Completions or Messages. The factory refuses native traffic and
       // providers that already speak Responses, so those paths gain no stage.
-      const translatedToolMessageCompat = route
+      const translatedToolMessageCompat = !directResponses && route
         ? translatedToolMessageCompatTransform(providerForModel(route), contentType)
         : undefined;
       if (translatedToolMessageCompat) transforms.push(translatedToolMessageCompat);
       // Restore flattened namespace calls for routed chat-completions providers,
       // and inject missing finished-child interrupts for both routed and native
       // multi-agent parents (San Francisco uses native GPT).
-      if (route || pendingInterrupts.length > 0) {
+      if (!directResponses && (route || pendingInterrupts.length > 0)) {
         transforms.push(
           new NamespaceToolCallTransform(
             flattenedNamespaces,
@@ -3930,7 +3977,7 @@ async function handleResponses(request, response, requestUrl) {
         );
       }
       const guard =
-        route && EMPTY_COMPLETION_RETRY
+        route && !directResponses && EMPTY_COMPLETION_RETRY
           ? new EmptyCompletionGuard(contentType, {
               maxPreludeBytes: EMPTY_COMPLETION_PRELUDE_BYTES,
               maxPreludeMs: EMPTY_COMPLETION_PRELUDE_MS,
@@ -4039,7 +4086,9 @@ async function handleResponses(request, response, requestUrl) {
       // discarded attempt's staged headers are no longer authoritative even
       // when this check fails and the router writes its own local response.
       clearStagedResponseHead(response);
-      if (route) assertRoutedSearchContract(route, builtSearchMode, searchContract);
+      if (route && !directResponses) {
+        assertRoutedSearchContract(route, builtSearchMode, searchContract);
+      }
       emptyCompletionRetried = true;
       try {
         const retried = await fetchWithRetry(
@@ -4867,6 +4916,30 @@ async function handleRequest(request, response) {
   // Behind the caller capability, like every other local endpoint: the panel
   // reads the same data the tray does, so it is gated the same way.
   if (isPanelRoute(route) && (await handlePanelRequest(request, response, route, { writeJson }))) {
+    return;
+  }
+
+  // Cursor has two different client protocols. The desktop app reaches the
+  // OpenAI-compatible `/cursor/v1` leaf, while Cursor Agent uses its Connect
+  // control plane. Both translate and re-enter this router's `/v1/responses`
+  // path, so providers, retries, failover, accounting, and caller authority
+  // remain shared with every other client.
+  if (isCursorRoute(route)) {
+    await handleCursorRequest(request, response, route, {
+      responsesUrl: `${callerBaseUrl(LISTEN_PORT, CALLER_KEY)}/responses`,
+      routedModels: routedClientModels,
+    });
+    return;
+  }
+
+  // Claude Code speaks Anthropic Messages. This leaf translates that protocol
+  // and re-enters the canonical Responses path, so routing, failover, usage,
+  // and provider credentials stay on the same shared plane as every client.
+  if (isClaudeRoute(route)) {
+    await handleClaudeRequest(request, response, route, {
+      responsesUrl: `${callerBaseUrl(LISTEN_PORT, CALLER_KEY)}/responses`,
+      routedModels: routedClientModels,
+    });
     return;
   }
 
