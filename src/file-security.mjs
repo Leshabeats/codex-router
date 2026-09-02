@@ -365,7 +365,7 @@ export function ensureCheckoutReadable(checkoutPath) {
       "powershell.exe",
       ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
       {
-        env: { CODEX_ROUTER_CHECKOUT_PATH: checkoutPath },
+        env: { ...process.env, CODEX_ROUTER_CHECKOUT_PATH: checkoutPath },
         stdio: ["ignore", "ignore", "pipe"],
         timeout: 15_000,
         windowsHide: true,
