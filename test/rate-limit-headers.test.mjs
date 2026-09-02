@@ -141,7 +141,7 @@ test("cooldown only triggers on real exhaustion", () => {
   assert.equal(cooldownUntil(undefined), undefined);
 });
 
-test("retry-after reads every form RFC 9110 allows", () => {
+test("retry-after reads RFC forms and the extensions providers actually send", () => {
   const seconds = (value) =>
     retryAfterSeconds(new Headers(value === undefined ? {} : { "retry-after": value }), {
       now: NOW,
@@ -150,16 +150,21 @@ test("retry-after reads every form RFC 9110 allows", () => {
   assert.equal(seconds("120"), 120);
   // HTTP-date, equally legal and what a gateway in front of the origin sends.
   assert.equal(seconds("Sat, 25 Jul 2026 12:05:00 GMT"), 300);
-  // Sub-second waits round up: a caller that saw 0 could not tell it apart
-  // from a header that was never sent.
+  // Zero is a non-negative integer, so it is a provider saying "now" rather
+  // than a provider saying nothing. The two must stay distinguishable here;
+  // whether "now" is worth wording belongs to the caller.
+  assert.equal(seconds("0"), 0);
+  // A window that elapsed before the response was read says the same thing.
+  assert.equal(seconds("Sat, 25 Jul 2026 11:59:00 GMT"), 0);
+  // Not RFC grammar -- delay-seconds is an integer -- but providers do send
+  // fractions, and `resetAt` has always read them. A sub-second wait keeps its
+  // second rather than rounding into the zero that means "no wait".
   assert.equal(seconds("0.2"), 1);
   // Nothing usable, so the caller keeps its own judgement rather than
   // inheriting a window the provider never named.
   assert.equal(seconds(undefined), undefined);
   assert.equal(seconds("soon"), undefined);
-  assert.equal(seconds("0"), undefined);
-  // Already elapsed by the time the response was read.
-  assert.equal(seconds("Sat, 25 Jul 2026 11:59:00 GMT"), undefined);
+  assert.equal(seconds("-5"), undefined);
   assert.equal(retryAfterSeconds(undefined, { now: NOW }), undefined);
   assert.equal(retryAfterSeconds({}, { now: NOW }), undefined);
 });

@@ -13,11 +13,16 @@
   `resetAt` parser the `x-ratelimit-*` snapshot already used, which reads
   delay-seconds, an HTTP-date, and a Go-style duration alike, and
   `api-forwarder`'s private copy of that conversion is gone in favor of the
-  shared one, so there is one place the header is read. A header that is
-  absent, unparseable, or already in the past now records nothing rather than
-  inventing a window — including the empty case, where `Number(null)` is `0`
-  and a rate-limit error consequently advised retrying "in about 0s" instead
-  of waiting.
+  shared one, so there is one place the header is read.
+- **A 429 that named no wait no longer advises retrying "in about 0s".**
+  `headers.get` answers null for a header that was never sent and
+  `Number(null)` is `0` — a finite value, so the rate-limit message quoted a
+  zero-second wait as though the provider had asked for one. Absence and an
+  unparseable value now read as no window at all, while a delay of `0` (which
+  RFC 9110 permits) and a date that has already passed are kept as the zero
+  they are, because a provider saying "now" is not a provider saying nothing.
+  Only a positive wait is worth wording, so both zeroes reach the operator as
+  "Wait a bit and retry."
 - **The Windows Control Center no longer flashes PowerShell windows.** A console
   process spawned by a parent that has no console of its own — the Electron
   Control Center and the tray — gets its own window unless `windowsHide` is set,

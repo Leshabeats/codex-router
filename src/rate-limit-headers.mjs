@@ -123,15 +123,27 @@ export function requestQuotaFromRateLimitHeaders(headers, { now = Date.now() } =
 // so a dated header reads as "the provider said nothing" and the window it
 // named is spent re-asking a provider that already answered the question.
 //
-// `undefined` when the header is absent, unparseable, or already in the past;
-// otherwise at least 1, because a sub-second wait rounded to 0 would be
-// indistinguishable from no wait at all. Absence matters as much as the date
-// form: `headers.get` answers null there, and `Number(null)` is 0.
+// `undefined` means the provider named no window at all -- the header is
+// absent or unparseable -- and every caller treats that as "decide for
+// yourself". A number is what it said, including `0`: RFC 9110's
+// delay-seconds is a non-negative integer, so `Retry-After: 0` is a provider
+// answering "now", not a provider staying silent, and a date whose instant has
+// already passed says the same thing. Distinguishing the two is this
+// function's whole job; whether a zero-length wait is worth wording is the
+// caller's, and `translateGatewayError` decides it there.
+//
+// Absence is the case that made this worth a shared helper alongside the date
+// form: `headers.get` answers null for a header that was never sent, and
+// `Number(null)` is 0 -- a finite value the old call sites could not tell from
+// a real zero.
 export function retryAfterSeconds(headers, { now = Date.now() } = {}) {
   if (!headers || typeof headers.get !== "function") return undefined;
   const at = resetAt(headers.get("retry-after"), now);
-  if (at === undefined || at <= now) return undefined;
-  return Math.max(1, Math.ceil((at - now) / 1_000));
+  if (at === undefined) return undefined;
+  // `ceil` keeps a sub-second wait at 1 rather than rounding it into the zero
+  // that means "no wait"; the clamp keeps an elapsed window there instead of
+  // reporting a negative one.
+  return Math.max(0, Math.ceil((at - now) / 1_000));
 }
 
 // The soonest moment a provider is worth retrying, or undefined when nothing in

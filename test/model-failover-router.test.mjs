@@ -1582,16 +1582,21 @@ test("a rate limit that names its window as an HTTP-date still fails over", asyn
   }
 });
 
-test("a rate limit with no window does not advise retrying in 0s", async () => {
-  // `headers.get()` answers null for a header that was never sent, and
-  // `Number(null)` is 0 -- a finite number, so the translated error read as if
-  // the provider had named an immediate retry.
+test("a rate limit with no usable window asks for patience", async () => {
+  // Two ways a 429 can carry no wait worth quoting, and they used to be the
+  // same bug in opposite directions. `headers.get()` answers null for a header
+  // that was never sent and `Number(null)` is 0 -- finite, so the translated
+  // error advised retrying "in about 0s". An explicit `Retry-After: 0` is a
+  // real answer the parser now keeps as 0, and it must reach the operator as
+  // the same patient sentence rather than as that rounding-bug wording.
   const gw = await gateway(async (request, response) => {
-    await bodyJson(request);
+    const body = await bodyJson(request);
     const payload = Buffer.from(BURST_RATE_LIMIT_BODY, "utf8");
     response.writeHead(429, {
       "Content-Type": "application/json",
       "Content-Length": String(payload.length),
+      // The first turn sends no header at all; the second names zero.
+      ...(body.instructions === "zero" ? { "Retry-After": "0" } : {}),
     });
     response.end(payload);
   });
@@ -1599,11 +1604,13 @@ test("a rate limit with no window does not advise retrying in 0s", async () => {
   const child = run(routerEnv(gw.port, routerPort), { enabled: false, chain: [] });
   try {
     await waitFor(`http://127.0.0.1:${routerPort}/health`, child);
-    const result = await readRouted(routerPort, TURN_BODY);
-    assert.equal(result.status, 429);
-    const message = JSON.parse(result.body).error.message;
-    assert.match(message, /Wait a bit and retry\./);
-    assert.doesNotMatch(message, /Retry in about 0s/);
+    for (const instructions of ["absent", "zero"]) {
+      const result = await readRouted(routerPort, { ...TURN_BODY, instructions });
+      assert.equal(result.status, 429);
+      const message = JSON.parse(result.body).error.message;
+      assert.match(message, /Wait a bit and retry\./);
+      assert.doesNotMatch(message, /Retry in about 0s/);
+    }
   } finally {
     await stopChild(child);
     await closeServer(gw.server);
