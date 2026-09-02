@@ -115,6 +115,25 @@ export function requestQuotaFromRateLimitHeaders(headers, { now = Date.now() } =
   };
 }
 
+// `Retry-After` in seconds-from-now, whichever of its two legal forms the
+// provider chose. RFC 9110 allows an HTTP-date as well as delay-seconds, so
+// reading the header as a bare number answers NaN for a value that is perfectly
+// valid. Every caller that turns this header into behavior -- a failover
+// decision, a provider cooldown, the "retry in about Ns" hint -- discards NaN,
+// so a dated header reads as "the provider said nothing" and the window it
+// named is spent re-asking a provider that already answered the question.
+//
+// `undefined` when the header is absent, unparseable, or already in the past;
+// otherwise at least 1, because a sub-second wait rounded to 0 would be
+// indistinguishable from no wait at all. Absence matters as much as the date
+// form: `headers.get` answers null there, and `Number(null)` is 0.
+export function retryAfterSeconds(headers, { now = Date.now() } = {}) {
+  if (!headers || typeof headers.get !== "function") return undefined;
+  const at = resetAt(headers.get("retry-after"), now);
+  if (at === undefined || at <= now) return undefined;
+  return Math.max(1, Math.ceil((at - now) / 1_000));
+}
+
 // The soonest moment a provider is worth retrying, or undefined when nothing in
 // the response says the caller is currently limited. A cooldown map reads this.
 export function cooldownUntil(snapshot) {

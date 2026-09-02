@@ -6,6 +6,7 @@ const {
   parseRateLimitHeaders,
   requestQuotaFromRateLimitHeaders,
   resetAt,
+  retryAfterSeconds,
 } = await import(
   "../src/rate-limit-headers.mjs"
 );
@@ -138,4 +139,27 @@ test("cooldown only triggers on real exhaustion", () => {
   // An explicit retry-after is honored on its own.
   assert.equal(cooldownUntil({ retryAt: "2026-07-25T12:09:00.000Z" }), "2026-07-25T12:09:00.000Z");
   assert.equal(cooldownUntil(undefined), undefined);
+});
+
+test("retry-after reads every form RFC 9110 allows", () => {
+  const seconds = (value) =>
+    retryAfterSeconds(new Headers(value === undefined ? {} : { "retry-after": value }), {
+      now: NOW,
+    });
+  // delay-seconds, the form most OpenAI-compatible providers send.
+  assert.equal(seconds("120"), 120);
+  // HTTP-date, equally legal and what a gateway in front of the origin sends.
+  assert.equal(seconds("Sat, 25 Jul 2026 12:05:00 GMT"), 300);
+  // Sub-second waits round up: a caller that saw 0 could not tell it apart
+  // from a header that was never sent.
+  assert.equal(seconds("0.2"), 1);
+  // Nothing usable, so the caller keeps its own judgement rather than
+  // inheriting a window the provider never named.
+  assert.equal(seconds(undefined), undefined);
+  assert.equal(seconds("soon"), undefined);
+  assert.equal(seconds("0"), undefined);
+  // Already elapsed by the time the response was read.
+  assert.equal(seconds("Sat, 25 Jul 2026 11:59:00 GMT"), undefined);
+  assert.equal(retryAfterSeconds(undefined, { now: NOW }), undefined);
+  assert.equal(retryAfterSeconds({}, { now: NOW }), undefined);
 });
