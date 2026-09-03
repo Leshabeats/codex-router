@@ -41,6 +41,22 @@
   MCP-style names like `mcp__node_repl__js` are left unchanged unless they came
   from a real namespace tool, avoiding false restoration of tools that happen to
   contain `__` (#568).
+- **An exhausted opencode Go plan no longer withdraws opencode Zen, or the
+  reverse.** Provider cooldowns were keyed by the canonical provider id, which
+  is the right identity for a protocol variant — opencode's Messages and
+  Responses routes are one subscription behind two wire formats, so one being
+  empty means all of them are. Zen is the exception the code already names in
+  `cooldownScope`: it shares Go's credential and selection toggle but is billed
+  separately at its own endpoint. Filing both windows under the parent meant a
+  closed Go plan silently answered a Zen turn from a different provider
+  (`reason=cooled_until_...`), and an exhausted Zen balance withdrew the whole
+  Go subscription — in both directions a paid route taken away for a window its
+  provider never named for it. Windows are now keyed by cooldown scope
+  wherever they are recorded, read, cleared, or ranked — including the vision
+  bridge's engine selection, which read a window its own writer files under a
+  different key — and `api-forwarder` passes the provider id through
+  unresolved so the scope is decided in one place. Protocol variants still
+  share a window, which is what the existing family test holds.
 - **The Windows Control Center no longer flashes PowerShell windows.** A console
   process spawned by a parent that has no console of its own — the Electron
   Control Center and the tray — gets its own window unless `windowsHide` is set,
