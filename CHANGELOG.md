@@ -31,7 +31,16 @@
   Command Code Qwen3.8 Max 0902 and GLM-5.3-Flash; opencode Go Messages
   Qwen3.8 Flash. No new `multiAgentVersion: "v2"` stamps. Updated Command Code
   curation allowlists for the new Chat and Messages ids.
-
+- **Qwen Plan collaboration calls are now restored to namespaced shape.** Qwen
+  Plan (Alibaba Model Studio Token Plan) returns Codex v1 collaboration calls
+  as pre-flattened names (`multi_agent_v1__spawn_agent` with no namespace),
+  which Codex Desktop rejects. The Responses adapter now rebuilds the namespace
+  from flattened tool names that came from actual `type: "namespace"` entries or
+  from known collaboration namespaces (`multi_agent_v1`, `collaboration`), so
+  Desktop receives `spawn_agent` in the `multi_agent_v1` namespace instead.
+  MCP-style names like `mcp__node_repl__js` are left unchanged unless they came
+  from a real namespace tool, avoiding false restoration of tools that happen to
+  contain `__` (#568).
 - **The Windows Control Center no longer flashes PowerShell windows.** A console
   process spawned by a parent that has no console of its own — the Electron
   Control Center and the tray — gets its own window unless `windowsHide` is set,
