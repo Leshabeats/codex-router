@@ -28,6 +28,7 @@ import {
   cooldownUntil,
   parseRateLimitHeaders,
   requestQuotaFromRateLimitHeaders,
+  retryAfterSeconds,
 } from "./rate-limit-headers.mjs";
 import { recordRateLimitSnapshot } from "./rate-limit-state.mjs";
 import { recordProviderCooldown } from "./model-failover.mjs";
@@ -1122,12 +1123,6 @@ function recordUpstreamLimits(normalized, upstream) {
   });
 }
 
-function responseRetryAfterSeconds(headers, now = Date.now()) {
-  const retryAt = Date.parse(parseRateLimitHeaders(headers, { now })?.retryAt || "");
-  if (!Number.isFinite(retryAt) || retryAt <= now) return undefined;
-  return Math.max(1, Math.ceil((retryAt - now) / 1_000));
-}
-
 function healthPayload() {
   const providers = {};
   let ok = true;
@@ -1371,7 +1366,7 @@ async function handleRequest(request, response) {
             ...outcome,
             headers: outcome.responseHeaders || upstreamHeaders,
             upstreamHeaders,
-            retryAfterSeconds: responseRetryAfterSeconds(upstreamHeaders),
+            retryAfterSeconds: retryAfterSeconds(upstreamHeaders),
             quota: requestQuotaFromRateLimitHeaders(upstreamHeaders),
             committed: outcome.committed === true,
             route: "plan",
@@ -1441,7 +1436,7 @@ async function handleRequest(request, response) {
                 ...outcome,
                 headers: outcome.responseHeaders || upstreamHeaders,
                 upstreamHeaders,
-                retryAfterSeconds: responseRetryAfterSeconds(upstreamHeaders),
+                retryAfterSeconds: retryAfterSeconds(upstreamHeaders),
                 quota: requestQuotaFromRateLimitHeaders(upstreamHeaders),
                 committed: outcome.committed === true,
                 route: "plan",
@@ -1453,7 +1448,7 @@ async function handleRequest(request, response) {
             status: attemptResponse.status,
             ok: false,
             committed: false,
-            retryAfterSeconds: responseRetryAfterSeconds(attemptResponse.headers),
+            retryAfterSeconds: retryAfterSeconds(attemptResponse.headers),
             quota: requestQuotaFromRateLimitHeaders(attemptResponse.headers),
             bodyText,
             headers: attemptResponse.headers,
@@ -1543,7 +1538,7 @@ async function handleRequest(request, response) {
         ok: upstream.ok,
         committed: false,
         error: upstream.ok ? undefined : `upstream status ${upstream.status}`,
-        retryAfterSeconds: responseRetryAfterSeconds(upstream.headers),
+        retryAfterSeconds: retryAfterSeconds(upstream.headers),
         quota: requestQuotaFromRateLimitHeaders(upstream.headers),
       });
     }

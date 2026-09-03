@@ -134,6 +134,7 @@ import {
   readFailoverSettings,
   recordProviderCooldown,
 } from "./model-failover.mjs";
+import { retryAfterSeconds } from "./rate-limit-headers.mjs";
 import {
   awaitingSpawnProof,
   recordSpawnFailure,
@@ -2628,7 +2629,7 @@ async function summarize(request, payload, route, signal, { allowFailover = true
     const verdict = classifyRoutedFailure({
       status: sent.upstream.status,
       bodyText: bytes.toString("utf8"),
-      retryAfterSeconds: Number(sent.upstream.headers.get("retry-after")),
+      retryAfterSeconds: retryAfterSeconds(sent.upstream.headers),
     });
     if (!allowFailover) return { ...last, failed };
     if (!verdict.swap) return { ...last, failed };
@@ -3422,7 +3423,7 @@ async function attemptModelFailover({
     const hopVerdict = classifyRoutedFailure({
       status: upstream.status,
       bodyText: hopBodyText,
-      retryAfterSeconds: Number(upstream.headers.get("retry-after")),
+      retryAfterSeconds: retryAfterSeconds(upstream.headers),
     });
     // A transport retry stops as soon as another provider gives any real HTTP
     // answer. Walking onward would turn an application failure into a silent
@@ -3830,7 +3831,7 @@ async function handleResponses(request, response, requestUrl) {
       const verdict = classifyRoutedFailure({
         status: upstream.status,
         bodyText: failedBodyText,
-        retryAfterSeconds: Number(upstream.headers.get("retry-after")),
+        retryAfterSeconds: retryAfterSeconds(upstream.headers),
       });
       if (verdict.swap && !exactRouteProbe) {
         // Believe the provider about when it will be back before trying anyone
@@ -3899,7 +3900,7 @@ async function handleResponses(request, response, requestUrl) {
     if (route && !upstream.ok) {
       const provider = providerForModel(route);
       const retryAfterHeader = upstream.headers.get("retry-after");
-      const retryAfterSeconds = Number(retryAfterHeader);
+      const retrySeconds = retryAfterSeconds(upstream.headers);
       const translatedStatus = gatewayErrorStatus({
         status: upstream.status,
         bodyText: failedBodyText,
@@ -3920,9 +3921,7 @@ async function handleResponses(request, response, requestUrl) {
               : provider?.ownedBy || provider?.displayName || route.provider,
           providerKind: provider?.kind,
           providerAuthMode: provider?.authMode,
-          retryAfterSeconds: Number.isFinite(retryAfterSeconds)
-            ? retryAfterSeconds
-            : undefined,
+          retryAfterSeconds: retrySeconds,
         }),
       );
       recordUsageEvent({

@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- **A `Retry-After` expressed as a date is now honored.** RFC 9110 allows
+  `Retry-After` to carry either delay-seconds or an HTTP-date. The router read
+  the header as a bare number, so a dated value became `NaN` and every consumer
+  discarded it: a burst 429 that named its own window did not qualify for
+  failover, no provider cooldown was recorded, and the translated error lost
+  its "retry in about Ns" hint. The turn therefore died on a provider that had
+  said exactly when it would be back, and each later turn paid the same refusal
+  again for the length of the window. The header now goes through the same
+  `resetAt` parser the `x-ratelimit-*` snapshot already used, which reads
+  delay-seconds, an HTTP-date, and a Go-style duration alike, and
+  `api-forwarder`'s private copy of that conversion is gone in favor of the
+  shared one, so there is one place the header is read.
+- **A 429 that named no wait no longer advises retrying "in about 0s".**
+  `headers.get` answers null for a header that was never sent and
+  `Number(null)` is `0` — a finite value, so the rate-limit message quoted a
+  zero-second wait as though the provider had asked for one. Absence and an
+  unparseable value now read as no window at all, while a delay of `0` (which
+  RFC 9110 permits) and a date that has already passed are kept as the zero
+  they are, because a provider saying "now" is not a provider saying nothing.
+  Only a positive wait is worth wording, so both zeroes reach the operator as
+  "Wait a bit and retry."
 - **The Windows Control Center no longer flashes PowerShell windows.** A console
   process spawned by a parent that has no console of its own — the Electron
   Control Center and the tray — gets its own window unless `windowsHide` is set,
