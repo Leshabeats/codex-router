@@ -21,7 +21,7 @@ import {
   readServiceProcessState,
   serviceProcessOwns,
 } from "./service-process.mjs";
-import { protectPrivateFile } from "./file-security.mjs";
+import { ensureCheckoutReadable, protectPrivateFile } from "./file-security.mjs";
 import { providerApiKeyServiceEnvironment } from "./provider-api-key-service-environment.mjs";
 import { serviceProxyEnvironment } from "./proxy-environment.mjs";
 import {
@@ -460,6 +460,11 @@ if (command === "render") {
   // failure, and must exit non-zero without touching the host filesystem.
   guardLauncherWrite();
   try {
+    // Ensure the checkout directory is readable by the Limited-level scheduled
+    // task. An elevated installer creates files with ACLs that only allow the
+    // elevated account to read them, while the task runs at Limited level
+    // (issue #548). Grant Users read access so the task can load modules.
+    ensureCheckoutReadable(SOURCE_ROOT);
     // Writing the launchers belongs inside the try: renameSync over the .vbs
     // raises a sharing violation while a running wscript.exe still holds it
     // open, and that used to throw out of install with nothing to catch it.
