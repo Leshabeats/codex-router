@@ -1174,6 +1174,32 @@ function writeEmptyCompletionError(response, code, message) {
   });
 }
 
+// Codex treats a streamed Responses `error` event as terminal, but can keep a
+// Grok OAuth turn open while its HTTP client retries a bare gateway 5xx. The
+// local Grok gateway has already exhausted its bounded retries by the time this
+// branch runs, so a second retry loop in the client only turns a stated outage
+// into a stale Working badge. Preserve every other provider's existing HTTP
+// contract, plus ordinary JSON errors for non-streaming Grok calls and its
+// actionable 4xx responses; only the observed terminal Grok shape crosses the
+// Responses SSE boundary this way.
+function writeTranslatedGatewayError(
+  response,
+  status,
+  payload,
+  { provider, stream = false } = {},
+) {
+  if (provider === "grok-oauth" && stream && status >= 500) {
+    writeEventStreamHead(response);
+    writeStreamErrorEvent(response, {
+      code: payload?.error?.type || "server_error",
+      message: payload?.error?.message || "The routed provider could not complete the request.",
+    });
+    response.end();
+    return;
+  }
+  writeJson(response, status, payload);
+}
+
 function timingMetric(value) {
   return Number.isFinite(value) ? String(value) : "unknown";
 }
@@ -3911,24 +3937,24 @@ async function handleResponses(request, response, requestUrl) {
         bodyText: failedBodyText,
       });
       if (retryAfterHeader) response.setHeader("Retry-After", retryAfterHeader);
-      writeJson(
-        response,
-        translatedStatus,
-        translateGatewayError({
-          status: upstream.status,
-          // Already drained above so the failover classifier could read it; a
-          // second `.text()` on the same response yields "".
-          bodyText: failedBodyText ?? "",
-          modelName: route.displayName || route.slug,
-          providerName:
-            provider?.transport === "ollama"
-              ? "Ollama"
-              : provider?.ownedBy || provider?.displayName || route.provider,
-          providerKind: provider?.kind,
-          providerAuthMode: provider?.authMode,
-          retryAfterSeconds: retrySeconds,
-        }),
-      );
+      const translatedError = translateGatewayError({
+        status: upstream.status,
+        // Already drained above so the failover classifier could read it; a
+        // second `.text()` on the same response yields "".
+        bodyText: failedBodyText ?? "",
+        modelName: route.displayName || route.slug,
+        providerName:
+          provider?.transport === "ollama"
+            ? "Ollama"
+            : provider?.ownedBy || provider?.displayName || route.provider,
+        providerKind: provider?.kind,
+        providerAuthMode: provider?.authMode,
+        retryAfterSeconds: retrySeconds,
+      });
+      writeTranslatedGatewayError(response, translatedStatus, translatedError, {
+        provider: route.provider,
+        stream: payload.stream === true,
+      });
       recordUsageEvent({
         model: route.slug,
         provider: canonicalProviderId(route.provider),
