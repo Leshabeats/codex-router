@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Empty `tools: []` and dangling `tool_choice` are now stripped for all
+  API-forwarder routes, not only `qwen38-community`.** Strict upstreams (vLLM
+  >=0.20 Pydantic) refuse both an empty tools array and `tool_choice` with no
+  tools present. Codex sends `tools: []` on compaction and plain chat, so
+  without this strip every compaction against strict providers 400s. The
+  repair was previously applied only to the `qwen38-community` profile;
+  it is now applied to all routes so compaction and plain chat work against
+  any strict provider. Real non-empty tool arrays and their tool_choice are
+  forwarded unchanged. (Fixes #588)
 - **A `Retry-After` expressed as a date is now honored.** RFC 9110 allows
   `Retry-After` to carry either delay-seconds or an HTTP-date. The router read
   the header as a bare number, so a dated value became `NaN` and every consumer

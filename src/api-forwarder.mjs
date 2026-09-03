@@ -589,6 +589,35 @@ function stripSearchContentTypes(tools) {
   return stripped ? repaired : tools;
 }
 
+/**
+ * Strip empty `tools: []` and dangling `tool_choice` from a payload.
+ * Returns whether the payload was changed.
+ * 
+ * The vLLM build in qwen38-community and other strict upstreams (>=0.20 Pydantic)
+ * refuse an empty tools array and tool_choice with no tools present. Codex sends
+ * `tools: []` on compaction and plain chat, so without this strip every compaction
+ * against strict providers 400s. An empty tools array is valid for lenient providers
+ * and explicitly permitted by OpenAI's schema, so the repair belongs at this last
+ * hop rather than in the compaction path. Omitting the empty field is also valid for
+ * providers like OpenCode Go.
+ */
+function stripEmptyTools(payload) {
+  let changed = false;
+  if (Array.isArray(payload.tools) && payload.tools.length === 0) {
+    delete payload.tools;
+    changed = true;
+  }
+  // Delete dangling tool_choice only after tools is gone or known absent.
+  // Keep tool_choice when a real non-empty tools array is present.
+  if (!Array.isArray(payload.tools) || payload.tools.length === 0) {
+    if ("tool_choice" in payload) {
+      delete payload.tool_choice;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 function normalizeBody(buffer, contentType, route) {
   if (!buffer.length || !String(contentType || "").includes("application/json")) {
     const error = new Error("API-provider requests require a JSON body.");
@@ -721,6 +750,16 @@ function normalizeBody(buffer, contentType, route) {
   // one tool this endpoint accepts it on.
   if (provider.id === "meta" && Array.isArray(payload.tools)) {
     payload.tools = stripSearchContentTypes(payload.tools);
+  }
+  // Strip empty tools array and dangling tool_choice for all routes.
+  // Strict upstreams (vLLM >=0.20 Pydantic) refuse both, and Codex sends
+  // tools: [] on compaction and plain chat. Log when a request is changed.
+  if (stripEmptyTools(payload)) {
+    if (!QUIET) {
+      console.error(
+        `[api-forwarder] model=${model.gatewayModel} stripped empty tools/tool_choice`,
+      );
+    }
   }
   if (Array.isArray(payload.messages)) {
     payload.messages = sanitizeChatToolHistory(payload.messages, provider, model);
@@ -906,22 +945,6 @@ function normalizeBody(buffer, contentType, route) {
     // and it folds onto `max` because that is the tier it is asking for.
     // Everything else passes through as the literal the endpoint accepts.
     if (payload.reasoning_effort === "ultra") payload.reasoning_effort = "max";
-    // The same build refuses two tool shapes Codex sends routinely, both
-    // measured live: an empty list answers "`tools` must not be an empty
-    // array. Either provide at least one tool or omit the field entirely",
-    // and a choice with nothing to choose from answers "When using
-    // `tool_choice`, `tools` must be set". `summarize()` in the router sends
-    // `tools: []` on every compaction, and this model auto-compacts at 230K of
-    // its 262K window, so left alone every compaction against it 400s. Strip
-    // the empty list first, then drop the tool choice that strip leaves
-    // dangling -- the order is what keeps the second rejection from replacing
-    // the first. The repair belongs at this last hop rather than in the
-    // compaction path because an empty tool list is legal on every other
-    // forwarder, and it is exactly how compaction disables tool use there.
-    if (Array.isArray(payload.tools) && payload.tools.length === 0) delete payload.tools;
-    if (!Array.isArray(payload.tools) || payload.tools.length === 0) {
-      delete payload.tool_choice;
-    }
     // Third measured refusal on the same endpoint: "System message must be at
     // the beginning." A conversation that already satisfies the rule is left
     // byte-identical -- see normalizeQwen38SystemMessages for the rule, the
