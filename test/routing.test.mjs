@@ -6319,8 +6319,12 @@ function genericSearchModelFixture() {
     inputModalities: ["text"],
   });
   const plain = entry("plain-model", 100);
+  const historyCompatible = {
+    ...entry("history-compatible-model", 101),
+    supportsSearchHistory: true,
+  };
   const searchable = {
-    ...entry("search-model", 101),
+    ...entry("search-model", 102),
     searchTool: { mode: "hosted" },
   };
   writeFileSync(providersFile, `${JSON.stringify({
@@ -6337,9 +6341,9 @@ function genericSearchModelFixture() {
   })}\n`);
   writeFileSync(userModelsFile, `${JSON.stringify({
     version: 1,
-    models: [plain, searchable],
+    models: [plain, historyCompatible, searchable],
   })}\n`);
-  return { dir, providersFile, userModelsFile, plain, searchable };
+  return { dir, providersFile, userModelsFile, plain, historyCompatible, searchable };
 }
 
 test("router enforces generic model search capability on ordinary and compact turns", async () => {
@@ -6518,6 +6522,64 @@ test("router refuses unsupported search history on selected generic turns and co
     }
     assert.equal(gatewayRequests.length, 2);
     assert.ok(gatewayRequests.every((request) => request.model === fixture.searchable.gatewayModel));
+  } finally {
+    await stopChild(router);
+    await closeServer(gateway.server);
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test("router replays verified search history without exposing a new search tool", async () => {
+  const gatewayRequests = [];
+  const gateway = await mockServer(async (request, response) => {
+    gatewayRequests.push(await bodyJson(request));
+    json(response, 200, {
+      id: `resp-${gatewayRequests.length}`,
+      object: "response",
+      status: "completed",
+      output: [{
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "ok" }],
+      }],
+    });
+  });
+  const fixture = genericSearchModelFixture();
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    MODEL_ROUTER_STATE_DIR: fixture.dir,
+    MODEL_ROUTER_GENERIC_PROVIDERS: fixture.providersFile,
+    MODEL_ROUTER_USER_MODELS: fixture.userModelsFile,
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_QUIET: "1",
+  });
+  const headers = {
+    Authorization: `Bearer ${CALLER_KEY}`,
+    "Content-Type": "application/json",
+  };
+  const history = [{
+    type: "web_search_call",
+    id: "completed-search-history",
+    status: "completed",
+    action: { type: "search", query: "router contract" },
+  }];
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    for (const suffix of ["", "/compact"]) {
+      const response = await fetch(`${routerBase(routerPort)}/responses${suffix}`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ model: fixture.historyCompatible.slug, input: history }),
+      });
+      assert.equal(response.status, 200, router.testErrors());
+    }
+    assert.equal(gatewayRequests.length, 2);
+    assert.ok(gatewayRequests.every((request) => (
+      request.model === fixture.historyCompatible.gatewayModel &&
+      (!Array.isArray(request.tools) || request.tools.every((tool) => tool.type !== "web_search"))
+    )));
   } finally {
     await stopChild(router);
     await closeServer(gateway.server);
