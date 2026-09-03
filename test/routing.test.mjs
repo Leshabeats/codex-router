@@ -795,6 +795,75 @@ test("router rewrites gateway errors to name the failing provider", async () => 
   }
 });
 
+test("a routed Grok 502 terminates a streamed turn with one SSE error", async () => {
+  const gateway = await mockServer(async (request, response) => {
+    await bodyJson(request);
+    json(response, 502, {
+      error: {
+        message:
+          "litellm.BadGatewayError: BadGatewayError: OpenAIException - The Grok OAuth forwarder could not complete the request. Received Model Group=grok-oauth-grok-4-6\nAvailable Model Group Fallbacks=None LiteLLM Retried: 2 times, LiteLLM Max Retries: 2",
+        type: null,
+        param: null,
+        code: "502",
+      },
+    });
+  });
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_QUIET: "1",
+  });
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const jsonResponse = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer CODEX_CALLER_SECRET",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "grok-oauth/grok-4.6",
+        input: "ordinary non-streaming request",
+        stream: false,
+      }),
+    });
+    assert.equal(jsonResponse.status, 502);
+    assert.equal((await jsonResponse.json()).error.type, "server_error");
+
+    const response = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer CODEX_CALLER_SECRET",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "grok-oauth/grok-4.6",
+        input: "continue after the tool result",
+        stream: true,
+      }),
+    });
+    const body = await response.text();
+    assert.equal(response.status, 200, body);
+    assert.match(response.headers.get("content-type"), /text\/event-stream/);
+    assert.equal((body.match(/event: error/g) || []).length, 1);
+    const eventData = body.split(/\r?\n/).find((line) => line.startsWith("data: {"));
+    assert.ok(eventData, body);
+    const event = JSON.parse(eventData.slice(5).trim());
+    assert.equal(event.type, "error");
+    assert.equal(event.code, "server_error");
+    assert.match(event.message, /Grok 4\.6 \(OAuth\).*unavailable/);
+    assert.match(event.message, /HTTP 502/);
+    assert.doesNotMatch(event.message, /litellm/i);
+    assert.doesNotMatch(body, /response\.completed/);
+    assert.doesNotMatch(body, /data: \[DONE\]/);
+  } finally {
+    await stopChild(router);
+    await closeServer(gateway.server);
+  }
+});
+
 test("router dispatches aliased native slugs to the mapped external model", async () => {
   const gatewayRequests = [];
   const gateway = await mockServer(async (request, response) => {

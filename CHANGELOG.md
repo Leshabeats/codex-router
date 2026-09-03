@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **A Grok OAuth outage now terminates streamed Codex turns instead of leaving
+  a stale Working badge.** After the local gateway has exhausted its bounded
+  retries, a final Grok 5xx on an explicitly streamed Responses request is
+  returned as one terminal SSE `error` event. Non-streaming Grok calls,
+  actionable 4xx failures, and every other provider retain their HTTP status
+  and JSON body, while usage metering still records Grok's real failure status.
+
 - **Empty `tools: []` is now stripped for all API-forwarder routes, not only
   `qwen38-community`.** Strict upstreams (vLLM >=0.20 Pydantic) refuse an empty
   tools array. Codex sends `tools: []` on compaction and plain chat, so without
