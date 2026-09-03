@@ -132,6 +132,10 @@ test("OpenCode Free Muse curation carries its model-specific tool-choice repair"
     curatedModelRequestProfile("opencode-free", "muse-spark-1.2-contributor-free"),
     "auto-tool-choice",
   );
+  assert.equal(
+    curatedModelRequestProfile("opencode-free", "muse-spark-1.3-contributor-free"),
+    "auto-tool-choice",
+  );
   assert.equal(curatedModelRequestProfile("opencode-free", "nemotron-3-ultra-free"), undefined);
 });
 
@@ -367,6 +371,35 @@ test("OpenCode protocol normalization preserves metadata and deduplicates old ro
     normalizeCurationModels([old, correct], "opencode-free"),
     [{ ...correct, requestProfile: "auto-tool-choice" }],
   );
+});
+
+test("Both Muse Spark 1.2 and 1.3 contributor free curate to opencode-free-responses", () => {
+  for (const upstreamModel of [
+    "muse-spark-1.2-contributor-free",
+    "muse-spark-1.3-contributor-free",
+  ]) {
+    const entry = userModelEntry({
+      providerId: "opencode-free",
+      upstreamId: upstreamModel,
+      priority: 147,
+      requestProfile: "auto-tool-choice",
+      metadata: {
+        contextWindow: 1_048_576,
+        autoCompact: 900_000,
+        inputModalities: ["text", "image"],
+        isFree: true,
+      },
+    });
+    const [normalized] = normalizeCurationModels([entry], "opencode-free");
+    assert.equal(normalized.provider, "opencode-free-responses", `${upstreamModel} provider`);
+    assert.equal(
+      normalized.slug,
+      `opencode-free-responses/${upstreamModel}`,
+      `${upstreamModel} slug`,
+    );
+    assert.equal(normalized.upstreamModel, upstreamModel);
+    assert.equal(normalized.multiAgentVersion, undefined, `${upstreamModel} not v2`);
+  }
 });
 
 test("an additive model run keeps unrelated curated metadata", () => {
@@ -967,7 +1000,10 @@ test("curation publishes through the overlay finalizer, never the installer", ()
 // checked-in precedent is config/zai/coding/glm-5.3.json, whose description
 // records the probe that justified 1M. Curated entries have the same field.
 test("a documented OpenCode Free window ships with the sourcing that justifies it", () => {
-  for (const id of ["muse-spark-1.2-contributor-free"]) {
+  for (const id of [
+    "muse-spark-1.2-contributor-free",
+    "muse-spark-1.3-contributor-free",
+  ]) {
     const description = curatedModelDescription("opencode-free", id);
     assert.equal(typeof description, "string", `${id} has no sourcing note`);
     // Naming the figure, and naming what published it, is the whole point.
@@ -988,6 +1024,10 @@ test("the Responses variant resolves the same sourcing as its base provider", ()
   assert.equal(
     curatedModelDescription("opencode-free-responses", "muse-spark-1.2-contributor-free"),
     curatedModelDescription("opencode-free", "muse-spark-1.2-contributor-free"),
+  );
+  assert.equal(
+    curatedModelDescription("opencode-free-responses", "muse-spark-1.3-contributor-free"),
+    curatedModelDescription("opencode-free", "muse-spark-1.3-contributor-free"),
   );
 });
 

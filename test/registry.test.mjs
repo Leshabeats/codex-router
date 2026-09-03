@@ -435,8 +435,10 @@ test("provider registry exposes configured API and OAuth model families", () => 
   assert.equal(opencodeFreeResponses.anonymousModelPolicy, "explicit-models");
   assert.deepEqual(opencodeFreeResponses.anonymousModels, [
     "muse-spark-1.2-contributor-free",
+    "muse-spark-1.3-contributor-free",
   ]);
   assert.equal(anonymousModelAllowed(opencodeFreeResponses, "muse-spark-1.2-contributor-free"), true);
+  assert.equal(anonymousModelAllowed(opencodeFreeResponses, "muse-spark-1.3-contributor-free"), true);
   assert.equal(anonymousModelAllowed(opencodeFreeResponses, "x-preview-f-free"), false);
   assert.equal(anonymousModelAllowed(opencodeFreeResponses, "big-pickle"), false);
   assert.equal(anonymousModelAllowed(opencodeFreeResponses, "arbitrary-free"), false);
