@@ -594,22 +594,22 @@ function stripSearchContentTypes(tools) {
  * Returns whether the payload was changed.
  * 
  * The vLLM build in qwen38-community and other strict upstreams (>=0.20 Pydantic)
- * refuse an empty tools array and tool_choice with no tools present. Codex sends
- * `tools: []` on compaction and plain chat, so without this strip every compaction
- * against strict providers 400s. An empty tools array is valid for lenient providers
- * and explicitly permitted by OpenAI's schema, so the repair belongs at this last
- * hop rather than in the compaction path. Omitting the empty field is also valid for
- * providers like OpenCode Go.
+ * refuse an empty tools array. Codex sends `tools: []` on compaction and plain chat,
+ * so without this strip every compaction against strict providers 400s. An empty tools
+ * array is valid for lenient providers and explicitly permitted by OpenAI's schema, so
+ * the repair belongs at this last hop rather than in the compaction path. Omitting the
+ * empty field is also valid for providers like OpenCode Go.
+ * 
+ * Drops tool_choice only when an empty tools: [] was actually stripped, not when tools
+ * was never present. Requests with tool_choice but no tools field are forwarded as-is
+ * for profiles that need them.
  */
 function stripEmptyTools(payload) {
   let changed = false;
-  if (Array.isArray(payload.tools) && payload.tools.length === 0) {
+  const hadEmptyTools = Array.isArray(payload.tools) && payload.tools.length === 0;
+  if (hadEmptyTools) {
     delete payload.tools;
     changed = true;
-  }
-  // Delete dangling tool_choice only after tools is gone or known absent.
-  // Keep tool_choice when a real non-empty tools array is present.
-  if (!Array.isArray(payload.tools) || payload.tools.length === 0) {
     if ("tool_choice" in payload) {
       delete payload.tool_choice;
       changed = true;
@@ -945,6 +945,12 @@ function normalizeBody(buffer, contentType, route) {
     // and it folds onto `max` because that is the tier it is asking for.
     // Everything else passes through as the literal the endpoint accepts.
     if (payload.reasoning_effort === "ultra") payload.reasoning_effort = "max";
+    // The same endpoint also refuses tool_choice when tools is absent or still
+    // empty after the global strip ("When using `tool_choice`, `tools` must be
+    // set"). Drop dangling tool_choice for this profile only.
+    if (!Array.isArray(payload.tools) || payload.tools.length === 0) {
+      delete payload.tool_choice;
+    }
     // Third measured refusal on the same endpoint: "System message must be at
     // the beginning." A conversation that already satisfies the rule is left
     // byte-identical -- see normalizeQwen38SystemMessages for the rule, the

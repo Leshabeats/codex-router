@@ -5107,6 +5107,26 @@ test("API forwarder strips empty tools for all routes, not only qwen38-community
     const forwarded = upstreamRequests.at(-1).body;
     assert.deepEqual(forwarded.tools, realTools);
     assert.equal(forwarded.tool_choice, "auto");
+
+    // A request with tool_choice but no tools field is forwarded as-is for
+    // non-qwen38 routes. The strip only drops tool_choice when it actually
+    // stripped an empty tools: [] array.
+    const choiceWithoutTools = await fetch(`http://127.0.0.1:${forwarderPort}/v1/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${INTERNAL_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "opencode-go-mimo-v2-5",
+        tool_choice: "auto",
+        messages: [{ role: "user", content: "test" }],
+      }),
+    });
+    assert.equal(choiceWithoutTools.status, 200);
+    const choiceForwarded = upstreamRequests.at(-1).body;
+    assert.equal("tools" in choiceForwarded, false);
+    assert.equal(choiceForwarded.tool_choice, "auto");
   } finally {
     await stopChild(forwarder);
     await closeServer(upstream.server);
