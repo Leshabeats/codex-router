@@ -31,6 +31,10 @@
   Command Code Qwen3.8 Max 0902 and GLM-5.3-Flash; opencode Go Messages
   Qwen3.8 Flash. No new `multiAgentVersion: "v2"` stamps. Updated Command Code
   curation allowlists for the new Chat and Messages ids.
+- **OpenCode Free Responses now lists Muse Spark 1.3 Contributor Free.** The
+  anonymous Zen Responses route now includes both `muse-spark-1.2-contributor-free`
+  and `muse-spark-1.3-contributor-free`. Same documented exception: no API key
+  needed, but the free catalog can vanish and Meta may train on these turns.
 - **Qwen Plan collaboration calls are now restored to namespaced shape.** Qwen
   Plan (Alibaba Model Studio Token Plan) returns Codex v1 collaboration calls
   as pre-flattened names (`multi_agent_v1__spawn_agent` with no namespace),

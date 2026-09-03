@@ -896,7 +896,8 @@ function needsZenFreeToolCompatibility(route) {
   const providerId = providerForModel(route)?.id;
   return (
     (providerId === "opencode-free-responses" &&
-      route.upstreamModel === "muse-spark-1.2-contributor-free")
+      (route.upstreamModel === "muse-spark-1.2-contributor-free" ||
+        route.upstreamModel === "muse-spark-1.3-contributor-free"))
   );
 }
 
