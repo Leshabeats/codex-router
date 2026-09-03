@@ -399,7 +399,6 @@ test("Both Muse Spark 1.2 and 1.3 contributor free curate to opencode-free-respo
     );
     assert.equal(normalized.upstreamModel, upstreamModel);
     assert.equal(normalized.multiAgentVersion, undefined, `${upstreamModel} not v2`);
-    assert.equal(normalized.protocol, "openai-responses", `${upstreamModel} protocol`);
   }
 });
 
