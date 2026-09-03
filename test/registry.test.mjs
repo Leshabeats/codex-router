@@ -446,16 +446,6 @@ test("provider registry exposes configured API and OAuth model families", () => 
   assert.equal(anonymousModelAllowed(opencodeFree, "big-pickle"), true);
   assert.equal(anonymousModelAllowed(opencodeFree, "mimo-v2.5-free"), true);
   assert.equal(anonymousModelAllowed(opencodeFree, "glm-5.1"), false);
-  // Both Muse Spark 1.2 and 1.3 contributor free are listed on opencode-free-responses
-  // as Responses protocol models, not v2.
-  const muse12 = MODEL_BY_SLUG.get("opencode-free-responses/muse-spark-1.2-contributor-free");
-  assert.equal(muse12.provider, "opencode-free-responses");
-  assert.equal(muse12.upstreamModel, "muse-spark-1.2-contributor-free");
-  assert.equal(muse12.multiAgentVersion, undefined);
-  const muse13 = MODEL_BY_SLUG.get("opencode-free-responses/muse-spark-1.3-contributor-free");
-  assert.equal(muse13.provider, "opencode-free-responses");
-  assert.equal(muse13.upstreamModel, "muse-spark-1.3-contributor-free");
-  assert.equal(muse13.multiAgentVersion, undefined);
   const kiloFree = PROVIDERS.get("kilo-free");
   assert.equal(kiloFree.authMode, "anonymous");
   assert.equal(kiloFree.baseUrl, "https://api.kilo.ai/api/gateway");

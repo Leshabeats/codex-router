@@ -373,6 +373,36 @@ test("OpenCode protocol normalization preserves metadata and deduplicates old ro
   );
 });
 
+test("Both Muse Spark 1.2 and 1.3 contributor free curate to opencode-free-responses", () => {
+  for (const upstreamModel of [
+    "muse-spark-1.2-contributor-free",
+    "muse-spark-1.3-contributor-free",
+  ]) {
+    const entry = userModelEntry({
+      providerId: "opencode-free",
+      upstreamId: upstreamModel,
+      priority: 147,
+      requestProfile: "auto-tool-choice",
+      metadata: {
+        contextWindow: 1_048_576,
+        autoCompact: 900_000,
+        inputModalities: ["text", "image"],
+        isFree: true,
+      },
+    });
+    const [normalized] = normalizeCurationModels([entry], "opencode-free");
+    assert.equal(normalized.provider, "opencode-free-responses", `${upstreamModel} provider`);
+    assert.equal(
+      normalized.slug,
+      `opencode-free-responses/${upstreamModel}`,
+      `${upstreamModel} slug`,
+    );
+    assert.equal(normalized.upstreamModel, upstreamModel);
+    assert.equal(normalized.multiAgentVersion, undefined, `${upstreamModel} not v2`);
+    assert.equal(normalized.protocol, "openai-responses", `${upstreamModel} protocol`);
+  }
+});
+
 test("an additive model run keeps unrelated curated metadata", () => {
   const existing = curated("accounts/fireworks/models/kimi-k3", { contextWindow: 262144 });
   const result = planCuration({
