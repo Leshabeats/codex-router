@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+- **Routed reasoning models no longer leak `<think>` chains into the visible
+  answer.** Qwen (and other reasoning models bridged through LiteLLM's
+  chat-completions path) sometimes emit their chain-of-thought inline in the
+  content channel as `<think>...</think>` instead of on the reasoning channel,
+  so LiteLLM relays it as `output_text` and the answer renders behind the
+  model's reasoning — or behind a bare `</think>` when the open tag is consumed
+  upstream but the close is not. A new `ReasoningTagStripper` egress transform
+  (`src/reasoning-tag-stripper.mjs`) removes `<think>...</think>` spans and
+  orphan tags from the message text across the streamed `output_text.delta`s
+  (buffering a tag split across deltas), the terminal `output_text.done`, and
+  the stored message item. It covers the reasoning-delimiter family the model
+  varies to (`think`/`thinking`/`reason`/`reasoning`), leaves the structured
+  reasoning channel and every non-message item untouched, and passes clean
+  answers through unchanged. Routed providers only.
+
+- **Routed turns that mix assistant text and a tool call no longer render
+  twice.** LiteLLM's chat-completions-to-Responses bridge
+  (`use_chat_completions_api`) could leave the assistant `message` item open
+  across a `function_call` item and emit its `output_item.done` late, so Codex
+  committed the streamed text once while it was live and again when the delayed
+  close arrived — the same sentence appeared twice, with the tool call after it.
+  It surfaced intermittently on qwen-plan turns that both speak and call a tool.
+  A new `ItemLifecycleNormalizer` egress transform (`src/item-lifecycle-normalizer.mjs`),
+  added last in the routed-provider response pipeline, holds events for a
+  newly-opened output item until the currently-open item closes, restoring the
+  Responses contract that every item is `done` before the next
+  `output_item.added`. It reorders only — no event body is added, dropped, or
+  rewritten — and engages only when the upstream actually interleaves; clean
+  streams and native OpenAI streams pass through unchanged.
+
 - **A Grok OAuth outage now terminates streamed Codex turns instead of leaving
   a stale Working badge.** After the local gateway has exhausted its bounded
   retries, a final Grok 5xx on an explicitly streamed Responses request is
