@@ -329,7 +329,9 @@ emits a status sentence, and never calls a tool. On turns following a user
 message, attempt 1 still streams live; when the client offered tools and the
 short-text/token trigger fires, the forwarder retries once and appends a
 retry tool call onto the same stream. On turns following a tool result, the
-stricter certified-repair path below stages the response before sending it.
+stricter certified-repair path opens the response as soon as xAI returns its
+headers and relays reasoning, but stages the short visible answer until the
+terminal event proves it is safe.
 After a conversation has exhibited that shape once, later user-message turns
 buffer only a short visible prefix up to the same text threshold. Headers and
 preceding reasoning remain live, and a tool call or longer answer releases the
@@ -356,7 +358,13 @@ Both attempts are billed. The usage returned to Codex reports only the
 selected attempt's context size, while the local ledger retains the aggregate
 as billed input/output tokens. The response sets
 `progress_only_retried: true`, and the log line `progress-only-retried=true`
-is never gated on `MODEL_ROUTER_QUIET`. To disable the invariant and see the
+is never gated on `MODEL_ROUTER_QUIET`. That line includes `attempt_*` and
+`repair_*` header, first-event, and total durations plus each request's
+`x-grok-req-id`. A failure while reading either stream emits
+`upstream-phase-failed=true` with the same safe fields. `headers_ms` shows how
+long xAI took to accept the request; `first_event_ms` separates an upstream
+that emitted nothing from output the forwarder deliberately withheld. Prompt
+and response content are never logged. To disable the invariant and see the
 raw first attempt, set `CODEX_ROUTER_GROK_PROGRESS_ONLY_RETRY=0`; this kill
 switch is intentionally unsafe for unattended tool loops.
 

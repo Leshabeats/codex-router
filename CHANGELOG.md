@@ -9,6 +9,15 @@
   waited 300s on `/health` and rolled the checkout back. The LaunchAgent now
   renders `ProcessType=Standard`. Do not revert to `Background` (LiteLLM
   starved to ~4% CPU in `fb40f8c`).
+- **Grok OAuth post-tool turns no longer stay silent while their repair is
+  certified.** The forwarder now opens a streamed Chat Completions response as
+  soon as xAI returns its headers and relays reasoning immediately, while still
+  withholding the short visible sentence that may be a progress-only stop.
+  A certified retry supplies the final answer or tool call; an invalid repair
+  ends the already-open stream with one terminal error and never emits
+  `[DONE]`. Retry and failure logs now include per-attempt header, first-event,
+  and total timings plus the safe `x-grok-req-id`, so upstream silence can be
+  distinguished from router-side staging without logging prompt or output.
 
 - **Routed reasoning models no longer leak `<think>` chains into the visible
   answer.** Qwen (and other reasoning models bridged through LiteLLM's
