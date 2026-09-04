@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **macOS KeepAlive no longer uses launchd `Adaptive`, which starved startup.**
+  Adaptive only boosts on XPC transactions; the router is localhost HTTP, so
+  the job stayed at Background. Node OAuth/API forwarders then missed the 30s
+  health budget, `KeepAlive` restart-looped, and tray Update / doctor --fix
+  waited 300s on `/health` and rolled the checkout back. The LaunchAgent now
+  renders `ProcessType=Standard`. Do not revert to `Background` (LiteLLM
+  starved to ~4% CPU in `fb40f8c`).
+
 - **Routed reasoning models no longer leak `<think>` chains into the visible
   answer.** Qwen (and other reasoning models bridged through LiteLLM's
   chat-completions path) sometimes emit their chain-of-thought inline in the

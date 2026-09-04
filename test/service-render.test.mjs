@@ -119,6 +119,11 @@ test("background service definitions render for macOS, Linux, and Windows", () =
     assert.match(launchd, /<string>io\.github\.codex-router<\/string>/);
     assert.match(launchd, /<key>PATH<\/key>/);
     assert.match(launchd, /CODEX_ROUTER_STATE_DIR/);
+    // Background starves LiteLLM; Adaptive is a no-op without XPC and starves
+    // Node forwarders past the 30s OAuth health budget. Keep Standard.
+    assert.match(launchd, /<key>ProcessType<\/key>\s*<string>Standard<\/string>/);
+    assert.doesNotMatch(launchd, /<key>ProcessType<\/key>\s*<string>Adaptive<\/string>/);
+    assert.doesNotMatch(launchd, /<key>ProcessType<\/key>\s*<string>Background<\/string>/);
 
     const systemd = render("service-linux.mjs", "linux", testRoot);
     assert.match(systemd, /\[Service\]/);
