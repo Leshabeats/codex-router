@@ -68,6 +68,17 @@ async function waitHealth(base, child) {
   throw new Error(`health timeout: ${child.testErrors()}`);
 }
 
+async function waitChildError(child, pattern, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const errors = child.testErrors();
+    if (pattern.test(errors)) return errors;
+    if (child.exitCode !== null) throw new Error(`exited before log marker: ${errors}`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`stderr marker timeout: ${child.testErrors()}`);
+}
+
 async function stop(child) {
   if (child.exitCode !== null) return;
   child.kill("SIGTERM");
@@ -1292,8 +1303,8 @@ test("opens a post-tool stream before classification while holding uncertified t
     assert.match(body, /"content":"The chart axis is months\."/);
     assert.doesNotMatch(body, /__codex_router_submit_final/);
     assert.match(body, /data: \[DONE\]/);
-    assert.match(
-      child.testErrors(),
+    await waitChildError(
+      child,
       /progress-only-retried=true retries=1 model=grok-4\.6 prefer=final attempt_req=[0-9a-f-]{36} attempt_headers_ms=\d+ attempt_first_event_ms=\d+ attempt_total_ms=\d+ repair_req=[0-9a-f-]{36} repair_headers_ms=\d+ repair_first_event_ms=\d+ repair_total_ms=\d+/,
     );
   } finally {
