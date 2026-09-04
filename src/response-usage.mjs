@@ -321,6 +321,7 @@ export class ResponseUsageTransform extends Transform {
   // a fast model read as slow. See #192.
   #firstTokenAt;
   #completedResponseObserved = false;
+  #terminalErrorObserved = false;
 
   // `estimatedInputTokens` arrives only on routed requests large enough that a
   // reported zero cannot be true. Without it this transform observes and
@@ -511,6 +512,7 @@ export class ResponseUsageTransform extends Transform {
     if (!data || data === "[DONE]") return undefined;
     try {
       const payload = JSON.parse(data);
+      if (payload?.type === "error") this.#terminalErrorObserved = true;
       this.#observe(payload);
       return payload;
     } catch {
@@ -553,5 +555,9 @@ export class ResponseUsageTransform extends Transform {
 
   completedResponseObserved() {
     return this.#completedResponseObserved;
+  }
+
+  terminalErrorObserved() {
+    return this.#terminalErrorObserved;
   }
 }

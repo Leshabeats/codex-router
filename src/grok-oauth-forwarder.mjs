@@ -645,6 +645,7 @@ async function handleChatCompletions(request, response) {
     toolNameMapper: (name) => toolNameForCodex(name, { viewImageAlias }),
   });
   let emittedDeltaCount = 0;
+  const heldStrictContentDeltas = [];
   let streamStarted = false;
 
   const startStream = () => {
@@ -658,15 +659,38 @@ async function handleChatCompletions(request, response) {
   };
 
   // A post-tool turn can only be classified after its terminal event. Open the
-  // SSE response immediately, but hold its short visible text so Codex sees
-  // liveness and reasoning without accepting an uncertified progress sentence.
+  // SSE response immediately, but hold all visible text so Codex sees liveness
+  // and reasoning without accepting an uncertified progress sentence.
   // Once the head is committed, a failed repair becomes one terminal SSE error.
   if (wantsStream) startStream();
+
+  const emitHeldStrictContent = () => {
+    if (!wantsStream || !streamStarted || heldStrictContentDeltas.length === 0) return;
+    for (const delta of heldStrictContentDeltas) {
+      response.write(OPENAI_ROLE_CHUNK(id, created, model, delta));
+    }
+    heldStrictContentDeltas.length = 0;
+  };
 
   const emitPendingDeltas = () => {
     if (!wantsStream || !streamStarted) return;
     while (emittedDeltaCount < turnState.deltas.length) {
       const delta = turnState.deltas[emittedDeltaCount];
+      if (
+        strictAfterToolRepair &&
+        Object.hasOwn(delta, "content") &&
+        turnState.toolCalls.length === 0
+      ) {
+        heldStrictContentDeltas.push(delta);
+        emittedDeltaCount += 1;
+        continue;
+      }
+      // A client tool call certifies attempt 1 as actionable. Release any
+      // earlier prose before its tool delta so the original event order stays
+      // intact; a no-tool attempt remains held through terminal classification.
+      if (strictAfterToolRepair && turnState.toolCalls.length > 0) {
+        emitHeldStrictContent();
+      }
       if (
         bufferShortProgress &&
         Object.hasOwn(delta, "content") &&
@@ -853,6 +877,7 @@ async function handleChatCompletions(request, response) {
     startStream();
     if (wasStarted && !strictRepairOutputEmitted) {
       emitPendingDeltas();
+      emitHeldStrictContent();
     } else if (!wasStarted) {
       for (const delta of turn.deltas || []) {
         response.write(OPENAI_ROLE_CHUNK(id, created, model, delta));

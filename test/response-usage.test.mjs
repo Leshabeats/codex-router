@@ -390,6 +390,17 @@ test("a response with no estimate behind it is forwarded untouched", async () =>
   assert.equal(transform.substitutedInputTokens(), undefined);
 });
 
+test("observes a terminal SSE error without rewriting the stream", async () => {
+  const body = [
+    'event: error\n',
+    'data: {"type":"error","code":"local_router_stream_failed","message":"repair failed"}\n\n',
+  ];
+  const transform = new ResponseUsageTransform("text/event-stream");
+  assert.equal(await passThrough(transform, body), body.join(""));
+  assert.equal(transform.terminalErrorObserved(), true);
+  assert.equal(transform.completedResponseObserved(), false);
+});
+
 test("bytes the router is not rewriting survive rewrite mode exactly", async () => {
   // Only the one substituted line is re-encoded. Everything else -- including a
   // byte sequence that is not valid UTF-8 at all -- has to leave as it arrived,

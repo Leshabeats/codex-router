@@ -864,6 +864,62 @@ test("a routed Grok 502 terminates a streamed turn with one SSE error", async ()
   }
 });
 
+test("a routed Grok terminal SSE error is recorded as a failed turn", async () => {
+  const gateway = await mockServer(async (request, response) => {
+    await bodyJson(request);
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    response.end(
+      [
+        'event: response.reasoning_summary_text.delta\n',
+        'data: {"type":"response.reasoning_summary_text.delta","delta":"Checking the tool result."}\n\n',
+        'event: error\n',
+        'data: {"type":"error","code":"local_router_stream_failed","message":"Grok stopped after a tool result and its repair request failed upstream.","param":null}\n\n',
+      ].join(""),
+    );
+  });
+  const routerPort = await openPort();
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "codex-router-grok-terminal-error-"));
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_STATE_DIR: stateDir,
+    CODEX_ROUTER_QUIET: "1",
+  });
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const response = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer CODEX_CALLER_SECRET",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "grok-oauth/grok-4.6",
+        input: "continue after the tool result",
+        stream: true,
+      }),
+    });
+    const body = await response.text();
+    assert.equal(response.status, 200, body);
+    assert.equal((body.match(/event: error/g) || []).length, 1);
+    assert.match(body, /local_router_stream_failed/);
+
+    const event = await waitForUsageEvent(
+      stateDir,
+      (candidate) => candidate.model === "grok-oauth/grok-4.6",
+      router,
+    );
+    assert.equal(event.provider, "grok-oauth");
+    assert.equal(event.status, 502);
+    assert.equal("streamAborted" in event, false);
+  } finally {
+    await stopChild(router);
+    await closeServer(gateway.server);
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
 test("router dispatches aliased native slugs to the mapped external model", async () => {
   const gatewayRequests = [];
   const gateway = await mockServer(async (request, response) => {

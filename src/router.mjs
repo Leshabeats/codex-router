@@ -4121,6 +4121,16 @@ async function handleResponses(request, response, requestUrl) {
       (clientGone || (response.destroyed && !response.writableFinished)) &&
       !nativeCompletedBeforeClose;
     finalStatus = clientWalkedAway ? 0 : upstream.status;
+    if (
+      !clientWalkedAway &&
+      route?.provider === "grok-oauth" &&
+      usageTransform?.terminalErrorObserved?.() === true
+    ) {
+      // The Grok forwarder has already committed the HTTP 200 SSE head when a
+      // post-tool repair can fail. Keep the client-visible terminal event, but
+      // account for the turn as a provider failure rather than a success.
+      finalStatus = 502;
+    }
     if (streamedPreludeFailureKind && !clientWalkedAway) finalStatus = 502;
     emptyCompletion = emptyCompletionGuard?.isEmpty() === true && !clientWalkedAway;
     emptyCompletionPreludeLimit ||=

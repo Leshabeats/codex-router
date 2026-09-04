@@ -1197,6 +1197,8 @@ test("a short stop after a tool result is nudged to continue, regardless of word
 
 test("opens a post-tool stream before classification while holding uncertified text", async () => {
   let inbound = 0;
+  const uncertifiedProgress = "I will inspect the figure next. ".repeat(8);
+  assert.ok(uncertifiedProgress.length > 120);
   let releaseFirstAttempt;
   const firstAttemptGate = new Promise((resolve) => {
     releaseFirstAttempt = resolve;
@@ -1209,7 +1211,7 @@ test("opens a post-tool stream before classification while holding uncertified t
       res.write(
         sse([
           { type: "response.reasoning_summary_text.delta", delta: "Checking the tool result." },
-          { type: "response.output_text.delta", delta: "I will inspect the figure next." },
+          { type: "response.output_text.delta", delta: uncertifiedProgress },
         ]),
       );
       await firstAttemptGate;
