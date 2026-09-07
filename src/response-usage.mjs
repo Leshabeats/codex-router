@@ -334,14 +334,16 @@ export class ResponseUsageTransform extends Transform {
   // first token appears, and counting that silence as generation is what makes
   // a fast model read as slow. See #192.
   #firstTokenAt;
+  #onEvent;
   #completedResponseObserved = false;
   #terminalErrorObserved = false;
 
   // `estimatedInputTokens` arrives only on routed requests large enough that a
   // reported zero cannot be true. Without it this transform observes and
   // forwards the response byte for byte, exactly as it always did.
-  constructor(contentType = "", { estimatedInputTokens } = {}) {
+  constructor(contentType = "", { estimatedInputTokens, onEvent } = {}) {
     super();
+    this.#onEvent = typeof onEvent === "function" ? onEvent : undefined;
     const declared = String(contentType).toLowerCase();
     this.#eventStream = declared.includes("text/event-stream");
     // The ChatGPT backend answers /responses with an SSE body and no
@@ -536,6 +538,8 @@ export class ResponseUsageTransform extends Transform {
   }
 
   #observe(payload) {
+    // Diagnostics must not change parsing, metering, or the relayed bytes.
+    try { this.#onEvent?.(payload); } catch { /* Observer failure is non-fatal. */ }
     this.#noteFirstToken(payload);
     if (payload?.type === "response.completed") this.#completedResponseObserved = true;
     const usage = tokenUsageFromPayload(payload);

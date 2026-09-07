@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Routed workers expose read-only request progress.** `bin/control activity
+  [thread-id]` reports active requests and bounded recent outcomes behind the
+  caller capability, including observed stream events and cancellation causes.
+  Quiet polling never ends a request, and the shipped agent guidance separates
+  polling intervals from worker deadlines.
+- **Grok repairs require a successful response terminal.** Failed, incomplete,
+  and truncated streams return a terminal error without releasing withheld
+  client actions or private final answers. Reasoning remains live.
 - **The ChatGPT Web provider is removed: using it risked an OpenAI account
   ban.** `chatgpt-web` routed Codex turns into an unofficial browser automation
   of chatgpt.com, driven through a separately installed launcher on loopback

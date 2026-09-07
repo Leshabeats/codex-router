@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { pickerCommandArgs } from "./control-args.mjs";
 import { readControlHealth } from "./control-health.mjs";
+import { readControlActivity } from "./control-activity.mjs";
 import { nativeSubagentCertification, promoteNativeMultiAgent } from "./catalog.mjs";
 import {
   applyModelOverlayPublication,
@@ -3450,6 +3451,9 @@ if (args.includes("--probe")) {
   await handleChatGptSession(args[1]);
 } else if (args[0] === "chatgpt-account-pool") {
   await handleChatGptAccountSwitch(args[1], args[2], args[3]);
+} else if (args[0] === "activity") {
+  if (args.length > 2) throw new Error("Usage: control activity [thread-id]");
+  process.stdout.write(`${JSON.stringify(await readControlActivity({ threadId: args[1] }))}\n`);
 } else if (args[0] === "health") {
   await printHealth();
 } else if (args[0] === "maintenance") {

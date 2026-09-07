@@ -393,6 +393,24 @@ is correct." is not talked into a call the client would then run. Raise
 `CODEX_ROUTER_GROK_PROGRESS_ONLY_MAX_TEXT` to fire less often on that
 user-message path; those settings do not weaken the post-tool invariant.
 
+For a quiet worker, run `bin/control activity <thread-id>` from the installed
+checkout. The command reads the capability-protected `/v1/activity` endpoint;
+unauthenticated `/health` keeps its existing compact contract. Active requests
+remain visible until their handlers release resources, independently of tray
+record retention. The snapshot includes router-upstream attempt count, byte/event
+timestamps, observed phase, and recent outcomes (128 entries, ten minutes, in
+memory). These observations do not identify raw provider timing or retries inside
+LiteLLM/xAI. Metrics cover the main Responses dispatch/stream; uninstrumented
+subpaths such as compaction/embeddings show `unobserved` and omit attempt count.
+An HTTP 200 envelope with a failed/incomplete response event is still `failed`.
+No prompt, answer, tool arguments, or credentials are retained.
+An unavailable probe reports `unknown`, not an empty/completed worker. A changed
+instance ID means the router restarted and lost its recent history. A cancellation
+records a client disconnect or an execution deadline; a disconnect cannot identify
+whether the user or a parent agent initiated it. Wait timeouts and quiet streams
+are not authorization to replace a worker. Consult its native task state and
+confirm that the old writer has stopped before starting another.
+
 Both attempts are billed. The usage returned to Codex reports only the
 selected attempt's context size, while the local ledger retains the aggregate
 as billed input/output tokens. The response sets

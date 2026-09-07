@@ -850,7 +850,7 @@ test("streams visible output before the upstream turn completes", async () => {
   }
 });
 
-test("streams a function call that appears only in a final unterminated SSE block", async () => {
+test("streams a done-only function call with an unterminated successful terminal SSE block", async () => {
   let inbound = 0;
   const backend = await mockBackend(async (_req, res) => {
     inbound += 1;
@@ -865,7 +865,8 @@ test("streams a function call that appears only in a final unterminated SSE bloc
         arguments: '{"cmd":"dir"}',
       },
     };
-    res.end(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n`);
+    res.write(sse([event]));
+    res.end('event: response.completed\ndata: {"type":"response.completed"}\n');
   });
   const port = await openPort();
   const dir = mkdtempSync(path.join(os.tmpdir(), "grok-oauth-final-block-"));
@@ -1362,6 +1363,210 @@ test("a streamed post-tool repair exposes reasoning and only the certified tool 
     assert.match(body, /"name":"exec_command"/);
     assert.match(body, /"finish_reason":"tool_calls"/);
     assert.match(body, /data: \[DONE\]/);
+  } finally {
+    await stop(child);
+    await new Promise((r) => backend.server.close(r));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("post-tool repair releases held actions only after a successful terminal", async (t) => {
+  let scenario;
+  const backend = await mockBackend(async (_req, res) => {
+    const current = scenario;
+    current.inbound += 1;
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    if (current.inbound === 1) {
+      res.end(sse([
+        { type: "response.output_text.delta", delta: "Uncertified progress." },
+        { type: "response.completed", response: { usage: { input_tokens: 100, output_tokens: 20 } } },
+      ]));
+      return;
+    }
+    const name = current.privateFinal ? "__codex_router_submit_final" : "exec_command";
+    const args = JSON.stringify(current.privateFinal
+      ? { answer: "Certified repair answer." }
+      : { cmd: "repair-command" });
+    res.write(sse([
+      { type: "response.output_item.added", item: { type: "function_call", id: "fc_repair", call_id: "call_repair", name } },
+      { type: "response.function_call_arguments.delta", item_id: "fc_repair", delta: args },
+      { type: "response.output_item.done", item: { type: "function_call", id: "fc_repair", call_id: "call_repair", name, arguments: args } },
+      // Reading this marker proves the preceding call frames were processed
+      // before the terminal gate is released; reasoning must remain live.
+      { type: "response.reasoning_summary_text.delta", delta: "Repair call prepared." },
+    ]));
+    current.repairReady.resolve();
+    await current.terminalGate.promise;
+    if (current.terminal === "eof") {
+      res.end("data: [DONE]\n\n");
+    } else if (current.terminal === "truncated") {
+      res.end('event: response.completed\ndata: {"type":"response.comp');
+    } else {
+      res.end(sse([{
+        type: `response.${current.terminal}`,
+        response: {
+          status: current.terminal,
+          usage: { input_tokens: 110, output_tokens: 30 },
+          ...(current.terminal === "failed" ? { error: { message: "private upstream failure detail" } } : {}),
+        },
+      }]));
+    }
+  });
+  const port = await openPort();
+  const dir = mkdtempSync(path.join(os.tmpdir(), "grok-oauth-repair-terminal-"));
+  const child = startForwarder(port, backend.port, writeSession(dir));
+  const base = `http://127.0.0.1:${port}`;
+  const within = async (promise, message) => {
+    let timeout;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error(message)), 2_000); }),
+      ]);
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+  try {
+    await waitHealth(base, child);
+    for (const stream of [false, true]) {
+      for (const privateFinal of [false, true]) {
+        for (const terminal of ["completed", "failed", "incomplete", "eof", "truncated"]) {
+          await t.test(`${stream ? "SSE" : "JSON"} ${privateFinal ? "private final" : "client tool"}: ${terminal}`, async () => {
+            scenario = { stream, privateFinal, terminal, inbound: 0,
+              repairReady: Promise.withResolvers(), terminalGate: Promise.withResolvers() };
+            const responsePromise = fetch(`${base}/v1/chat/completions`, {
+              method: "POST", headers: auth,
+              body: JSON.stringify({
+                model: "grok-4.6",
+                messages: [
+                  { role: "assistant", tool_calls: [{ id: "c1", type: "function", function: { name: "exec_command", arguments: "{}" } }] },
+                  { role: "tool", tool_call_id: "c1", content: "rendered page" },
+                ],
+                tools: [{ type: "function", function: { name: "exec_command", parameters: { type: "object" } } }],
+                stream,
+              }),
+            });
+            try {
+              await within(scenario.repairReady.promise, "repair attempt did not start");
+              let resp;
+              let reader;
+              let body = "";
+              const decoder = new TextDecoder();
+              if (stream) {
+                resp = await within(responsePromise, "SSE response head stayed buffered");
+                reader = resp.body.getReader();
+                await within((async () => {
+                  while (!body.includes("Repair call prepared.")) {
+                    const { value, done } = await reader.read();
+                    if (done) throw new Error("response ended before the terminal gate");
+                    body += decoder.decode(value, { stream: true });
+                  }
+                })(), "repair reasoning stayed buffered");
+                assert.doesNotMatch(body, /Uncertified progress|tool_calls|repair-command|Certified repair answer|__codex_router_submit_final|\[DONE\]/);
+              }
+              scenario.terminalGate.resolve();
+              resp ??= await responsePromise;
+              if (reader) {
+                for (;;) {
+                  const { value, done } = await reader.read();
+                  if (done) break;
+                  body += decoder.decode(value, { stream: true });
+                }
+                body += decoder.decode();
+              } else {
+                body = await resp.text();
+              }
+              assert.equal(scenario.inbound, 2, "a failed repair must never replay");
+              assert.doesNotMatch(body, /Uncertified progress|__codex_router_submit_final|private upstream failure detail/);
+              if (terminal === "completed") {
+                assert.equal(resp.status, 200);
+                if (stream) {
+                  assert.equal((body.match(/data: \[DONE\]/g) || []).length, 1);
+                  assert.doesNotMatch(body, /event: error/);
+                  assert.equal((body.match(privateFinal ? /"content":"Certified repair answer\."/g : /"name":"exec_command"/g) || []).length, 1);
+                  assert.match(body, privateFinal ? /"finish_reason":"stop"/ : /"finish_reason":"tool_calls"/);
+                } else {
+                  const json = JSON.parse(body);
+                  assert.equal(json.choices[0].finish_reason, privateFinal ? "stop" : "tool_calls");
+                  if (privateFinal) assert.equal(json.choices[0].message.content, "Certified repair answer.");
+                  else assert.equal(json.choices[0].message.tool_calls[0].function.arguments, '{"cmd":"repair-command"}');
+                }
+              } else {
+                assert.doesNotMatch(body, /repair-command|Certified repair answer|"name":"exec_command"|"finish_reason":"(?:stop|tool_calls)"|\[DONE\]/);
+                if (stream) {
+                  assert.equal(resp.status, 200);
+                  assert.equal((body.match(/event: error/g) || []).length, 1);
+                  assert.match(body, /local_router_stream_failed/);
+                } else {
+                  assert.equal(resp.status, 502);
+                  assert.equal(JSON.parse(body).error.code, `grok_upstream_response_${["eof", "truncated"].includes(terminal) ? "missing" : terminal}`);
+                  assert.doesNotMatch(body, /choices|tool_calls/);
+                }
+              }
+            } finally {
+              scenario.terminalGate.resolve();
+              await responsePromise.then((resp) => resp.body?.cancel().catch(() => {})).catch(() => {});
+            }
+          });
+        }
+      }
+    }
+  } finally {
+    scenario?.terminalGate.resolve();
+    await stop(child);
+    await new Promise((r) => backend.server.close(r));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an unsuccessful first turn emits one error without replaying its live client tool", async (t) => {
+  let terminal;
+  let inbound;
+  const backend = await mockBackend(async (_req, res) => {
+    inbound += 1;
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    res.write(sse(TOOL_EVENTS.filter((event) => event.type !== "response.completed")));
+    res.end(terminal === "missing" ? "data: [DONE]\n\n" : sse([{ type: `response.${terminal}` }]));
+  });
+  const port = await openPort();
+  const dir = mkdtempSync(path.join(os.tmpdir(), "grok-oauth-terminal-no-replay-"));
+  const child = startForwarder(port, backend.port, writeSession(dir));
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    await waitHealth(base, child);
+    for (terminal of ["failed", "incomplete", "missing"]) {
+      for (const stream of [false, true]) {
+        await t.test(`${stream ? "SSE" : "JSON"}: ${terminal}`, async () => {
+          inbound = 0;
+          const resp = await fetch(`${base}/v1/chat/completions`, {
+            method: "POST", headers: auth,
+            body: JSON.stringify({
+              model: "grok-4.6",
+              messages: [
+                { role: "assistant", tool_calls: [{ id: "c1", type: "function", function: { name: "exec_command", arguments: "{}" } }] },
+                { role: "tool", tool_call_id: "c1", content: "rendered page" },
+              ],
+              tools: [{ type: "function", function: { name: "exec_command", parameters: { type: "object" } } }],
+              stream,
+            }),
+          });
+          const body = await resp.text();
+          assert.equal(inbound, 1);
+          assert.doesNotMatch(body, /"finish_reason":"(?:stop|tool_calls)"|\[DONE\]/);
+          if (stream) {
+            assert.equal(resp.status, 200);
+            assert.equal((body.match(/"name":"exec_command"/g) || []).length, 1);
+            assert.equal((body.match(/event: error/g) || []).length, 1);
+            assert.match(body, /local_router_stream_failed/);
+          } else {
+            assert.equal(resp.status, 502);
+            assert.equal(JSON.parse(body).error.code, `grok_upstream_response_${terminal}`);
+            assert.doesNotMatch(body, /tool_calls/);
+          }
+        });
+      }
+    }
   } finally {
     await stop(child);
     await new Promise((r) => backend.server.close(r));

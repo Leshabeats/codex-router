@@ -664,6 +664,25 @@ async function handleChatCompletions(request, response) {
   // Once the head is committed, a failed repair becomes one terminal SSE error.
   if (wantsStream) startStream();
 
+  const rejectUnsuccessfulTurn = (turn, phase, attempt) => {
+    if (turn.terminalStatus === "completed") return false;
+    const status = turn.terminalStatus;
+    const message = status === "missing"
+      ? "Grok ended the upstream response stream without a successful terminal event."
+      : `Grok returned an unsuccessful upstream response (${status}).`;
+    console.error(
+      `[grok-oauth] upstream-terminal-failed=true phase=${phase} model=${model} terminal=${status} ${upstreamAttemptTiming(phase, attempt)}`,
+    );
+    if (wantsStream && streamStarted) {
+      endStreamedResponse(response, { message });
+    } else {
+      writeJson(response, 502, {
+        error: { type: "api_error", code: `grok_upstream_response_${status}`, message },
+      });
+    }
+    return true;
+  };
+
   const emitHeldStrictContent = () => {
     if (!wantsStream || !streamStarted || heldStrictContentDeltas.length === 0) return;
     for (const delta of heldStrictContentDeltas) {
@@ -720,6 +739,10 @@ async function handleChatCompletions(request, response) {
   }
 
   let turn = finalizeTurn(turnState);
+  // Never repair or replay an unsuccessful first attempt. Its live tool
+  // deltas may already have reached the client; only one terminal error is
+  // legal now. Withheld/backfilled deltas stay withheld on failure.
+  if (rejectUnsuccessfulTurn(turn, "attempt", firstAttempt)) return;
   emitPendingDeltas();
   let retried = false;
   let repairFailure;
@@ -786,6 +809,10 @@ async function handleChatCompletions(request, response) {
         throw error;
       }
       const second = finalizeTurn(secondState);
+      // Keep both client tools and the private final answer withheld until
+      // response.completed. An item.done followed by EOF/failure is not a
+      // certified repair, even when its arguments look complete.
+      if (rejectUnsuccessfulTurn(second, "repair", repairAttempt)) return;
       retried = true;
       const repair = strictAfterToolRepair
         ? classifyAfterToolRepair(second)
@@ -814,6 +841,7 @@ async function handleChatCompletions(request, response) {
             ? toolCallDeltas(second)
             : [...turn.deltas, ...toolCallDeltas(second)],
           finishReason: "tool_calls",
+          terminalStatus: "completed",
         };
         if (streamStarted) emittedDeltaCount = turn.deltas.length;
       } else if (repair.action === "final") {
@@ -830,6 +858,7 @@ async function handleChatCompletions(request, response) {
           usage: selectedRetryUsage(turn.usage, second.usage),
           deltas: [{ content: repair.contentText }],
           finishReason: "stop",
+          terminalStatus: "completed",
         };
         emittedDeltaCount = 0;
       } else if (repair.action === "fail") {

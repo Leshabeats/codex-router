@@ -55,6 +55,7 @@ test("createTurnState can restore a provider-facing tool alias", () => {
       arguments: '{"path":"C:\\\\image.jpg"}',
     },
   });
+  applyResponsesEvent(state, { type: "response.completed" });
   const turn = finalizeTurn(state);
   assert.equal(turn.toolCalls[0].function.name, "view_image");
   assert.equal(turn.deltas[0].tool_calls[0].function.name, "view_image");
@@ -76,6 +77,7 @@ test("finalizeTurn backfills streamed arguments when added is followed by done w
         arguments: '{"cmd":"dir"}',
       },
     },
+    { type: "response.completed" },
   ]);
   const streamedArgs = turn.deltas
     .flatMap((delta) => delta.tool_calls || [])
@@ -102,6 +104,7 @@ test("collectResponsesEvents maps custom_tool_call onto a function tool call", (
         input: '{"x":1}',
       },
     },
+    { type: "response.completed" },
   ]);
   assert.equal(turn.toolCalls[0].id, "call_9");
   assert.equal(turn.toolCalls[0].function.name, "exec");
@@ -155,6 +158,7 @@ test("collectResponsesEvents maps xAI reasoning deltas onto reasoning_content", 
     { type: "response.reasoning_summary_text.delta", delta: "先想" },
     { type: "response.reasoning_text.delta", delta: "再想" },
     { type: "response.output_text.delta", delta: "答案" },
+    { type: "response.completed" },
   ]);
   assert.equal(turn.reasoningText, "先想再想");
   assert.equal(turn.contentText, "答案");
@@ -193,6 +197,7 @@ test("parseSseBlockEvent skips malformed JSON and leaves handlers to throw", () 
 
 test("isProgressOnlyStop requires short text, no tools, and enough output tokens", () => {
   const progress = {
+    terminalStatus: "completed",
     contentText: "Still thinking about it.",
     toolCalls: [],
     usage: { completion_tokens: 1660 },
@@ -211,6 +216,7 @@ test("isProgressOnlyStop requires short text, no tools, and enough output tokens
 
 test("isProgressOnlyStop retries a cheap stop after a tool result", () => {
   const stop = {
+    terminalStatus: "completed",
     contentText: "The figures are ready.",
     toolCalls: [],
     usage: { completion_tokens: 95 },
@@ -224,6 +230,7 @@ test("isProgressOnlyStop requires certification for long prose after a tool resu
   assert.equal(
     isProgressOnlyStop(
       {
+        terminalStatus: "completed",
         contentText: "This may look final, but the router cannot infer task completion. ".repeat(4),
         toolCalls: [],
         usage: { completion_tokens: 20 },
@@ -270,8 +277,8 @@ test("requestOffersClientTools ignores hosted-only or empty tool lists", () => {
 });
 
 test("shouldPreferRetryTurn keeps the first answer when the retry also has no tools", () => {
-  assert.equal(shouldPreferRetryTurn({ toolCalls: [] }), false);
-  assert.equal(shouldPreferRetryTurn({ toolCalls: [{ id: "c1" }] }), true);
+  assert.equal(shouldPreferRetryTurn({ terminalStatus: "completed", toolCalls: [] }), false);
+  assert.equal(shouldPreferRetryTurn({ terminalStatus: "completed", toolCalls: [{ id: "c1" }] }), true);
 });
 
 test("withProgressOnlyNudge appends a user message so the instructions prefix stays put", () => {
@@ -308,6 +315,7 @@ test("withProgressOnlyNudge leads with continue after a tool result", () => {
 test("classifyAfterToolRepair accepts only tools or a certified non-empty final answer", () => {
   assert.deepEqual(
     classifyAfterToolRepair({
+      terminalStatus: "completed",
       toolCalls: [{ id: "c1", function: { name: "exec_command", arguments: "{}" } }],
       contentText: "status",
     }),
@@ -315,17 +323,19 @@ test("classifyAfterToolRepair accepts only tools or a certified non-empty final 
   );
   assert.deepEqual(
     classifyAfterToolRepair({
+      terminalStatus: "completed",
       toolCalls: [
         { function: { name: REPAIR_FINAL_TOOL, arguments: JSON.stringify({ answer: "Done." }) } },
       ],
     }),
     { action: "final", contentText: "Done." },
   );
-  assert.deepEqual(classifyAfterToolRepair({ toolCalls: [], contentText: "Still working." }), {
+  assert.deepEqual(classifyAfterToolRepair({ terminalStatus: "completed", toolCalls: [], contentText: "Still working." }), {
     action: "fail",
   });
   assert.deepEqual(
     classifyAfterToolRepair({
+      terminalStatus: "completed",
       toolCalls: [
         { function: { name: REPAIR_FINAL_TOOL, arguments: JSON.stringify({ answer: "   " }) } },
       ],
@@ -333,10 +343,62 @@ test("classifyAfterToolRepair accepts only tools or a certified non-empty final 
     { action: "fail" },
   );
   assert.deepEqual(classifyAfterToolRepair({
+    terminalStatus: "completed",
     toolCalls: [{ function: { name: REPAIR_FINAL_TOOL, arguments: "{" } }],
   }), {
     action: "fail",
   });
+});
+
+test("only response.completed certifies a tool call or private final answer", () => {
+  for (const name of ["exec_command", REPAIR_FINAL_TOOL]) {
+    const call = {
+      type: "response.output_item.done",
+      item: {
+        type: "function_call", id: "fc_terminal", call_id: "call_terminal", name,
+        arguments: JSON.stringify(name === REPAIR_FINAL_TOOL ? { answer: "Done." } : { cmd: "dir" }),
+      },
+    };
+    for (const terminalStatus of ["completed", "failed", "incomplete", "missing"]) {
+      const turn = collectResponsesEvents([
+        call,
+        ...(terminalStatus === "missing" ? [] : [{ type: `response.${terminalStatus}` }]),
+      ]);
+      assert.equal(turn.terminalStatus, terminalStatus);
+      assert.equal(turn.finishReason, terminalStatus === "completed" ? "tool_calls" : null);
+      assert.deepEqual(classifyAfterToolRepair(turn), terminalStatus === "completed"
+        ? name === REPAIR_FINAL_TOOL ? { action: "final", contentText: "Done." } : { action: "tools" }
+        : { action: "fail" });
+      assert.equal(shouldPreferRetryTurn(turn), terminalStatus === "completed");
+    }
+  }
+});
+
+test("a failed or missing terminal cannot become a progress-only retry", () => {
+  for (const terminalStatus of [undefined, "failed", "incomplete", "missing"]) {
+    const turn = { terminalStatus, contentText: "Continuing.", usage: { completion_tokens: 1660 } };
+    assert.equal(isProgressOnlyStop(turn), false);
+    assert.equal(isProgressOnlyStop(turn, { afterToolResult: true }), false);
+  }
+});
+
+test("an upstream failure cannot be revived by later completed or tool events", () => {
+  for (const failure of [
+    { type: "response.failed" },
+    { type: "response.incomplete" },
+    { type: "error" },
+    { type: "response.completed", response: { status: "failed" } },
+    { type: "response.completed", response: { status: "incomplete" } },
+  ]) {
+    const turn = collectResponsesEvents([
+      failure,
+      { type: "response.output_item.done", item: { type: "function_call", id: "late", name: "exec_command", arguments: "{}" } },
+      { type: "response.completed" },
+    ]);
+    assert.equal(turn.finishReason, null);
+    assert.equal(turn.toolCalls.length, 0);
+    assert.deepEqual(classifyAfterToolRepair(turn), { action: "fail" });
+  }
 });
 
 test("selectedRetryUsage reports selected context and separate aggregate billing", () => {

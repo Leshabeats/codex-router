@@ -164,6 +164,7 @@ import {
   supportsOpenAIModelEndpoint,
 } from "./openai-endpoint-policy.mjs";
 import { recordUsageEvent } from "./usage-events.mjs";
+import { createRequestProgress } from "./request-progress.mjs";
 import {
   classifySsePrefix,
   HEADERLESS_SSE_SNIFF_BYTES,
@@ -376,6 +377,7 @@ const agentPayloadCacheMetrics = {
   coalesced: 0,
 };
 
+const requestProgress = createRequestProgress();
 let requestSequence = 0;
 const activityRecords = new Map();
 const inFlightRequests = new Map();
@@ -451,6 +453,7 @@ function beginRequestActivity({ request, response, controller } = {}) {
     error.code = "ERR_ROUTER_ACTIVE_REQUEST_LIMIT";
     throw error;
   }
+  const progress = requestProgress.begin();
   const requestId = ++requestSequence;
   const startedAt = Date.now();
   let finished = false;
@@ -459,6 +462,7 @@ function beginRequestActivity({ request, response, controller } = {}) {
   const finish = (status) => {
     if (finished) return;
     finished = true;
+    progress.finish(status);
     if (executionTimer) clearTimeout(executionTimer);
     activityRecords.delete(requestId);
     inFlightRequests.delete(requestId);
@@ -467,6 +471,7 @@ function beginRequestActivity({ request, response, controller } = {}) {
   const abortAtExecutionDeadline = () => {
     if (finished || deadlineExceeded) return;
     deadlineExceeded = true;
+    progress.cancel("execution_deadline");
     const error = new Error("Router request exceeded its execution deadline.");
     error.code = "ERR_ROUTER_REQUEST_TIMEOUT";
     error.status = 504;
@@ -484,8 +489,10 @@ function beginRequestActivity({ request, response, controller } = {}) {
   inFlightRequests.set(requestId, { startedAt });
   activityRecords.set(requestId, { startedAt });
   return {
+    progress,
     setRoute({ provider, model, sessionName, ...metadata } = {}) {
       if (!provider || finished) return;
+      progress.setRoute({ provider, model, ...metadata });
       // Once presentation bookkeeping expires, later route updates must not
       // resurrect it. The operation remains counted in `inFlightRequests`.
       if (!activityRecords.has(requestId)) return;
@@ -3440,6 +3447,7 @@ async function attemptModelFailover({
   normalizedInput,
   agingEnabled,
   searchContract,
+  progress,
 }) {
   const settings = readFailoverSettings();
   if (!settings.enabled) return undefined;
@@ -3494,12 +3502,14 @@ async function attemptModelFailover({
         logFailover(route, model, verdict.reason, status, "search-capability-changed");
         continue;
       }
+      progress?.attempt();
       upstream = await fetch(built.target, {
         method: "POST",
         headers: built.headers,
         body: built.body,
         signal,
       });
+      progress?.headers();
     } catch (error) {
       if (signal.aborted) throw error;
       const compatibilityCode = candidateBuildCompatibilityCode(error);
@@ -3565,6 +3575,12 @@ async function handleResponses(request, response, requestUrl) {
   const startedAt = Date.now();
   const controller = new AbortController();
   const activity = beginRequestActivity({ request, response, controller });
+  const fetchObservedUpstream = async (...args) => {
+    activity.progress.attempt();
+    const upstream = await fetch(...args);
+    activity.progress.headers();
+    return upstream;
+  };
   let clientGone = false;
   let requestedModel = "";
   let route;
@@ -3598,6 +3614,7 @@ async function handleResponses(request, response, requestUrl) {
   let usageRecorded = false;
   bindClientAbort(request, response, () => {
     clientGone = true;
+    activity.progress.cancel("client_disconnected");
     controller.abort();
   });
   try {
@@ -3902,6 +3919,7 @@ async function handleResponses(request, response, requestUrl) {
         // Routed traffic terminates at the local gateway, which has its own
         // error translation and Retry-After handling below; leave it exactly
         // as it was.
+        fetchImpl: fetchObservedUpstream,
         retries: route ? 0 : undefined,
         canRetry: () => nothingRelayed(response),
         onRetry: (event) => logUpstreamRetry(event, requestedModel, requestUrl.pathname),
@@ -3975,6 +3993,7 @@ async function handleResponses(request, response, requestUrl) {
         // rejection again.
         recordProviderCooldown(route.provider, verdict);
         const moved = await attemptModelFailover({
+          progress: activity.progress,
           request,
           response,
           payload,
@@ -4075,12 +4094,13 @@ async function handleResponses(request, response, requestUrl) {
     const upstreamContentType = upstream.headers.get("content-type") || "";
     const createResponsePipeline = (contentType) => {
       const usageObserver = new ResponseUsageTransform(contentType, {
+        onEvent: (payload) => activity.progress.event(payload),
         estimatedInputTokens:
           ZERO_INPUT_ESTIMATE && route
             ? estimateInputTokens(routedBody, { contextWindow: route.contextWindow })
             : undefined,
       });
-      const transforms = [usageObserver];
+      const transforms = [activity.progress.byteObserver(), usageObserver];
       let envelopeCompat = route
         ? zaiResponsesCompatTransform(route.provider, contentType)
         : undefined;
@@ -4274,6 +4294,7 @@ async function handleResponses(request, response, requestUrl) {
             signal: controller.signal,
           },
           {
+            fetchImpl: fetchObservedUpstream,
             retries: 0,
             canRetry: () => nothingRelayed(response),
             onRetry: (event) => logUpstreamRetry(event, requestedModel, requestUrl.pathname),
@@ -5123,6 +5144,15 @@ async function handleRequest(request, response) {
   ) {
     const health = await healthPayload();
     writeJson(response, health.ok ? 200 : 503, health);
+    return;
+  }
+  if (request.method === "GET" && ["/activity", "/v1/activity"].includes(requestUrl.pathname)) {
+    const threadId = requestUrl.searchParams.get("threadId") || undefined;
+    if (threadId && !/^[A-Za-z0-9_-]{1,160}$/.test(threadId)) {
+      writeJson(response, 400, { error: { type: "invalid_thread_id" } });
+      return;
+    }
+    writeJson(response, 200, requestProgress.snapshot({ threadId }));
     return;
   }
   if (request.method === "GET" && ["/models", "/v1/models"].includes(requestUrl.pathname)) {

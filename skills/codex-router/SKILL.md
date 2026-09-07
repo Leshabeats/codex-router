@@ -54,6 +54,26 @@ arguments are model-generated and must not silently cross a provider or billing
 boundary. Follow-up messages retain the target thread's settings, and cloud
 tasks choose their model outside this relay.
 
+## Waiting for a routed worker
+
+A wait/poll timeout or quiet stream is not a failed worker. Keep its task ID
+and wait again; do not interrupt, resend its assignment, or spawn a replacement
+only because a poll returned. End waiting on an explicit terminal result, user
+cancellation, or a task deadline established independently of the polling interval.
+Before replacement, check the worker's current state and confirm it has stopped;
+never overlap two writers for the same work.
+
+When shell access is available, inspect the installed router with
+`~/.local/share/codex-router/bin/control activity <thread-id>` (omit the ID for
+all requests). This is read-only. It reports active requests and up to 128 recent
+results retained for ten minutes. `lastEventAt`/`lastByteAt` describe events
+received at the router's upstream boundary, not raw xAI progress. An open request
+alone does not prove generation. An empty result, an offline probe, or a changed
+`instanceId` does not prove the worker finished; check the native task status.
+`canceling` stays active until cleanup; `client_disconnected` cannot identify
+whether the user or an orchestrator initiated cancellation. Polling never changes
+these states or restarts a task.
+
 ## What the token and usage numbers mean
 
 - The router meter records provider-reported counts verbatim. When the
