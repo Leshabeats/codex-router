@@ -66,8 +66,9 @@ never overlap two writers for the same work.
 When shell access is available, inspect the installed router with
 `~/.local/share/codex-router/bin/control activity <thread-id>` (omit the ID for
 all requests). This is read-only. It reports active requests and up to 128 recent
-results retained for ten minutes. `lastEventAt`/`lastByteAt` describe events
-received at the router's upstream boundary, not raw xAI progress. An open request
+results retained for ten minutes. `lastByteAt` describes raw bytes received at
+the router's upstream boundary; `lastEventAt` describes normalized Responses
+events, not raw xAI progress. An open request
 alone does not prove generation. An empty result, an offline probe, or a changed
 `instanceId` does not prove the worker finished; check the native task status.
 `canceling` stays active until cleanup; `client_disconnected` cannot identify

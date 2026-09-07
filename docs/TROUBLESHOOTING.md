@@ -397,12 +397,14 @@ For a quiet worker, run `bin/control activity <thread-id>` from the installed
 checkout. The command reads the capability-protected `/v1/activity` endpoint;
 unauthenticated `/health` keeps its existing compact contract. Active requests
 remain visible until their handlers release resources, independently of tray
-record retention. The snapshot includes router-upstream attempt count, byte/event
-timestamps, observed phase, and recent outcomes (128 entries, ten minutes, in
-memory). These observations do not identify raw provider timing or retries inside
+record retention. The snapshot includes router-upstream attempt count, raw byte
+timestamps, normalized Responses event timestamps, observed phase, and recent
+outcomes (128 entries, ten minutes, in memory). These observations do not identify raw provider timing or retries inside
 LiteLLM/xAI. Metrics cover the main Responses dispatch/stream; uninstrumented
 subpaths such as compaction/embeddings show `unobserved` and omit attempt count.
 An HTTP 200 envelope with a failed/incomplete response event is still `failed`.
+Untyped Grok gateway error envelopes become a safe terminal `error` event;
+later empty message closes or success markers are discarded.
 No prompt, answer, tool arguments, or credentials are retained.
 An unavailable probe reports `unknown`, not an empty/completed worker. A changed
 instance ID means the router restarted and lost its recent history. A cancellation

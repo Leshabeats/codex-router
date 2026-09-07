@@ -4117,7 +4117,10 @@ async function handleResponses(request, response, requestUrl) {
       const grokReasoningSummaryCompat = route
         ? grokReasoningSummaryCompatTransform(providerForModel(route), contentType)
         : undefined;
-      if (grokReasoningSummaryCompat) transforms.push(grokReasoningSummaryCompat);
+      // Grok gateway error envelopes are normalized along with its reasoning
+      // lifecycle. Observe the canonical terminal for metering and activity;
+      // the leading byte observer still measures the original upstream bytes.
+      if (grokReasoningSummaryCompat) transforms.splice(1, 0, grokReasoningSummaryCompat);
       // LiteLLM can add blank assistant envelopes while translating either
       // Chat Completions or Messages. The factory refuses native traffic and
       // providers that already speak Responses, so those paths gain no stage.

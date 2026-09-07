@@ -10,6 +10,9 @@
 - **Grok repairs require a successful response terminal.** Failed, incomplete,
   and truncated streams return a terminal error without releasing withheld
   client actions or private final answers. Reasoning remains live.
+- **Grok gateway stream errors reach Codex as terminal failures.** Untyped
+  gateway errors are normalized without exposing upstream diagnostics or
+  appending empty message closes, and request activity records the failure.
 - **The ChatGPT Web provider is removed: using it risked an OpenAI account
   ban.** `chatgpt-web` routed Codex turns into an unofficial browser automation
   of chatgpt.com, driven through a separately installed launcher on loopback
