@@ -63,17 +63,15 @@ cancellation, or a task deadline established independently of the polling interv
 Before replacement, check the worker's current state and confirm it has stopped;
 never overlap two writers for the same work.
 
-When shell access is available, inspect the installed router with
-`~/.local/share/codex-router/bin/control activity <thread-id>` (omit the ID for
-all requests). This is read-only. It reports active requests and up to 128 recent
-results retained for ten minutes. `lastByteAt` describes raw bytes received at
-the router's upstream boundary; `lastEventAt` describes normalized Responses
-events, not raw xAI progress. An open request
-alone does not prove generation. An empty result, an offline probe, or a changed
-`instanceId` does not prove the worker finished; check the native task status.
-`canceling` stays active until cleanup; `client_disconnected` cannot identify
-whether the user or an orchestrator initiated cancellation. Polling never changes
-these states or restarts a task.
+Use the read-only `~/.local/share/codex-router/bin/control activity <thread-id>`
+when shell access is available; omit the ID for all requests. It reports active
+requests and up to 128 recent results retained for ten minutes. `lastByteAt`
+tracks raw bytes at the router boundary; `lastEventAt` tracks normalized Responses
+events, not raw xAI progress. An open request alone does not prove generation.
+Empty/offline results or a changed `instanceId` do not prove worker completion;
+check native task status. `canceling` stays active until cleanup, and
+`client_disconnected` cannot distinguish user cancellation from an orchestrator's.
+Polling never changes these states or restarts a task.
 
 ## What the token and usage numbers mean
 
