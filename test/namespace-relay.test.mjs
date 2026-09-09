@@ -4031,6 +4031,14 @@ test("Grok apply_patch guidance is confined to grok-oauth/grok-4.6", () => {
   }
 });
 
+test("a delimiter reminder in the original description does not suppress the examples", () => {
+  const tools = [nativeApplyPatch({ description: GROK_APPLY_PATCH_GUIDANCE_MARKER })];
+  const guided = applyGrokApplyPatchGuidance(tools, GROK_46_ROUTE);
+  assert.ok(guided[0].description.includes(GROK_APPLY_PATCH_CREATE_EXAMPLE));
+  assert.ok(guided[0].description.includes(GROK_APPLY_PATCH_UPDATE_EXAMPLE));
+  assert.equal(applyGrokApplyPatchGuidance(guided, GROK_46_ROUTE), guided);
+});
+
 test("custom-tool bridge avoids hijacking an ordinary apply_patch function", () => {
   const namespaces = new Map();
   const ordinary = { type: "function", name: "apply_patch", parameters: { type: "object" } };

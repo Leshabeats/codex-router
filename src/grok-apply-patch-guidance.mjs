@@ -41,7 +41,7 @@ function isNativeCustomApplyPatch(tool) {
 }
 
 function alreadyGuided(value) {
-  return typeof value === "string" && value.includes(GROK_APPLY_PATCH_GUIDANCE_MARKER);
+  return typeof value === "string" && value.includes(GROK_APPLY_PATCH_GUIDANCE);
 }
 
 function appendGuidance(prefix) {
