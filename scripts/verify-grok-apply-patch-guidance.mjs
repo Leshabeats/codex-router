@@ -36,6 +36,15 @@ const V4A_GRAMMAR = [
   "",
   "hunk: add_hunk | delete_hunk | update_hunk",
   'add_hunk: "*** Add File: " filename LF add_line+',
+  'delete_hunk: "*** Delete File: " filename LF',
+  'update_hunk: "*** Update File: " filename LF change_move? change?',
+  "filename: /(.+)/",
+  'add_line: "+" /(.+)/ LF -> line',
+  'change_move: "*** Move to: " filename LF',
+  "change: (change_context | change_line)+ eof_line?",
+  'change_context: ("@@" | "@@ " /(.+)/) LF',
+  'change_line: ("+" | "-" | " ") /(.+)/ LF',
+  'eof_line: "*** End of File" LF',
   "%import common.LF",
 ].join("\n");
 
@@ -94,7 +103,7 @@ function spawnChild(command, args, env, { detached = false } = {}) {
   });
   let output = "";
   const collect = (chunk) => {
-    output += redact(chunk.toString("utf8"));
+    output = (output + redact(chunk.toString("utf8"))).slice(-128 * 1024);
   };
   child.stdout.on("data", collect);
   child.stderr.on("data", collect);
@@ -136,7 +145,7 @@ async function waitHttp(url, child, { headers = {}, timeoutMs = SERVICE_HEALTH_M
       throw new Error(`exited before ${url}: ${child.testOutput()}`);
     }
     try {
-      const response = await fetch(url, { headers });
+      const response = await fetch(url, { headers, signal: AbortSignal.timeout(1_000) });
       if (response.ok) return;
     } catch {
       // not bound yet
@@ -218,11 +227,11 @@ function mockFunctionCall(callId, argumentsText) {
         name: APPLY_PATCH_TOOL_NAME,
       },
     },
-    {
+    ...[argumentsText.slice(0, 13), argumentsText.slice(13, 29), argumentsText.slice(29)].map((delta) => ({
       type: "response.function_call_arguments.delta",
       item_id: `fc_${callId}`,
-      delta: argumentsText,
-    },
+      delta,
+    })),
     {
       type: "response.output_item.done",
       item: {
@@ -256,140 +265,141 @@ const mockXai = http.createServer(async (request, response) => {
   response.end(mockFunctionCall(callId, outgoingArgs));
 });
 
-await new Promise((resolve, reject) => {
-  mockXai.once("error", reject);
-  mockXai.listen(0, "127.0.0.1", resolve);
-});
-const xaiPort = mockXai.address().port;
-
-const grokPort = await openPort();
-const gatewayPort = await openPort();
-const routerPort = await openPort();
-const pythonDir = path.dirname(python);
-const litellmBin = path.join(
-  pythonDir,
-  process.platform === "win32" ? "litellm.exe" : "litellm",
-);
-assert.ok(existsSync(python), `venv python missing: ${python}`);
-assert.ok(existsSync(litellmBin), `litellm entry point missing: ${litellmBin}`);
-
-const authPath = path.join(workspace, "auth.json");
-writeFileSync(
-  authPath,
-  JSON.stringify({ "https://auth.x.ai::test-client-id": { key: "fake-access" } }),
-  { mode: 0o600 },
-);
-const litellmConfig = path.join(workspace, "litellm.yaml");
-writeFileSync(
-  litellmConfig,
-  [
-    "model_list:",
-    '  - model_name: "grok-oauth-grok-4-6"',
-    "    litellm_params:",
-    '      model: "openai/grok-4.6"',
-    "      api_base: os.environ/GROK_OAUTH_FORWARD_BASE_URL",
-    '      api_key: "os.environ/CODEX_ROUTER_INTERNAL_KEY"',
-    "      use_chat_completions_api: true",
-    "      num_retries: 0",
-    "",
-    "litellm_settings:",
-    "  drop_params: true",
-    "  request_timeout: 60",
-    "",
-    "router_settings:",
-    "  disable_cooldowns: true",
-    "",
-    "general_settings:",
-    "  disable_spend_logs: true",
-    "",
-  ].join("\n"),
-  { mode: 0o600 },
-);
-
-const sharedEnv = {
-  MODEL_ROUTER_TARGET: "codex",
-  MODEL_ROUTER_QUIET: "1",
-  MODEL_ROUTER_INTERNAL_KEY: INTERNAL_KEY,
-  CODEX_ROUTER_INTERNAL_KEY: INTERNAL_KEY,
-  CODEX_ROUTER_CALLER_KEY: CALLER_KEY,
-  CODEX_ROUTER_GROK_PROGRESS_ONLY_RETRY: "0",
-  LITELLM_MASTER_KEY: INTERNAL_KEY,
-  LITELLM_LOG: "ERROR",
-  LITELLM_TELEMETRY: "False",
-  LITELLM_LOCAL_MODEL_COST_MAP: "True",
-  NO_COLOR: "1",
-  PYTHONIOENCODING: "utf-8",
-  PYTHONUTF8: "1",
-  PATH: `${pythonDir}${path.delimiter}${process.env.PATH || ""}`,
-};
-
-const grokChild = spawnChild(
-  process.execPath,
-  [path.join(root, "src", "grok-oauth-forwarder.mjs")],
-  {
-    ...sharedEnv,
-    MODEL_ROUTER_GROK_OAUTH_PORT: String(grokPort),
-    GROK_CLI_CHAT_PROXY_BASE_URL: `http://127.0.0.1:${xaiPort}`,
-    GROK_CLI: path.join(root, "test", "fixtures", "missing-grok-cli"),
-    GROK_AUTH_PATH: authPath,
-  },
-);
-await waitHttp(`http://127.0.0.1:${grokPort}/health`, grokChild, {
-  headers: { Authorization: `Bearer ${INTERNAL_KEY}` },
-});
-
-const litellmChild = spawnChild(
-  litellmBin,
-  ["--config", litellmConfig, "--host", "127.0.0.1", "--port", String(gatewayPort)],
-  {
-    ...sharedEnv,
-    GROK_OAUTH_FORWARD_BASE_URL: `http://127.0.0.1:${grokPort}/v1`,
-  },
-  { detached: process.platform !== "win32" },
-);
-await waitHttp(`http://127.0.0.1:${gatewayPort}/health/liveliness`, litellmChild, {
-  timeoutMs: LITELLM_HEALTH_MS,
-});
-
-const stateDir = path.join(workspace, "state");
-const codexHome = path.join(workspace, "codex-home");
-mkdirSync(stateDir, { recursive: true, mode: 0o700 });
-mkdirSync(codexHome, { recursive: true, mode: 0o700 });
-writeFileSync(
-  path.join(stateDir, "enabled-providers.json"),
-  `${JSON.stringify({ version: 1, providers: ["grok-oauth"] }, null, 2)}\n`,
-  { mode: 0o600 },
-);
-const routerChild = spawnChild(process.execPath, [path.join(root, "src", "router.mjs")], {
-  ...sharedEnv,
-  MODEL_ROUTER_STATE_DIR: stateDir,
-  CODEX_ROUTER_STATE_DIR: stateDir,
-  CODEX_HOME: codexHome,
-  CODEX_ROUTER_PORT: String(routerPort),
-  CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gatewayPort}/v1`,
-  CODEX_ROUTER_GATEWAY_HEALTH_URL: `http://127.0.0.1:${gatewayPort}/health/liveliness`,
-  CODEX_ROUTER_GROK_OAUTH_HEALTH_URL: `http://127.0.0.1:${grokPort}/health`,
-  MODEL_ROUTER_GROK_OAUTH_PORT: String(grokPort),
-});
-await waitHttp(`http://127.0.0.1:${routerPort}/health`, routerChild);
-
-const routerUrl = `${callerBaseUrl(routerPort, CALLER_KEY)}/responses`;
-
-async function postTurn(payload) {
-  const response = await fetch(routerUrl, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${CALLER_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-  const body = await response.text();
-  assert.equal(response.status, 200, redact(body));
-  return body;
-}
-
 try {
+  await new Promise((resolve, reject) => {
+    mockXai.once("error", reject);
+    mockXai.listen(0, "127.0.0.1", resolve);
+  });
+  const xaiPort = mockXai.address().port;
+
+  const grokPort = await openPort();
+  const gatewayPort = await openPort();
+  const routerPort = await openPort();
+  const pythonDir = path.dirname(python);
+  const litellmBin = path.join(
+    pythonDir,
+    process.platform === "win32" ? "litellm.exe" : "litellm",
+  );
+  assert.ok(existsSync(python), `venv python missing: ${python}`);
+  assert.ok(existsSync(litellmBin), `litellm entry point missing: ${litellmBin}`);
+
+  const authPath = path.join(workspace, "auth.json");
+  writeFileSync(
+    authPath,
+    JSON.stringify({ "https://auth.x.ai::test-client-id": { key: "fake-access" } }),
+    { mode: 0o600 },
+  );
+  const litellmConfig = path.join(workspace, "litellm.yaml");
+  writeFileSync(
+    litellmConfig,
+    [
+      "model_list:",
+      '  - model_name: "grok-oauth-grok-4-6"',
+      "    litellm_params:",
+      '      model: "openai/grok-4.6"',
+      "      api_base: os.environ/GROK_OAUTH_FORWARD_BASE_URL",
+      '      api_key: "os.environ/CODEX_ROUTER_INTERNAL_KEY"',
+      "      use_chat_completions_api: true",
+      "      num_retries: 0",
+      "",
+      "litellm_settings:",
+      "  drop_params: true",
+      "  request_timeout: 60",
+      "",
+      "router_settings:",
+      "  disable_cooldowns: true",
+      "",
+      "general_settings:",
+      "  disable_spend_logs: true",
+      "",
+    ].join("\n"),
+    { mode: 0o600 },
+  );
+
+  const sharedEnv = {
+    MODEL_ROUTER_TARGET: "codex",
+    MODEL_ROUTER_QUIET: "1",
+    MODEL_ROUTER_INTERNAL_KEY: INTERNAL_KEY,
+    CODEX_ROUTER_INTERNAL_KEY: INTERNAL_KEY,
+    CODEX_ROUTER_CALLER_KEY: CALLER_KEY,
+    CODEX_ROUTER_GROK_PROGRESS_ONLY_RETRY: "0",
+    LITELLM_MASTER_KEY: INTERNAL_KEY,
+    LITELLM_LOG: "ERROR",
+    LITELLM_TELEMETRY: "False",
+    LITELLM_LOCAL_MODEL_COST_MAP: "True",
+    NO_COLOR: "1",
+    PYTHONIOENCODING: "utf-8",
+    PYTHONUTF8: "1",
+    PATH: `${pythonDir}${path.delimiter}${process.env.PATH || ""}`,
+  };
+
+  const grokChild = spawnChild(
+    process.execPath,
+    [path.join(root, "src", "grok-oauth-forwarder.mjs")],
+    {
+      ...sharedEnv,
+      MODEL_ROUTER_GROK_OAUTH_PORT: String(grokPort),
+      GROK_CLI_CHAT_PROXY_BASE_URL: `http://127.0.0.1:${xaiPort}`,
+      GROK_CLI: path.join(root, "test", "fixtures", "missing-grok-cli"),
+      GROK_AUTH_PATH: authPath,
+    },
+  );
+  await waitHttp(`http://127.0.0.1:${grokPort}/health`, grokChild, {
+    headers: { Authorization: `Bearer ${INTERNAL_KEY}` },
+  });
+
+  const litellmChild = spawnChild(
+    litellmBin,
+    ["--config", litellmConfig, "--host", "127.0.0.1", "--port", String(gatewayPort)],
+    {
+      ...sharedEnv,
+      GROK_OAUTH_FORWARD_BASE_URL: `http://127.0.0.1:${grokPort}/v1`,
+    },
+    { detached: process.platform !== "win32" },
+  );
+  await waitHttp(`http://127.0.0.1:${gatewayPort}/health/liveliness`, litellmChild, {
+    timeoutMs: LITELLM_HEALTH_MS,
+  });
+
+  const stateDir = path.join(workspace, "state");
+  const codexHome = path.join(workspace, "codex-home");
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  mkdirSync(codexHome, { recursive: true, mode: 0o700 });
+  writeFileSync(
+    path.join(stateDir, "enabled-providers.json"),
+    `${JSON.stringify({ version: 1, providers: ["grok-oauth"] }, null, 2)}\n`,
+    { mode: 0o600 },
+  );
+  const routerChild = spawnChild(process.execPath, [path.join(root, "src", "router.mjs")], {
+    ...sharedEnv,
+    MODEL_ROUTER_STATE_DIR: stateDir,
+    CODEX_ROUTER_STATE_DIR: stateDir,
+    CODEX_HOME: codexHome,
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gatewayPort}/v1`,
+    CODEX_ROUTER_GATEWAY_HEALTH_URL: `http://127.0.0.1:${gatewayPort}/health/liveliness`,
+    CODEX_ROUTER_GROK_OAUTH_HEALTH_URL: `http://127.0.0.1:${grokPort}/health`,
+    MODEL_ROUTER_GROK_OAUTH_PORT: String(grokPort),
+  });
+  await waitHttp(`http://127.0.0.1:${routerPort}/health`, routerChild);
+
+  const routerUrl = `${callerBaseUrl(routerPort, CALLER_KEY)}/responses`;
+
+  async function postTurn(payload) {
+    const response = await fetch(routerUrl, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${CALLER_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(90_000),
+    });
+    const body = await response.text();
+    assert.equal(response.status, 200, redact(body));
+    return body;
+  }
+
   const unicodeBody = await postTurn(
     applyPatchRequest({ historyInput: HISTORY_PATCH, historyId: "ctc_history" }),
   );
@@ -437,7 +447,8 @@ try {
   assert.equal(malformedItem.input, MALFORMED_PATCH);
 } finally {
   await Promise.all(children.map((child) => stopChild(child)));
-  await new Promise((resolve) => mockXai.close(resolve));
+  mockXai.closeAllConnections();
+  if (mockXai.listening) await new Promise((resolve) => mockXai.close(resolve));
   rmSync(workspace, { recursive: true, force: true });
 }
 
