@@ -445,6 +445,14 @@ terminal frames and emits an explicit `precontent_limit` SSE error first,
 instead of accepting an empty success. These stated mid-stream failures retain
 the already-committed HTTP 200 on the wire but are metered internally as 502.
 
+Grok OAuth uses a separate ten-minute stall bound after the prologue has been
+released, including while reasoning is in progress. A pause longer than the
+initial 30-second prologue budget is not by itself an empty completion.
+`CODEX_ROUTER_GROK_STREAM_STALL_MS` accepts a positive millisecond value to
+adjust this bound; invalid values retain the ten-minute default. The headers-only
+budget, parser byte limits, cancellation, and prohibition on replaying a visible
+stream still apply. Other provider routes retain their existing stall bound.
+
 Operators diagnosing an unusually slow upstream can temporarily change the
 30-second bound with `CODEX_ROUTER_EMPTY_COMPLETION_PRELUDE_MS` and the 1 MiB
 parser bound with `CODEX_ROUTER_EMPTY_COMPLETION_PRELUDE_BYTES`. These are

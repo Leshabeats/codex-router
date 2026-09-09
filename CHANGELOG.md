@@ -13,6 +13,11 @@
 - **Grok gateway stream errors reach Codex as terminal failures.** Untyped
   gateway errors are normalized without exposing upstream diagnostics or
   appending empty message closes, and request activity records the failure.
+- **Grok OAuth streams use a ten-minute idle bound after the prologue is released.**
+  A reasoning pause longer than the 30-second empty-completion prelude is not an
+  empty completion. `CODEX_ROUTER_GROK_STREAM_STALL_MS` accepts a positive
+  millisecond value; invalid values keep the ten-minute default. Other providers
+  retain the existing stall bound. Visible streams are never replayed.
 - **The ChatGPT Web provider is removed: using it risked an OpenAI account
   ban.** `chatgpt-web` routed Codex turns into an unofficial browser automation
   of chatgpt.com, driven through a separately installed launcher on loopback

@@ -282,6 +282,16 @@ const EMPTY_COMPLETION_PRELUDE_MS =
   configuredEmptyCompletionPreludeMs >= 0
     ? configuredEmptyCompletionPreludeMs
     : 30_000;
+// Grok can pause between reasoning events for longer than the short prologue
+// budget. Bound that pause independently; never replay an already visible turn.
+const DEFAULT_GROK_STREAM_STALL_MS = 10 * 60_000;
+const configuredGrokStreamStallMs = Number(
+  process.env.CODEX_ROUTER_GROK_STREAM_STALL_MS ?? DEFAULT_GROK_STREAM_STALL_MS,
+);
+const GROK_STREAM_STALL_MS =
+  Number.isFinite(configuredGrokStreamStallMs) && configuredGrokStreamStallMs > 0
+    ? configuredGrokStreamStallMs
+    : DEFAULT_GROK_STREAM_STALL_MS;
 const configuredEmptyCompletionPreludeBytes = Number(
   process.env.CODEX_ROUTER_EMPTY_COMPLETION_PRELUDE_BYTES || 1024 * 1024,
 );
@@ -4150,6 +4160,9 @@ async function handleResponses(request, response, requestUrl) {
           ? new EmptyCompletionGuard(contentType, {
               maxPreludeBytes: EMPTY_COMPLETION_PRELUDE_BYTES,
               maxPreludeMs: EMPTY_COMPLETION_PRELUDE_MS,
+              maxStreamStallMs: canonicalProviderId(route.provider) === "grok-oauth"
+                ? GROK_STREAM_STALL_MS
+                : EMPTY_COMPLETION_PRELUDE_MS,
             })
           : undefined;
       if (guard) {
