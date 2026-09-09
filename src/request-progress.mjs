@@ -30,6 +30,7 @@ export function createRequestProgress({ now = Date.now, recentLimit = 128, recen
       let finished = false;
       const update = (fields) => { if (!finished) Object.assign(record, fields); };
       return {
+        requestId: record.requestId,
         setRoute(metadata = {}) {
           for (const key of METADATA) {
             const value = metadata[key];

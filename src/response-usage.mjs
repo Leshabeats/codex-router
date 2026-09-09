@@ -162,11 +162,14 @@ export function normalizeTokenUsage(value) {
   // Reasoning tokens are the silent thinking tokens generated before visible
   // output. Providers report them in output_tokens_details.reasoning_tokens,
   // completion_tokens_details.reasoning_tokens, or reasoning_tokens directly.
-  const reasoningTokens = tokenCount(
+  // A missing or non-numeric value stays absent; only an actual number 0 is a
+  // measured zero. `tokenCount(null)` would otherwise coerce null to 0.
+  const reasoningRaw =
     value.output_tokens_details?.reasoning_tokens ??
-      value.completion_tokens_details?.reasoning_tokens ??
-      value.reasoning_tokens,
-  );
+    value.completion_tokens_details?.reasoning_tokens ??
+    value.reasoning_tokens;
+  const reasoningTokens =
+    typeof reasoningRaw === "number" ? tokenCount(reasoningRaw) : undefined;
   const retries = tokenCount(value.retries);
   const progressOnlyRetried =
     value.progress_only_retried === true || value.progressOnlyRetried === true;

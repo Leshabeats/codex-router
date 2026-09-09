@@ -11,6 +11,7 @@ import path from "node:path";
 import { STATE_DIR } from "./paths.mjs";
 import { canonicalProviderId } from "./provider-selection.mjs";
 import { acceptedInputTokens } from "./context-window-drift.mjs";
+import { usageDiagnosticMetadata } from "./request-diagnostics.mjs";
 
 export const USAGE_EVENTS_PATH = path.join(STATE_DIR, "usage-events.jsonl");
 
@@ -163,8 +164,15 @@ export function recordUsageEvent({
   searchSidecar,
   searchCacheHit,
   searchResults,
+  // Router-generated correlation id. Matches /activity's `requestId`. Optional so
+  // historical rows keep their exact shape.
+  requestId,
+  // Grok OAuth 4.6 ingress UTF-8 JSON byte split. Optional, bounded, and never
+  // a token estimate. Missing payload fields measure as zero.
+  contextBytes,
   at = Date.now(),
 }) {
+  const diagnostics = usageDiagnosticMetadata({ requestId, contextBytes });
   const event = {
     meteringVersion: 1,
     at: new Date(at).toISOString(),
@@ -252,6 +260,7 @@ export function recordUsageEvent({
     ...(safeTokenCount(toolResultBytesLargest) !== undefined
       ? { toolResultBytesLargest: safeTokenCount(toolResultBytesLargest) }
       : {}),
+    ...diagnostics,
   };
   try {
     mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
@@ -475,6 +484,10 @@ export function recentUsageEvents({
         const toolResultBytesSaved = safeTokenCount(event.toolResultBytesSaved);
         const toolResultShapeBytesSaved = safeTokenCount(event.toolResultShapeBytesSaved);
         const searchResults = safeTokenCount(event.searchResults);
+        const diagnostics = usageDiagnosticMetadata({
+          requestId: event.requestId,
+          contextBytes: event.contextBytes,
+        });
         return {
           ...(event.meteringVersion === 1 ? { meteringVersion: 1 } : {}),
           at: event.at,
@@ -531,6 +544,7 @@ export function recentUsageEvents({
           ...(toolResultBytesAfter ? { toolResultBytesAfter } : {}),
           ...(toolResultBytesSaved ? { toolResultBytesSaved } : {}),
           ...(toolResultShapeBytesSaved ? { toolResultShapeBytesSaved } : {}),
+          ...diagnostics,
         };
       });
     return events;

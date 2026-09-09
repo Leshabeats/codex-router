@@ -166,6 +166,10 @@ import {
 import { recordUsageEvent } from "./usage-events.mjs";
 import { createRequestProgress } from "./request-progress.mjs";
 import {
+  grokOauth46IngressContextBytes,
+  usageDiagnosticMetadata,
+} from "./request-diagnostics.mjs";
+import {
   classifySsePrefix,
   HEADERLESS_SSE_SNIFF_BYTES,
   HEADERLESS_SSE_SNIFF_MS,
@@ -455,6 +459,8 @@ function beginRequestActivity({ request, response, controller } = {}) {
   }
   const progress = requestProgress.begin();
   const requestId = ++requestSequence;
+  // Use the observer's instance-scoped ID so usage joins /activity across restarts.
+  const requestIdText = progress.requestId;
   const startedAt = Date.now();
   let finished = false;
   let deadlineExceeded = false;
@@ -499,6 +505,7 @@ function beginRequestActivity({ request, response, controller } = {}) {
       const entry = {
         ...(activityRecords.get(requestId) || {}),
         id: String(requestId),
+        requestId: requestIdText,
         provider,
         ...(model ? { model } : {}),
         ...(sessionName ? { sessionName } : {}),
@@ -510,9 +517,17 @@ function beginRequestActivity({ request, response, controller } = {}) {
       if (model) lastUsedModel = model;
       if (sessionName) lastUsedSessionName = sessionName;
     },
+    requestId: requestIdText,
     finish,
     deadlineExceeded: () => deadlineExceeded,
   };
+}
+
+function recordObservedUsage(fields, diagnostics) {
+  recordUsageEvent({
+    ...fields,
+    ...usageDiagnosticMetadata(diagnostics),
+  });
 }
 
 const FORWARD_HEADERS = new Set([
@@ -2762,27 +2777,33 @@ async function summarize(request, payload, route, signal, { allowFailover = true
   return last && { ...last, failed };
 }
 
-function recordCompactionUsage(result, route, startedAt) {
+function recordCompactionUsage(result, route, startedAt, diagnostics) {
   const servedRoute = result?.route || route;
   const failed = (result?.failed || []).filter((entry) => entry.route !== servedRoute);
   for (const attempt of failed) {
-    recordUsageEvent({
-      model: attempt.route.slug,
-      provider: canonicalProviderId(attempt.route.provider),
-      status: attempt.status,
-      durationMs: Date.now() - startedAt,
-      ...attempt.usage,
-    });
+    recordObservedUsage(
+      {
+        model: attempt.route.slug,
+        provider: canonicalProviderId(attempt.route.provider),
+        status: attempt.status,
+        durationMs: Date.now() - startedAt,
+        ...attempt.usage,
+      },
+      diagnostics,
+    );
   }
-  recordUsageEvent({
-    model: servedRoute.slug,
-    provider: canonicalProviderId(servedRoute.provider),
-    status: result?.ok ? 200 : result?.status || 502,
-    durationMs: Date.now() - startedAt,
-    ...result?.usage,
-    ...result?.toolResultAging,
-    ...(result?.failoverFrom ? { failoverFrom: result.failoverFrom } : {}),
-  });
+  recordObservedUsage(
+    {
+      model: servedRoute.slug,
+      provider: canonicalProviderId(servedRoute.provider),
+      status: result?.ok ? 200 : result?.status || 502,
+      durationMs: Date.now() - startedAt,
+      ...result?.usage,
+      ...result?.toolResultAging,
+      ...(result?.failoverFrom ? { failoverFrom: result.failoverFrom } : {}),
+    },
+    diagnostics,
+  );
 }
 
 function compactionSnapshot(model, item, status = "completed") {
@@ -3581,6 +3602,7 @@ async function handleResponses(request, response, requestUrl) {
     activity.progress.headers();
     return upstream;
   };
+  const diagnostics = { requestId: activity.requestId };
   let clientGone = false;
   let requestedModel = "";
   let route;
@@ -3667,6 +3689,7 @@ async function handleResponses(request, response, requestUrl) {
       model: route?.slug || requestedModel || undefined,
       ...activityMetadataFromHeaders(request.headers),
     });
+    diagnostics.contextBytes = grokOauth46IngressContextBytes(payload, route);
     const compactV1 = /\/responses\/compact$/.test(requestUrl.pathname);
     // Codex remote compaction V2 uses the ordinary Responses endpoint with a
     // terminal trigger. Detect the protocol shape before route dispatch so the
@@ -3686,7 +3709,7 @@ async function handleResponses(request, response, requestUrl) {
         { allowFailover: !exactRouteProbe },
       );
       const compacted = compaction.route || route;
-      recordCompactionUsage(compaction, route, startedAt);
+      recordCompactionUsage(compaction, route, startedAt, diagnostics);
       usage = compaction.usage;
       finalStatus = compaction.status;
       activityStatus = compaction.status;
@@ -4012,13 +4035,13 @@ async function handleResponses(request, response, requestUrl) {
           // cost the provider something, so it is metered on its own row. The
           // serving row below carries `failoverFrom`, which is what makes a
           // rescued turn distinguishable from one that never failed.
-          recordUsageEvent({
+          recordObservedUsage({
             model: route.slug,
             provider: canonicalProviderId(route.provider),
             status: upstream.status,
             durationMs: Date.now() - startedAt,
             responseStartMs: upstreamLatencyMs,
-          });
+          }, diagnostics);
           adoptRoute(moved.route, moved.built);
           upstream = moved.upstream;
           upstreamStatus = upstream.status;
@@ -4061,14 +4084,14 @@ async function handleResponses(request, response, requestUrl) {
         provider: route.provider,
         stream: payload.stream === true,
       });
-      recordUsageEvent({
+      recordObservedUsage({
         model: route.slug,
         provider: canonicalProviderId(route.provider),
         status: upstream.status,
         durationMs: Date.now() - startedAt,
         responseStartMs: upstreamLatencyMs,
         firstTokenMs,
-      });
+      }, diagnostics);
       observeSubagentOutcome(request, route, upstream.status);
       finalStatus = translatedStatus;
       activityStatus = translatedStatus;
@@ -4461,7 +4484,7 @@ async function handleResponses(request, response, requestUrl) {
     // is already gone) and only rejects for an upstream that actually failed.
     // A cancel is not a router failure, so it meters as 0 rather than the
     // committed 200 that the client never finished reading.
-    recordUsageEvent({
+    recordObservedUsage({
       model: route?.slug || requestedModel,
       provider: route ? canonicalProviderId(route.provider) : "openai",
       status: finalStatus,
@@ -4480,7 +4503,7 @@ async function handleResponses(request, response, requestUrl) {
         ? { emptyCompletionPreludeLimit }
         : {}),
       ...(failoverFrom ? { failoverFrom } : {}),
-    });
+    }, diagnostics);
     // The same usage this turn just metered, and the same two disqualifiers
     // context-window-drift.mjs applies to it: a substituted estimate and a
     // retry-doubled count are not measurements of what the child sent.
@@ -4522,14 +4545,14 @@ async function handleResponses(request, response, requestUrl) {
       finalStatus = 504;
       activityStatus = 504;
       if (!usageRecorded) {
-        recordUsageEvent({
+        recordObservedUsage({
           model: route?.slug || requestedModel,
           provider: route ? canonicalProviderId(route.provider) : "openai",
           status: 504,
           durationMs: Date.now() - startedAt,
           responseStartMs: upstreamLatencyMs,
           requestDeadlineExceeded: true,
-        });
+        }, diagnostics);
         usageRecorded = true;
       }
       if (!response.headersSent) {
@@ -4562,13 +4585,13 @@ async function handleResponses(request, response, requestUrl) {
           message: error.message,
         },
       });
-      recordUsageEvent({
+      recordObservedUsage({
         model: route?.slug || requestedModel,
         provider: route ? canonicalProviderId(route.provider) : "openai",
         status: error.status,
         durationMs: Date.now() - startedAt,
         responseStartMs: upstreamLatencyMs,
-      });
+      }, diagnostics);
       usageRecorded = true;
       return;
     }
@@ -4581,7 +4604,7 @@ async function handleResponses(request, response, requestUrl) {
           message: error.message,
         },
       });
-      recordUsageEvent({
+      recordObservedUsage({
         model: route?.slug || requestedModel,
         provider: route ? canonicalProviderId(route.provider) : "openai",
         status: error.status,
@@ -4595,7 +4618,7 @@ async function handleResponses(request, response, requestUrl) {
           ? { emptyCompletionPreludeLimit }
           : {}),
         ...(failoverFrom ? { failoverFrom } : {}),
-      });
+      }, diagnostics);
       usageRecorded = true;
       return;
     }
@@ -4618,7 +4641,7 @@ async function handleResponses(request, response, requestUrl) {
       finalStatus = upstreamStatus ?? response.statusCode;
       activityStatus = finalStatus;
       if (!usageRecorded) {
-        recordUsageEvent({
+        recordObservedUsage({
           model: requestedModel,
           provider: "openai",
           status: finalStatus,
@@ -4629,7 +4652,7 @@ async function handleResponses(request, response, requestUrl) {
           estimatedInputTokens,
           ...toolResultAging,
           retries: (upstreamRetries || 0) + (usage?.retries || 0) || undefined,
-        });
+        }, diagnostics);
         usageRecorded = true;
       }
       if (!QUIET) {
@@ -4651,7 +4674,7 @@ async function handleResponses(request, response, requestUrl) {
       finalStatus = 0;
       activityStatus = 0;
       if (!usageRecorded) {
-        recordUsageEvent({
+        recordObservedUsage({
           model: route?.slug || requestedModel,
           provider: route ? canonicalProviderId(route.provider) : "openai",
           status: 0,
@@ -4664,7 +4687,7 @@ async function handleResponses(request, response, requestUrl) {
           ...toolResultAging,
           ...(emptyCompletion ? { emptyCompletion: true } : {}),
           ...(emptyCompletionRetried ? { emptyCompletionRetried: true } : {}),
-        });
+        }, diagnostics);
         usageRecorded = true;
       }
       return;
@@ -4676,7 +4699,7 @@ async function handleResponses(request, response, requestUrl) {
     finalStatus = response.headersSent ? 502 : httpErrorStatus(error);
     activityStatus = finalStatus;
     if (!usageRecorded) {
-      recordUsageEvent({
+      recordObservedUsage({
         model: route?.slug || requestedModel,
         provider: route ? canonicalProviderId(route.provider) : "openai",
         status: finalStatus,
@@ -4693,7 +4716,7 @@ async function handleResponses(request, response, requestUrl) {
         ...(emptyCompletionPreludeLimit
           ? { emptyCompletionPreludeLimit }
           : {}),
-      });
+      }, diagnostics);
       usageRecorded = true;
     }
     throw error;
@@ -4721,6 +4744,7 @@ async function handleNativeRequest(request, response, requestUrl, defaultModel) 
   const startedAt = Date.now();
   const controller = new AbortController();
   const activity = beginRequestActivity({ request, response, controller });
+  const diagnostics = { requestId: activity.requestId };
   let clientGone = false;
   let requestedModel = defaultModel;
   let servingProvider = "openai";
@@ -4780,7 +4804,7 @@ async function handleNativeRequest(request, response, requestUrl, defaultModel) 
           signal: controller.signal,
         });
         writeJson(response, 200, sidecar.response);
-        recordUsageEvent({
+        recordObservedUsage({
           model: requestedModel,
           provider: servingProvider,
           status: 200,
@@ -4789,7 +4813,7 @@ async function handleNativeRequest(request, response, requestUrl, defaultModel) 
           searchSidecar: true,
           searchCacheHit: sidecar.telemetry?.cacheHit === true,
           searchResults: sidecar.telemetry?.results,
-        });
+        }, diagnostics);
         if (!QUIET) {
           console.error(
             `[codex-router] model=${requestedModel} provider=${servingProvider} status=200 attempts=${sidecar.telemetry?.attempts || 0} cache_hit=${sidecar.telemetry?.cacheHit === true}`,
@@ -4865,13 +4889,13 @@ async function handleNativeRequest(request, response, requestUrl, defaultModel) 
       },
     );
     await pipeResponse(upstream, response, HOP_BY_HOP_HEADERS);
-    recordUsageEvent({
+    recordObservedUsage({
       model: requestedModel,
       provider: "openai",
       status: upstream.status,
       durationMs: Date.now() - startedAt,
       retries: upstreamRetries,
-    });
+    }, diagnostics);
     if (!QUIET) {
       console.error(
         `[codex-router] model=${requestedModel} provider=openai status=${upstream.status}${upstreamRetries ? ` retries=${upstreamRetries}` : ""}`,
@@ -4892,14 +4916,14 @@ async function handleNativeRequest(request, response, requestUrl, defaultModel) 
           message: "The router canceled a request that exceeded its execution deadline.",
         });
       }
-      recordUsageEvent({
+      recordObservedUsage({
         model: requestedModel,
         provider: servingProvider,
         status,
         durationMs: Date.now() - startedAt,
         ...(response.headersSent ? { streamAborted: true } : {}),
         requestDeadlineExceeded: true,
-      });
+      }, diagnostics);
       activity.finish(status);
       return;
     }
@@ -4908,12 +4932,12 @@ async function handleNativeRequest(request, response, requestUrl, defaultModel) 
     // router" — the distinction #171 turned on. Meter this path the way the
     // turn path does: a departed client as 0, everything else by its status.
     if (clientGone) {
-      recordUsageEvent({
+      recordObservedUsage({
         model: requestedModel,
         provider: servingProvider,
         status: 0,
         durationMs: Date.now() - startedAt,
-      });
+      }, diagnostics);
       activity.finish(0);
       return;
     }
@@ -4925,7 +4949,7 @@ async function handleNativeRequest(request, response, requestUrl, defaultModel) 
           message: error.message,
         },
       });
-      recordUsageEvent({
+      recordObservedUsage({
         model: requestedModel,
         provider: servingProvider,
         status,
@@ -4933,18 +4957,18 @@ async function handleNativeRequest(request, response, requestUrl, defaultModel) 
         retries: Math.max(0, (error.telemetry?.attempts || 1) - 1),
         searchSidecar: true,
         searchCacheHit: false,
-      });
+      }, diagnostics);
       activity.finish(status);
       return;
     }
     const status = response.headersSent ? 502 : httpErrorStatus(error);
-    recordUsageEvent({
+    recordObservedUsage({
       model: requestedModel,
       provider: servingProvider,
       status,
       durationMs: Date.now() - startedAt,
       ...(response.headersSent ? { streamAborted: true } : {}),
-    });
+    }, diagnostics);
     activity.finish(status);
     throw error;
   } finally {
@@ -4956,6 +4980,7 @@ async function handleEmbeddings(request, response, requestUrl) {
   const startedAt = Date.now();
   const controller = new AbortController();
   const activity = beginRequestActivity({ request, response, controller });
+  const diagnostics = { requestId: activity.requestId };
   let clientGone = false;
   let requestedModel = "";
   let route;
@@ -5071,12 +5096,12 @@ async function handleEmbeddings(request, response, requestUrl) {
     throw error;
   } finally {
     if (requestedModel) {
-      recordUsageEvent({
+      recordObservedUsage({
         model: route?.slug || requestedModel,
         provider: route ? canonicalProviderId(route.provider) : "unknown",
         status,
         durationMs: Date.now() - startedAt,
-      });
+      }, diagnostics);
     }
     activity.finish(status);
   }

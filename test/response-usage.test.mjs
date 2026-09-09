@@ -115,6 +115,24 @@ test("extracts reasoning tokens from output_tokens_details when present", () => 
     normalizeTokenUsage({ input_tokens: 10, output_tokens: 5 }),
     { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
   );
+  // An explicit zero is a measured zero and must survive.
+  assert.deepEqual(
+    normalizeTokenUsage({
+      input_tokens: 10,
+      output_tokens: 5,
+      output_tokens_details: { reasoning_tokens: 0 },
+    }),
+    { inputTokens: 10, outputTokens: 5, totalTokens: 15, reasoningTokens: 0 },
+  );
+  // null/string are not source-provided counts; they stay absent.
+  assert.deepEqual(
+    normalizeTokenUsage({
+      input_tokens: 10,
+      output_tokens: 5,
+      output_tokens_details: { reasoning_tokens: null },
+    }),
+    { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+  );
 });
 
 test("adds up the usage of two attempts at one turn", () => {
@@ -141,6 +159,13 @@ test("adds up the usage of two attempts at one turn", () => {
       { inputTokens: 50, outputTokens: 100, totalTokens: 150, reasoningTokens: 30 },
     ),
     { inputTokens: 100, outputTokens: 200, totalTokens: 300, reasoningTokens: 50 },
+  );
+  assert.deepEqual(
+    mergeTokenUsage(
+      { inputTokens: 10, outputTokens: 2, totalTokens: 12, reasoningTokens: 0 },
+      { inputTokens: 10, outputTokens: 2, totalTokens: 12 },
+    ),
+    { inputTokens: 20, outputTokens: 4, totalTokens: 24, reasoningTokens: 0 },
   );
   // One-sided merges are the ordinary case: an attempt whose provider reported
   // nothing must not erase the one that did.
@@ -179,6 +204,77 @@ test("detects first token from chat.completion.chunk without type field", async 
   await passThrough(transform, body);
   // First token should be detected from the first delta with content.
   assert.equal(typeof transform.firstTokenAt(), "number");
+});
+
+test("stream, JSON, and headerless readers preserve reasoning absent vs zero", async () => {
+  const withReasoning = {
+    input_tokens: 21,
+    output_tokens: 8,
+    output_tokens_details: { reasoning_tokens: 5 },
+  };
+  const zeroReasoning = {
+    input_tokens: 21,
+    output_tokens: 8,
+    output_tokens_details: { reasoning_tokens: 0 },
+  };
+  const absentReasoning = { input_tokens: 21, output_tokens: 8 };
+
+  const sse = (usage) => [
+    "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+    `event: response.completed\ndata: ${JSON.stringify({
+      type: "response.completed",
+      response: { usage },
+    })}\n\n`,
+    "data: [DONE]\n\n",
+  ];
+
+  const stream = new ResponseUsageTransform("text/event-stream");
+  assert.equal(await passThrough(stream, sse(withReasoning)), sse(withReasoning).join(""));
+  assert.deepEqual(stream.tokenUsage(), {
+    inputTokens: 21,
+    outputTokens: 8,
+    totalTokens: 29,
+    reasoningTokens: 5,
+  });
+
+  const streamZero = new ResponseUsageTransform("text/event-stream");
+  await passThrough(streamZero, sse(zeroReasoning));
+  assert.equal(streamZero.tokenUsage().reasoningTokens, 0);
+
+  const streamAbsent = new ResponseUsageTransform("text/event-stream");
+  await passThrough(streamAbsent, sse(absentReasoning));
+  assert.equal("reasoningTokens" in streamAbsent.tokenUsage(), false);
+
+  const jsonBody = JSON.stringify({ usage: withReasoning });
+  const json = new ResponseUsageTransform("application/json");
+  assert.equal(await passThrough(json, [jsonBody]), jsonBody);
+  assert.equal(json.tokenUsage().reasoningTokens, 5);
+
+  const jsonZero = new ResponseUsageTransform("application/json");
+  await passThrough(jsonZero, [JSON.stringify({ usage: zeroReasoning })]);
+  assert.equal(jsonZero.tokenUsage().reasoningTokens, 0);
+
+  const jsonAbsent = new ResponseUsageTransform("application/json");
+  await passThrough(jsonAbsent, [JSON.stringify({ usage: absentReasoning })]);
+  assert.equal("reasoningTokens" in jsonAbsent.tokenUsage(), false);
+
+  const headerless = new ResponseUsageTransform("");
+  await passThrough(headerless, sse(withReasoning).map((part) => Buffer.from(part, "utf8")));
+  assert.equal(headerless.tokenUsage().reasoningTokens, 5);
+
+  const headerlessZero = new ResponseUsageTransform("");
+  await passThrough(
+    headerlessZero,
+    sse(zeroReasoning).map((part) => Buffer.from(part, "utf8")),
+  );
+  assert.equal(headerlessZero.tokenUsage().reasoningTokens, 0);
+
+  const headerlessAbsent = new ResponseUsageTransform("");
+  await passThrough(
+    headerlessAbsent,
+    sse(absentReasoning).map((part) => Buffer.from(part, "utf8")),
+  );
+  assert.equal("reasoningTokens" in headerlessAbsent.tokenUsage(), false);
 });
 
 test("captures JSON usage without changing the response", async () => {
