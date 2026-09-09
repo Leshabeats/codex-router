@@ -106,6 +106,22 @@ test('partial usage coverage cannot produce an inflated throughput', () => {
   assert.equal(report.outcome, 'running');
 });
 
+test('CLI counts terminal shell failures once even when the tool completed', () => {
+  const report = buildGrokRunReport({ grokEvents: [
+    { type: 'tool_call_update', toolCallId: 'bash', status: 'in_progress', rawOutput: { type: 'Bash', exit_code: 1 } },
+    { type: 'tool_call_update', toolCallId: 'bash', status: 'completed', rawOutput: { type: 'Bash', exit_code: 127, command: 'PRIVATE', output_for_prompt: 'PRIVATE' } },
+    { type: 'tool_call_update', toolCallId: 'bash', status: 'completed', rawOutput: { type: 'Bash', exit_code: 127 } },
+    { type: 'tool_call_update', toolCallId: 'timeout', status: 'completed', rawOutput: { type: 'Bash', exit_code: 0, timed_out: true } },
+    { type: 'tool_call_update', toolCallId: 'signal', status: 'completed', rawOutput: { type: 'Bash', exit_code: 0, signal: 'SIGTERM' } },
+    { type: 'tool_call_update', toolCallId: 'tool', status: 'failed' },
+    { type: 'tool_call_update', toolCallId: 'tool', status: 'failed' },
+    { type: 'tool_call_update', toolCallId: 'success', status: 'completed', rawOutput: { type: 'Bash', exit_code: 0 } },
+    { type: 'tool_call_update', toolCallId: 'unknown', status: 'completed', rawOutput: { type: 'Bash', exit_code: '1' } },
+  ] });
+  assert.equal(report.tools.failures, 4);
+  assert.ok(!JSON.stringify(report).includes('PRIVATE'));
+});
+
 test('CLI input totals include separately reported cached tokens', () => {
   const report = buildGrokRunReport({ grokEvents: [{ type: 'usage', usage: {
     input_tokens: 10, cache_read_input_tokens: 80, cache_creation_input_tokens: 5, output_tokens: 7,

@@ -96,13 +96,19 @@ export function buildGrokRunReport({ usageEvents = [], activityEvents = [], code
   if (cliEnd) inferredOutcome = cliEnd.stopReason === 'end_turn' ? 'completed' : cliEnd.stopReason === 'cancelled' ? 'cancelled' : 'failed';
   const cliToolIds = new Set();
   const cliTestIds = new Set();
-  let cliToolFailures = 0;
+  const cliToolFailures = new Set();
   for (const row of grokEvents) {
     if (row.type === 'tool_call' && typeof row.toolCallId === 'string') {
       cliToolIds.add(row.toolCallId);
       if (testCommand(row.rawInput?.command)) cliTestIds.add(row.toolCallId);
     }
-    if (row.type === 'tool_call_update' && row.status === 'failed') cliToolFailures++;
+    if (row.type === 'tool_call_update' && typeof row.toolCallId === 'string') {
+      const result = row.rawOutput;
+      const shellFailed = row.status === 'completed' && result?.type === 'Bash' &&
+        (Number.isInteger(result.exit_code) && result.exit_code !== 0 || result.timed_out === true ||
+          typeof result.signal === 'string' && result.signal.length > 0);
+      if (row.status === 'failed' || shellFailed) cliToolFailures.add(row.toolCallId);
+    }
   }
   for (const row of grokSessionEvents) {
     if (!within(row.ts) || row.type !== 'tool_completed') continue;
@@ -146,7 +152,7 @@ export function buildGrokRunReport({ usageEvents = [], activityEvents = [], code
     // Timing is not interchangeable with reasoning-inclusive token counts. Do not
     // subtract text TTFT and present that quotient as decoding throughput.
     firstTokenMs: cli ? total(cliRequests, 'ttft_ms') : total(usage, 'firstTokenMs'),
-    tools: { calls: cli ? cliToolIds.size : toolCount, failures: cli ? cliToolFailures : toolFailures,
+    tools: { calls: cli ? cliToolIds.size : toolCount, failures: cli ? cliToolFailures.size : toolFailures,
       patchFailures: cli ? null : patchFailures, durationMs: toolIntervals.length ? unionMs(toolIntervals) : null,
       firstTestAfterMs: start !== undefined && firstTestAt !== undefined ? firstTestAt - start : null },
     contextBytes: { unit: 'utf8_json_bytes', first: bytes[0] ?? null, last: bytes.at(-1) ?? null },

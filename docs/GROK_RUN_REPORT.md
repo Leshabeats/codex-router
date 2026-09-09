@@ -59,8 +59,12 @@ Interpretation:
   time-to-first-token is never subtracted from reasoning-inclusive token timing.
 - Tool duration is the union of observed tool intervals, avoiding double counting
   parallel tools. `firstTestAfterMs` recognizes common test-runner commands;
-  only direct command positions are recognized. Quoted examples, filenames and
+  only direct command positions are recognized. This measures the first attempt,
+  which may fail before the test runner starts. Quoted examples, filenames and
   comments do not count; heredocs and indirect wrapper scripts are omitted.
+- CLI tool failures include terminal shell exit codes, signals and timeouts,
+  even when the surrounding tool reports `completed`. Repeated updates for one
+  tool call are counted once; interim shell output is not a terminal result.
 - `unobservedMs` is wall time outside observed requests/tools, including scheduling
   and uninstrumented work. It cannot establish a specific cause of delay.
 - `contextBytes` separates UTF-8 JSON sizes of Router ingress instructions, tool
