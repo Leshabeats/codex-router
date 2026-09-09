@@ -22,6 +22,15 @@ import {
   ToolSearchHistoryCapacityError,
 } from "../src/namespace-relay.mjs";
 import { CODEX_APP_TOOLS, mergeCodexAppTools } from "../src/codex-app-tools.mjs";
+import {
+  APPLY_PATCH_TOOL_NAME,
+  GROK_APPLY_PATCH_CREATE_EXAMPLE,
+  GROK_APPLY_PATCH_GUIDANCE,
+  GROK_APPLY_PATCH_GUIDANCE_MARKER,
+  GROK_APPLY_PATCH_GUIDANCE_ROUTE,
+  GROK_APPLY_PATCH_UPDATE_EXAMPLE,
+  applyGrokApplyPatchGuidance,
+} from "../src/grok-apply-patch-guidance.mjs";
 
 function collect(stream) {
   return new Promise((resolve, reject) => {
@@ -3926,6 +3935,100 @@ test("custom-tool bridge maps apply_patch definitions and paired history lossles
   assert.equal(bridged.input[1].type, "function_call_output");
   assert.deepEqual(bridged.input[2], unrelatedCall);
   assert.equal(buildNamespaceLookups(namespaces).customTools.get("apply_patch"), "apply_patch");
+});
+
+const GROK_46_ROUTE = { slug: GROK_APPLY_PATCH_GUIDANCE_ROUTE };
+const GROK_45_ROUTE = { slug: "grok-oauth/grok-4.5" };
+const GROK_API_46_ROUTE = { slug: "grok-api/grok-4.6" };
+const COMMANDCODE_46_ROUTE = { slug: "commandcode/grok-4.6" };
+
+function nativeApplyPatch(extra = {}) {
+  return {
+    type: "custom",
+    name: APPLY_PATCH_TOOL_NAME,
+    format: { type: "grammar", syntax: "lark", definition: V4A_GRAMMAR },
+    ...extra,
+  };
+}
+
+test("Grok 4.6 OAuth appends V4A examples to native custom apply_patch before translation", () => {
+  assert.equal(GROK_APPLY_PATCH_GUIDANCE.includes(GROK_APPLY_PATCH_GUIDANCE_MARKER), true);
+  const description = "Apply a patch.";
+  const ordinary = { type: "function", name: APPLY_PATCH_TOOL_NAME, parameters: { type: "object" } };
+  const otherCustom = { type: "custom", name: "future_custom", description: "leave me" };
+  const tools = [nativeApplyPatch({ description }), ordinary, otherCustom];
+  const originalFormat = tools[0].format;
+  const input = [
+    {
+      type: "custom_tool_call",
+      id: "ctc_keep",
+      call_id: "call_keep",
+      name: APPLY_PATCH_TOOL_NAME,
+      input: "*** Begin Patch\n*** End Patch",
+    },
+  ];
+  const annotated = applyGrokApplyPatchGuidance(tools, GROK_46_ROUTE);
+  assert.notEqual(annotated, tools);
+  assert.equal(annotated[0].type, "custom");
+  assert.equal(annotated[0].name, APPLY_PATCH_TOOL_NAME);
+  assert.equal(annotated[0].description.startsWith(description), true);
+  assert.equal(annotated[0].description.includes(GROK_APPLY_PATCH_GUIDANCE_MARKER), true);
+  assert.equal(annotated[0].description.includes(GROK_APPLY_PATCH_CREATE_EXAMPLE), true);
+  assert.equal(annotated[0].description.includes(GROK_APPLY_PATCH_UPDATE_EXAMPLE), true);
+  assert.doesNotMatch(annotated[0].description, /```/);
+  assert.equal(annotated[0].format, originalFormat);
+  assert.deepEqual(annotated[0].format, {
+    type: "grammar",
+    syntax: "lark",
+    definition: V4A_GRAMMAR,
+  });
+  assert.deepEqual(annotated[1], ordinary);
+  assert.deepEqual(annotated[2], otherCustom);
+  assert.deepEqual(input, [
+    {
+      type: "custom_tool_call",
+      id: "ctc_keep",
+      call_id: "call_keep",
+      name: APPLY_PATCH_TOOL_NAME,
+      input: "*** Begin Patch\n*** End Patch",
+    },
+  ]);
+
+  const bridged = bridgeCustomTools(annotated, input, new Map());
+  assert.equal(bridged.tools[0].name, "codex_custom_apply_patch");
+  assert.deepEqual(bridged.tools[1], ordinary);
+  assert.ok(bridged.tools[0].description.includes(V4A_GRAMMAR));
+  assert.ok(bridged.tools[0].description.includes(GROK_APPLY_PATCH_CREATE_EXAMPLE));
+  assert.equal(bridged.input[0].id, "ctc_keep");
+  assert.equal(bridged.input[0].call_id, "call_keep");
+  assert.equal(bridged.input[0].name, "codex_custom_apply_patch");
+  assert.deepEqual(JSON.parse(bridged.input[0].arguments), {
+    input: "*** Begin Patch\n*** End Patch",
+  });
+});
+
+test("Grok apply_patch guidance is idempotent and ignores a same-named ordinary function", () => {
+  const ordinary = { type: "function", name: APPLY_PATCH_TOOL_NAME, parameters: { type: "object" } };
+  const native = nativeApplyPatch();
+  const originalFormat = native.format;
+  const once = applyGrokApplyPatchGuidance([ordinary, native], GROK_46_ROUTE);
+  assert.deepEqual(once[0], ordinary);
+  assert.equal(once[1].format, originalFormat);
+  assert.deepEqual(once[1].format, originalFormat);
+  const twice = applyGrokApplyPatchGuidance(once, GROK_46_ROUTE);
+  assert.equal(twice, once);
+  assert.equal(twice[1].description.includes(GROK_APPLY_PATCH_GUIDANCE_MARKER), true);
+  assert.equal(
+    twice[1].description.split(GROK_APPLY_PATCH_GUIDANCE_MARKER).length - 1,
+    1,
+  );
+});
+
+test("Grok apply_patch guidance is confined to grok-oauth/grok-4.6", () => {
+  const tools = [nativeApplyPatch({ description: "Apply a patch." })];
+  for (const route of [GROK_45_ROUTE, GROK_API_46_ROUTE, COMMANDCODE_46_ROUTE, undefined]) {
+    assert.equal(applyGrokApplyPatchGuidance(tools, route), tools);
+  }
 });
 
 test("custom-tool bridge avoids hijacking an ordinary apply_patch function", () => {

@@ -105,6 +105,7 @@ import {
   tokenUsageFromPayload,
 } from "./response-usage.mjs";
 import { fetchWithRetry } from "./upstream-retry.mjs";
+import { applyGrokApplyPatchGuidance } from "./grok-apply-patch-guidance.mjs";
 import {
   NamespaceToolCallTransform,
   agentMessagesAsUserMessages,
@@ -3239,6 +3240,9 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
   if (consoleGoResponsesCompatibility) {
     routedToolChoice = flattenToolChoice(routedToolChoice, flattenedNamespaces);
   }
+  // Append V4A examples to the native custom apply_patch description for
+  // grok-oauth/grok-4.6 only, before LiteLLM translates that custom tool.
+  tools = applyGrokApplyPatchGuidance(tools, route);
   const routed = {
     ...payload,
     tools,

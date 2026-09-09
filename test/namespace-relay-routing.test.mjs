@@ -9,6 +9,12 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { callerBaseUrl } from "../src/caller-auth.mjs";
+import {
+  APPLY_PATCH_TOOL_NAME,
+  GROK_APPLY_PATCH_CREATE_EXAMPLE,
+  GROK_APPLY_PATCH_GUIDANCE_MARKER,
+  GROK_APPLY_PATCH_UPDATE_EXAMPLE,
+} from "../src/grok-apply-patch-guidance.mjs";
 
 // End-to-end proof of the namespace relay through the REAL router: a routed
 // request carrying the client's namespace toolset must reach the (mock)
@@ -2249,4 +2255,141 @@ test("OpenCode Go compaction removes native tool history before the strict endpo
     outgoing.input.some((item) => item.call_id === "orphan-custom-output"),
     false,
   );
+});
+
+const GROK_V4A_GRAMMAR = [
+  "start: begin_patch hunk+ end_patch",
+  'begin_patch: "*** Begin Patch" LF',
+  'end_patch: "*** End Patch" LF?',
+  "",
+  "hunk: add_hunk | delete_hunk | update_hunk",
+  'add_hunk: "*** Add File: " filename LF add_line+',
+  "%import common.LF",
+].join("\n");
+
+const GROK_PATCH_UNICODE = [
+  "*** Begin Patch",
+  '*** Add File: café "quotes".txt',
+  "+hello “unicode”",
+  "*** End Patch",
+].join("\n");
+
+function grokApplyPatchPayload(stream, model) {
+  return {
+    model,
+    stream,
+    input: [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "patch notes" }] },
+      {
+        type: "custom_tool_call",
+        id: "ctc_history",
+        call_id: "call_history",
+        name: APPLY_PATCH_TOOL_NAME,
+        input: "*** Begin Patch\n*** Add File: seed.txt\n+before\n*** End Patch",
+      },
+      { type: "custom_tool_call_output", call_id: "call_history", output: "Done!" },
+    ],
+    tools: [
+      {
+        type: "custom",
+        name: APPLY_PATCH_TOOL_NAME,
+        description: "Apply a patch.",
+        format: { type: "grammar", syntax: "lark", definition: GROK_V4A_GRAMMAR },
+      },
+      {
+        type: "function",
+        name: APPLY_PATCH_TOOL_NAME,
+        description: "ordinary same-name function",
+        parameters: { type: "object", properties: { path: { type: "string" } } },
+      },
+      { type: "custom", name: "future_custom", description: "leave me" },
+    ],
+  };
+}
+
+function grokApplyPatchSseBody() {
+  return [
+    sseEvent({
+      type: "response.output_item.added",
+      item: {
+        type: "custom_tool_call",
+        id: "ctc_unicode",
+        call_id: "call_unicode",
+        name: APPLY_PATCH_TOOL_NAME,
+        input: "",
+      },
+    }),
+    sseEvent({
+      type: "response.custom_tool_call_input.delta",
+      item_id: "ctc_unicode",
+      delta: GROK_PATCH_UNICODE,
+    }),
+    sseEvent({
+      type: "response.output_item.done",
+      item: {
+        type: "custom_tool_call",
+        id: "ctc_unicode",
+        call_id: "call_unicode",
+        name: APPLY_PATCH_TOOL_NAME,
+        input: GROK_PATCH_UNICODE,
+      },
+    }),
+    sseEvent({ type: "response.completed" }),
+    "data: [DONE]\n\n",
+  ].join("");
+}
+
+test("Grok 4.6 OAuth annotates native custom apply_patch and leaves history, collisions, and other models alone", async () => {
+  const guided = await scenario(true, {
+    model: "grok-oauth/grok-4.6",
+    requestPayload: grokApplyPatchPayload,
+    sseBody: grokApplyPatchSseBody,
+  });
+  const outgoing = guided.gatewayBodies[0];
+  const custom = outgoing.tools.find((tool) => tool.type === "custom" && tool.name === APPLY_PATCH_TOOL_NAME);
+  const ordinary = outgoing.tools.find((tool) => tool.type === "function" && tool.name === APPLY_PATCH_TOOL_NAME);
+  const otherCustom = outgoing.tools.find((tool) => tool.type === "custom" && tool.name === "future_custom");
+  assert.ok(custom, "native custom apply_patch still reaches LiteLLM as a custom tool");
+  assert.equal(custom.description.startsWith("Apply a patch."), true);
+  assert.equal(custom.description.includes(GROK_APPLY_PATCH_GUIDANCE_MARKER), true);
+  assert.equal(custom.description.includes(GROK_APPLY_PATCH_CREATE_EXAMPLE), true);
+  assert.equal(custom.description.includes(GROK_APPLY_PATCH_UPDATE_EXAMPLE), true);
+  assert.doesNotMatch(custom.description, /```/);
+  assert.deepEqual(custom.format, {
+    type: "grammar",
+    syntax: "lark",
+    definition: GROK_V4A_GRAMMAR,
+  });
+  assert.deepEqual(ordinary.description, "ordinary same-name function");
+  assert.equal(ordinary.description.includes(GROK_APPLY_PATCH_GUIDANCE_MARKER), false);
+  assert.deepEqual(otherCustom.description, "leave me");
+  const history = outgoing.input.find((item) => item.call_id === "call_history");
+  assert.equal(history.type, "custom_tool_call");
+  assert.equal(history.id, "ctc_history");
+  assert.equal(history.name, APPLY_PATCH_TOOL_NAME);
+  assert.equal(history.input, "*** Begin Patch\n*** Add File: seed.txt\n+before\n*** End Patch");
+  const restoredByCallId = new Map();
+  for (const item of responseItemsFromSse(guided.clientBody)) {
+    if (item?.call_id) restoredByCallId.set(item.call_id, item);
+  }
+  const restored = restoredByCallId.get("call_unicode");
+  assert.equal(restored.type, "custom_tool_call");
+  assert.equal(restored.id, "ctc_unicode");
+  assert.equal(restored.input, GROK_PATCH_UNICODE);
+
+  const unguided = await scenario(true, {
+    model: "grok-oauth/grok-4.5",
+    requestPayload: grokApplyPatchPayload,
+    sseBody: grokApplyPatchSseBody,
+  });
+  const control = unguided.gatewayBodies[0].tools.find(
+    (tool) => tool.type === "custom" && tool.name === APPLY_PATCH_TOOL_NAME,
+  );
+  assert.equal(control.description, "Apply a patch.");
+  assert.deepEqual(control.format, {
+    type: "grammar",
+    syntax: "lark",
+    definition: GROK_V4A_GRAMMAR,
+  });
+  assert.equal(control.description.includes(GROK_APPLY_PATCH_GUIDANCE_MARKER), false);
 });

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import http from "node:http";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -13,6 +13,14 @@ import {
   mergeHostedSearchTools,
   toResponsesRequest,
 } from "../src/grok-oauth-forwarder.mjs";
+import {
+  APPLY_PATCH_TOOL_NAME,
+  GROK_APPLY_PATCH_CREATE_EXAMPLE,
+  GROK_APPLY_PATCH_GUIDANCE_MARKER,
+  GROK_APPLY_PATCH_GUIDANCE_ROUTE,
+  GROK_APPLY_PATCH_UPDATE_EXAMPLE,
+  applyGrokApplyPatchGuidance,
+} from "../src/grok-apply-patch-guidance.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const INTERNAL_KEY = "test-grok-internal-service-key-with-sufficient-length";
@@ -1928,4 +1936,287 @@ test("keeps the first streamed answer when the retry also has no tools", async (
     await new Promise((r) => backend.server.close(r));
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+const V4A_GRAMMAR = [
+  "start: begin_patch hunk+ end_patch",
+  'begin_patch: "*** Begin Patch" LF',
+  'end_patch: "*** End Patch" LF?',
+  "",
+  "hunk: add_hunk | delete_hunk | update_hunk",
+  'add_hunk: "*** Add File: " filename LF add_line+',
+  'delete_hunk: "*** Delete File: " filename LF',
+  'update_hunk: "*** Update File: " filename LF change_move? change?',
+  "filename: /(.+)/",
+  'add_line: "+" /(.+)/ LF -> line',
+  "",
+  'change_move: "*** Move to: " filename LF',
+  "change: (change_context | change_line)+ eof_line?",
+  'change_context: ("@@" | "@@ " /(.+)/) LF',
+  'change_line: ("+" | "-" | " ") /(.+)/ LF',
+  'eof_line: "*** End of File" LF',
+  "",
+  "%import common.LF",
+].join("\n");
+
+const INSTALLED_LITELLM_PYTHON = path.join(
+  os.homedir(),
+  ".local/share/codex-router/.venv/bin/python",
+);
+
+function installedLiteLlmPython() {
+  const candidates = [
+    INSTALLED_LITELLM_PYTHON,
+    path.join(root, ".venv", "bin", "python"),
+    path.join(root, ".venv", "Scripts", "python.exe"),
+  ];
+  return candidates.find((candidate) => existsSync(candidate));
+}
+
+function convertCustomToolThroughInstalledLiteLlm(tool) {
+  const python = installedLiteLlmPython();
+  assert.ok(python, `installed LiteLLM python is required at ${INSTALLED_LITELLM_PYTHON}`);
+  const script = [
+    "import json, sys",
+    "from litellm.responses.litellm_completion_transformation.custom_tools import convert_custom_tool_to_function_tool",
+    "tool = json.load(sys.stdin)",
+    "converted = convert_custom_tool_to_function_tool(tool)",
+    "if hasattr(converted, 'model_dump'):",
+    "    converted = converted.model_dump(mode='json')",
+    "json.dump(converted, sys.stdout)",
+  ].join("\n");
+  const result = spawnSync(python, ["-c", script], {
+    input: JSON.stringify(tool),
+    encoding: "utf8",
+    timeout: 20_000,
+  });
+  assert.equal(result.status, 0, result.stderr || result.error?.message || "LiteLLM convert failed");
+  return JSON.parse(result.stdout);
+}
+
+function chatToolFromLiteLlm(converted) {
+  if (converted?.type === "function" && converted.function) return converted;
+  return { type: "function", function: converted };
+}
+
+test("Grok 4.6 apply_patch guidance survives Router-shaped LiteLLM translation and the forwarder", () => {
+  const originalDescription = "Apply a patch.";
+  const originalFormat = { type: "grammar", syntax: "lark", definition: V4A_GRAMMAR };
+  const native = applyGrokApplyPatchGuidance(
+    [
+      {
+        type: "custom",
+        name: APPLY_PATCH_TOOL_NAME,
+        description: originalDescription,
+        format: originalFormat,
+      },
+      { type: "function", name: APPLY_PATCH_TOOL_NAME, parameters: { type: "object" } },
+    ],
+    { slug: GROK_APPLY_PATCH_GUIDANCE_ROUTE },
+  )[0];
+  assert.equal(native.type, "custom");
+  assert.equal(native.format, originalFormat);
+  assert.deepEqual(native.format, {
+    type: "grammar",
+    syntax: "lark",
+    definition: V4A_GRAMMAR,
+  });
+
+  const converted = convertCustomToolThroughInstalledLiteLlm(native);
+  const chatTool = chatToolFromLiteLlm(converted);
+  assert.equal(chatTool.type, "function");
+  assert.equal(chatTool.function.name, APPLY_PATCH_TOOL_NAME);
+  const description = chatTool.function.description;
+  assert.match(description, new RegExp(originalDescription));
+  assert.ok(description.includes(V4A_GRAMMAR), "installed LiteLLM retains the original lark grammar");
+  assert.ok(description.includes(GROK_APPLY_PATCH_CREATE_EXAMPLE));
+  assert.ok(description.includes(GROK_APPLY_PATCH_UPDATE_EXAMPLE));
+  assert.equal(description.includes(GROK_APPLY_PATCH_GUIDANCE_MARKER), true);
+  assert.deepEqual(chatTool.function.parameters.required, ["content"]);
+  assert.equal(chatTool.function.parameters.properties.content.type, "string");
+
+  const forwarded = toResponsesRequest({
+    model: "grok-4.6",
+    messages: [{ role: "user", content: "patch notes.txt" }],
+    tools: [chatTool],
+  });
+  const applyPatch = forwarded.tools.find((tool) => tool.type === "function" && tool.name === APPLY_PATCH_TOOL_NAME);
+  assert.ok(applyPatch);
+  assert.equal(applyPatch.description, description);
+  assert.ok(applyPatch.description.includes(V4A_GRAMMAR));
+  assert.deepEqual(applyPatch.parameters.required, ["content"]);
+});
+
+test("Grok forwarder keeps apply_patch call ids and streamed unicode quotes newlines verbatim", async () => {
+  const rawPatch = [
+    "*** Begin Patch",
+    '*** Add File: café "quotes".txt',
+    "+hello “unicode”",
+    "*** End Patch",
+  ].join("\n");
+  const wrapped = JSON.stringify({ content: rawPatch });
+  const malformed = "*** Begin Patch\nnot-a-json-object";
+  let captured;
+  const backend = await mockBackend(async (req, res) => {
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    captured = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    const call = captured.input.find((item) => item.type === "function_call");
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    res.end(
+      sse([
+        {
+          type: "response.output_item.added",
+          item: {
+            type: "function_call",
+            id: "fc_unicode",
+            call_id: "call_unicode",
+            name: APPLY_PATCH_TOOL_NAME,
+          },
+        },
+        {
+          type: "response.function_call_arguments.delta",
+          item_id: "fc_unicode",
+          delta: call?.arguments === malformed ? malformed : wrapped,
+        },
+        {
+          type: "response.output_item.done",
+          item: {
+            type: "function_call",
+            id: "fc_unicode",
+            call_id: "call_unicode",
+            name: APPLY_PATCH_TOOL_NAME,
+            arguments: call?.arguments === malformed ? malformed : wrapped,
+          },
+        },
+        { type: "response.completed", response: { usage: { input_tokens: 11, output_tokens: 9 } } },
+      ]),
+    );
+  });
+  const port = await openPort();
+  const dir = mkdtempSync(path.join(os.tmpdir(), "grok-oauth-patch-guidance-"));
+  const child = startForwarder(port, backend.port, writeSession(dir));
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    await waitHealth(base, child);
+    const tools = [
+      {
+        type: "function",
+        function: {
+          name: APPLY_PATCH_TOOL_NAME,
+          description: `Apply a patch.\n\n${GROK_APPLY_PATCH_GUIDANCE_MARKER}`,
+          parameters: {
+            type: "object",
+            properties: { content: { type: "string" } },
+            required: ["content"],
+          },
+        },
+      },
+    ];
+    const streamed = await fetch(`${base}/v1/chat/completions`, {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({
+        model: "grok-4.6",
+        messages: [
+          { role: "user", content: "edit café" },
+          {
+            role: "assistant",
+            tool_calls: [
+              {
+                id: "call_history",
+                type: "function",
+                function: { name: APPLY_PATCH_TOOL_NAME, arguments: wrapped },
+              },
+            ],
+          },
+          { role: "tool", tool_call_id: "call_history", content: "Done!" },
+        ],
+        tools,
+        stream: true,
+      }),
+    });
+    const streamBody = await streamed.text();
+    assert.equal(captured.input.find((item) => item.type === "function_call").call_id, "call_history");
+    assert.equal(captured.input.find((item) => item.type === "function_call").arguments, wrapped);
+    assert.match(streamBody, /"id":"call_unicode"/);
+    const streamedArguments = [];
+    for (const line of streamBody.split(/\n/)) {
+      if (!line.startsWith("data:")) continue;
+      const data = line.slice(5).trim();
+      if (!data || data === "[DONE]") continue;
+      let parsed;
+      try {
+        parsed = JSON.parse(data);
+      } catch {
+        continue;
+      }
+      const deltaArgs = parsed.choices?.[0]?.delta?.tool_calls?.[0]?.function?.arguments;
+      if (typeof deltaArgs === "string") streamedArguments.push(deltaArgs);
+    }
+    assert.equal(streamedArguments.join(""), wrapped);
+    assert.equal(JSON.parse(streamedArguments.join("")).content, rawPatch);
+
+    const malformedResp = await fetch(`${base}/v1/chat/completions`, {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({
+        model: "grok-4.6",
+        messages: [
+          { role: "user", content: "edit again" },
+          {
+            role: "assistant",
+            tool_calls: [
+              {
+                id: "call_malformed",
+                type: "function",
+                function: { name: APPLY_PATCH_TOOL_NAME, arguments: malformed },
+              },
+            ],
+          },
+          { role: "tool", tool_call_id: "call_malformed", content: "Failed" },
+        ],
+        tools,
+        stream: false,
+      }),
+    });
+    const malformedJson = await malformedResp.json();
+    assert.equal(captured.input.find((item) => item.type === "function_call").arguments, malformed);
+    assert.equal(
+      malformedJson.choices[0].message.tool_calls[0].function.arguments,
+      malformed,
+    );
+  } finally {
+    await stop(child);
+    await new Promise((r) => backend.server.close(r));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Grok 4.5 does not receive apply_patch V4A guidance from this route", () => {
+  const tools = [
+    {
+      type: "custom",
+      name: APPLY_PATCH_TOOL_NAME,
+      format: { type: "grammar", syntax: "lark", definition: V4A_GRAMMAR },
+    },
+  ];
+  assert.equal(applyGrokApplyPatchGuidance(tools, { slug: "grok-oauth/grok-4.5" }), tools);
+  const forwarded = toResponsesRequest({
+    model: "grok-4.5",
+    messages: [{ role: "user", content: "patch" }],
+    tools: [
+      {
+        type: "function",
+        function: {
+          name: APPLY_PATCH_TOOL_NAME,
+          description: "Apply a patch.",
+          parameters: { type: "object", properties: { content: { type: "string" } } },
+        },
+      },
+    ],
+  });
+  const applyPatch = forwarded.tools.find((tool) => tool.name === APPLY_PATCH_TOOL_NAME);
+  assert.equal(applyPatch.description, "Apply a patch.");
+  assert.equal(applyPatch.description.includes(GROK_APPLY_PATCH_GUIDANCE_MARKER), false);
 });
