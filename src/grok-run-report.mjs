@@ -41,7 +41,9 @@ export function buildGrokRunReport({ usageEvents = [], activityEvents = [], code
   }
   const requests = [...activity.values()];
   const settled = requests.filter((row) => count(row.endedAt) !== undefined);
-  const usage = [...new Map(usageEvents.filter((row) => typeof row.requestId === 'string' && activity.has(row.requestId)).map((row) => [row.requestId, row])).values()];
+  // One client request may meter multiple charged provider attempts. Never
+  // collapse those records merely because their requestId matches.
+  const usage = usageEvents.filter((row) => typeof row.requestId === 'string' && activity.has(row.requestId));
   const nativeCounts = [];
   const toolCalls = new Map();
   const toolIntervals = [];
@@ -104,7 +106,9 @@ export function buildGrokRunReport({ usageEvents = [], activityEvents = [], code
     }
   }
   const cli = grokEvents.length > 0 || cliRequests.length > 0;
-  const routerCountsComplete = usage.length === settled.length && usage.length > 0 && usage.every((row) => count(row.outputTokens) !== undefined);
+  const usageIds = new Set(usage.map((row) => row.requestId));
+  const routerCountsComplete = settled.length > 0 && usageIds.size === settled.length &&
+    settled.every((row) => usageIds.has(row.requestId)) && usage.every((row) => count(row.outputTokens) !== undefined);
   const counts = cli ? cliUsage : routerCountsComplete ? usage : nativeCounts.length ? nativeCounts : usage;
   const tokens = Object.fromEntries(['inputTokens', 'cachedInputTokens', 'outputTokens', 'reasoningTokens'].map((key) => [key, total(counts, key)]));
   const durations = cli ? cliRequests.map((row) => count(row.model_elapsed_ms)).filter((v) => v !== undefined)
@@ -130,7 +134,8 @@ export function buildGrokRunReport({ usageEvents = [], activityEvents = [], code
       durationMs: requestMs, correlation: usage.length ? 'request_id' : 'unavailable',
       correlatedUsageRecords: usage.length, statuses: settled.reduce((all, row) => { const key = Number.isInteger(row.status) ? String(row.status) : 'unknown'; all[key] = (all[key] ?? 0) + 1; return all; }, {}) },
     tokens, tokenSource: cli ? 'grok_usage_events' : routerCountsComplete ? 'router_usage' : nativeCounts.length ? 'codex_usage_events' : 'router_usage',
-    outputTokensPerRequestSecond: requestMs > 0 && outputTokens !== null && durations.length === counts.length ? outputTokens / (requestMs / 1000) : null,
+    outputTokensPerRequestSecond: requestMs > 0 && outputTokens !== null &&
+      (routerCountsComplete && !cli || durations.length === counts.length) ? outputTokens / (requestMs / 1000) : null,
     // Timing is not interchangeable with reasoning-inclusive token counts. Do not
     // subtract text TTFT and present that quotient as decoding throughput.
     firstTokenMs: cli ? total(cliRequests, 'ttft_ms') : total(usage, 'firstTokenMs'),

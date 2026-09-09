@@ -93,16 +93,17 @@ test('CLI input totals include separately reported cached tokens', () => {
   assert.equal(report.tokens.reasoningTokens.value, null);
 });
 
-test('authoritative correlated usage wins over client counters and duplicate exports', () => {
+test('authoritative usage wins over client counters and retains multiple charged attempts', () => {
   const row = { requestId: 'r1', inputTokens: 20, outputTokens: 30 };
   const report = buildGrokRunReport({ threadId: 'worker', startedAt: at(0), endedAt: at(10),
     activityEvents: [{ recent: [{ requestId: 'r1', threadId: 'worker', startedAt: Date.parse(at(1)), endedAt: Date.parse(at(5)) }] }],
     usageEvents: [row, row], codexEvents: [event(5, 'event_msg', usage(20, 30, 0))] });
-  assert.equal(report.requests.correlatedUsageRecords, 1);
-  assert.equal(report.tokens.outputTokens.value, 30);
+  assert.equal(report.requests.correlatedUsageRecords, 2);
+  assert.equal(report.tokens.outputTokens.value, 60);
   assert.equal(report.tokens.reasoningTokens.value, null);
   assert.equal(report.tokenSource, 'router_usage');
   assert.equal(report.unobservedMs, 6000);
+  assert.equal(report.outputTokensPerRequestSecond, 15);
 });
 
 test('JSONL rejects corrupt completed records while allowing an unfinished tail', async (t) => {
