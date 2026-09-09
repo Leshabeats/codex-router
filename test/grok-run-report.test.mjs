@@ -33,6 +33,28 @@ test('missing reasoning stays missing while explicit zero is counted', () => {
   assert.equal(report.outputTokensPerRequestSecond, null);
 });
 
+test('first test timing ignores filenames, quoted examples and shell comments', () => {
+  const reads = [
+    'cat frontend/vitest.config.ts',
+    'rg vitest package.json',
+    'echo "vitest run; npm test"',
+    "printf '%s\\n' 'jest run'",
+    'cat package.json # ; npm test',
+    'node -e "console.log(\'vitest run\')"',
+    "cat <<'EOF'\nvitest run\nEOF",
+  ];
+  const commands = [...reads, 'cd frontend && ./node_modules/.bin/vitest run src/example.spec.ts'];
+  const report = buildGrokRunReport({ startedAt: at(0), codexEvents: commands.map((cmd, i) =>
+    event(i + 1, 'response_item', { type: 'function_call', name: 'exec_command', call_id: String(i), arguments: JSON.stringify({ cmd }) })) });
+  assert.equal(report.tools.firstTestAfterMs, commands.length * 1000);
+  for (const cmd of ['npm test', 'npm run test:unit', 'npx vitest run', 'node --test test/example.mjs', 'jest', 'cd frontend\n./node_modules/.bin/vitest run']) {
+    const direct = buildGrokRunReport({ startedAt: at(0), codexEvents: [event(2, 'response_item', {
+      type: 'function_call', name: 'exec_command', call_id: 'test', arguments: JSON.stringify({ cmd }),
+    })] });
+    assert.equal(direct.tools.firstTestAfterMs, 2000, cmd);
+  }
+});
+
 test('measures overlapping tool intervals once and counts patch failure without exporting text', () => {
   const secret = 'PRIVATE_USER_CONTENT_CANARY';
   const report = buildGrokRunReport({ startedAt: at(0), endedAt: at(10), codexEvents: [

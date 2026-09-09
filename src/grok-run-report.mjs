@@ -9,7 +9,14 @@ const total = (rows, key) => {
     reported: values.filter((v) => v !== undefined).length, missing: values.filter((v) => v === undefined).length };
 };
 const completeValue = (aggregate) => aggregate.missing === 0 ? aggregate.value : null;
-const testCommand = (command) => /(?:\bvitest\b|\bjest\b|\bnpm\s+(?:run\s+)?test\b|\bnode\s+--test\b)/u.test(command ?? '');
+function testCommand(command) {
+  if (typeof command !== 'string') return false;
+  // Recognize direct commands conservatively, not filenames or quoted examples.
+  // This is not a shell interpreter: heredocs and indirect wrappers are omitted.
+  const source = command.replace(/'(?:[^']*)'|"(?:\\.|[^"\\])*"|`(?:\\.|[^`\\])*`|#[^\r\n]*/gu, ' ');
+  if (source.includes('<<')) return false;
+  return /(?:^|&&|\|\||;|\n)\s*(?:(?:[^\s;|&]+\/)?(?:vitest|jest)(?=\s|$)|npm\s+(?:run\s+)?test(?=\s|:|$)|npx\s+(?:vitest|jest)(?=\s|$)|node\s+--test(?=\s|$))/u.test(source);
+}
 const terminal = new Set(['completed', 'failed', 'cancelled', 'timeout']);
 
 function unionMs(intervals) {
