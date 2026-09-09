@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import http from "node:http";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -1959,49 +1959,35 @@ const V4A_GRAMMAR = [
   "%import common.LF",
 ].join("\n");
 
-const INSTALLED_LITELLM_PYTHON = path.join(
-  os.homedir(),
-  ".local/share/codex-router/.venv/bin/python",
-);
-
-function installedLiteLlmPython() {
-  const candidates = [
-    INSTALLED_LITELLM_PYTHON,
-    path.join(root, ".venv", "bin", "python"),
-    path.join(root, ".venv", "Scripts", "python.exe"),
-  ];
-  return candidates.find((candidate) => existsSync(candidate));
+// Hand-built LiteLLM 1.96 custom-tool function shape. Live conversion through
+// the installed proxy is scripts/verify-grok-apply-patch-guidance.mjs.
+function litellmCustomToolFunctionShape(tool) {
+  const syntax = typeof tool.format?.syntax === "string" && tool.format.syntax ? tool.format.syntax : "lark";
+  const definition = typeof tool.format?.definition === "string" ? tool.format.definition : "";
+  const description = `${tool.description || ""}\n\nFormat:\n\`\`\`${syntax}\n${definition}\n\`\`\``;
+  return {
+    type: "function",
+    function: {
+      name: tool.name,
+      description,
+      parameters: {
+        type: "object",
+        properties: {
+          content: {
+            type: "string",
+            description: `The ${tool.name} content following the specified format`,
+          },
+        },
+        required: ["content"],
+      },
+    },
+  };
 }
 
-function convertCustomToolThroughInstalledLiteLlm(tool) {
-  const python = installedLiteLlmPython();
-  assert.ok(python, `installed LiteLLM python is required at ${INSTALLED_LITELLM_PYTHON}`);
-  const script = [
-    "import json, sys",
-    "from litellm.responses.litellm_completion_transformation.custom_tools import convert_custom_tool_to_function_tool",
-    "tool = json.load(sys.stdin)",
-    "converted = convert_custom_tool_to_function_tool(tool)",
-    "if hasattr(converted, 'model_dump'):",
-    "    converted = converted.model_dump(mode='json')",
-    "json.dump(converted, sys.stdout)",
-  ].join("\n");
-  const result = spawnSync(python, ["-c", script], {
-    input: JSON.stringify(tool),
-    encoding: "utf8",
-    timeout: 20_000,
-  });
-  assert.equal(result.status, 0, result.stderr || result.error?.message || "LiteLLM convert failed");
-  return JSON.parse(result.stdout);
-}
-
-function chatToolFromLiteLlm(converted) {
-  if (converted?.type === "function" && converted.function) return converted;
-  return { type: "function", function: converted };
-}
-
-test("Grok 4.6 apply_patch guidance survives Router-shaped LiteLLM translation and the forwarder", () => {
+test("Grok 4.6 apply_patch guidance reaches the forwarder in LiteLLM's custom-tool function shape", () => {
   const originalDescription = "Apply a patch.";
   const originalFormat = { type: "grammar", syntax: "lark", definition: V4A_GRAMMAR };
+  const ordinary = { type: "function", name: APPLY_PATCH_TOOL_NAME, parameters: { type: "object" } };
   const native = applyGrokApplyPatchGuidance(
     [
       {
@@ -2010,7 +1996,7 @@ test("Grok 4.6 apply_patch guidance survives Router-shaped LiteLLM translation a
         description: originalDescription,
         format: originalFormat,
       },
-      { type: "function", name: APPLY_PATCH_TOOL_NAME, parameters: { type: "object" } },
+      ordinary,
     ],
     { slug: GROK_APPLY_PATCH_GUIDANCE_ROUTE },
   )[0];
@@ -2021,30 +2007,36 @@ test("Grok 4.6 apply_patch guidance survives Router-shaped LiteLLM translation a
     syntax: "lark",
     definition: V4A_GRAMMAR,
   });
+  assert.equal(native.description.includes(GROK_APPLY_PATCH_GUIDANCE_MARKER), true);
+  assert.equal(native.description.includes(GROK_APPLY_PATCH_CREATE_EXAMPLE), true);
+  assert.equal(native.description.includes(GROK_APPLY_PATCH_UPDATE_EXAMPLE), true);
 
-  const converted = convertCustomToolThroughInstalledLiteLlm(native);
-  const chatTool = chatToolFromLiteLlm(converted);
-  assert.equal(chatTool.type, "function");
-  assert.equal(chatTool.function.name, APPLY_PATCH_TOOL_NAME);
-  const description = chatTool.function.description;
-  assert.match(description, new RegExp(originalDescription));
-  assert.ok(description.includes(V4A_GRAMMAR), "installed LiteLLM retains the original lark grammar");
-  assert.ok(description.includes(GROK_APPLY_PATCH_CREATE_EXAMPLE));
-  assert.ok(description.includes(GROK_APPLY_PATCH_UPDATE_EXAMPLE));
-  assert.equal(description.includes(GROK_APPLY_PATCH_GUIDANCE_MARKER), true);
+  const chatTool = litellmCustomToolFunctionShape(native);
+  const formatFence = chatTool.function.description.match(/Format:\n```lark\n([\s\S]*)\n```$/);
+  assert.ok(formatFence, "LiteLLM-shaped description keeps grammar in a Format fence");
+  assert.equal(formatFence[1], V4A_GRAMMAR);
+  const beforeFormat = chatTool.function.description.slice(
+    0,
+    chatTool.function.description.indexOf("\n\nFormat:"),
+  );
+  assert.equal(beforeFormat.includes(originalDescription), true);
+  assert.equal(beforeFormat.includes(GROK_APPLY_PATCH_CREATE_EXAMPLE), true);
   assert.deepEqual(chatTool.function.parameters.required, ["content"]);
-  assert.equal(chatTool.function.parameters.properties.content.type, "string");
 
   const forwarded = toResponsesRequest({
     model: "grok-4.6",
     messages: [{ role: "user", content: "patch notes.txt" }],
-    tools: [chatTool],
+    tools: [chatTool, { type: "function", function: { name: APPLY_PATCH_TOOL_NAME, description: "ordinary same-name function", parameters: ordinary.parameters } }],
   });
   const applyPatch = forwarded.tools.find((tool) => tool.type === "function" && tool.name === APPLY_PATCH_TOOL_NAME);
   assert.ok(applyPatch);
-  assert.equal(applyPatch.description, description);
-  assert.ok(applyPatch.description.includes(V4A_GRAMMAR));
+  assert.equal(applyPatch.description, chatTool.function.description);
   assert.deepEqual(applyPatch.parameters.required, ["content"]);
+  assert.equal(
+    forwarded.tools.filter((tool) => tool.type === "function" && tool.name === APPLY_PATCH_TOOL_NAME).length,
+    1,
+    "the Grok forwarder keeps one apply_patch definition and does not merge guidance onto a same-named ordinary function",
+  );
 });
 
 test("Grok forwarder keeps apply_patch call ids and streamed unicode quotes newlines verbatim", async () => {
