@@ -719,6 +719,11 @@ try {
   assert.equal(grokApply[0].description.includes("Apply a patch."), true);
   if (structured) {
     assert.deepEqual(grokApply[0].parameters, GROK_STRUCTURED_PATCH_CODEC.parameters);
+    assert.match(grokApply[0].description, /operations as a JSON array, never a JSON-encoded string/);
+    assert.match(grokApply[0].description, /one operation per path/);
+    assert.match(grokApply[0].description, /Every hunk must include at least one add or remove/);
+    assert.match(grokApply[0].description, /Prefer apply_patch for manual file edits/);
+    assert.match(grokApply[0].description, /Shell remains available for formatters/);
     assert.notEqual(grokApply[0].name, APPLY_PATCH_TOOL_NAME);
     const ordinary = grokTools.find((tool) => tool.name === APPLY_PATCH_TOOL_NAME);
     assert.equal(ordinary?.description, "ordinary same-name function");

@@ -147,8 +147,7 @@ const objectSchema = (properties, required = Object.keys(properties)) => ({
   type: "object", properties, required, additionalProperties: false,
 });
 
-// Not installed on any route yet. The request/response bridge must first prove
-// history, collisions and streaming safety before this schema can be offered.
+// Offered only by the opt-in structured bridge or negotiated native hook.
 export const GROK_STRUCTURED_PATCH_PARAMETERS = objectSchema({
   operations: {
     type: "array", minItems: 1, maxItems: MAX_OPERATIONS,
@@ -187,6 +186,9 @@ export const GROK_STRUCTURED_PATCH_CODEC = {
     return [
       typeof original === "string" ? original : "Apply a patch to files.",
       "This provider interface accepts structured operations, not raw patch text. Supply literal logical lines without patch delimiters or line prefixes; use context/add/remove kinds inside update hunks. Codex performs the original patch validation and permission checks. Old calls in history may have an input field containing native patch text; that historical envelope is not accepted for new calls.",
+      "Supply operations as a JSON array, never a JSON-encoded string. Use one operation per path; combine changes to the same file into multiple hunks of that operation. Every hunk must include at least one add or remove line. A replaced line belongs in remove, not also in context. Context lines are unchanged neighboring lines.",
+      'Example replacement: {"operations":[{"op":"update","path":"notes.txt","hunks":[{"lines":[{"kind":"remove","text":"old"},{"kind":"add","text":"new"}]}]}]}',
+      "Prefer apply_patch for manual file edits. Shell remains available for formatters, generated files and justified bulk transformations. After a validation error, correct this call using its feedback rather than deleting and recreating the file or switching tools just to evade validation.",
     ].filter(Boolean).join("\n\n");
   },
 };

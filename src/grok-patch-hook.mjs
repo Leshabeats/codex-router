@@ -9,6 +9,12 @@ import { GROK_PATCH_HOOK_PREFIX } from "./grok-patch-hook-transport.mjs";
 // for the native event metadata as well; reject the complete event above 8 MiB.
 export const MAX_GROK_PATCH_HOOK_INPUT_BYTES = MAX_STRUCTURED_PATCH_BYTES * 8;
 
+const ERROR_HINTS = Object.freeze({
+  array_bounds: "Use JSON arrays for operations, hunks and lines, within their schema bounds; do not JSON-encode arrays as strings.",
+  duplicate_path: "Use one operation per path; combine that file's changes into multiple hunks.",
+  no_change: "Include at least one add or remove line in every hunk; omit context-only hunks.",
+});
+
 // This adapter only serializes. Native apply_patch still validates the patch
 // and enforces its permissions. If this hook fails or is absent, the original
 // prefixed envelope cannot be a native patch; this is not a general guarantee
@@ -33,7 +39,7 @@ export function adaptHookInput(event) {
     return { hookSpecificOutput: {
       hookEventName: "PreToolUse",
       permissionDecision: "deny",
-      permissionDecisionReason: `Invalid structured apply_patch arguments (${code}). Correct the structured arguments and retry this tool.`,
+      permissionDecisionReason: `Invalid structured apply_patch arguments (${code}). ${Object.hasOwn(ERROR_HINTS, code) ? ERROR_HINTS[code] : "Correct the structured arguments and retry this tool."}`,
     } };
   }
 }

@@ -32,6 +32,21 @@ invalid Unicode, duplicate paths, and no-op update hunks are rejected. Paths
 are literal single header values; allowing an absolute path is not permission
 to access it. Native Codex authorization still applies.
 
+`operations`, `hunks`, and `lines` are JSON arrays, not JSON-encoded strings.
+Use one operation per path and multiple hunks for multiple changes to that
+file. Every hunk must add or remove a line. A replacement's old line belongs
+in `remove`; do not repeat it in `context`, which describes unchanged neighbors:
+
+```json
+{"operations":[{"op":"update","path":"notes.txt","hunks":[{"lines":[{"kind":"remove","text":"old"},{"kind":"add","text":"new"}]}]}]}
+```
+
+The native hook retains strict validation and the `array_bounds`,
+`duplicate_path`, and `no_change` codes, with bounded corrective hints for
+each. The provider-facing description prefers `apply_patch` for manual edits;
+shell tools remain available for formatters, generators, and justified bulk
+transformations. No shell or Python command interception is introduced.
+
 The serializer authors patch delimiters and line prefixes. It does not fix
 source code, search for approximate matches, or request another model response.
 The existing native parser owns line-oriented file behavior, including final

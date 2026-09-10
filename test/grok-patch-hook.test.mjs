@@ -75,9 +75,28 @@ test("invalid and ambiguous operations yield bounded native denial with no execu
     assert.equal(output.hookEventName, "PreToolUse");
     assert.equal(output.permissionDecision, "deny");
     assert.equal(Object.hasOwn(output, "updatedInput"), false);
-    assert.match(output.permissionDecisionReason, /^Invalid structured apply_patch arguments \([a-z_]+\)\. Correct the structured arguments and retry this tool\.$/u);
-    assert.ok(output.permissionDecisionReason.length < 200);
+    assert.match(output.permissionDecisionReason, /^Invalid structured apply_patch arguments \([a-z_]+\)\. .+\.$/u);
+    assert.ok(output.permissionDecisionReason.length < 240);
     assert.ok(!output.permissionDecisionReason.includes("private source"));
+  }
+});
+
+test("specific feedback repairs array types, duplicate paths and context-only hunks without relaxing validation", () => {
+  const hunk = { lines: [{ kind: "remove", text: 'old "Привет" \\r\\n' }, { kind: "add", text: 'new "Привет" \\r\\n' }] };
+  const operation = { op: "update", path: "notes.txt", hunks: [hunk] };
+  const cases = [
+    [{ operations: JSON.stringify([operation]) }, /array_bounds.*JSON arrays/, { operations: [operation] }],
+    [{ operations: [operation, operation] }, /duplicate_path.*one operation per path/, { operations: [{ ...operation, hunks: [hunk, hunk] }] }],
+    [{ operations: [{ ...operation, hunks: [{ lines: [{ kind: "context", text: "old" }] }] }] }, /no_change.*at least one add or remove/, { operations: [operation] }],
+  ];
+  for (const [invalid, hint, corrected] of cases) {
+    const denied = adaptHookInput(event(JSON.stringify(invalid))).hookSpecificOutput;
+    assert.equal(denied.permissionDecision, "deny");
+    assert.match(denied.permissionDecisionReason, hint);
+    const allowed = adaptHookInput(event(JSON.stringify(corrected))).hookSpecificOutput;
+    assert.equal(allowed.permissionDecision, "allow");
+    assert.match(allowed.updatedInput.command, /-old "Привет" \\r\\n\n\+new "Привет" \\r\\n/);
+    assert.doesNotMatch(allowed.updatedInput.command, /Delete File|Add File/);
   }
 });
 
