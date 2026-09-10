@@ -70,9 +70,13 @@ export function buildGrokRunReport({ usageEvents = [], activityEvents = [], code
   const usage = usageEvents.filter((row) => typeof row.requestId === 'string' && activity.has(row.requestId));
   const nativeCounts = [];
   const toolCalls = new Map();
+  const seenToolCalls = new Set();
   const toolIntervals = [];
+  const patches = { calls: 0, succeeded: 0, hookRejected: 0, contextRejected: 0,
+    otherFailed: 0, unknownResult: 0, withoutResult: 0 };
   let toolCount = 0, toolFailures = 0, patchFailures = 0, firstTestAt;
   let inferredOutcome = 'running';
+  let currentTurn;
   for (const event of codexEvents) {
     if (!within(event.timestamp)) continue;
     const p = event.payload ?? {};
@@ -81,14 +85,27 @@ export function buildGrokRunReport({ usageEvents = [], activityEvents = [], code
       nativeCounts.push({ inputTokens: n.input_tokens, cachedInputTokens: n.cached_input_tokens,
         outputTokens: n.output_tokens, reasoningTokens: n.reasoning_output_tokens });
     }
-    if (event.type === 'event_msg' && ['task_complete', 'task_completed'].includes(p.type)) inferredOutcome = 'completed';
-    if (event.type === 'event_msg' && p.type === 'turn_aborted') inferredOutcome = 'cancelled';
+    if (event.type === 'event_msg') {
+      if (p.type === 'task_started') {
+        currentTurn = p.turn_id;
+        inferredOutcome = 'running';
+      }
+      // A late close from an older turn must not finish a resumed worker.
+      const current = !currentTurn || !p.turn_id || p.turn_id === currentTurn;
+      if (current && ['task_complete', 'task_completed'].includes(p.type)) {
+        inferredOutcome = p.error ? 'failed' : 'completed';
+      }
+      if (current && p.type === 'turn_aborted') inferredOutcome = 'cancelled';
+    }
     if (event.type !== 'response_item') continue;
     if (['function_call', 'custom_tool_call'].includes(p.type)) {
+      if (typeof p.call_id !== 'string' || seenToolCalls.has(p.call_id)) continue;
+      seenToolCalls.add(p.call_id);
       let command;
       try { command = JSON.parse(p.arguments ?? '{}').cmd; } catch { /* only inspect valid command envelopes */ }
       toolCalls.set(p.call_id, { at: timestamp(event.timestamp), patch: p.name === 'apply_patch' });
       toolCount++;
+      if (p.name === 'apply_patch') patches.calls++;
       if (typeof command === 'string' && testCommand(command)) firstTestAt ??= timestamp(event.timestamp);
     }
     if (['function_call_output', 'custom_tool_call_output'].includes(p.type) && toolCalls.has(p.call_id)) {
@@ -96,11 +113,22 @@ export function buildGrokRunReport({ usageEvents = [], activityEvents = [], code
       toolCalls.delete(p.call_id);
       toolIntervals.push([call.at, timestamp(event.timestamp)]);
       const output = typeof p.output === 'string' ? p.output : '';
-      const failedPatch = call.patch && /(?:verification failed|invalid patch)/iu.test(output);
+      const hookRejected = /^Command blocked by PreToolUse hook:/iu.test(output);
+      const failedExit = /(?:Process exited with code|Exit code:)\s*[1-9]\d*/u.test(output);
+      const contextRejected = /^apply_patch verification failed:/iu.test(output);
+      const failedPatch = call.patch && (hookRejected || contextRejected || failedExit || /^invalid patch/iu.test(output));
+      if (call.patch) {
+        if (hookRejected) patches.hookRejected++;
+        else if (contextRejected) patches.contextRejected++;
+        else if (failedPatch) patches.otherFailed++;
+        else if (/^(?:Success\. Updated the following files:|Output:\s*\nSuccess\. Updated the following files:)/mu.test(output)) patches.succeeded++;
+        else patches.unknownResult++;
+      }
       if (failedPatch) patchFailures++;
-      if (failedPatch || /(?:Process exited with code|Exit code:)\s*[1-9]\d*/u.test(output)) toolFailures++;
+      if (failedPatch || hookRejected || failedExit) toolFailures++;
     }
   }
+  patches.withoutResult = [...toolCalls.values()].filter((call) => call.patch).length;
   const cliRequestRows = grokLog.filter((row) => sessionId && row.sid === sessionId && within(row.ts) && row.msg === 'shell.turn.inference_done');
   const cliRequests = cliRequestRows.map((row) => row.ctx ?? {});
   const cliUsage = grokEvents.filter((row) => row.type === 'usage').map((row) => ({
@@ -171,11 +199,13 @@ export function buildGrokRunReport({ usageEvents = [], activityEvents = [], code
     firstTokenMs: cli ? total(cliRequests, 'ttft_ms') : total(usage, 'firstTokenMs'),
     tools: { calls: cli ? cliToolIds.size : toolCount, failures: cli ? cliToolFailures.size : toolFailures,
       patchFailures: cli ? null : patchFailures, durationMs: toolIntervals.length ? unionMs(toolIntervals) : null,
+      patches: cli ? null : patches,
       firstTestAfterMs: start !== undefined && firstTestAt !== undefined ? firstTestAt - start : null },
     contextBytes: { unit: 'utf8_json_bytes', first: bytes[0] ?? null, last: bytes.at(-1) ?? null },
     // Counts already-correlated usage records only. Never copy metadata, request IDs, or prompt/code.
     structuredPatch: cli ? null : structuredPatchCounts(usage),
     limitations: ['Completion is the worker status; test success and independent review must be recorded separately.',
+      'structuredPatch.applied counts request schema transformations, not successful file edits; tools.patches counts observed native results.',
       'Byte sizes are not token estimates. Partial or unmatched counters do not establish throughput.',
       'Unobserved time includes scheduling and uninstrumented work; it is not proven provider waiting time.',
       'Input totals include cache reads and writes; reasoning counts are never inferred from text or durations.',

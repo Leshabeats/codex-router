@@ -51,6 +51,17 @@ live files can be inspected. Prefer complete files for final comparisons.
 
 Interpretation:
 
+- The latest native turn determines outcome: a completion carrying an error is
+  `failed`, and a subsequent `task_started` returns it to `running`. Completion
+  alone does not certify tests or the user's goal.
+- `tools.patches` separates `succeeded`, `hookRejected`, `contextRejected`,
+  `otherFailed`, `unknownResult` and `withoutResult`. Only explicit native
+  success feedback counts as a successful patch. Hook rejections contribute to
+  both legacy failure counters. Repeated call/result records are counted once.
+- `structuredPatch.applied` counts usage records where the request's tool schema
+  was transformed. It does not prove that the model called the hook or edited
+  a file. Use `tools.patches` for native execution evidence.
+
 - Token fields include `reported` and `missing` coverage. Input totals include
   cache reads and writes for both harnesses. Reasoning is part of output tokens,
   not an extra amount to add to the output total.

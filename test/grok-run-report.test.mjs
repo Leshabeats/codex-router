@@ -65,9 +65,50 @@ test('measures overlapping tool intervals once and counts patch failure without 
     event(5, 'response_item', { type: 'reasoning', text: secret }),
     event(6, 'event_msg', { type: 'task_complete', last_agent_message: secret }),
   ] });
-  assert.deepEqual(report.tools, { calls: 2, failures: 2, patchFailures: 1, durationMs: 3000, firstTestAfterMs: 1000 });
+  assert.deepEqual(report.tools, { calls: 2, failures: 2, patchFailures: 1, durationMs: 3000, firstTestAfterMs: 1000,
+    patches: { calls: 1, succeeded: 0, hookRejected: 0, contextRejected: 1, otherFailed: 0, unknownResult: 0, withoutResult: 0 } });
   assert.equal(report.outcome, 'completed');
   assert.ok(!JSON.stringify(report).includes(secret));
+});
+
+test('native patch results distinguish hook denial, context, failures, success and missing evidence', () => {
+  const outputs = [
+    'Command blocked by PreToolUse hook: Invalid structured apply_patch arguments (duplicate_path). PRIVATE',
+    'apply_patch verification failed: Failed to find expected lines PRIVATE',
+    'Exit code: 1\nOutput:\nPRIVATE',
+    'Exit code: 0\nWall time: 0.1 seconds\nOutput:\nSuccess. Updated the following files:\nM PRIVATE',
+    'unrecognized PRIVATE',
+  ];
+  const calls = [...outputs, undefined].map((_, i) => event(i, 'response_item', {
+    type: 'custom_tool_call', name: 'apply_patch', call_id: String(i), input: 'PRIVATE',
+  }));
+  const results = outputs.map((output, i) => event(10 + i, 'response_item', {
+    type: 'custom_tool_call_output', call_id: String(i), output,
+  }));
+  const report = buildGrokRunReport({ codexEvents: [...calls, ...results, calls[0], results[0]] });
+  assert.deepEqual(report.tools.patches, { calls: 6, succeeded: 1, hookRejected: 1,
+    contextRejected: 1, otherFailed: 1, unknownResult: 1, withoutResult: 1 });
+  assert.equal(report.tools.calls, 6);
+  assert.equal(report.tools.failures, 3);
+  assert.equal(report.tools.patchFailures, 3);
+  assert.ok(!JSON.stringify(report).includes('PRIVATE'));
+});
+
+test('latest native turn can fail, resume and complete without leaking an auth error', () => {
+  const events = [
+    event(0, 'event_msg', { type: 'task_started', turn_id: 'old' }),
+    event(1, 'event_msg', { type: 'task_complete', turn_id: 'old', error: {
+      message: 'PRIVATE refresh revoked', codex_error_info: 'unauthorized',
+    } }),
+    event(2, 'event_msg', { type: 'task_started', turn_id: 'new' }),
+    event(3, 'event_msg', { type: 'task_complete', turn_id: 'old' }),
+    event(4, 'event_msg', { type: 'task_complete', turn_id: 'new', error: null }),
+  ];
+  for (const [length, outcome] of [[2, 'failed'], [3, 'running'], [4, 'running'], [5, 'completed']]) {
+    const report = buildGrokRunReport({ codexEvents: events.slice(0, length) });
+    assert.equal(report.outcome, outcome);
+    assert.ok(!JSON.stringify(report).includes('PRIVATE'));
+  }
 });
 
 test('separates invocation timings and byte metadata without admitting arbitrary content', () => {
