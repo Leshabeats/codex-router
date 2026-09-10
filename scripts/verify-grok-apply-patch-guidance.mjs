@@ -400,6 +400,15 @@ async function handleMockRequest(request, response) {
     body,
   });
   const structuredTool = body.tools?.find((tool) => tool.parameters?.properties?.operations);
+  if (structuredTool) {
+    // Assert at the provider boundary on every turn, including built-in native
+    // WebSocket endpoint requests and continuations with old/failed history.
+    assert.match(structuredTool.description, /operations as a JSON array, never a JSON-encoded string/);
+    assert.match(structuredTool.description, /one operation per path/);
+    assert.match(structuredTool.description, /Every hunk must include at least one add or remove/);
+    assert.match(structuredTool.description, /Prefer apply_patch for manual file edits/);
+    assert.match(structuredTool.description, /Shell remains available for formatters/);
+  }
   const toolName = structured ? structuredTool?.name : APPLY_PATCH_TOOL_NAME;
   if (streamProbe) {
     streamProbe.requests++;
@@ -719,11 +728,6 @@ try {
   assert.equal(grokApply[0].description.includes("Apply a patch."), true);
   if (structured) {
     assert.deepEqual(grokApply[0].parameters, GROK_STRUCTURED_PATCH_CODEC.parameters);
-    assert.match(grokApply[0].description, /operations as a JSON array, never a JSON-encoded string/);
-    assert.match(grokApply[0].description, /one operation per path/);
-    assert.match(grokApply[0].description, /Every hunk must include at least one add or remove/);
-    assert.match(grokApply[0].description, /Prefer apply_patch for manual file edits/);
-    assert.match(grokApply[0].description, /Shell remains available for formatters/);
     assert.notEqual(grokApply[0].name, APPLY_PATCH_TOOL_NAME);
     const ordinary = grokTools.find((tool) => tool.name === APPLY_PATCH_TOOL_NAME);
     assert.equal(ordinary?.description, "ordinary same-name function");
