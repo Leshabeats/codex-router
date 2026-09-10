@@ -533,13 +533,18 @@ test("same encrypted payload shares one relay and expiry removes the retained pl
   }
 });
 
-test("same ciphertext never coalesces or caches across native accounts", async () => {
+test("same ciphertext never coalesces or caches across native accounts or refreshed credentials", async () => {
   const nativeRequests = [];
   const native = await mockServer(async (request, response) => {
     nativeRequests.push({
       account: request.headers["chatgpt-account-id"],
       authorization: request.headers.authorization,
     });
+    if (request.headers.authorization === "Bearer expired") {
+      response.writeHead(401, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: { message: "PRIVATE_NATIVE_AUTH_DETAIL" } }));
+      return;
+    }
     await new Promise((resolve) => setTimeout(resolve, 60));
     response.writeHead(200, { "Content-Type": "text/event-stream" });
     response.end(relayEventStream(`payload for ${request.headers["chatgpt-account-id"]}`));
@@ -566,11 +571,11 @@ test("same ciphertext never coalesces or caches across native accounts", async (
     CODEX_ROUTER_GATEWAY_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
   });
   const body = JSON.stringify(encryptedRelayBody("gAAAAA-account-boundary="));
-  const requestFor = (account) =>
+  const requestFor = (account, session = `session-${account}`) =>
     fetch(`${callerBaseUrl(routerPort, CALLER_KEY)}/responses`, {
       method: "POST",
       headers: {
-        Authorization: `Bearer session-${account}`,
+        Authorization: `Bearer ${session}`,
         "ChatGPT-Account-Id": account,
         "Content-Type": "application/json",
       },
@@ -578,19 +583,31 @@ test("same ciphertext never coalesces or caches across native accounts", async (
     });
   try {
     await waitFor(`http://127.0.0.1:${routerPort}/health`, router);
-    const [first, second] = await Promise.all([
+    const [first, second, refreshed] = await Promise.all([
       requestFor("account-a"),
       requestFor("account-b"),
+      requestFor("account-a", "refreshed-session"),
     ]);
     assert.equal(first.status, 200, await first.text());
     assert.equal(second.status, 200, await second.text());
-    assert.equal(gatewayRequests, 2);
+    assert.equal(refreshed.status, 200, await refreshed.text());
+    assert.equal(gatewayRequests, 3);
     assert.deepEqual(
       nativeRequests
         .map(({ account, authorization }) => `${account}:${authorization}`)
         .sort(),
-      ["account-a:Bearer session-account-a", "account-b:Bearer session-account-b"],
+      ["account-a:Bearer refreshed-session", "account-a:Bearer session-account-a", "account-b:Bearer session-account-b"],
     );
+    const cached = await requestFor("account-a", "refreshed-session");
+    assert.equal(cached.status, 200, await cached.text());
+    assert.equal(nativeRequests.length, 3, "same account and credential may use its own cache");
+    const rejected = await requestFor("account-a", "expired");
+    assert.equal(rejected.status, 401);
+    const error = await rejected.text();
+    assert.match(error, /ERR_NATIVE_AGENT_RELAY_UNAUTHORIZED/);
+    assert.doesNotMatch(error, /PRIVATE_NATIVE_AUTH_DETAIL|expired/);
+    assert.equal(nativeRequests.length, 4);
+    assert.equal(gatewayRequests, 4, "rejected authorization cannot reuse a previous credential's payload");
   } finally {
     await stopChild(router);
     await Promise.all([closeServer(native.server), closeServer(gateway.server)]);

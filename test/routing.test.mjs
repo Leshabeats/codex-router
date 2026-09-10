@@ -1497,8 +1497,15 @@ test("router relays encrypted Codex subagent payloads before external routing", 
 
 test("router preserves relay 401 so Codex can refresh authentication", async () => {
   let nativeRequests = 0;
-  const native = await mockServer(async (_request, response) => {
+  const native = await mockServer(async (request, response) => {
     nativeRequests += 1;
+    if (request.headers.authorization === "Bearer valid-refreshed-session") {
+      response.writeHead(200, { "Content-Type": "text/event-stream" });
+      response.end(`data: ${JSON.stringify({ type: "response.completed", response: { output: [{
+        type: "function_call", name: "relay_external_agent_payload", arguments: JSON.stringify({ payload: "synthetic task" }),
+      }] } })}\n\n`);
+      return;
+    }
     json(response, 401, { error: { message: "native sign-in required" } });
   });
   let gatewayRequests = 0;
@@ -1564,6 +1571,16 @@ test("router preserves relay 401 so Codex can refresh authentication", async () 
     assert.equal(retry.status, 401);
     assert.equal(nativeRequests, 2, "401 must not enter the 429 anti-storm cache");
     assert.equal(gatewayRequests, 0);
+    const resumed = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST", headers: { Authorization: "Bearer valid-refreshed-session", "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "grok-oauth/grok-4.6", input: [{ type: "agent_message", content: [
+        { type: "input_text", text: "Message Type: MESSAGE\nPayload:\n" },
+        { type: "encrypted_content", encrypted_content: "gAAAAA-unreadable=" },
+      ] }] }),
+    });
+    assert.equal(resumed.status, 200, await resumed.text());
+    assert.equal(nativeRequests, 3, "fresh client authorization must reach the native relay once");
+    assert.equal(gatewayRequests, 1, "only the successfully relayed task may reach Grok");
   } finally {
     await stopChild(router);
     await Promise.all([closeServer(native.server), closeServer(gateway.server)]);
