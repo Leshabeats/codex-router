@@ -23,6 +23,8 @@ import { GROK_PATCH_HOOK_PREFIX, GROK_PATCH_HOOK_HEADER, GROK_PATCH_HOOK_CAPABIL
 import { CODEX_PATCH_HOOK_BASE_PATH } from "../src/codex-patch-hook-endpoint.mjs";
 
 const nativeHook = process.argv.includes("--native-hook");
+const streamProbes = process.argv.includes("--stream-probes");
+let streamProbe;
 const hookEndpoint = process.argv.includes("--native-hook-endpoint");
 if (hookEndpoint && !nativeHook) throw new Error("--native-hook-endpoint requires --native-hook");
 const structured = nativeHook || process.argv.includes("--structured");
@@ -399,6 +401,40 @@ async function handleMockRequest(request, response) {
   });
   const structuredTool = body.tools?.find((tool) => tool.parameters?.properties?.operations);
   const toolName = structured ? structuredTool?.name : APPLY_PATCH_TOOL_NAME;
+  if (streamProbe) {
+    streamProbe.requests++;
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    if (streamProbe.mode === "repair") {
+      response.end(sse([
+        { type: "response.output_text.delta", delta: "Working." },
+        { type: "response.completed", response: { usage: { input_tokens: 10, output_tokens: 5 } } },
+      ]));
+      return;
+    }
+    const reasoning = { type: "reasoning", id: "rs_probe", summary: [{ type: "summary_text", text: "repeat repeat " }] };
+    const frames = [
+      { type: "response.output_item.added", item: { ...reasoning, summary: [] }, output_index: 0 },
+      { type: "response.reasoning_summary_text.delta", item_id: reasoning.id, summary_index: 0, delta: "repeat ", sequence_number: 1 },
+      { type: "response.reasoning_summary_text.delta", item_id: reasoning.id, summary_index: 0, delta: "repeat ", sequence_number: 2 },
+      { type: "response.reasoning_summary_text.done", item_id: reasoning.id, text: "repeat repeat " },
+      { type: "response.output_item.done", item: reasoning, output_index: 0 },
+      { type: "response.output_item.done", item: reasoning, output_index: 0 },
+      { type: "response.output_item.added", item: { type: "reasoning", id: "rs_second", summary: [] }, output_index: 1 },
+      { type: "response.reasoning_summary_text.delta", item_id: "rs_second", summary_index: 0, delta: "second ", sequence_number: 3 },
+      { type: "response.output_item.done", item: { type: "reasoning", id: "rs_second", summary: [{ type: "summary_text", text: "second " }] }, output_index: 1 },
+      { type: "response.output_text.delta", item_id: "msg_probe", delta: "echo " },
+      { type: "response.output_text.delta", item_id: "msg_probe", delta: "echo " },
+    ];
+    if (streamProbe.mode === "repeat") frames.push({ type: "response.completed", response: { usage: { input_tokens: 10, output_tokens: 5 } } });
+    else if (["failed", "incomplete"].includes(streamProbe.mode)) frames.push({ type: `response.${streamProbe.mode}`, response: { error: { message: "PRIVATE_PROBE" } } });
+    else if (streamProbe.mode === "error") frames.push({ type: "error", error: { message: "PRIVATE_PROBE" } });
+    const wire = sse(frames).replace("data: [DONE]\n\n", "");
+    if (streamProbe.mode === "disconnect") {
+      response.write(wire);
+      setTimeout(() => response.destroy(), 50);
+    } else response.end(wire + (streamProbe.mode === "truncated" ? 'data: {"type":' : "data: [DONE]\n\n"));
+    return;
+  }
   if (nativeRecoveryProbe) {
     const probe = nativeRecoveryProbe;
     probe.requests += 1;
@@ -588,7 +624,7 @@ try {
     MODEL_ROUTER_INTERNAL_KEY: INTERNAL_KEY,
     CODEX_ROUTER_INTERNAL_KEY: INTERNAL_KEY,
     CODEX_ROUTER_CALLER_KEY: CALLER_KEY,
-    CODEX_ROUTER_GROK_PROGRESS_ONLY_RETRY: "0",
+    CODEX_ROUTER_GROK_PROGRESS_ONLY_RETRY: streamProbes ? "1" : "0",
     CODEX_ROUTER_GROK_STRUCTURED_PATCH: structured && !nativeHook ? "1" : "0",
     CODEX_ROUTER_GROK_PATCH_HOOK: nativeHook ? "1" : "0",
     LITELLM_MASTER_KEY: INTERNAL_KEY,
@@ -916,6 +952,32 @@ try {
       assert.deepEqual(nativeRecoveryProbe, { requests: 3, contextFailure: true, successFeedback: true, invalidArgumentFeedback: false });
       assert.equal(readFileSync(path.join(fixtureDir, "fixture.txt"), "utf8"), "new\n");
       process.stdout.write("ok installed Codex workspace-write handler received context failure, then applied repair through the complete local protocol path\n");
+    }
+  }
+  if (streamProbes) {
+    nativeRecoveryProbe = undefined;
+    hookRawWireArguments = undefined;
+    for (const mode of ["failed", "incomplete", "missing", "truncated", "disconnect", "error", "repair", "repeat", "repeat"]) {
+      streamProbe = { mode, requests: 0 };
+      const payload = mode === "repair" ? applyPatchRequest({ historyInput: HISTORY_PATCH, historyId: "ctc_probe" })
+        : { model: "grok-oauth/grok-4.6", stream: true, input: "synthetic stream probe" };
+      const wire = await postTurn(payload);
+      const events = wire.split(/\r?\n/).filter((line) => line.startsWith("data: {")).map((line) => JSON.parse(line.slice(6)));
+      const errors = events.filter((event) => event.type === "error" || event.type === "response.failed");
+      if (mode === "repeat") {
+        assert.equal(errors.length, 0);
+        assert.equal(events.filter((e) => e.type === "response.output_text.delta").map((e) => e.delta).join(""), "echo echo ");
+        assert.equal(events.filter((e) => e.type === "response.reasoning_summary_text.delta").map((e) => e.delta).join(""), "repeat repeat second ");
+        assert.equal(events.filter((e) => e.type === "response.completed").length, 1);
+      } else {
+        assert.equal(errors.length, 1, `${mode}: expected one terminal error`);
+        assert.equal(events.some((e) => e.type === "response.completed"), false, mode);
+        assert.equal(events.some((e) => e.type === "response.output_item.done" && ["function_call", "custom_tool_call"].includes(e.item?.type)), false, mode);
+        assert.doesNotMatch(wire, /PRIVATE_PROBE|IndexError/);
+      }
+      assert.equal(streamProbe.requests, mode === "repair" ? 2 : 1, `${mode}: unexpected retry`);
+      assert.doesNotMatch(litellmChild.testOutput(), /IndexError/);
+      process.stdout.write(`ok full gateway stream probe: ${mode}\n`);
     }
   }
 } finally {

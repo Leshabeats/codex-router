@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import http from "node:http";
 import test from "node:test";
+import { endGrokChatStream } from "../src/grok-oauth-forwarder.mjs";
 
 import {
   applyKeepAliveTimeouts,
@@ -19,7 +20,7 @@ function listen(server) {
 // test never depends on the runner's own signal disposition.
 const SHUTDOWN_EVENT = "codex-router-test-shutdown";
 
-function shutdownHarness(server, { drainMs, flushMs }) {
+function shutdownHarness(server, { drainMs, flushMs, endStream }) {
   let exitCode;
   const exited = new Promise((resolve) => {
     installGracefulShutdown(server, {
@@ -27,6 +28,7 @@ function shutdownHarness(server, { drainMs, flushMs }) {
       signals: [SHUTDOWN_EVENT],
       drainMs,
       flushMs,
+      endStream,
       exit: (code) => {
         exitCode = code;
         resolve(code);
@@ -100,6 +102,27 @@ test("a streaming response is ended, not reset, when the service shuts down", as
 
 // A request still waiting on an upstream has no committed head, so it can
 // still be answered with a status instead of an empty-looking 200.
+test("Grok shutdown uses the Chat Completions error envelope", async () => {
+  const server = http.createServer((_request, response) => {
+    writeEventStreamHead(response);
+    response.write('data: {"choices":[{"delta":{"content":"hello"}}]}\n\n');
+  });
+  const port = await listen(server);
+  const { exited } = shutdownHarness(server, { drainMs: 25, endStream: endGrokChatStream });
+  const response = await get(port, "/stream");
+  const stream = read(response);
+  await stream.firstChunk;
+  process.emit(SHUTDOWN_EVENT);
+  const body = await stream.body;
+  const frames = body.split('\n').filter((line) => line.startsWith('data: ')).map((line) => JSON.parse(line.slice(6)));
+  assert.equal(frames.length, 2);
+  assert.equal(frames[1].error.code, "local_router_stream_failed");
+  assert.match(frames[1].error.message, /restarting/);
+  assert.equal(response.complete, true);
+  assert.equal(await exited, 0);
+  process.removeAllListeners(SHUTDOWN_EVENT);
+});
+
 test("a request with no head sent yet is answered 503 when the service shuts down", async () => {
   let arrived;
   const received = new Promise((resolve) => {

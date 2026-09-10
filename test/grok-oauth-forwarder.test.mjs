@@ -10,9 +10,21 @@ import { openPort } from "./port-pool.mjs";
 
 import {
   hostedSearchEnabledFor,
+  endGrokChatStream,
   mergeHostedSearchTools,
   toResponsesRequest,
 } from "../src/grok-oauth-forwarder.mjs";
+
+test("chat terminal errors are nested, emitted once, and never contain a successful finish", () => {
+  const response = { writableEnded: false, end(body) { this.body = body; this.writableEnded = true; } };
+  endGrokChatStream(response, { message: "safe failure" });
+  const first = response.body;
+  endGrokChatStream(response);
+  assert.equal(response.body, first);
+  const parsed = JSON.parse(first.split("data: ")[1]);
+  assert.deepEqual(parsed, { error: { type: "api_error", code: "local_router_stream_failed", message: "safe failure" } });
+  assert.doesNotMatch(first, /\[DONE\]|finish_reason|choices|response.completed/);
+});
 import {
   APPLY_PATCH_TOOL_NAME,
   GROK_APPLY_PATCH_CREATE_EXAMPLE,

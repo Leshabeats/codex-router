@@ -406,6 +406,7 @@ export function installGracefulShutdown(
     signals = ["SIGINT", "SIGTERM"],
     drainMs = SHUTDOWN_DRAIN_MS,
     flushMs = SHUTDOWN_FLUSH_MS,
+    endStream = endStreamedResponse,
     exit = (code) => process.exit(code),
   } = {},
 ) {
@@ -450,7 +451,7 @@ export function installGracefulShutdown(
         // with a status; one already streaming cannot, and takes the terminal
         // error frame instead.
         if (response.headersSent) {
-          endStreamedResponse(response, { message: SHUTDOWN_MESSAGE });
+          endStream(response, { message: SHUTDOWN_MESSAGE });
         } else {
           writeJson(response, 503, {
             error: { type: "local_router_restarting", message: SHUTDOWN_MESSAGE },

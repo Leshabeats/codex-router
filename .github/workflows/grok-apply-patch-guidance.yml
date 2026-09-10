@@ -148,5 +148,6 @@ jobs:
           node scripts/verify-grok-apply-patch-guidance.mjs "$venv_python"
           node scripts/verify-grok-apply-patch-guidance.mjs "$venv_python" --structured
           node scripts/verify-grok-apply-patch-guidance.mjs "$venv_python" --native-hook
+          node scripts/verify-grok-apply-patch-guidance.mjs "$venv_python" --native-hook --stream-probes
           node scripts/verify-grok-apply-patch-guidance.mjs "$venv_python" --native-hook --native-hook-endpoint
           node scripts/verify-grok-service-tier.mjs "$venv_python"

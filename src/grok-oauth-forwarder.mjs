@@ -7,7 +7,6 @@ import { fileURLToPath } from "node:url";
 
 import {
   applyKeepAliveTimeouts,
-  endStreamedResponse,
   formatErrorChain,
   httpErrorStatus,
   installGracefulShutdown,
@@ -533,6 +532,17 @@ const OPENAI_ROLE_CHUNK = (id, created, model, delta, finishReason = null, extra
     ...extra,
   })}\n\n`;
 
+// This boundary speaks Chat Completions to LiteLLM, not Responses to Codex.
+// A top-level Responses {type:"error"} is parsed as a choice-less chat chunk
+// by the Python client. Use its error envelope so the gateway raises instead.
+export function endGrokChatStream(response, { message } = {}) {
+  if (!response || response.writableEnded || response.destroyed) return;
+  response.end(`\n\nevent: error\ndata: ${JSON.stringify({ error: {
+    type: "api_error", code: "local_router_stream_failed",
+    message: message || "The Grok OAuth forwarder lost the upstream response stream.",
+  } })}\n\n`);
+}
+
 async function handleChatCompletions(request, response) {
   const chat = JSON.parse((await readRequestBody(request)).toString("utf8"));
   const wantsStream = chat.stream === true;
@@ -680,7 +690,7 @@ async function handleChatCompletions(request, response) {
       `[grok-oauth] upstream-terminal-failed=true phase=${phase} model=${model} terminal=${status} ${upstreamAttemptTiming(phase, attempt)}`,
     );
     if (wantsStream && streamStarted) {
-      endStreamedResponse(response, { message });
+      endGrokChatStream(response, { message });
     } else {
       writeJson(response, 502, {
         error: { type: "api_error", code: `grok_upstream_response_${status}`, message },
@@ -893,7 +903,7 @@ async function handleChatCompletions(request, response) {
       `[grok-oauth] progress-only-unrepairable=true model=${model} code=${repairFailure.code} ${upstreamAttemptTiming("attempt", firstAttempt)} ${upstreamAttemptTiming("repair", repairAttempt)}`,
     );
     if (wantsStream && streamStarted) {
-      endStreamedResponse(response, { message: repairFailure.message });
+      endGrokChatStream(response, { message: repairFailure.message });
       return;
     }
     writeJson(response, 502, {
@@ -1007,7 +1017,7 @@ if (isMain) {
           },
         });
       } else if (!response.writableEnded) {
-        endStreamedResponse(response, {
+        endGrokChatStream(response, {
           message: "The Grok OAuth forwarder lost the upstream response stream.",
         });
       }
@@ -1020,5 +1030,5 @@ if (isMain) {
     console.error("[grok-oauth] listening");
   });
 
-  installGracefulShutdown(server, { label: "grok-oauth" });
+  installGracefulShutdown(server, { label: "grok-oauth", endStream: endGrokChatStream });
 }
