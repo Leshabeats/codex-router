@@ -3697,6 +3697,23 @@ export class NamespaceToolCallTransform extends Transform {
         return "tool search arguments changed after close";
       }
     }
+    if (state.kind === "function_codec") {
+      const codecReason = this.#validateCodecSource(state, sourceItem.arguments);
+      if (codecReason) return codecReason;
+      if (typeof item.arguments !== "string") {
+        return "function relay arguments changed after close";
+      }
+      const argumentsFingerprint = stringFingerprint(item.arguments);
+      if (
+        !fingerprintMatches(
+          argumentsFingerprint,
+          state.finalArgumentsLength,
+          state.finalArgumentsDigest,
+        )
+      ) {
+        return "function relay arguments changed after close";
+      }
+    }
     if (allowAtomic) state.summarySeen = true;
     return undefined;
   }

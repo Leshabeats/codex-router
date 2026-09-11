@@ -12,6 +12,14 @@ export const READ_FILE_TOOL_NAME = "read_file";
 export const GREP_TOOL_NAME = "grep";
 export const LIST_DIR_TOOL_NAME = "list_dir";
 export const RUN_TERMINAL_COMMAND_TOOL_NAME = "run_terminal_command";
+export const GROK_FACADE_TOOL_NAMES = [
+  SEARCH_REPLACE_TOOL_NAME,
+  WRITE_TOOL_NAME,
+  READ_FILE_TOOL_NAME,
+  GREP_TOOL_NAME,
+  LIST_DIR_TOOL_NAME,
+  RUN_TERMINAL_COMMAND_TOOL_NAME,
+];
 export const DEFAULT_READ_LIMIT = 400;
 export const MAX_READ_LIMIT = 2000;
 const HIDDEN_NATIVE_TOOLS = new Set(["exec_command", "shell_command"]);
@@ -196,7 +204,7 @@ const RUN_TERMINAL_COMMAND_PARAMETERS = objectSchema({
   working_directory: pathSchema,
 }, ["command"]);
 
-function nativeExecRelayTarget(tools, namespaces) {
+export function nativeExecRelayTarget(tools, namespaces) {
   const exact = tools.find((tool) => tool?.name === "exec_command" && tool.namespace === undefined);
   if (exact) return { nativeName: "exec_command" };
   if (!(namespaces instanceof Map)) return undefined;
@@ -229,16 +237,21 @@ export function compileListDirCommand(argumentsText, workdir, platform = process
   return withWorkdir({ cmd: `ls -la ${quoted}` }, workdir);
 }
 
-export function rewriteGrokFacadeToolChoice(toolChoice) {
+export function rewriteGrokFacadeToolChoice(toolChoice, installed) {
   if (!toolChoice || typeof toolChoice !== "object") return toolChoice;
+  const offered = (name) => !(installed instanceof Set) || installed.has(name);
   if (toolChoice.type === "function" && (toolChoice.name === "exec_command" || toolChoice.name === "shell_command")) {
-    return { ...toolChoice, name: RUN_TERMINAL_COMMAND_TOOL_NAME };
+    return offered(RUN_TERMINAL_COMMAND_TOOL_NAME)
+      ? { ...toolChoice, name: RUN_TERMINAL_COMMAND_TOOL_NAME }
+      : toolChoice;
   }
   if (toolChoice.type === "function" && toolChoice.name === "apply_patch") {
-    return { ...toolChoice, name: SEARCH_REPLACE_TOOL_NAME };
+    return offered(SEARCH_REPLACE_TOOL_NAME)
+      ? { ...toolChoice, name: SEARCH_REPLACE_TOOL_NAME }
+      : toolChoice;
   }
   if (toolChoice.type === "allowed_tools" && Array.isArray(toolChoice.tools)) {
-    return { ...toolChoice, tools: toolChoice.tools.map((choice) => rewriteGrokFacadeToolChoice(choice)) };
+    return { ...toolChoice, tools: toolChoice.tools.map((choice) => rewriteGrokFacadeToolChoice(choice, installed)) };
   }
   return toolChoice;
 }
@@ -281,18 +294,33 @@ export function classifyShellCommand(command) {
   }
   const standalone = standalonePathRead(command);
   if (standalone) return { kind: "read_file", args: { target_file: standalone } };
-  const pipedGrep = /^rg --line-number --color never --max-count 50 -e (.+?)(?: --glob (.+))? -- (.+?) \| head -n 50$/u.exec(command.trim());
+  const pipedGrep = /^rg --line-number --color never --max-count 50 -e (.+?)(?: --glob (.+))? -- (.+?) \| (?:head -n 50|Select-Object -First 50)$/u.exec(command.trim());
   if (pipedGrep) {
-    const pattern = unquotePosix(pipedGrep[1]);
-    const path = unquotePosix(pipedGrep[3]);
+    const pattern = unquotePosix(pipedGrep[1]) ?? unquotePowershell(pipedGrep[1]);
+    const path = unquotePosix(pipedGrep[3]) ?? unquotePowershell(pipedGrep[3]);
     if (pattern && path) {
       const args = { pattern, path };
       if (pipedGrep[2]) {
-        const glob = unquotePosix(pipedGrep[2]);
+        const glob = unquotePosix(pipedGrep[2]) ?? unquotePowershell(pipedGrep[2]);
         if (glob) args.glob = glob;
       }
       return { kind: "grep", args };
     }
+  }
+  const psRead = /^powershell -NoProfile -Command "Get-Content -LiteralPath ('(?:''|[^']*)') \| Select-Object -Skip (\d+) -First (\d+)"$/u.exec(command.trim());
+  if (psRead) {
+    const target_file = unquotePowershell(psRead[1]);
+    if (target_file) {
+      return {
+        kind: "read_file",
+        args: { target_file, offset: Number(psRead[2]) + 1, limit: Number(psRead[3]) },
+      };
+    }
+  }
+  const psList = /^powershell -NoProfile -Command "Get-ChildItem -LiteralPath ('(?:''|[^']*)')"$/u.exec(command.trim());
+  if (psList) {
+    const target_directory = unquotePowershell(psList[1]);
+    if (target_directory) return { kind: "list_dir", args: { target_directory } };
   }
   const line = singleLineCommand(command);
   if (!line) return { kind: "process" };
@@ -381,6 +409,13 @@ function unquotePosix(value) {
   return value.slice(1, -1).replace(/'\\''/g, "'");
 }
 
+function unquotePowershell(value) {
+  if (typeof value !== "string" || value.length < 2 || !value.startsWith("'") || !value.endsWith("'")) {
+    return undefined;
+  }
+  return value.slice(1, -1).replace(/''/g, "'");
+}
+
 function parseExecPayload(argumentsText) {
   const value = parseFacadeObject(argumentsText);
   if (!value || typeof value.cmd !== "string") return undefined;
@@ -412,14 +447,24 @@ export function encodeExecCommandHistory(argumentsText) {
   return { name: RUN_TERMINAL_COMMAND_TOOL_NAME, arguments: JSON.stringify(encoded) };
 }
 
+function isNativeExecHistory(item, nativeExec) {
+  const target = nativeExec && typeof nativeExec === "object"
+    ? nativeExec
+    : { nativeName: "exec_command" };
+  if (item?.type !== "function_call" || typeof item.name !== "string" || !target.nativeName) return false;
+  if (target.nativeNamespace) {
+    if (item.namespace === target.nativeNamespace && item.name === target.nativeName) return true;
+    return item.namespace === undefined && item.name === `${target.nativeNamespace}__${target.nativeName}`;
+  }
+  return item.namespace === undefined && item.name === target.nativeName;
+}
+
 export function encodeGrokFacadeHistory(input, nativeExec) {
   if (!Array.isArray(input)) return input;
   let changed = false;
   const routed = input.map((item) => {
     if (item?.type !== "function_call" || typeof item.name !== "string") return item;
-    const isExec = item.name === nativeExec || item.name === "exec_command" ||
-      item.name === "shell_command" || item.name.endsWith("__exec_command");
-    if (isExec) {
+    if (isNativeExecHistory(item, nativeExec)) {
       const encoded = encodeExecCommandHistory(item.arguments);
       if (!encoded) return item;
       changed = true;
@@ -467,6 +512,7 @@ export function applyGrokEditFacade(tools, namespaces, route, structuredPatch, o
   const aliases = [];
   const extra = [];
   const allowWrite = options.patchHook === true;
+  const installed = options.installed instanceof Set ? options.installed : new Set();
   for (const tool of FACADE_TOOLS) {
     if (existing.has(tool.name)) continue;
     if (tool.name === WRITE_TOOL_NAME && !allowWrite) continue;
@@ -481,6 +527,7 @@ export function applyGrokEditFacade(tools, namespaces, route, structuredPatch, o
       description: tool.codec.description(),
       parameters: tool.codec.parameters,
     });
+    installed.add(tool.name);
   }
   const nativeExec = nativeExecRelayTarget(tools, namespaces);
   const functionRelays = [];
@@ -499,6 +546,7 @@ export function applyGrokEditFacade(tools, namespaces, route, structuredPatch, o
         description: "Read a bounded slice of a local file. Defaults to 400 lines.",
         parameters: READ_FILE_PARAMETERS,
       });
+      installed.add(READ_FILE_TOOL_NAME);
     }
     if (!existing.has(GREP_TOOL_NAME)) {
       functionRelays.push({
@@ -514,6 +562,7 @@ export function applyGrokEditFacade(tools, namespaces, route, structuredPatch, o
         description: "Search local file contents with a regex. Optional path and glob.",
         parameters: GREP_PARAMETERS,
       });
+      installed.add(GREP_TOOL_NAME);
     }
     if (!existing.has(LIST_DIR_TOOL_NAME)) {
       functionRelays.push({
@@ -529,6 +578,7 @@ export function applyGrokEditFacade(tools, namespaces, route, structuredPatch, o
         description: "List a local directory.",
         parameters: LIST_DIR_PARAMETERS,
       });
+      installed.add(LIST_DIR_TOOL_NAME);
     }
     if (!existing.has(RUN_TERMINAL_COMMAND_TOOL_NAME)) {
       functionRelays.push({
@@ -544,6 +594,7 @@ export function applyGrokEditFacade(tools, namespaces, route, structuredPatch, o
         description: "Run a shell command for git, tests, and installs.",
         parameters: RUN_TERMINAL_COMMAND_PARAMETERS,
       });
+      installed.add(RUN_TERMINAL_COMMAND_TOOL_NAME);
     }
   }
   if (aliases.length && !registerCustomToolRelays(namespaces, aliases)) {

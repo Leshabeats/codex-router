@@ -190,11 +190,19 @@ export class EarlyToolItemDoneTransform extends Transform {
         kind: event.item.type,
         argumentsDone: false,
       };
+      if (this.#exceedsArgumentBound()) {
+        this.#disableRewrite(original);
+        return;
+      }
       this.push(Buffer.from(original));
       return;
     }
     if (ARG_DELTA_TYPES.has(type) && this.#matchesOpen(event)) {
       const piece = typeof event.delta === "string" ? event.delta : "";
+      if (this.#exceedsArgumentBound(piece)) {
+        this.#disableRewrite(original);
+        return;
+      }
       if (this.#open.kind === "custom_tool_call") this.#open.input += piece;
       else this.#open.arguments += piece;
       this.push(Buffer.from(original));
@@ -204,8 +212,15 @@ export class EarlyToolItemDoneTransform extends Transform {
       const id = event.item_id;
       if (id && this.#closed.has(id)) return;
       if (this.#matchesOpen(event)) {
-        if (typeof event.arguments === "string") this.#open.arguments = event.arguments;
-        if (typeof event.input === "string") this.#open.input = event.input;
+        const nextArguments = typeof event.arguments === "string" ? event.arguments : this.#open.arguments;
+        const nextInput = typeof event.input === "string" ? event.input : this.#open.input;
+        const next = this.#open.kind === "custom_tool_call" ? nextInput : nextArguments;
+        if (this.#exceedsArgumentBound("", next)) {
+          this.#disableRewrite(original);
+          return;
+        }
+        this.#open.arguments = nextArguments;
+        this.#open.input = nextInput;
         this.#open.argumentsDone = true;
       }
       this.push(Buffer.from(original));
@@ -228,6 +243,18 @@ export class EarlyToolItemDoneTransform extends Transform {
     if (!this.#open) return false;
     const id = event.item_id;
     return id === this.#open.itemId || id === this.#open.callId || event.output_index === this.#open.outputIndex;
+  }
+
+  #exceedsArgumentBound(extra = "", text) {
+    const current = text ?? (this.#open.kind === "custom_tool_call" ? this.#open.input : this.#open.arguments);
+    return Buffer.byteLength(current) + Buffer.byteLength(extra) > MAX_SSE_FRAME_BYTES;
+  }
+
+  #disableRewrite(original) {
+    this.#passthrough = true;
+    this.#open = undefined;
+    this.push(Buffer.from(original));
+    if (this.#length) this.push(this.#release());
   }
 
   #closeOpen() {

@@ -260,6 +260,20 @@ test("legacy apply_patch history and forced native choices keep façade identiti
     rewriteGrokFacadeToolChoice({ type: "function", name: "apply_patch" }),
     { type: "function", name: SEARCH_REPLACE_TOOL_NAME },
   );
+  const unrelated = encodeGrokFacadeHistory([
+    { type: "function_call", call_id: "mcp", name: "mcp__x__exec_command", arguments: JSON.stringify({ cmd: "true" }) },
+  ], { nativeName: "exec_command" });
+  assert.equal(unrelated[0].name, "mcp__x__exec_command");
+  assert.deepEqual(
+    rewriteGrokFacadeToolChoice({ type: "function", name: "apply_patch" }, new Set()),
+    { type: "function", name: "apply_patch" },
+  );
+  const windowsRead = compileReadFileCommand(JSON.stringify({ target_file: "a.txt", offset: 1, limit: 10 }), undefined, "win32");
+  const fromWindows = encodeGrokFacadeHistory([
+    { type: "function_call", call_id: "w", name: "exec_command", arguments: windowsRead },
+  ]);
+  assert.equal(fromWindows[0].name, READ_FILE_TOOL_NAME);
+  assert.deepEqual(JSON.parse(fromWindows[0].arguments), { target_file: "a.txt", offset: 1, limit: 10 });
 });
 
 test("search_replace restores to native apply_patch with a compiled V4A payload", async () => {
@@ -346,6 +360,37 @@ test("shell_command is not used as the native exec identity", () => {
   assert.ok(names.includes(SEARCH_REPLACE_TOOL_NAME));
   assert.ok(!names.includes(READ_FILE_TOOL_NAME));
   assert.ok(!names.includes("shell_command"));
+});
+
+test("function relay terminal summary must match the closed arguments", async () => {
+  const bridge = setup();
+  const args = JSON.stringify({ target_file: "/tmp/a.js", offset: 1, limit: 10 });
+  const call = { type: "function_call", id: "fc_edit", call_id: "call_edit", name: READ_FILE_TOOL_NAME, arguments: args };
+  const parts = [
+    frame("response.output_item.added", { output_index: 0, item: { ...call, arguments: "" } }),
+    frame("response.function_call_arguments.done", { item_id: call.id, output_index: 0, arguments: args }),
+    frame("response.output_item.done", { output_index: 0, item: call }),
+    frame("response.completed", {
+      response: {
+        output: [{
+          ...call,
+          arguments: JSON.stringify({ target_file: "/tmp/other.js", offset: 1, limit: 10 }),
+        }],
+      },
+    }),
+  ];
+  await assert.rejects(
+    pipeline(
+      Readable.from(parts),
+      new NamespaceToolCallTransform(bridge.namespaces, "text/event-stream", "grok-oauth/grok-4.6"),
+      new Writable({
+        write(_chunk, _encoding, next) {
+          next();
+        },
+      }),
+    ),
+    /function relay arguments changed after close|structured arguments changed after completion/,
+  );
 });
 
 test("run_terminal_command restores to native exec_command", async () => {

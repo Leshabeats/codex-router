@@ -189,6 +189,31 @@ test("unwraps custom-tool content wrappers before synthesizing done", async () =
   assert.equal(done.input, "*** Begin");
 });
 
+test("accumulated tool argument deltas are bounded across frames", async () => {
+  const stream = new EarlyToolItemDoneTransform();
+  let output = "";
+  stream.setEncoding("utf8");
+  stream.on("data", (chunk) => {
+    output += chunk;
+  });
+  const ended = once(stream, "end");
+  stream.write(block(toolAdded(0, "c1", "apply_patch")));
+  const piece = "a".repeat(1024 * 1024);
+  for (let i = 0; i < 9; i += 1) {
+    stream.write(block({
+      type: "response.function_call_arguments.delta",
+      item_id: "c1",
+      output_index: 0,
+      delta: piece,
+    }));
+  }
+  stream.write(block(toolAdded(1, "c2", "apply_patch")));
+  stream.end();
+  await ended;
+  const seen = events(output);
+  assert.equal(seen.filter((event) => event.type === "response.function_call_arguments.done").length, 0);
+});
+
 test("oversized unterminated SSE frames disable rewriting", async () => {
   const stream = new EarlyToolItemDoneTransform();
   let output = "";

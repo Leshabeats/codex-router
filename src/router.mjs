@@ -67,7 +67,9 @@ import { earlyToolItemDoneTransform } from "./early-tool-item-done.mjs";
 import {
   applyGrokEditFacade,
   encodeGrokFacadeHistory,
+  GROK_FACADE_TOOL_NAMES,
   grokEditFacadeEnabled,
+  nativeExecRelayTarget,
   rewriteGrokFacadeToolChoice,
 } from "./grok-tool-facade.mjs";
 import { applyInstructionOverlay } from "./instruction-overlays.mjs";
@@ -3309,6 +3311,8 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
   }
   let routedInput = input;
   let routedToolChoice = payload.tool_choice;
+  let installedFacade = new Set();
+  let facadeNameCollision = false;
   const patchHook = grokPatchHookEnabled(route, request.headers, process.env, request.codexRouterPatchHookCapability);
   const structuredPatch = (patchHook || grokStructuredPatchEnabled(route)) &&
     Array.isArray(tools) && tools.some(
@@ -3332,10 +3336,18 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
     tools = customTools.tools;
     routedInput = customTools.input;
     routedToolChoice = customTools.toolChoice;
-    tools = applyGrokEditFacade(tools, flattenedNamespaces, route, structuredPatch, { patchHook });
+    const incomingFacadeNames = new Set(
+      (Array.isArray(tools) ? tools : []).map((tool) => tool?.name).filter(Boolean),
+    );
+    const nativeExec = nativeExecRelayTarget(tools, flattenedNamespaces);
+    tools = applyGrokEditFacade(tools, flattenedNamespaces, route, structuredPatch, {
+      patchHook,
+      installed: installedFacade,
+    });
     if (grokEditFacadeEnabled(route, structuredPatch)) {
-      routedInput = encodeGrokFacadeHistory(routedInput);
-      routedToolChoice = rewriteGrokFacadeToolChoice(routedToolChoice);
+      routedInput = encodeGrokFacadeHistory(routedInput, nativeExec);
+      routedToolChoice = rewriteGrokFacadeToolChoice(routedToolChoice, installedFacade);
+      facadeNameCollision = GROK_FACADE_TOOL_NAMES.some((name) => incomingFacadeNames.has(name));
     }
   }
   if (chatCompletionsProvider || consoleGoResponsesCompatibility || deepSeekResponses) {
@@ -3419,7 +3431,11 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
     model: route.gatewayModel,
     input: routedInput,
   };
-  if (grokEditFacadeEnabled(route, structuredPatch)) {
+  if (
+    grokEditFacadeEnabled(route, structuredPatch) &&
+    installedFacade.size > 0 &&
+    !facadeNameCollision
+  ) {
     routed.instructions = applyInstructionOverlay(
       typeof payload.instructions === "string" ? payload.instructions : "",
       "grok-file-tools",
