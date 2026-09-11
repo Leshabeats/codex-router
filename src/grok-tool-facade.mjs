@@ -205,6 +205,7 @@ const RUN_TERMINAL_COMMAND_PARAMETERS = objectSchema({
 }, ["command"]);
 
 export function nativeExecRelayTarget(tools, namespaces) {
+  if (!Array.isArray(tools)) return undefined;
   const exact = tools.find((tool) => tool?.name === "exec_command" && tool.namespace === undefined);
   if (exact) return { nativeName: "exec_command" };
   if (!(namespaces instanceof Map)) return undefined;

@@ -3336,15 +3336,15 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
     tools = customTools.tools;
     routedInput = customTools.input;
     routedToolChoice = customTools.toolChoice;
-    const incomingFacadeNames = new Set(
-      (Array.isArray(tools) ? tools : []).map((tool) => tool?.name).filter(Boolean),
-    );
-    const nativeExec = nativeExecRelayTarget(tools, flattenedNamespaces);
-    tools = applyGrokEditFacade(tools, flattenedNamespaces, route, structuredPatch, {
-      patchHook,
-      installed: installedFacade,
-    });
     if (grokEditFacadeEnabled(route, structuredPatch)) {
+      const incomingFacadeNames = new Set(
+        (Array.isArray(tools) ? tools : []).map((tool) => tool?.name).filter(Boolean),
+      );
+      const nativeExec = nativeExecRelayTarget(tools, flattenedNamespaces);
+      tools = applyGrokEditFacade(tools, flattenedNamespaces, route, structuredPatch, {
+        patchHook,
+        installed: installedFacade,
+      });
       routedInput = encodeGrokFacadeHistory(routedInput, nativeExec);
       routedToolChoice = rewriteGrokFacadeToolChoice(routedToolChoice, installedFacade);
       facadeNameCollision = GROK_FACADE_TOOL_NAMES.some((name) => incomingFacadeNames.has(name));

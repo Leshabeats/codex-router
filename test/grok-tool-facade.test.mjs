@@ -20,6 +20,7 @@ import {
   compileReadFileCommand,
   compileRunTerminalCommand,
   encodeGrokFacadeHistory,
+  nativeExecRelayTarget,
   rewriteGrokFacadeToolChoice,
   SHELL_NOT_EDITOR_COMMAND,
   grokEditFacadeEnabled,
@@ -101,6 +102,12 @@ async function relay(bridge, name, value) {
     .filter(Boolean)
     .map((block) => JSON.parse(block.split("\n").find((line) => line.startsWith("data: ")).slice(6)));
 }
+
+test("native exec lookup ignores missing tool lists", () => {
+  assert.equal(nativeExecRelayTarget(undefined), undefined);
+  assert.equal(nativeExecRelayTarget(null), undefined);
+  assert.equal(nativeExecRelayTarget({ name: "exec_command" }), undefined);
+});
 
 test("facade is only offered on Grok 4.6 structured-patch turns", () => {
   assert.equal(grokEditFacadeEnabled({ slug: "grok-oauth/grok-4.6" }, true), true);
