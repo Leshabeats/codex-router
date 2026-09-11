@@ -188,6 +188,7 @@ export class EarlyToolItemDoneTransform extends Transform {
         arguments: typeof event.item.arguments === "string" ? event.item.arguments : "",
         input: typeof event.item.input === "string" ? event.item.input : "",
         kind: event.item.type,
+        argumentsDone: false,
       };
       this.push(Buffer.from(original));
       return;
@@ -205,6 +206,7 @@ export class EarlyToolItemDoneTransform extends Transform {
       if (this.#matchesOpen(event)) {
         if (typeof event.arguments === "string") this.#open.arguments = event.arguments;
         if (typeof event.input === "string") this.#open.input = event.input;
+        this.#open.argumentsDone = true;
       }
       this.push(Buffer.from(original));
       return;
@@ -245,13 +247,15 @@ export class EarlyToolItemDoneTransform extends Transform {
         ? { input: customInput }
         : { arguments: open.arguments }),
     };
-    const doneType = open.kind === "custom_tool_call"
-      ? "response.custom_tool_call_input.done"
-      : "response.function_call_arguments.done";
-    const doneBody = open.kind === "custom_tool_call"
-      ? { item_id: lifecycleId, output_index: open.outputIndex, input: customInput }
-      : { item_id: lifecycleId, output_index: open.outputIndex, arguments: open.arguments };
-    this.push(Buffer.from(frameFor(doneType, doneBody, this.#newline)));
+    if (!open.argumentsDone) {
+      const doneType = open.kind === "custom_tool_call"
+        ? "response.custom_tool_call_input.done"
+        : "response.function_call_arguments.done";
+      const doneBody = open.kind === "custom_tool_call"
+        ? { item_id: lifecycleId, output_index: open.outputIndex, input: customInput }
+        : { item_id: lifecycleId, output_index: open.outputIndex, arguments: open.arguments };
+      this.push(Buffer.from(frameFor(doneType, doneBody, this.#newline)));
+    }
     this.push(Buffer.from(frameFor("response.output_item.done", {
       output_index: open.outputIndex,
       item,

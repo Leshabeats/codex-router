@@ -178,6 +178,9 @@ function searchReplaceToOperations(value) {
 
 function writeToOperations(value) {
   object(value, ["path", "contents"]);
+  if (value.contents !== "" && !/(?:\r?\n)$/u.test(value.contents)) {
+    reject("missing_trailing_newline");
+  }
   return {
     operations: [{
       op: "add",

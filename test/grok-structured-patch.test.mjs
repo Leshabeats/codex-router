@@ -149,6 +149,10 @@ test("search_replace and write shapes compile to native add/update patches", () 
   })), [
     "*** Begin Patch", "*** Add File: new.txt", "+Привет", "*** End Patch",
   ].join("\n"));
+  assert.throws(
+    () => compileStructuredPatchArguments(JSON.stringify({ path: "new.txt", contents: "hello" })),
+    { code: "missing_trailing_newline" },
+  );
 });
 
 test("schema only offers add/update/delete with typed lines, no raw patch escape hatch", () => {

@@ -155,15 +155,16 @@ export function compileReadFileCommand(argumentsText, workdir, platform = proces
 export function compileGrepCommand(argumentsText, workdir, platform = process.platform) {
   const value = parseExactObject(argumentsText, ["pattern"], ["path", "glob"]);
   if (!value || typeof value.pattern !== "string" || value.pattern.length === 0) return undefined;
-  const pattern = posixSingleQuote(value.pattern);
+  const quote = platform === "win32" ? powershellLiteral : posixSingleQuote;
+  const pattern = quote(value.pattern);
   if (!pattern) return undefined;
   const path = value.path === undefined ? "." : value.path;
-  const quotedPath = posixSingleQuote(terminateUnixPath(path) || path);
+  const quotedPath = quote(terminateUnixPath(path) || path);
   if (!quotedPath) return undefined;
   let cmd = `rg --line-number --color never --max-count 50 -e ${pattern}`;
   if (Object.hasOwn(value, "glob")) {
     if (typeof value.glob !== "string" || !value.glob) return undefined;
-    const glob = posixSingleQuote(value.glob);
+    const glob = quote(value.glob);
     if (!glob) return undefined;
     cmd += ` --glob ${glob}`;
   }
@@ -389,6 +390,12 @@ function parseExecPayload(argumentsText) {
 export function encodeExecCommandHistory(argumentsText) {
   const value = parseExecPayload(argumentsText);
   if (!value) return undefined;
+  if (typeof value.workdir === "string" && value.workdir) {
+    return {
+      name: RUN_TERMINAL_COMMAND_TOOL_NAME,
+      arguments: JSON.stringify({ command: value.cmd, working_directory: value.workdir }),
+    };
+  }
   const classified = classifyShellCommand(value.cmd);
   if (classified.kind === "read_file") {
     return { name: READ_FILE_TOOL_NAME, arguments: JSON.stringify(classified.args) };
@@ -440,14 +447,10 @@ export function encodeGrokFacadeHistory(input, nativeExec) {
   return changed ? routed : input;
 }
 
-function hideNativeTools(tools) {
-  return tools.filter((tool) => {
-    const name = tool?.name;
-    if (typeof name !== "string") return true;
-    if (HIDDEN_NATIVE_TOOLS.has(name)) return false;
-    if (name.endsWith("__exec_command")) return false;
-    return true;
-  });
+function hideNativeTools(tools, nativeExec) {
+  const hide = new Set(HIDDEN_NATIVE_TOOLS);
+  if (nativeExec?.nativeNamespace) hide.add(`${nativeExec.nativeNamespace}__exec_command`);
+  return tools.filter((tool) => typeof tool?.name !== "string" || !hide.has(tool.name));
 }
 
 export function grokEditFacadeEnabled(route, structuredPatch) {
@@ -549,6 +552,6 @@ export function applyGrokEditFacade(tools, namespaces, route, structuredPatch, o
   if (functionRelays.length && !registerFunctionRelays(namespaces, functionRelays)) {
     return aliases.length ? [...tools, ...extra.filter((tool) => tool.name === SEARCH_REPLACE_TOOL_NAME || tool.name === WRITE_TOOL_NAME)] : tools;
   }
-  if (extra.length === 0) return hideNativeTools(tools);
-  return hideNativeTools([...tools, ...extra]);
+  if (extra.length === 0) return hideNativeTools(tools, nativeExec);
+  return hideNativeTools([...tools, ...extra], nativeExec);
 }

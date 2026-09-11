@@ -115,6 +115,25 @@ test("item lifecycle can start the second tool before the stream ends", async ()
   ]);
 });
 
+test("does not re-emit arguments-done when the provider already completed them", async () => {
+  const body = await run([
+    block(toolAdded(0, "c1", "apply_patch")),
+    block({ type: "response.function_call_arguments.delta", item_id: "c1", output_index: 0, delta: "aaa" }),
+    block({
+      type: "response.function_call_arguments.done",
+      item_id: "c1",
+      output_index: 0,
+      arguments: "aaa",
+    }),
+    block(toolAdded(1, "c2", "apply_patch")),
+  ].join(""));
+  const seen = events(body);
+  assert.equal(seen.filter((event) => event.type === "response.function_call_arguments.done").length, 1);
+  const firstDone = seen.findIndex((event) => event.type === "response.output_item.done");
+  const secondAdded = seen.findIndex((event) => event.type === "response.output_item.added" && event.output_index === 1);
+  assert.ok(firstDone !== -1 && secondAdded !== -1 && firstDone < secondAdded);
+});
+
 test("does not complete an open tool call on stream EOF", async () => {
   const body = await run([
     block(toolAdded(0, "c1", "apply_patch")),

@@ -149,6 +149,12 @@ test("read_file and grep compile to bounded exec_command payloads", () => {
     compileReadFileCommand(JSON.stringify({ target_file: "notes.txt" }), undefined, "win32"),
     /Get-Content -LiteralPath 'notes.txt'/,
   );
+  assert.equal(
+    compileGrepCommand(JSON.stringify({ pattern: "don't", path: "O'Brien" }), undefined, "win32"),
+    JSON.stringify({
+      cmd: "rg --line-number --color never --max-count 50 -e 'don''t' -- 'O''Brien' | Select-Object -First 50",
+    }),
+  );
   assert.equal(compileReadFileCommand(JSON.stringify({ target_file: "a\nb" })), undefined);
   assert.equal(
     compileListDirCommand(JSON.stringify({ target_directory: "smid/app" }), undefined, "linux"),
@@ -181,6 +187,19 @@ test("history restores Codex exec/apply_patch calls back to Grok tool names", ()
   assert.equal(JSON.parse(fromCat[0].arguments).target_file, "/tmp/a.js");
   assert.equal(fromCat[1].name, READ_FILE_TOOL_NAME);
   assert.equal(fromCat[2].name, RUN_TERMINAL_COMMAND_TOOL_NAME);
+  const withWorkdir = encodeGrokFacadeHistory([
+    {
+      type: "function_call",
+      call_id: "8",
+      name: "exec_command",
+      arguments: compileReadFileCommand(JSON.stringify({ target_file: "a.txt" }), "sub", "linux"),
+    },
+  ]);
+  assert.equal(withWorkdir[0].name, RUN_TERMINAL_COMMAND_TOOL_NAME);
+  assert.deepEqual(JSON.parse(withWorkdir[0].arguments), {
+    command: "sed -n '1,400p' 'a.txt'",
+    working_directory: "sub",
+  });
 });
 
 test("run_terminal_command canonicalizes file reads and refuses file writes", () => {
@@ -293,6 +312,14 @@ test("namespaced exec_command restores to namespace/name not the flattened spell
   assert.equal(done.item.type, "function_call");
   assert.equal(done.item.name, "exec_command");
   assert.equal(done.item.namespace, "functions");
+});
+
+test("unrelated namespaced exec_command declarations are not hidden by suffix", () => {
+  const names = setup(undefined, true, [
+    { type: "function", name: "mcp__x__exec_command", parameters: { type: "object" } },
+  ]).tools.map((tool) => tool.name);
+  assert.ok(names.includes("mcp__x__exec_command"));
+  assert.ok(!names.includes("exec_command"));
 });
 
 test("shell_command is not used as the native exec identity", () => {
