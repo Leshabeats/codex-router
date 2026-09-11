@@ -14,7 +14,7 @@ export const LIST_DIR_TOOL_NAME = "list_dir";
 export const RUN_TERMINAL_COMMAND_TOOL_NAME = "run_terminal_command";
 export const DEFAULT_READ_LIMIT = 400;
 export const MAX_READ_LIMIT = 2000;
-const HIDDEN_NATIVE_TOOLS = new Set(["apply_patch", "exec_command", "shell_command"]);
+const HIDDEN_NATIVE_TOOLS = new Set(["exec_command", "shell_command"]);
 
 const pathSchema = { type: "string", minLength: 1, maxLength: 65536 };
 const bodySchema = { type: "string", maxLength: MAX_STRUCTURED_PATCH_BYTES };
@@ -338,7 +338,7 @@ function hideNativeTools(tools, nativeExec) {
     if (typeof name !== "string") return true;
     if (HIDDEN_NATIVE_TOOLS.has(name)) return false;
     if (nativeExec && name === nativeExec) return false;
-    if (name.endsWith("__exec_command") || name.endsWith("__apply_patch")) return false;
+    if (name.endsWith("__exec_command")) return false;
     return true;
   });
 }

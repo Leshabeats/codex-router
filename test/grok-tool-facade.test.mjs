@@ -117,7 +117,6 @@ test("search_replace and write are added beside apply_patch without colliding", 
   assert.ok(names.includes(LIST_DIR_TOOL_NAME));
   assert.ok(names.includes(RUN_TERMINAL_COMMAND_TOOL_NAME));
   assert.ok(!names.includes("exec_command"));
-  assert.ok(!names.includes("apply_patch"));
   assert.deepEqual(
     bridge.tools.find((tool) => tool.name === SEARCH_REPLACE_TOOL_NAME).parameters,
     SEARCH_REPLACE_PARAMETERS,
