@@ -2,6 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { setTimeout } from "node:timers/promises";
@@ -50,17 +53,92 @@ test("valid operations become exactly the native patch without mutating the even
   assert.deepEqual(input, before);
 });
 
-test("native patches, malformed event shapes and other routes or tool identities pass unchanged", () => {
+test("malformed event shapes and other routes or tool identities pass unchanged", () => {
   const controls = [
     null, {}, [], { ...event(valid), tool_input: null },
     { ...event(valid), tool_input: { command: 1 } },
-    { ...event(valid), tool_input: { command: patch } },
     { ...event(valid), tool_input: { command: ` ${GROK_PATCH_HOOK_PREFIX}${valid}` } },
     { ...event(valid), tool_input: { command: `CODEX_ROUTER_STRUCTURED_PATCH_V2\n${valid}` } },
     ...["grok-oauth/grok-4.5", "grok-4.6", "gpt-6-astra", undefined].map((model) => ({ ...event(valid), model })),
     ...["other.apply_patch", "functions.apply_patch", "functions__apply_patch", "shell", undefined].map((tool_name) => ({ ...event(valid), tool_name })),
   ];
   for (const input of controls) assert.deepEqual(adaptHookInput(input), {});
+});
+
+function withTempCwd(run) {
+  const cwd = mkdtempSync(join(tmpdir(), "grok-patch-hook-"));
+  try {
+    return run(cwd);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+}
+
+test("native Add File passes through when the target is absent and is denied when it exists", () => {
+  const native = { ...event(valid), tool_input: { command: patch } };
+  withTempCwd((cwd) => {
+    assert.deepEqual(adaptHookInput({ ...native, cwd }), {});
+    writeFileSync(join(cwd, "hello.txt"), "already here\n");
+    const output = adaptHookInput({ ...native, cwd }).hookSpecificOutput;
+    assert.equal(output.hookEventName, "PreToolUse");
+    assert.equal(output.permissionDecision, "deny");
+    assert.equal(Object.hasOwn(output, "updatedInput"), false);
+    assert.equal(output.permissionDecisionReason, "file exists; use search_replace");
+    assert.ok(output.permissionDecisionReason.length < 200);
+    assert.ok(!output.permissionDecisionReason.includes("already here"));
+    assert.ok(!output.permissionDecisionReason.includes(cwd));
+  });
+});
+
+test("prefixed Add File is denied when the target exists and still compiles when it does not", () => {
+  withTempCwd((cwd) => {
+    assert.deepEqual(adaptHookInput({ ...event(valid), cwd }), { hookSpecificOutput: {
+      hookEventName: "PreToolUse", permissionDecision: "allow", updatedInput: { command: patch },
+    } });
+    writeFileSync(join(cwd, "hello.txt"), "already here\n");
+    const output = adaptHookInput({ ...event(valid), cwd }).hookSpecificOutput;
+    assert.equal(output.hookEventName, "PreToolUse");
+    assert.equal(output.permissionDecision, "deny");
+    assert.equal(Object.hasOwn(output, "updatedInput"), false);
+    assert.equal(output.permissionDecisionReason, "file exists; use search_replace");
+    assert.ok(output.permissionDecisionReason.length < 200);
+    assert.ok(!output.permissionDecisionReason.includes("already here"));
+    assert.ok(!output.permissionDecisionReason.includes(cwd));
+  });
+});
+
+test("Update File, search_replace, and delete are not denied merely because the path exists", () => {
+  const nativeUpdate = "*** Begin Patch\n*** Update File: notes.txt\n@@\n-hello\n+hello world\n*** End Patch";
+  withTempCwd((cwd) => {
+    writeFileSync(join(cwd, "notes.txt"), "hello\n");
+    writeFileSync(join(cwd, "x"), "x\n");
+    assert.deepEqual(adaptHookInput({
+      ...event(valid),
+      tool_input: { command: nativeUpdate },
+      cwd,
+    }), {});
+    const replace = JSON.stringify({ path: "notes.txt", old_string: "hello", new_string: "hello world" });
+    assert.equal(adaptHookInput({ ...event(replace), cwd }).hookSpecificOutput.permissionDecision, "allow");
+    const del = JSON.stringify({ operations: [{ op: "delete", path: "x" }] });
+    assert.equal(adaptHookInput({ ...event(del), cwd }).hookSpecificOutput.permissionDecision, "allow");
+  });
+});
+
+test("search_replace, write, and operations-as-string payloads compile through the hook", () => {
+  const replace = JSON.stringify({ path: "notes.txt", old_string: "hello", new_string: "hello world" });
+  const written = JSON.stringify({ path: "new.txt", contents: "Привет\n" });
+  const nested = JSON.stringify({
+    operations: JSON.stringify([{ op: "add", path: "hello.txt", lines: ['Привет "world" 🌍', ""] }]),
+  });
+  assert.equal(
+    adaptHookInput(event(replace)).hookSpecificOutput.updatedInput.command,
+    "*** Begin Patch\n*** Update File: notes.txt\n@@\n-hello\n+hello world\n*** End Patch",
+  );
+  assert.equal(
+    adaptHookInput(event(written)).hookSpecificOutput.updatedInput.command,
+    "*** Begin Patch\n*** Add File: new.txt\n+Привет\n*** End Patch",
+  );
+  assert.equal(adaptHookInput(event(nested)).hookSpecificOutput.updatedInput.command, patch);
 });
 
 test("invalid and ambiguous operations yield bounded native denial with no executable replacement", () => {

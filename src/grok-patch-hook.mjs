@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   compileStructuredPatchArguments,
   MAX_STRUCTURED_PATCH_BYTES,
@@ -9,6 +11,37 @@ import { GROK_PATCH_HOOK_PREFIX } from "./grok-patch-hook-transport.mjs";
 // for the native event metadata as well; reject the complete event above 8 MiB.
 export const MAX_GROK_PATCH_HOOK_INPUT_BYTES = MAX_STRUCTURED_PATCH_BYTES * 8;
 
+const ADD_FILE_HEADER = "*** Add File:";
+const ADD_FILE_EXISTS_REASON = "file exists; use search_replace";
+
+function patchWorkingDirectory(event) {
+  const cwd = event?.cwd;
+  return typeof cwd === "string" && cwd.length > 0 ? cwd : process.cwd();
+}
+
+// Grok subagents emit whole-file Add File for paths that already exist.
+// Router compile cannot see the worktree; this client hook can existsSync.
+function addFileTargetExists(patch, event) {
+  const cwd = patchWorkingDirectory(event);
+  if (cwd.includes("\0")) return false;
+  for (const rawLine of patch.split("\n")) {
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    if (!line.startsWith(ADD_FILE_HEADER)) continue;
+    const target = line.slice(ADD_FILE_HEADER.length).trim();
+    if (!target || target.includes("\0")) continue;
+    if (existsSync(resolve(cwd, target))) return true;
+  }
+  return false;
+}
+
+function denyExistingAddFile() {
+  return { hookSpecificOutput: {
+    hookEventName: "PreToolUse",
+    permissionDecision: "deny",
+    permissionDecisionReason: ADD_FILE_EXISTS_REASON,
+  } };
+}
+
 // This adapter only serializes. Native apply_patch still validates the patch
 // and enforces its permissions. If this hook fails or is absent, the original
 // prefixed envelope cannot be a native patch; this is not a general guarantee
@@ -16,26 +49,31 @@ export const MAX_GROK_PATCH_HOOK_INPUT_BYTES = MAX_STRUCTURED_PATCH_BYTES * 8;
 export function adaptHookInput(event) {
   const command = event?.tool_input?.command;
   if (event?.model !== "grok-oauth/grok-4.6" || event?.tool_name !== "apply_patch" ||
-      typeof command !== "string" || !command.startsWith(GROK_PATCH_HOOK_PREFIX)) return {};
-  try {
-    const patch = compileStructuredPatchArguments(command.slice(GROK_PATCH_HOOK_PREFIX.length));
-    return { hookSpecificOutput: {
-      hookEventName: "PreToolUse",
-      permissionDecision: "allow",
-      updatedInput: { command: patch },
-    } };
-  } catch (error) {
-    if (!(error instanceof StructuredPatchError)) throw error;
-    // Only a bounded codec identifier enters feedback, never argument text or
-    // arbitrary exception messages. The client may separately echo the command.
-    const code = typeof error.code === "string" && /^[a-z_]{1,64}$/u.test(error.code)
-      ? error.code : "invalid_arguments";
-    return { hookSpecificOutput: {
-      hookEventName: "PreToolUse",
-      permissionDecision: "deny",
-      permissionDecisionReason: `Invalid structured apply_patch arguments (${code}). Correct the structured arguments and retry this tool.`,
-    } };
+      typeof command !== "string") return {};
+  if (command.startsWith(GROK_PATCH_HOOK_PREFIX)) {
+    try {
+      const patch = compileStructuredPatchArguments(command.slice(GROK_PATCH_HOOK_PREFIX.length));
+      if (addFileTargetExists(patch, event)) return denyExistingAddFile();
+      return { hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "allow",
+        updatedInput: { command: patch },
+      } };
+    } catch (error) {
+      if (!(error instanceof StructuredPatchError)) throw error;
+      // Only a bounded codec identifier enters feedback, never argument text or
+      // arbitrary exception messages. The client may separately echo the command.
+      const code = typeof error.code === "string" && /^[a-z_]{1,64}$/u.test(error.code)
+        ? error.code : "invalid_arguments";
+      return { hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: `Invalid structured apply_patch arguments (${code}). Correct the structured arguments and retry this tool.`,
+      } };
+    }
   }
+  if (addFileTargetExists(command, event)) return denyExistingAddFile();
+  return {};
 }
 
 export async function readHookInput(stream) {

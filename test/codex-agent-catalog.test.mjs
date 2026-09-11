@@ -27,6 +27,17 @@ test("routed agent definitions select the router provider and exact model slug",
   assert.match(definition.contents, /Before claiming that something is absent/);
   assert.match(definition.contents, /Never invent or reuse a stale name/);
   assert.match(definition.contents, /Do not stop after merely announcing a next action/);
+  assert.doesNotMatch(definition.contents, /search_replace/);
+});
+
+test("Grok 4.6 routed agents get surgical file-edit instructions", () => {
+  const definition = routedAgentDefinition({
+    slug: "grok-oauth/grok-4.6",
+    displayName: "Grok 4.6 (OAuth)",
+  });
+  assert.match(definition.contents, /search_replace/);
+  assert.match(definition.contents, /do not rewrite a whole file/);
+  assert.match(definition.contents, /write only when the file does not exist/);
 });
 
 test("agent sync writes one private definition for every routed model", () => {

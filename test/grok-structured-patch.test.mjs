@@ -107,6 +107,35 @@ test("object API refuses accessor fields and sparse arrays", () => {
   assert.equal(invoked, false);
 });
 
+test("operations serialized as a JSON string still compile", () => {
+  const operations = [add("notes.txt", ["hello"])];
+  assert.equal(
+    compileStructuredPatchArguments(JSON.stringify({ operations: JSON.stringify(operations) })),
+    serializeStructuredPatch(wrap(...operations)),
+  );
+});
+
+test("two updates of the same path merge into one file operation", () => {
+  const first = update([removeLine("a"), addLine("b")]);
+  const second = { op: "update", path: "notes.txt", hunks: [{ lines: [removeLine("c"), addLine("d")] }] };
+  assert.equal(compileStructuredPatchArguments(JSON.stringify(wrap(first, second))), [
+    "*** Begin Patch", "*** Update File: notes.txt", "@@", "-a", "+b", "@@", "-c", "+d", "*** End Patch",
+  ].join("\n"));
+});
+
+test("search_replace and write shapes compile to native add/update patches", () => {
+  assert.equal(compileStructuredPatchArguments(JSON.stringify({
+    path: "notes.txt", old_string: "hello", new_string: "hello world",
+  })), [
+    "*** Begin Patch", "*** Update File: notes.txt", "@@", "-hello", "+hello world", "*** End Patch",
+  ].join("\n"));
+  assert.equal(compileStructuredPatchArguments(JSON.stringify({
+    path: "new.txt", contents: "Привет\n",
+  })), [
+    "*** Begin Patch", "*** Add File: new.txt", "+Привет", "*** End Patch",
+  ].join("\n"));
+});
+
 test("schema only offers add/update/delete with typed lines, no raw patch escape hatch", () => {
   const alternatives = GROK_STRUCTURED_PATCH_PARAMETERS.properties.operations.items.anyOf;
   assert.deepEqual(alternatives.map((s) => s.properties.op.const), ["add", "delete", "update"]);

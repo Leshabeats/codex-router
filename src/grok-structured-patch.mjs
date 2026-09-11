@@ -141,7 +141,97 @@ export function compileStructuredPatchArguments(argumentsText) {
   } catch {
     reject("ambiguous_or_invalid_json");
   }
-  return serializeStructuredPatch(value);
+  return serializeStructuredPatch(normalizeGrokEdit(value));
+}
+
+function splitLogicalLines(text) {
+  if (typeof text !== "string") reject("string_required");
+  if (text === "") return [];
+  const lines = text.split(/\r?\n/u);
+  if (lines[lines.length - 1] === "") lines.pop();
+  return lines;
+}
+
+function searchReplaceToOperations(value) {
+  object(value, ["path", "old_string", "new_string"], ["replace_all"]);
+  if (Object.hasOwn(value, "replace_all") && typeof value.replace_all !== "boolean") {
+    reject("boolean_required");
+  }
+  if (value.old_string === value.new_string) reject("no_change");
+  const removed = splitLogicalLines(value.old_string);
+  const added = splitLogicalLines(value.new_string);
+  if (removed.length === 0 && added.length === 0) reject("no_change");
+  return {
+    operations: [{
+      op: "update",
+      path: value.path,
+      hunks: [{
+        lines: [
+          ...removed.map((text) => ({ kind: "remove", text })),
+          ...added.map((text) => ({ kind: "add", text })),
+        ],
+      }],
+    }],
+  };
+}
+
+function writeToOperations(value) {
+  object(value, ["path", "contents"]);
+  return {
+    operations: [{
+      op: "add",
+      path: value.path,
+      lines: splitLogicalLines(value.contents),
+    }],
+  };
+}
+
+function parseOperationsField(operations) {
+  if (typeof operations === "string") {
+    if (!jsonArgumentsAreUnambiguous(operations)) reject("ambiguous_or_invalid_json");
+    try {
+      return JSON.parse(operations);
+    } catch {
+      reject("ambiguous_or_invalid_json");
+    }
+  }
+  return operations;
+}
+
+function mergeUpdateOperations(value) {
+  const operations = parseOperationsField(value.operations);
+  if (!Array.isArray(operations)) return { ...value, operations };
+  const merged = [];
+  const updateAt = new Map();
+  for (const operation of operations) {
+    if (operation && operation.op === "update" && typeof operation.path === "string") {
+      const index = updateAt.get(operation.path);
+      if (index !== undefined) {
+        const current = merged[index];
+        merged[index] = {
+          ...current,
+          hunks: [
+            ...(Array.isArray(current.hunks) ? current.hunks : []),
+            ...(Array.isArray(operation.hunks) ? operation.hunks : []),
+          ],
+        };
+        continue;
+      }
+      updateAt.set(operation.path, merged.length);
+    }
+    merged.push(operation);
+  }
+  return { ...value, operations: merged };
+}
+
+function normalizeGrokEdit(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) reject("object_required");
+  if (Object.hasOwn(value, "operations")) return mergeUpdateOperations(value);
+  if (Object.hasOwn(value, "old_string") || Object.hasOwn(value, "new_string")) {
+    return searchReplaceToOperations(value);
+  }
+  if (Object.hasOwn(value, "contents")) return writeToOperations(value);
+  reject("missing_field");
 }
 
 const textSchema = { type: "string", maxLength: MAX_LINE_LENGTH };

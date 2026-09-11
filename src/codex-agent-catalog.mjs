@@ -68,6 +68,14 @@ export function routedAgentDefinition(model) {
     "Use only tool names, agent types, and model overrides offered by the current tool schema. Never invent or reuse a stale name; omit an optional override when no offered value fits.",
     "Do not stop after merely announcing a next action. Execute it when it is within scope, or report the exact blocker or decision needed.",
     "Return a concise summary of work completed, checks run, and remaining risks.",
+    ...(slug === "grok-oauth/grok-4.6"
+      ? [
+          "Edit existing files only with search_replace and a unique old_string; do not rewrite a whole file.",
+          "write only when the file does not exist.",
+          "Do not dump node_modules dist; open the named task paths and edit.",
+          "Do not survey the whole repo before the first edit.",
+        ]
+      : []),
     '"""',
     "",
   ].join("\n");

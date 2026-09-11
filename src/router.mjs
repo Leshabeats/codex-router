@@ -63,6 +63,8 @@ import {
   zaiResponsesCompatTransform,
 } from "./zai-responses-compat.mjs";
 import { grokReasoningSummaryCompatTransform } from "./grok-reasoning-summary-compat.mjs";
+import { earlyToolItemDoneTransform } from "./early-tool-item-done.mjs";
+import { applyGrokEditFacade, encodeGrokFacadeHistory, grokEditFacadeEnabled } from "./grok-tool-facade.mjs";
 import { ResponsesHeartbeatTransform } from "./responses-heartbeat.mjs";
 import { translatedToolMessageCompatTransform } from "./deepseek-tool-message-compat.mjs";
 import {
@@ -3324,6 +3326,10 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
     tools = customTools.tools;
     routedInput = customTools.input;
     routedToolChoice = customTools.toolChoice;
+    tools = applyGrokEditFacade(tools, flattenedNamespaces, route, structuredPatch);
+    if (grokEditFacadeEnabled(route, structuredPatch)) {
+      routedInput = encodeGrokFacadeHistory(routedInput);
+    }
   }
   if (chatCompletionsProvider || consoleGoResponsesCompatibility || deepSeekResponses) {
     let searchHistory;
@@ -4317,6 +4323,10 @@ async function handleResponses(request, response, requestUrl) {
         ? translatedToolMessageCompatTransform(providerForModel(route), contentType)
         : undefined;
       if (translatedToolMessageCompat) transforms.push(translatedToolMessageCompat);
+      const earlyToolDone = route
+        ? earlyToolItemDoneTransform(providerForModel(route), contentType)
+        : undefined;
+      if (earlyToolDone) transforms.push(earlyToolDone);
       // Restore flattened namespace calls for routed chat-completions providers
       // and pin an omitted spawn_agent model to every routed parent, including
       // providers that already speak Responses. Also inject missing finished-
