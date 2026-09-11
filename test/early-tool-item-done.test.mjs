@@ -100,6 +100,5 @@ test("item lifecycle can start the second tool before the stream ends", async ()
     "0:added",
     "0:done",
     "1:added",
-    "1:done",
   ]);
 });

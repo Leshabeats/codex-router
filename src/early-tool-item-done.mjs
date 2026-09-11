@@ -70,7 +70,6 @@ export class EarlyToolItemDoneTransform extends Transform {
 
   _flush(callback) {
     this.#drain(true);
-    this.#closeOpen();
     callback();
   }
 
@@ -95,14 +94,12 @@ export class EarlyToolItemDoneTransform extends Transform {
     if (separator.length === 4) this.#newline = "\r\n";
     const parsed = parseBlock(text.replace(/\r?\n\r?\n$/u, "").replace(/\r?\n$/u, ""));
     if (!parsed || parsed.terminal) {
-      if (parsed?.terminal) this.#closeOpen();
       this.push(Buffer.from(original));
       return;
     }
     const event = parsed.event;
     const type = event?.type;
     if (TERMINAL_TYPES.has(type)) {
-      this.#closeOpen();
       this.push(Buffer.from(original));
       return;
     }
