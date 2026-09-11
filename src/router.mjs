@@ -64,7 +64,13 @@ import {
 } from "./zai-responses-compat.mjs";
 import { grokReasoningSummaryCompatTransform } from "./grok-reasoning-summary-compat.mjs";
 import { earlyToolItemDoneTransform } from "./early-tool-item-done.mjs";
-import { applyGrokEditFacade, encodeGrokFacadeHistory, grokEditFacadeEnabled } from "./grok-tool-facade.mjs";
+import {
+  applyGrokEditFacade,
+  encodeGrokFacadeHistory,
+  grokEditFacadeEnabled,
+  rewriteGrokFacadeToolChoice,
+} from "./grok-tool-facade.mjs";
+import { applyInstructionOverlay } from "./instruction-overlays.mjs";
 import { ResponsesHeartbeatTransform } from "./responses-heartbeat.mjs";
 import { translatedToolMessageCompatTransform } from "./deepseek-tool-message-compat.mjs";
 import {
@@ -3329,6 +3335,7 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
     tools = applyGrokEditFacade(tools, flattenedNamespaces, route, structuredPatch);
     if (grokEditFacadeEnabled(route, structuredPatch)) {
       routedInput = encodeGrokFacadeHistory(routedInput);
+      routedToolChoice = rewriteGrokFacadeToolChoice(routedToolChoice);
     }
   }
   if (chatCompletionsProvider || consoleGoResponsesCompatibility || deepSeekResponses) {
@@ -3412,6 +3419,12 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
     model: route.gatewayModel,
     input: routedInput,
   };
+  if (grokEditFacadeEnabled(route, structuredPatch)) {
+    routed.instructions = applyInstructionOverlay(
+      typeof payload.instructions === "string" ? payload.instructions : "",
+      "grok-file-tools",
+    );
+  }
   applyRoutedServiceTier(routed, payload, route);
   if (routedToolChoice !== payload.tool_choice) routed.tool_choice = routedToolChoice;
   // Codex chooses a child's model; this is where an operator gets to choose its

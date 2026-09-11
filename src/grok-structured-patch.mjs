@@ -157,6 +157,7 @@ function searchReplaceToOperations(value) {
   if (Object.hasOwn(value, "replace_all") && typeof value.replace_all !== "boolean") {
     reject("boolean_required");
   }
+  if (value.replace_all === true) reject("replace_all_unsupported");
   if (value.old_string === value.new_string) reject("no_change");
   const removed = splitLogicalLines(value.old_string);
   const added = splitLogicalLines(value.new_string);
@@ -201,6 +202,9 @@ function parseOperationsField(operations) {
 function mergeUpdateOperations(value) {
   const operations = parseOperationsField(value.operations);
   if (!Array.isArray(operations)) return { ...value, operations };
+  for (const operation of operations) {
+    serializeStructuredPatch({ operations: [operation] });
+  }
   const merged = [];
   const updateAt = new Map();
   for (const operation of operations) {
@@ -210,10 +214,7 @@ function mergeUpdateOperations(value) {
         const current = merged[index];
         merged[index] = {
           ...current,
-          hunks: [
-            ...(Array.isArray(current.hunks) ? current.hunks : []),
-            ...(Array.isArray(operation.hunks) ? operation.hunks : []),
-          ],
+          hunks: [...current.hunks, ...operation.hunks],
         };
         continue;
       }

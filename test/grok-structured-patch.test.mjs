@@ -123,6 +123,21 @@ test("two updates of the same path merge into one file operation", () => {
   ].join("\n"));
 });
 
+test("search_replace rejects replace_all and invalid duplicate updates", () => {
+  assert.throws(
+    () => compileStructuredPatchArguments(JSON.stringify({
+      path: "x", old_string: "a", new_string: "b", replace_all: true,
+    })),
+    { code: "replace_all_unsupported" },
+  );
+  const valid = update([removeLine("a"), addLine("b")]);
+  const invalid = { op: "update", path: "notes.txt", hunks: "nope" };
+  assert.throws(
+    () => compileStructuredPatchArguments(JSON.stringify(wrap(valid, invalid))),
+    StructuredPatchError,
+  );
+});
+
 test("search_replace and write shapes compile to native add/update patches", () => {
   assert.equal(compileStructuredPatchArguments(JSON.stringify({
     path: "notes.txt", old_string: "hello", new_string: "hello world",

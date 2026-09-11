@@ -35,11 +35,11 @@ async function run(input, extra) {
   return output;
 }
 
-function toolAdded(index, id, name) {
+function toolAdded(index, id, name, callId = id) {
   return {
     type: "response.output_item.added",
     output_index: index,
-    item: { type: "function_call", id, call_id: id, name, arguments: "", status: "in_progress" },
+    item: { type: "function_call", id, call_id: callId, name, arguments: "", status: "in_progress" },
   };
 }
 
@@ -76,6 +76,17 @@ test("closes the first tool item when the next tool is added", async () => {
   assert.ok(firstDone < secondAdded);
   assert.equal(seen.filter((event) => event.type === "response.output_item.done" && event.output_index === 0).length, 1);
   assert.equal(seen[firstDone].item.arguments, "*** Begin");
+});
+
+test("synthesized argument-done uses the item id not the call id", async () => {
+  const body = await run([
+    block(toolAdded(0, "fc_1", "apply_patch", "call_1")),
+    block({ type: "response.function_call_arguments.delta", item_id: "fc_1", output_index: 0, delta: "aaa" }),
+    block(toolAdded(1, "fc_2", "apply_patch", "call_2")),
+  ].join(""));
+  const done = events(body).find((event) => event.type === "response.function_call_arguments.done");
+  assert.equal(done.item_id, "fc_1");
+  assert.equal(done.arguments, "aaa");
 });
 
 test("item lifecycle can start the second tool before the stream ends", async () => {

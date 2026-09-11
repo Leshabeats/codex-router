@@ -97,26 +97,68 @@ function parseFacadeObject(argumentsText) {
   }
 }
 
-export function compileReadFileCommand(argumentsText) {
+function parseExactObject(argumentsText, required, optional = []) {
   const value = parseFacadeObject(argumentsText);
-  if (!value || typeof value.target_file !== "string") return undefined;
-  const quoted = posixSingleQuote(value.target_file);
+  if (!value) return undefined;
+  const allowed = new Set([...required, ...optional]);
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) return undefined;
+  }
+  for (const key of required) {
+    if (!Object.hasOwn(value, key)) return undefined;
+  }
+  return value;
+}
+
+function terminateUnixPath(filePath) {
+  if (typeof filePath !== "string" || !filePath) return undefined;
+  if (filePath.startsWith("-")) return `./${filePath}`;
+  return filePath;
+}
+
+function powershellLiteral(value) {
+  if (typeof value !== "string" || value.includes("\0") || /[\r\n]/.test(value)) return undefined;
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function withWorkdir(payload, workdir) {
+  if (typeof workdir === "string" && workdir) payload.workdir = workdir;
+  return JSON.stringify(payload);
+}
+
+function fileReadCommand(filePath, offset, limit, workdir) {
+  if (process.platform === "win32") {
+    const literal = powershellLiteral(filePath);
+    if (!literal) return undefined;
+    const skip = offset - 1;
+    return withWorkdir({
+      cmd: `powershell -NoProfile -Command "Get-Content -LiteralPath ${literal} | Select-Object -Skip ${skip} -First ${limit}"`,
+    }, workdir);
+  }
+  const posixPath = terminateUnixPath(filePath);
+  const quoted = posixSingleQuote(posixPath);
   if (!quoted) return undefined;
+  const end = offset + limit - 1;
+  return withWorkdir({ cmd: `sed -n '${offset},${end}p' ${quoted}` }, workdir);
+}
+
+export function compileReadFileCommand(argumentsText, workdir) {
+  const value = parseExactObject(argumentsText, ["target_file"], ["offset", "limit"]);
+  if (!value || typeof value.target_file !== "string") return undefined;
   const offset = value.offset === undefined ? 1 : value.offset;
   const limit = value.limit === undefined ? DEFAULT_READ_LIMIT : value.limit;
   if (!Number.isInteger(offset) || offset < 1) return undefined;
   if (!Number.isInteger(limit) || limit < 1 || limit > MAX_READ_LIMIT) return undefined;
-  const end = offset + limit - 1;
-  return JSON.stringify({ cmd: `sed -n '${offset},${end}p' ${quoted}` });
+  return fileReadCommand(value.target_file, offset, limit, workdir);
 }
 
-export function compileGrepCommand(argumentsText) {
-  const value = parseFacadeObject(argumentsText);
+export function compileGrepCommand(argumentsText, workdir) {
+  const value = parseExactObject(argumentsText, ["pattern"], ["path", "glob"]);
   if (!value || typeof value.pattern !== "string" || value.pattern.length === 0) return undefined;
   const pattern = posixSingleQuote(value.pattern);
   if (!pattern) return undefined;
   const path = value.path === undefined ? "." : value.path;
-  const quotedPath = posixSingleQuote(path);
+  const quotedPath = posixSingleQuote(terminateUnixPath(path) || path);
   if (!quotedPath) return undefined;
   let cmd = `rg --line-number --color never --max-count 50 -e ${pattern}`;
   if (Object.hasOwn(value, "glob")) {
@@ -126,7 +168,10 @@ export function compileGrepCommand(argumentsText) {
     cmd += ` --glob ${glob}`;
   }
   cmd += ` -- ${quotedPath}`;
-  return JSON.stringify({ cmd });
+  cmd = process.platform === "win32"
+    ? `${cmd} | Select-Object -First 50`
+    : `${cmd} | head -n 50`;
+  return withWorkdir({ cmd }, workdir);
 }
 
 const READ_FILE_PARAMETERS = objectSchema({
@@ -151,17 +196,38 @@ const RUN_TERMINAL_COMMAND_PARAMETERS = objectSchema({
 }, ["command"]);
 
 function execCommandName(tools) {
-  const names = tools.map((tool) => tool?.name).filter(Boolean);
-  if (names.includes("exec_command")) return "exec_command";
-  return names.find((name) => name === "shell_command" || name.endsWith("__exec_command"));
+  const exact = tools.find((tool) => tool?.name === "exec_command" && tool.namespace === undefined);
+  return exact ? "exec_command" : undefined;
 }
 
-export function compileListDirCommand(argumentsText) {
-  const value = parseFacadeObject(argumentsText) ?? {};
+export function compileListDirCommand(argumentsText, workdir) {
+  const value = argumentsText === undefined || argumentsText === ""
+    ? {}
+    : parseExactObject(argumentsText, [], ["target_directory"]);
+  if (!value) return undefined;
   const directory = value.target_directory === undefined ? "." : value.target_directory;
-  const quoted = posixSingleQuote(directory);
+  if (typeof directory !== "string" || !directory) return undefined;
+  if (process.platform === "win32") {
+    const literal = powershellLiteral(directory);
+    if (!literal) return undefined;
+    return withWorkdir({
+      cmd: `powershell -NoProfile -Command "Get-ChildItem -LiteralPath ${literal}"`,
+    }, workdir);
+  }
+  const quoted = posixSingleQuote(terminateUnixPath(directory) || directory);
   if (!quoted) return undefined;
-  return JSON.stringify({ cmd: `ls -la ${quoted}` });
+  return withWorkdir({ cmd: `ls -la ${quoted}` }, workdir);
+}
+
+export function rewriteGrokFacadeToolChoice(toolChoice) {
+  if (!toolChoice || typeof toolChoice !== "object") return toolChoice;
+  if (toolChoice.type === "function" && (toolChoice.name === "exec_command" || toolChoice.name === "shell_command")) {
+    return { ...toolChoice, name: RUN_TERMINAL_COMMAND_TOOL_NAME };
+  }
+  if (toolChoice.type === "allowed_tools" && Array.isArray(toolChoice.tools)) {
+    return { ...toolChoice, tools: toolChoice.tools.map((choice) => rewriteGrokFacadeToolChoice(choice)) };
+  }
+  return toolChoice;
 }
 
 export const SHELL_NOT_EDITOR_COMMAND =
@@ -181,16 +247,40 @@ function singleLineCommand(command) {
   return trimmed;
 }
 
+function standalonePathRead(command) {
+  const trimmed = command.trim();
+  let match = /^Path\(['"]([^'"]+)['"]\)\.read_text\(\)\s*$/u.exec(trimmed);
+  if (match) return match[1];
+  match = /^from pathlib import Path\s*\nPath\(['"]([^'"]+)['"]\)\.read_text\(\)\s*$/u.exec(trimmed);
+  if (match) return match[1];
+  match = /^from pathlib import Path\s*\np=Path\(['"]([^'"]+)['"]\)\s*\nprint\(p\.read_text\(\)\)\s*$/u.exec(trimmed);
+  if (match) return match[1];
+  return undefined;
+}
+
 export function classifyShellCommand(command) {
   if (typeof command !== "string" || command.includes("\0")) return { kind: "process" };
   if (/\.write_text\b|\btee\s|>>|open\([^)]*['\"]w/.test(command)) {
     return { kind: "write" };
   }
-  if (/(?:^|[\s;|&])>(?!>)/.test(command) && /\.(js|jsx|ts|tsx|json|mjs|cjs|css|scss|md)\b/.test(command)) {
+  if (/(?:^|[\s;|&])>(?!>)/.test(command)) {
     return { kind: "write" };
   }
-  const pyRead = /Path\(['"]([^'"]+)['"]\)[\s\S]*\.read_text\(/.exec(command);
-  if (pyRead) return { kind: "read_file", args: { target_file: pyRead[1] } };
+  const standalone = standalonePathRead(command);
+  if (standalone) return { kind: "read_file", args: { target_file: standalone } };
+  const pipedGrep = /^rg --line-number --color never --max-count 50 -e (.+?)(?: --glob (.+))? -- (.+?) \| head -n 50$/u.exec(command.trim());
+  if (pipedGrep) {
+    const pattern = unquotePosix(pipedGrep[1]);
+    const path = unquotePosix(pipedGrep[3]);
+    if (pattern && path) {
+      const args = { pattern, path };
+      if (pipedGrep[2]) {
+        const glob = unquotePosix(pipedGrep[2]);
+        if (glob) args.glob = glob;
+      }
+      return { kind: "grep", args };
+    }
+  }
   const line = singleLineCommand(command);
   if (!line) return { kind: "process" };
   const sed = /^sed -n '(\d+),(\d+)p'(?: --)? (.+)$/u.exec(line);
@@ -220,7 +310,7 @@ export function classifyShellCommand(command) {
   const rg = /^(?:rg|grep) (?:-[nI]+\s+)?(.+)$/u.exec(line);
   if (rg && !/\snode_modules\/.*dist/.test(line)) {
     // Keep raw rg as grep only when it's a simple `rg -n pattern path` or our canonical form.
-    const canonical = /^rg --line-number --color never --max-count 50 -e (.+?)(?: --glob (.+))? -- (.+)$/u.exec(line);
+    const canonical = /^rg --line-number --color never --max-count 50 -e (.+?)(?: --glob (.+))? -- (.+?)(?: \| head -n 50)?$/u.exec(line);
     if (canonical) {
       const pattern = unquotePosix(canonical[1]);
       const path = unquotePosix(canonical[3]);
@@ -250,27 +340,27 @@ export function classifyShellCommand(command) {
 }
 
 export function compileRunTerminalCommand(argumentsText) {
-  const value = parseFacadeObject(argumentsText);
+  const value = parseExactObject(argumentsText, ["command"], ["working_directory"]);
   if (!value || typeof value.command !== "string" || !value.command) return undefined;
   if (value.command.includes("\0")) return undefined;
+  if (Object.hasOwn(value, "working_directory") && typeof value.working_directory !== "string") {
+    return undefined;
+  }
+  const workdir = value.working_directory;
   const classified = classifyShellCommand(value.command);
   if (classified.kind === "read_file") {
-    return compileReadFileCommand(JSON.stringify(classified.args));
+    return compileReadFileCommand(JSON.stringify(classified.args), workdir);
   }
   if (classified.kind === "grep") {
-    return compileGrepCommand(JSON.stringify(classified.args));
+    return compileGrepCommand(JSON.stringify(classified.args), workdir);
   }
   if (classified.kind === "list_dir") {
-    return compileListDirCommand(JSON.stringify(classified.args));
+    return compileListDirCommand(JSON.stringify(classified.args), workdir);
   }
   if (classified.kind === "write") {
     return JSON.stringify({ cmd: SHELL_NOT_EDITOR_COMMAND });
   }
-  const payload = { cmd: value.command };
-  if (typeof value.working_directory === "string" && value.working_directory) {
-    payload.workdir = value.working_directory;
-  }
-  return JSON.stringify(payload);
+  return withWorkdir({ cmd: value.command }, workdir);
 }
 
 function unquotePosix(value) {
@@ -324,6 +414,12 @@ export function encodeGrokFacadeHistory(input, nativeExec) {
         changed = true;
         const { name: _name, ...rest } = item;
         const name = Object.hasOwn(value, "contents") ? WRITE_TOOL_NAME : SEARCH_REPLACE_TOOL_NAME;
+        return { ...rest, name, arguments: item.arguments };
+      }
+      if (typeof value.input === "string" && value.input.includes("*** Begin Patch")) {
+        changed = true;
+        const { name: _name, ...rest } = item;
+        const name = value.input.includes("*** Add File:") ? WRITE_TOOL_NAME : SEARCH_REPLACE_TOOL_NAME;
         return { ...rest, name, arguments: item.arguments };
       }
     }

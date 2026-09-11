@@ -18,6 +18,7 @@ const ARG_DONE_TYPES = new Set([
   "response.function_call_arguments.done",
   "response.custom_tool_call_input.done",
 ]);
+const MAX_SSE_FRAME_BYTES = 8 * 1024 * 1024;
 
 function findFrameEnd(buffer) {
   const crlf = buffer.indexOf(CRLF_SEP);
@@ -28,8 +29,10 @@ function findFrameEnd(buffer) {
 }
 
 function parseBlock(block) {
+  let eventName;
   const dataLines = [];
   for (const line of block.split(/\r?\n/)) {
+    if (line.startsWith("event:")) eventName = line.slice(6).trim();
     if (line.startsWith("data:")) {
       const value = line.slice(5);
       dataLines.push(value.startsWith(" ") ? value.slice(1) : value);
@@ -39,20 +42,31 @@ function parseBlock(block) {
   const dataText = dataLines.join("\n");
   if (dataText === "[DONE]") return { terminal: true };
   try {
-    return { event: JSON.parse(dataText) };
+    const event = JSON.parse(dataText);
+    if (eventName && event?.type && eventName !== event.type) return { conflict: true };
+    return { event };
   } catch {
     return undefined;
   }
 }
 
 function frameFor(type, event, newline) {
-  const payload = { type, ...event };
-  if (payload.type !== type) payload.type = type;
+  const payload = { type, ...event, type };
   return `event: ${type}${newline}data: ${JSON.stringify(payload)}${newline}${newline}`;
 }
 
-function toolId(item, event) {
-  return item?.call_id || item?.id || event?.item_id || undefined;
+function unwrapCustomInput(text) {
+  if (typeof text !== "string" || !text.startsWith("{")) return text;
+  try {
+    const value = JSON.parse(text);
+    if (value && typeof value === "object" && !Array.isArray(value) && typeof value.content === "string") {
+      const keys = Object.keys(value);
+      if (keys.every((key) => key === "content" || key === "input")) return value.content;
+    }
+  } catch {
+    return text;
+  }
+  return text;
 }
 
 export class EarlyToolItemDoneTransform extends Transform {
@@ -60,16 +74,30 @@ export class EarlyToolItemDoneTransform extends Transform {
   #open;
   #closed = new Set();
   #newline = "\n";
+  #passthrough = false;
 
   _transform(chunk, encoding, callback) {
+    if (this.#passthrough) {
+      this.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding));
+      callback();
+      return;
+    }
     const piece = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding);
+    if (this.#buffer.length + piece.length > MAX_SSE_FRAME_BYTES) {
+      this.#passthrough = true;
+      if (this.#buffer.length) this.push(this.#buffer);
+      this.#buffer = Buffer.alloc(0);
+      this.push(piece);
+      callback();
+      return;
+    }
     this.#buffer = this.#buffer.length ? Buffer.concat([this.#buffer, piece]) : piece;
     this.#drain(false);
     callback();
   }
 
   _flush(callback) {
-    this.#drain(true);
+    if (!this.#passthrough) this.#drain(true);
     callback();
   }
 
@@ -78,9 +106,13 @@ export class EarlyToolItemDoneTransform extends Transform {
       const found = findFrameEnd(this.#buffer);
       if (!found) {
         if (!flush) return;
+        if (this.#buffer.length > MAX_SSE_FRAME_BYTES) {
+          this.#passthrough = true;
+        }
         const original = this.#buffer;
         this.#buffer = Buffer.alloc(0);
-        this.#handle(original, Buffer.alloc(0));
+        if (this.#passthrough) this.push(original);
+        else this.#handle(original, Buffer.alloc(0));
         return;
       }
       const original = this.#buffer.subarray(0, found.index + found.separator.length);
@@ -93,7 +125,8 @@ export class EarlyToolItemDoneTransform extends Transform {
     const text = original.toString("utf8");
     if (separator.length === 4) this.#newline = "\r\n";
     const parsed = parseBlock(text.replace(/\r?\n\r?\n$/u, "").replace(/\r?\n$/u, ""));
-    if (!parsed || parsed.terminal) {
+    if (!parsed || parsed.terminal || parsed.conflict) {
+      if (parsed?.conflict) this.#passthrough = true;
       this.push(Buffer.from(original));
       return;
     }
@@ -106,7 +139,8 @@ export class EarlyToolItemDoneTransform extends Transform {
     if (type === "response.output_item.added" && TOOL_TYPES.has(event.item?.type)) {
       this.#closeOpen();
       this.#open = {
-        id: toolId(event.item, event),
+        itemId: typeof event.item.id === "string" ? event.item.id : undefined,
+        callId: typeof event.item.call_id === "string" ? event.item.call_id : undefined,
         outputIndex: event.output_index,
         item: { ...event.item },
         arguments: typeof event.item.arguments === "string" ? event.item.arguments : "",
@@ -116,7 +150,7 @@ export class EarlyToolItemDoneTransform extends Transform {
       this.push(Buffer.from(original));
       return;
     }
-    if (ARG_DELTA_TYPES.has(type) && this.#open && (event.item_id === this.#open.id || event.output_index === this.#open.outputIndex)) {
+    if (ARG_DELTA_TYPES.has(type) && this.#matchesOpen(event)) {
       const piece = typeof event.delta === "string" ? event.delta : "";
       if (this.#open.kind === "custom_tool_call") this.#open.input += piece;
       else this.#open.arguments += piece;
@@ -126,7 +160,7 @@ export class EarlyToolItemDoneTransform extends Transform {
     if (ARG_DONE_TYPES.has(type)) {
       const id = event.item_id;
       if (id && this.#closed.has(id)) return;
-      if (this.#open && (id === this.#open.id || event.output_index === this.#open.outputIndex)) {
+      if (this.#matchesOpen(event)) {
         if (typeof event.arguments === "string") this.#open.arguments = event.arguments;
         if (typeof event.input === "string") this.#open.input = event.input;
       }
@@ -134,10 +168,10 @@ export class EarlyToolItemDoneTransform extends Transform {
       return;
     }
     if (type === "response.output_item.done") {
-      const id = toolId(event.item, event);
+      const id = event.item?.id || event.item?.call_id;
       if (id && this.#closed.has(id)) return;
       if (id) this.#closed.add(id);
-      if (this.#open && (id === this.#open.id || event.output_index === this.#open.outputIndex)) {
+      if (this.#open && (id === this.#open.itemId || id === this.#open.callId || event.output_index === this.#open.outputIndex)) {
         this.#open = undefined;
       }
       this.push(Buffer.from(original));
@@ -146,26 +180,35 @@ export class EarlyToolItemDoneTransform extends Transform {
     this.push(Buffer.from(original));
   }
 
+  #matchesOpen(event) {
+    if (!this.#open) return false;
+    const id = event.item_id;
+    return id === this.#open.itemId || id === this.#open.callId || event.output_index === this.#open.outputIndex;
+  }
+
   #closeOpen() {
     const open = this.#open;
-    if (!open || (open.id && this.#closed.has(open.id))) {
+    if (!open || (open.itemId && this.#closed.has(open.itemId)) || (open.callId && this.#closed.has(open.callId))) {
       this.#open = undefined;
       return;
     }
-    if (open.id) this.#closed.add(open.id);
+    const lifecycleId = open.itemId || open.callId;
+    if (lifecycleId) this.#closed.add(lifecycleId);
+    if (open.callId) this.#closed.add(open.callId);
+    const customInput = unwrapCustomInput(open.input);
     const item = {
       ...open.item,
       status: "completed",
       ...(open.kind === "custom_tool_call"
-        ? { input: open.input }
+        ? { input: customInput }
         : { arguments: open.arguments }),
     };
     const doneType = open.kind === "custom_tool_call"
       ? "response.custom_tool_call_input.done"
       : "response.function_call_arguments.done";
     const doneBody = open.kind === "custom_tool_call"
-      ? { item_id: open.id, output_index: open.outputIndex, input: open.input }
-      : { item_id: open.id, output_index: open.outputIndex, arguments: open.arguments };
+      ? { item_id: lifecycleId, output_index: open.outputIndex, input: customInput }
+      : { item_id: lifecycleId, output_index: open.outputIndex, arguments: open.arguments };
     this.push(Buffer.from(frameFor(doneType, doneBody, this.#newline)));
     this.push(Buffer.from(frameFor("response.output_item.done", {
       output_index: open.outputIndex,

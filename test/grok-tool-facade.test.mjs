@@ -142,7 +142,7 @@ test("read_file and grep compile to bounded exec_command payloads", () => {
   );
   assert.equal(
     compileGrepCommand(JSON.stringify({ pattern: "SelectCompat", path: "smid", glob: "*.js" })),
-    JSON.stringify({ cmd: "rg --line-number --color never --max-count 50 -e 'SelectCompat' --glob '*.js' -- 'smid'" }),
+    JSON.stringify({ cmd: "rg --line-number --color never --max-count 50 -e 'SelectCompat' --glob '*.js' -- 'smid' | head -n 50" }),
   );
   assert.equal(compileReadFileCommand(JSON.stringify({ target_file: "a\nb" })), undefined);
   assert.equal(
@@ -170,10 +170,12 @@ test("history restores Codex exec/apply_patch calls back to Grok tool names", ()
   const fromCat = encodeGrokFacadeHistory([
     { type: "function_call", call_id: "5", name: "exec_command", arguments: JSON.stringify({ cmd: "cat '/tmp/a.js'" }) },
     { type: "function_call", call_id: "6", name: "exec_command", arguments: JSON.stringify({ cmd: "from pathlib import Path\np=Path('/tmp/a.js')\nprint(p.read_text())" }) },
+    { type: "function_call", call_id: "7", name: "exec_command", arguments: JSON.stringify({ cmd: "python -c \"from pathlib import Path; assert Path('result.txt').read_text() == 'ok'\"" }) },
   ]);
   assert.equal(fromCat[0].name, READ_FILE_TOOL_NAME);
   assert.equal(JSON.parse(fromCat[0].arguments).target_file, "/tmp/a.js");
   assert.equal(fromCat[1].name, READ_FILE_TOOL_NAME);
+  assert.equal(fromCat[2].name, RUN_TERMINAL_COMMAND_TOOL_NAME);
 });
 
 test("run_terminal_command canonicalizes file reads and refuses file writes", () => {
@@ -186,6 +188,16 @@ test("run_terminal_command canonicalizes file reads and refuses file writes", ()
     JSON.stringify({ cmd: SHELL_NOT_EDITOR_COMMAND }),
   );
   assert.equal(classifyShellCommand("yarn test:frontend").kind, "process");
+  assert.equal(classifyShellCommand("echo hi > notes.txt").kind, "write");
+  assert.equal(
+    compileRunTerminalCommand(JSON.stringify({ command: "cat 'a.txt'", working_directory: "sub" })),
+    compileReadFileCommand(JSON.stringify({ target_file: "a.txt" }), "sub"),
+  );
+  assert.equal(compileListDirCommand(JSON.stringify({ unexpected: true })), undefined);
+  assert.equal(
+    compileReadFileCommand(JSON.stringify({ target_file: "--expression=w victim", offset: 1, limit: 10 })),
+    JSON.stringify({ cmd: "sed -n '1,10p' './--expression=w victim'" }),
+  );
 });
 
 test("search_replace restores to native apply_patch with a compiled V4A payload", async () => {
