@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { readFileSync, realpathSync, statSync } from "node:fs";
+import { isAbsolute, relative, resolve } from "node:path";
 import {
   compileStructuredPatchArguments,
   MAX_STRUCTURED_PATCH_BYTES,
@@ -22,17 +22,38 @@ function patchWorkingDirectory(event) {
   return typeof cwd === "string" && cwd.length > 0 ? cwd : process.cwd();
 }
 
+function workspaceContainedFile(cwd, target) {
+  if (typeof cwd !== "string" || typeof target !== "string" || !cwd || !target) return undefined;
+  if (cwd.includes("\0") || target.includes("\0")) return undefined;
+  let root;
+  try {
+    root = realpathSync(cwd);
+  } catch {
+    return undefined;
+  }
+  const candidate = resolve(root, target);
+  const lexical = relative(root, candidate);
+  if (lexical.startsWith("..") || isAbsolute(lexical)) return undefined;
+  let real;
+  try {
+    real = realpathSync(candidate);
+  } catch {
+    return undefined;
+  }
+  const contained = relative(root, real);
+  if (contained.startsWith("..") || isAbsolute(contained)) return undefined;
+  return real;
+}
+
 // Grok subagents emit whole-file Add File for paths that already exist.
 // Router compile cannot see the worktree; this client hook can existsSync.
 function addFileTargetExists(patch, event) {
   const cwd = patchWorkingDirectory(event);
-  if (cwd.includes("\0")) return false;
   for (const rawLine of patch.split("\n")) {
     const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
     if (!line.startsWith(ADD_FILE_HEADER)) continue;
     const target = line.slice(ADD_FILE_HEADER.length).trim();
-    if (!target || target.includes("\0")) continue;
-    if (existsSync(resolve(cwd, target))) return true;
+    if (workspaceContainedFile(cwd, target)) return true;
   }
   return false;
 }
@@ -77,8 +98,8 @@ function searchReplaceMatchProblem(raw, event) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   if (typeof value.old_string !== "string" || typeof value.path !== "string") return undefined;
   const cwd = patchWorkingDirectory(event);
-  if (cwd.includes("\0") || value.path.includes("\0")) return OLD_STRING_NOT_FOUND_REASON;
-  const target = resolve(cwd, value.path);
+  const target = workspaceContainedFile(cwd, value.path);
+  if (!target) return OLD_STRING_NOT_FOUND_REASON;
   try {
     const info = statSync(target);
     if (!info.isFile()) return OLD_STRING_NOT_FOUND_REASON;

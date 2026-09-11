@@ -161,6 +161,33 @@ test("event/body type conflicts disable rewriting", async () => {
   assert.equal(seen.filter((event) => event.type === "response.output_item.done").length, 0);
 });
 
+test("decodes mixed-lifecycle argument-done wrappers for custom openings", async () => {
+  const customAdded = {
+    type: "response.output_item.added",
+    output_index: 0,
+    item: {
+      type: "custom_tool_call",
+      id: "c1",
+      call_id: "c1",
+      name: "apply_patch",
+      input: "",
+      status: "in_progress",
+    },
+  };
+  const body = await run([
+    block(customAdded),
+    block({
+      type: "response.function_call_arguments.done",
+      item_id: "c1",
+      output_index: 0,
+      arguments: "{\"content\":\"*** Begin\"}",
+    }),
+    block(toolAdded(1, "c2", "apply_patch")),
+  ].join(""));
+  const done = events(body).find((event) => event.type === "response.output_item.done");
+  assert.equal(done.item.input, "*** Begin");
+});
+
 test("unwraps custom-tool content wrappers before synthesizing done", async () => {
   const customAdded = {
     type: "response.output_item.added",

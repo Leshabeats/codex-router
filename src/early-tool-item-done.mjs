@@ -213,7 +213,15 @@ export class EarlyToolItemDoneTransform extends Transform {
       if (id && this.#closed.has(id)) return;
       if (this.#matchesOpen(event)) {
         const nextArguments = typeof event.arguments === "string" ? event.arguments : this.#open.arguments;
-        const nextInput = typeof event.input === "string" ? event.input : this.#open.input;
+        let nextInput = typeof event.input === "string" ? event.input : this.#open.input;
+        if (this.#open.kind === "custom_tool_call") {
+          const wrapped = typeof event.input === "string"
+            ? event.input
+            : typeof event.arguments === "string"
+              ? event.arguments
+              : this.#open.input;
+          nextInput = unwrapCustomInput(wrapped);
+        }
         const next = this.#open.kind === "custom_tool_call" ? nextInput : nextArguments;
         if (this.#exceedsArgumentBound("", next)) {
           this.#disableRewrite(original);

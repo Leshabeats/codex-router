@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { setTimeout } from "node:timers/promises";
@@ -142,6 +142,30 @@ test("search_replace, write, and operations-as-string payloads compile through t
     "*** Begin Patch\n*** Add File: new.txt\n+Привет\n*** End Patch",
   );
   assert.equal(adaptHookInput(event(nested)).hookSpecificOutput.updatedInput.command, patch);
+});
+
+test("hook uniqueness reads stay inside the workspace", () => {
+  withTempCwd((cwd) => {
+    const outside = join(tmpdir(), `grok-hook-outside-${process.pid}.txt`);
+    writeFileSync(outside, "hello\n");
+    try {
+      const absolute = JSON.stringify({ path: outside, old_string: "hello", new_string: "x" });
+      const absOut = adaptHookInput({ ...event(absolute), cwd }).hookSpecificOutput;
+      assert.equal(absOut.permissionDecision, "deny");
+      assert.equal(absOut.permissionDecisionReason, "old_string not found");
+      assert.ok(!absOut.permissionDecisionReason.includes(outside));
+      const traversal = JSON.stringify({
+        path: `../${basename(outside)}`,
+        old_string: "hello",
+        new_string: "x",
+      });
+      const relOut = adaptHookInput({ ...event(traversal), cwd }).hookSpecificOutput;
+      assert.equal(relOut.permissionDecision, "deny");
+      assert.equal(relOut.permissionDecisionReason, "old_string not found");
+    } finally {
+      rmSync(outside, { force: true });
+    }
+  });
 });
 
 test("search_replace is denied when old_string is missing, not unique, or not a whole line", () => {

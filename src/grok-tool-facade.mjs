@@ -129,6 +129,23 @@ function powershellLiteral(value) {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
+function powershellEncodedCommand(script) {
+  if (typeof script !== "string" || script.includes("\0")) return undefined;
+  return `powershell -NoProfile -EncodedCommand ${Buffer.from(script, "utf16le").toString("base64")}`;
+}
+
+function decodePowershellEncodedCommand(command) {
+  const match = /^powershell -NoProfile -EncodedCommand ([A-Za-z0-9+/=]+)$/u.exec(
+    typeof command === "string" ? command.trim() : "",
+  );
+  if (!match) return undefined;
+  try {
+    return Buffer.from(match[1], "base64").toString("utf16le");
+  } catch {
+    return undefined;
+  }
+}
+
 function withWorkdir(payload, workdir) {
   if (typeof workdir === "string" && workdir) payload.workdir = workdir;
   return JSON.stringify(payload);
@@ -139,9 +156,11 @@ function fileReadCommand(filePath, offset, limit, workdir, platform = process.pl
     const literal = powershellLiteral(filePath);
     if (!literal) return undefined;
     const skip = offset - 1;
-    return withWorkdir({
-      cmd: `powershell -NoProfile -Command "Get-Content -LiteralPath ${literal} | Select-Object -Skip ${skip} -First ${limit}"`,
-    }, workdir);
+    const cmd = powershellEncodedCommand(
+      `Get-Content -LiteralPath ${literal} | Select-Object -Skip ${skip} -First ${limit}`,
+    );
+    if (!cmd) return undefined;
+    return withWorkdir({ cmd }, workdir);
   }
   const posixPath = terminateUnixPath(filePath);
   const quoted = posixSingleQuote(posixPath);
@@ -177,9 +196,12 @@ export function compileGrepCommand(argumentsText, workdir, platform = process.pl
     cmd += ` --glob ${glob}`;
   }
   cmd += ` -- ${quotedPath}`;
-  cmd = platform === "win32"
-    ? `${cmd} | Select-Object -First 50`
-    : `${cmd} | head -n 50`;
+  if (platform === "win32") {
+    cmd = powershellEncodedCommand(`${cmd} | Select-Object -First 50`);
+    if (!cmd) return undefined;
+  } else {
+    cmd = `set -o pipefail; ${cmd} | head -n 50`;
+  }
   return withWorkdir({ cmd }, workdir);
 }
 
@@ -229,9 +251,9 @@ export function compileListDirCommand(argumentsText, workdir, platform = process
   if (platform === "win32") {
     const literal = powershellLiteral(directory);
     if (!literal) return undefined;
-    return withWorkdir({
-      cmd: `powershell -NoProfile -Command "Get-ChildItem -LiteralPath ${literal}"`,
-    }, workdir);
+    const cmd = powershellEncodedCommand(`Get-ChildItem -LiteralPath ${literal}`);
+    if (!cmd) return undefined;
+    return withWorkdir({ cmd }, workdir);
   }
   const quoted = posixSingleQuote(terminateUnixPath(directory) || directory);
   if (!quoted) return undefined;
@@ -290,25 +312,28 @@ export function classifyShellCommand(command) {
   if (/\.write_text\b|\btee\s|>>|open\([^)]*['\"]w/.test(command)) {
     return { kind: "write" };
   }
-  if (/(?:^|[\s;|&])>(?!>)/.test(command)) {
+  if (/(?:^|[^>])>(?!>|&)/.test(command)) {
     return { kind: "write" };
   }
   const standalone = standalonePathRead(command);
   if (standalone) return { kind: "read_file", args: { target_file: standalone } };
-  const pipedGrep = /^rg --line-number --color never --max-count 50 -e (.+?)(?: --glob (.+))? -- (.+?) \| (?:head -n 50|Select-Object -First 50)$/u.exec(command.trim());
+  const encodedScript = decodePowershellEncodedCommand(command);
+  if (encodedScript) return classifyShellCommand(encodedScript);
+  const pipedGrep = /^(?:set -o pipefail; )?rg --line-number --color never --max-count 50 -e (.+?)(?: --glob (.+))? -- (.+?) \| (head -n 50|Select-Object -First 50)$/u.exec(command.trim());
   if (pipedGrep) {
-    const pattern = unquotePosix(pipedGrep[1]) ?? unquotePowershell(pipedGrep[1]);
-    const path = unquotePosix(pipedGrep[3]) ?? unquotePowershell(pipedGrep[3]);
+    const quote = pipedGrep[4].startsWith("Select-Object") ? unquotePowershell : unquotePosix;
+    const pattern = quote(pipedGrep[1]);
+    const path = quote(pipedGrep[3]);
     if (pattern && path) {
       const args = { pattern, path };
       if (pipedGrep[2]) {
-        const glob = unquotePosix(pipedGrep[2]) ?? unquotePowershell(pipedGrep[2]);
+        const glob = quote(pipedGrep[2]);
         if (glob) args.glob = glob;
       }
       return { kind: "grep", args };
     }
   }
-  const psRead = /^powershell -NoProfile -Command "Get-Content -LiteralPath ('(?:''|[^']*)') \| Select-Object -Skip (\d+) -First (\d+)"$/u.exec(command.trim());
+  const psRead = /^Get-Content -LiteralPath ('(?:''|[^']*)') \| Select-Object -Skip (\d+) -First (\d+)$/u.exec(command.trim());
   if (psRead) {
     const target_file = unquotePowershell(psRead[1]);
     if (target_file) {
@@ -318,7 +343,7 @@ export function classifyShellCommand(command) {
       };
     }
   }
-  const psList = /^powershell -NoProfile -Command "Get-ChildItem -LiteralPath ('(?:''|[^']*)')"$/u.exec(command.trim());
+  const psList = /^Get-ChildItem -LiteralPath ('(?:''|[^']*)')$/u.exec(command.trim());
   if (psList) {
     const target_directory = unquotePowershell(psList[1]);
     if (target_directory) return { kind: "list_dir", args: { target_directory } };
@@ -472,7 +497,7 @@ export function encodeGrokFacadeHistory(input, nativeExec) {
       const { name: _name, arguments: _arguments, ...rest } = item;
       return { ...rest, name: encoded.name, arguments: encoded.arguments };
     }
-    if (item.name === "apply_patch" || item.name.endsWith("__apply_patch")) {
+    if (item.namespace === undefined && item.name === "apply_patch") {
       const value = parseFacadeObject(item.arguments);
       if (!value) return item;
       if (Object.hasOwn(value, "old_string") || Object.hasOwn(value, "contents") || Object.hasOwn(value, "operations")) {

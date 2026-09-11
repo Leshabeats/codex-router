@@ -150,18 +150,29 @@ test("read_file and grep compile to bounded exec_command payloads", () => {
   );
   assert.equal(
     compileGrepCommand(JSON.stringify({ pattern: "SelectCompat", path: "smid", glob: "*.js" }), undefined, "linux"),
-    JSON.stringify({ cmd: "rg --line-number --color never --max-count 50 -e 'SelectCompat' --glob '*.js' -- 'smid' | head -n 50" }),
+    JSON.stringify({ cmd: "set -o pipefail; rg --line-number --color never --max-count 50 -e 'SelectCompat' --glob '*.js' -- 'smid' | head -n 50" }),
   );
   assert.match(
     compileReadFileCommand(JSON.stringify({ target_file: "notes.txt" }), undefined, "win32"),
-    /Get-Content -LiteralPath 'notes.txt'/,
+    /EncodedCommand/,
   );
-  assert.equal(
-    compileGrepCommand(JSON.stringify({ pattern: "don't", path: "O'Brien" }), undefined, "win32"),
-    JSON.stringify({
-      cmd: "rg --line-number --color never --max-count 50 -e 'don''t' -- 'O''Brien' | Select-Object -First 50",
-    }),
+  const quotedWin = compileReadFileCommand(
+    JSON.stringify({ target_file: 'a"; Remove-Item victim; #' }),
+    undefined,
+    "win32",
   );
+  assert.match(quotedWin, /EncodedCommand/);
+  assert.doesNotMatch(quotedWin, /Remove-Item victim/);
+  const windowsGrep = encodeGrokFacadeHistory([
+    {
+      type: "function_call",
+      call_id: "g",
+      name: "exec_command",
+      arguments: compileGrepCommand(JSON.stringify({ pattern: "don't", path: "O'Brien" }), undefined, "win32"),
+    },
+  ]);
+  assert.equal(windowsGrep[0].name, GREP_TOOL_NAME);
+  assert.deepEqual(JSON.parse(windowsGrep[0].arguments), { pattern: "don't", path: "O'Brien" });
   assert.equal(compileReadFileCommand(JSON.stringify({ target_file: "a\nb" })), undefined);
   assert.equal(
     compileListDirCommand(JSON.stringify({ target_directory: "smid/app" }), undefined, "linux"),
@@ -220,6 +231,9 @@ test("run_terminal_command canonicalizes file reads and refuses file writes", ()
   );
   assert.equal(classifyShellCommand("yarn test:frontend").kind, "process");
   assert.equal(classifyShellCommand("echo hi > notes.txt").kind, "write");
+  assert.equal(classifyShellCommand("printf x>main.py").kind, "write");
+  assert.equal(classifyShellCommand("echo err 2>Dockerfile").kind, "write");
+  assert.equal(classifyShellCommand("git status 2>&1").kind, "process");
   assert.equal(
     compileRunTerminalCommand(JSON.stringify({ command: "cat 'a.txt'", working_directory: "sub" })),
     compileReadFileCommand(JSON.stringify({ target_file: "a.txt" }), "sub"),
@@ -269,8 +283,13 @@ test("legacy apply_patch history and forced native choices keep façade identiti
   );
   const unrelated = encodeGrokFacadeHistory([
     { type: "function_call", call_id: "mcp", name: "mcp__x__exec_command", arguments: JSON.stringify({ cmd: "true" }) },
+    { type: "function_call", call_id: "mcp-patch", name: "mcp__x__apply_patch", arguments: JSON.stringify({ input: "*** Begin Patch\n*** Update File: a.js\n@@\n-a\n+b\n*** End Patch" }) },
+    { type: "function_call", call_id: "ns-patch", namespace: "mcp", name: "apply_patch", arguments: JSON.stringify({ input: "*** Begin Patch\n*** Update File: a.js\n@@\n-a\n+b\n*** End Patch" }) },
   ], { nativeName: "exec_command" });
   assert.equal(unrelated[0].name, "mcp__x__exec_command");
+  assert.equal(unrelated[1].name, "mcp__x__apply_patch");
+  assert.equal(unrelated[2].name, "apply_patch");
+  assert.equal(unrelated[2].namespace, "mcp");
   assert.deepEqual(
     rewriteGrokFacadeToolChoice({ type: "function", name: "apply_patch" }, new Set()),
     { type: "function", name: "apply_patch" },
