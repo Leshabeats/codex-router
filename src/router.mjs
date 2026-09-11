@@ -3332,7 +3332,7 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
     tools = customTools.tools;
     routedInput = customTools.input;
     routedToolChoice = customTools.toolChoice;
-    tools = applyGrokEditFacade(tools, flattenedNamespaces, route, structuredPatch);
+    tools = applyGrokEditFacade(tools, flattenedNamespaces, route, structuredPatch, { patchHook });
     if (grokEditFacadeEnabled(route, structuredPatch)) {
       routedInput = encodeGrokFacadeHistory(routedInput);
       routedToolChoice = rewriteGrokFacadeToolChoice(routedToolChoice);

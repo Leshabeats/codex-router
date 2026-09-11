@@ -130,15 +130,41 @@ test("search_replace, write, and operations-as-string payloads compile through t
   const nested = JSON.stringify({
     operations: JSON.stringify([{ op: "add", path: "hello.txt", lines: ['Привет "world" 🌍', ""] }]),
   });
-  assert.equal(
-    adaptHookInput(event(replace)).hookSpecificOutput.updatedInput.command,
-    "*** Begin Patch\n*** Update File: notes.txt\n@@\n-hello\n+hello world\n*** End Patch",
-  );
+  withTempCwd((cwd) => {
+    writeFileSync(join(cwd, "notes.txt"), "hello\n");
+    assert.equal(
+      adaptHookInput({ ...event(replace), cwd }).hookSpecificOutput.updatedInput.command,
+      "*** Begin Patch\n*** Update File: notes.txt\n@@\n-hello\n+hello world\n*** End Patch",
+    );
+  });
   assert.equal(
     adaptHookInput(event(written)).hookSpecificOutput.updatedInput.command,
     "*** Begin Patch\n*** Add File: new.txt\n+Привет\n*** End Patch",
   );
   assert.equal(adaptHookInput(event(nested)).hookSpecificOutput.updatedInput.command, patch);
+});
+
+test("search_replace is denied when old_string is missing, not unique, or not a whole line", () => {
+  const replace = JSON.stringify({ path: "notes.txt", old_string: "hello", new_string: "hello world" });
+  withTempCwd((cwd) => {
+    writeFileSync(join(cwd, "notes.txt"), "hello\nhello\n");
+    const duplicate = adaptHookInput({ ...event(replace), cwd }).hookSpecificOutput;
+    assert.equal(duplicate.permissionDecision, "deny");
+    assert.equal(duplicate.permissionDecisionReason, "old_string is not unique; narrow the match");
+    assert.equal(Object.hasOwn(duplicate, "updatedInput"), false);
+
+    writeFileSync(join(cwd, "notes.txt"), "say hello world\n");
+    const substring = adaptHookInput({ ...event(replace), cwd }).hookSpecificOutput;
+    assert.equal(substring.permissionDecision, "deny");
+    assert.equal(substring.permissionDecisionReason, "old_string not found");
+
+    writeFileSync(join(cwd, "notes.txt"), "other\n");
+    const missing = adaptHookInput({ ...event(replace), cwd }).hookSpecificOutput;
+    assert.equal(missing.permissionDecision, "deny");
+    assert.equal(missing.permissionDecisionReason, "old_string not found");
+    assert.ok(!missing.permissionDecisionReason.includes("other"));
+    assert.ok(!missing.permissionDecisionReason.includes(cwd));
+  });
 });
 
 test("invalid and ambiguous operations yield bounded native denial with no executable replacement", () => {

@@ -126,8 +126,8 @@ function withWorkdir(payload, workdir) {
   return JSON.stringify(payload);
 }
 
-function fileReadCommand(filePath, offset, limit, workdir) {
-  if (process.platform === "win32") {
+function fileReadCommand(filePath, offset, limit, workdir, platform = process.platform) {
+  if (platform === "win32") {
     const literal = powershellLiteral(filePath);
     if (!literal) return undefined;
     const skip = offset - 1;
@@ -142,17 +142,17 @@ function fileReadCommand(filePath, offset, limit, workdir) {
   return withWorkdir({ cmd: `sed -n '${offset},${end}p' ${quoted}` }, workdir);
 }
 
-export function compileReadFileCommand(argumentsText, workdir) {
+export function compileReadFileCommand(argumentsText, workdir, platform = process.platform) {
   const value = parseExactObject(argumentsText, ["target_file"], ["offset", "limit"]);
   if (!value || typeof value.target_file !== "string") return undefined;
   const offset = value.offset === undefined ? 1 : value.offset;
   const limit = value.limit === undefined ? DEFAULT_READ_LIMIT : value.limit;
   if (!Number.isInteger(offset) || offset < 1) return undefined;
   if (!Number.isInteger(limit) || limit < 1 || limit > MAX_READ_LIMIT) return undefined;
-  return fileReadCommand(value.target_file, offset, limit, workdir);
+  return fileReadCommand(value.target_file, offset, limit, workdir, platform);
 }
 
-export function compileGrepCommand(argumentsText, workdir) {
+export function compileGrepCommand(argumentsText, workdir, platform = process.platform) {
   const value = parseExactObject(argumentsText, ["pattern"], ["path", "glob"]);
   if (!value || typeof value.pattern !== "string" || value.pattern.length === 0) return undefined;
   const pattern = posixSingleQuote(value.pattern);
@@ -168,7 +168,7 @@ export function compileGrepCommand(argumentsText, workdir) {
     cmd += ` --glob ${glob}`;
   }
   cmd += ` -- ${quotedPath}`;
-  cmd = process.platform === "win32"
+  cmd = platform === "win32"
     ? `${cmd} | Select-Object -First 50`
     : `${cmd} | head -n 50`;
   return withWorkdir({ cmd }, workdir);
@@ -195,19 +195,28 @@ const RUN_TERMINAL_COMMAND_PARAMETERS = objectSchema({
   working_directory: pathSchema,
 }, ["command"]);
 
-function execCommandName(tools) {
+function nativeExecRelayTarget(tools, namespaces) {
   const exact = tools.find((tool) => tool?.name === "exec_command" && tool.namespace === undefined);
-  return exact ? "exec_command" : undefined;
+  if (exact) return { nativeName: "exec_command" };
+  if (!(namespaces instanceof Map)) return undefined;
+  const owners = [];
+  for (const [namespace, names] of namespaces) {
+    if (typeof namespace === "string" && namespace && names instanceof Set && names.has("exec_command")) {
+      owners.push(namespace);
+    }
+  }
+  if (owners.length !== 1) return undefined;
+  return { nativeName: "exec_command", nativeNamespace: owners[0] };
 }
 
-export function compileListDirCommand(argumentsText, workdir) {
+export function compileListDirCommand(argumentsText, workdir, platform = process.platform) {
   const value = argumentsText === undefined || argumentsText === ""
     ? {}
     : parseExactObject(argumentsText, [], ["target_directory"]);
   if (!value) return undefined;
   const directory = value.target_directory === undefined ? "." : value.target_directory;
   if (typeof directory !== "string" || !directory) return undefined;
-  if (process.platform === "win32") {
+  if (platform === "win32") {
     const literal = powershellLiteral(directory);
     if (!literal) return undefined;
     return withWorkdir({
@@ -223,6 +232,9 @@ export function rewriteGrokFacadeToolChoice(toolChoice) {
   if (!toolChoice || typeof toolChoice !== "object") return toolChoice;
   if (toolChoice.type === "function" && (toolChoice.name === "exec_command" || toolChoice.name === "shell_command")) {
     return { ...toolChoice, name: RUN_TERMINAL_COMMAND_TOOL_NAME };
+  }
+  if (toolChoice.type === "function" && toolChoice.name === "apply_patch") {
+    return { ...toolChoice, name: SEARCH_REPLACE_TOOL_NAME };
   }
   if (toolChoice.type === "allowed_tools" && Array.isArray(toolChoice.tools)) {
     return { ...toolChoice, tools: toolChoice.tools.map((choice) => rewriteGrokFacadeToolChoice(choice)) };
@@ -339,7 +351,7 @@ export function classifyShellCommand(command) {
   return { kind: "process" };
 }
 
-export function compileRunTerminalCommand(argumentsText) {
+export function compileRunTerminalCommand(argumentsText, platform = process.platform) {
   const value = parseExactObject(argumentsText, ["command"], ["working_directory"]);
   if (!value || typeof value.command !== "string" || !value.command) return undefined;
   if (value.command.includes("\0")) return undefined;
@@ -349,13 +361,13 @@ export function compileRunTerminalCommand(argumentsText) {
   const workdir = value.working_directory;
   const classified = classifyShellCommand(value.command);
   if (classified.kind === "read_file") {
-    return compileReadFileCommand(JSON.stringify(classified.args), workdir);
+    return compileReadFileCommand(JSON.stringify(classified.args), workdir, platform);
   }
   if (classified.kind === "grep") {
-    return compileGrepCommand(JSON.stringify(classified.args), workdir);
+    return compileGrepCommand(JSON.stringify(classified.args), workdir, platform);
   }
   if (classified.kind === "list_dir") {
-    return compileListDirCommand(JSON.stringify(classified.args), workdir);
+    return compileListDirCommand(JSON.stringify(classified.args), workdir, platform);
   }
   if (classified.kind === "write") {
     return JSON.stringify({ cmd: SHELL_NOT_EDITOR_COMMAND });
@@ -428,12 +440,11 @@ export function encodeGrokFacadeHistory(input, nativeExec) {
   return changed ? routed : input;
 }
 
-function hideNativeTools(tools, nativeExec) {
+function hideNativeTools(tools) {
   return tools.filter((tool) => {
     const name = tool?.name;
     if (typeof name !== "string") return true;
     if (HIDDEN_NATIVE_TOOLS.has(name)) return false;
-    if (nativeExec && name === nativeExec) return false;
     if (name.endsWith("__exec_command")) return false;
     return true;
   });
@@ -443,7 +454,7 @@ export function grokEditFacadeEnabled(route, structuredPatch) {
   return structuredPatch === true && route?.slug === GROK_EDIT_FACADE_ROUTE;
 }
 
-export function applyGrokEditFacade(tools, namespaces, route, structuredPatch) {
+export function applyGrokEditFacade(tools, namespaces, route, structuredPatch, options = {}) {
   if (!grokEditFacadeEnabled(route, structuredPatch) || !Array.isArray(tools)) return tools;
   const existing = new Set(
     tools
@@ -452,8 +463,10 @@ export function applyGrokEditFacade(tools, namespaces, route, structuredPatch) {
   );
   const aliases = [];
   const extra = [];
+  const allowWrite = options.patchHook === true;
   for (const tool of FACADE_TOOLS) {
     if (existing.has(tool.name)) continue;
+    if (tool.name === WRITE_TOOL_NAME && !allowWrite) continue;
     aliases.push({
       providerName: tool.name,
       nativeName: "apply_patch",
@@ -466,13 +479,14 @@ export function applyGrokEditFacade(tools, namespaces, route, structuredPatch) {
       parameters: tool.codec.parameters,
     });
   }
-  const nativeExec = execCommandName(tools);
+  const nativeExec = nativeExecRelayTarget(tools, namespaces);
   const functionRelays = [];
   if (nativeExec) {
     if (!existing.has(READ_FILE_TOOL_NAME)) {
       functionRelays.push({
         providerName: READ_FILE_TOOL_NAME,
-        nativeName: nativeExec,
+        nativeName: nativeExec.nativeName,
+        nativeNamespace: nativeExec.nativeNamespace,
         rewriteArguments: compileReadFileCommand,
         maxArgumentBytes: MAX_STRUCTURED_PATCH_BYTES,
       });
@@ -486,7 +500,8 @@ export function applyGrokEditFacade(tools, namespaces, route, structuredPatch) {
     if (!existing.has(GREP_TOOL_NAME)) {
       functionRelays.push({
         providerName: GREP_TOOL_NAME,
-        nativeName: nativeExec,
+        nativeName: nativeExec.nativeName,
+        nativeNamespace: nativeExec.nativeNamespace,
         rewriteArguments: compileGrepCommand,
         maxArgumentBytes: MAX_STRUCTURED_PATCH_BYTES,
       });
@@ -500,7 +515,8 @@ export function applyGrokEditFacade(tools, namespaces, route, structuredPatch) {
     if (!existing.has(LIST_DIR_TOOL_NAME)) {
       functionRelays.push({
         providerName: LIST_DIR_TOOL_NAME,
-        nativeName: nativeExec,
+        nativeName: nativeExec.nativeName,
+        nativeNamespace: nativeExec.nativeNamespace,
         rewriteArguments: compileListDirCommand,
         maxArgumentBytes: MAX_STRUCTURED_PATCH_BYTES,
       });
@@ -514,7 +530,8 @@ export function applyGrokEditFacade(tools, namespaces, route, structuredPatch) {
     if (!existing.has(RUN_TERMINAL_COMMAND_TOOL_NAME)) {
       functionRelays.push({
         providerName: RUN_TERMINAL_COMMAND_TOOL_NAME,
-        nativeName: nativeExec,
+        nativeName: nativeExec.nativeName,
+        nativeNamespace: nativeExec.nativeNamespace,
         rewriteArguments: compileRunTerminalCommand,
         maxArgumentBytes: MAX_STRUCTURED_PATCH_BYTES,
       });
@@ -532,6 +549,6 @@ export function applyGrokEditFacade(tools, namespaces, route, structuredPatch) {
   if (functionRelays.length && !registerFunctionRelays(namespaces, functionRelays)) {
     return aliases.length ? [...tools, ...extra.filter((tool) => tool.name === SEARCH_REPLACE_TOOL_NAME || tool.name === WRITE_TOOL_NAME)] : tools;
   }
-  if (extra.length === 0) return hideNativeTools(tools, nativeExec);
-  return hideNativeTools([...tools, ...extra], nativeExec);
+  if (extra.length === 0) return hideNativeTools(tools);
+  return hideNativeTools([...tools, ...extra]);
 }

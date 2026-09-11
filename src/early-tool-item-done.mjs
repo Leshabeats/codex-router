@@ -18,7 +18,7 @@ const ARG_DONE_TYPES = new Set([
   "response.function_call_arguments.done",
   "response.custom_tool_call_input.done",
 ]);
-const MAX_SSE_FRAME_BYTES = 8 * 1024 * 1024;
+export const MAX_SSE_FRAME_BYTES = 8 * 1024 * 1024;
 
 function findFrameEnd(buffer) {
   const crlf = buffer.indexOf(CRLF_SEP);
@@ -71,10 +71,42 @@ function unwrapCustomInput(text) {
 
 export class EarlyToolItemDoneTransform extends Transform {
   #buffer = Buffer.alloc(0);
+  #length = 0;
   #open;
   #closed = new Set();
   #newline = "\n";
   #passthrough = false;
+
+  #view() {
+    return this.#buffer.subarray(0, this.#length);
+  }
+
+  #append(piece) {
+    const needed = this.#length + piece.length;
+    if (needed > this.#buffer.length) {
+      const next = Buffer.allocUnsafe(Math.max(this.#buffer.length * 2, 4096, needed));
+      if (this.#length) this.#buffer.copy(next, 0, 0, this.#length);
+      this.#buffer = next;
+    }
+    piece.copy(this.#buffer, this.#length);
+    this.#length += piece.length;
+  }
+
+  #consume(n) {
+    if (n <= 0) return;
+    if (n >= this.#length) {
+      this.#length = 0;
+      return;
+    }
+    this.#buffer.copyWithin(0, n, this.#length);
+    this.#length -= n;
+  }
+
+  #release() {
+    const original = Buffer.from(this.#view());
+    this.#length = 0;
+    return original;
+  }
 
   _transform(chunk, encoding, callback) {
     if (this.#passthrough) {
@@ -83,15 +115,14 @@ export class EarlyToolItemDoneTransform extends Transform {
       return;
     }
     const piece = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding);
-    if (this.#buffer.length + piece.length > MAX_SSE_FRAME_BYTES) {
+    if (this.#length + piece.length > MAX_SSE_FRAME_BYTES) {
       this.#passthrough = true;
-      if (this.#buffer.length) this.push(this.#buffer);
-      this.#buffer = Buffer.alloc(0);
+      if (this.#length) this.push(this.#release());
       this.push(piece);
       callback();
       return;
     }
-    this.#buffer = this.#buffer.length ? Buffer.concat([this.#buffer, piece]) : piece;
+    this.#append(piece);
     this.#drain(false);
     callback();
   }
@@ -102,31 +133,42 @@ export class EarlyToolItemDoneTransform extends Transform {
   }
 
   #drain(flush) {
-    while (this.#buffer.length) {
-      const found = findFrameEnd(this.#buffer);
+    while (this.#length) {
+      if (this.#passthrough) {
+        this.push(this.#release());
+        return;
+      }
+      const found = findFrameEnd(this.#view());
       if (!found) {
         if (!flush) return;
-        if (this.#buffer.length > MAX_SSE_FRAME_BYTES) {
-          this.#passthrough = true;
-        }
-        const original = this.#buffer;
-        this.#buffer = Buffer.alloc(0);
+        if (this.#length > MAX_SSE_FRAME_BYTES) this.#passthrough = true;
+        const original = this.#release();
         if (this.#passthrough) this.push(original);
         else this.#handle(original, Buffer.alloc(0));
         return;
       }
-      const original = this.#buffer.subarray(0, found.index + found.separator.length);
-      this.#buffer = this.#buffer.subarray(found.index + found.separator.length);
+      const end = found.index + found.separator.length;
+      const original = Buffer.from(this.#view().subarray(0, end));
+      this.#consume(end);
       this.#handle(original, found.separator);
     }
   }
 
   #handle(original, separator) {
+    if (this.#passthrough) {
+      this.push(Buffer.from(original));
+      return;
+    }
     const text = original.toString("utf8");
     if (separator.length === 4) this.#newline = "\r\n";
     const parsed = parseBlock(text.replace(/\r?\n\r?\n$/u, "").replace(/\r?\n$/u, ""));
     if (!parsed || parsed.terminal || parsed.conflict) {
-      if (parsed?.conflict) this.#passthrough = true;
+      if (parsed?.conflict) {
+        this.#passthrough = true;
+        this.push(Buffer.from(original));
+        if (this.#length) this.push(this.#release());
+        return;
+      }
       this.push(Buffer.from(original));
       return;
     }

@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   compileStructuredPatchArguments,
@@ -13,6 +13,9 @@ export const MAX_GROK_PATCH_HOOK_INPUT_BYTES = MAX_STRUCTURED_PATCH_BYTES * 8;
 
 const ADD_FILE_HEADER = "*** Add File:";
 const ADD_FILE_EXISTS_REASON = "file exists; use search_replace";
+const OLD_STRING_NOT_FOUND_REASON = "old_string not found";
+const OLD_STRING_NOT_UNIQUE_REASON = "old_string is not unique; narrow the match";
+const OLD_STRING_FILE_TOO_LARGE_REASON = "file too large to verify unique match";
 
 function patchWorkingDirectory(event) {
   const cwd = event?.cwd;
@@ -35,11 +38,59 @@ function addFileTargetExists(patch, event) {
 }
 
 function denyExistingAddFile() {
+  return deny(ADD_FILE_EXISTS_REASON);
+}
+
+function deny(reason) {
   return { hookSpecificOutput: {
     hookEventName: "PreToolUse",
     permissionDecision: "deny",
-    permissionDecisionReason: ADD_FILE_EXISTS_REASON,
+    permissionDecisionReason: reason,
   } };
+}
+
+function logicalLines(text) {
+  if (text === "") return [];
+  const lines = text.split(/\r?\n/u);
+  if (lines[lines.length - 1] === "") lines.pop();
+  return lines;
+}
+
+function lineAlignedMatchCount(contents, needle) {
+  const fileLines = logicalLines(contents);
+  const needleLines = logicalLines(needle);
+  if (needleLines.length === 0) return 0;
+  let count = 0;
+  for (let i = 0; i <= fileLines.length - needleLines.length; i += 1) {
+    if (needleLines.every((line, offset) => fileLines[i + offset] === line)) count += 1;
+  }
+  return count;
+}
+
+function searchReplaceMatchProblem(raw, event) {
+  let value;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  if (typeof value.old_string !== "string" || typeof value.path !== "string") return undefined;
+  const cwd = patchWorkingDirectory(event);
+  if (cwd.includes("\0") || value.path.includes("\0")) return OLD_STRING_NOT_FOUND_REASON;
+  const target = resolve(cwd, value.path);
+  try {
+    const info = statSync(target);
+    if (!info.isFile()) return OLD_STRING_NOT_FOUND_REASON;
+    if (info.size > MAX_STRUCTURED_PATCH_BYTES) return OLD_STRING_FILE_TOO_LARGE_REASON;
+    const contents = readFileSync(target, "utf8");
+    const count = lineAlignedMatchCount(contents, value.old_string);
+    if (count === 0) return OLD_STRING_NOT_FOUND_REASON;
+    if (count > 1) return OLD_STRING_NOT_UNIQUE_REASON;
+  } catch {
+    return OLD_STRING_NOT_FOUND_REASON;
+  }
+  return undefined;
 }
 
 // This adapter only serializes. Native apply_patch still validates the patch
@@ -52,7 +103,10 @@ export function adaptHookInput(event) {
       typeof command !== "string") return {};
   if (command.startsWith(GROK_PATCH_HOOK_PREFIX)) {
     try {
-      const patch = compileStructuredPatchArguments(command.slice(GROK_PATCH_HOOK_PREFIX.length));
+      const raw = command.slice(GROK_PATCH_HOOK_PREFIX.length);
+      const matchProblem = searchReplaceMatchProblem(raw, event);
+      if (matchProblem) return deny(matchProblem);
+      const patch = compileStructuredPatchArguments(raw);
       if (addFileTargetExists(patch, event)) return denyExistingAddFile();
       return { hookSpecificOutput: {
         hookEventName: "PreToolUse",

@@ -4,6 +4,7 @@ import test from "node:test";
 
 import {
   EarlyToolItemDoneTransform,
+  MAX_SSE_FRAME_BYTES,
   earlyToolItemDoneTransform,
 } from "../src/early-tool-item-done.mjs";
 import { ItemLifecycleNormalizer } from "../src/item-lifecycle-normalizer.mjs";
@@ -112,4 +113,77 @@ test("item lifecycle can start the second tool before the stream ends", async ()
     "0:done",
     "1:added",
   ]);
+});
+
+test("does not complete an open tool call on stream EOF", async () => {
+  const body = await run([
+    block(toolAdded(0, "c1", "apply_patch")),
+    block({ type: "response.function_call_arguments.delta", item_id: "c1", output_index: 0, delta: "aaa" }),
+  ].join(""));
+  const seen = events(body);
+  assert.equal(seen.filter((event) => event.type === "response.function_call_arguments.done").length, 0);
+  assert.equal(seen.filter((event) => event.type === "response.output_item.done").length, 0);
+});
+
+test("event/body type conflicts disable rewriting", async () => {
+  const conflict = `event: response.output_item.added\ndata: ${JSON.stringify({
+    type: "response.function_call_arguments.delta",
+    item_id: "c1",
+    output_index: 0,
+    delta: "nope",
+  })}\n\n`;
+  const body = await run([
+    block(toolAdded(0, "c1", "apply_patch")),
+    conflict,
+    block(toolAdded(1, "c2", "apply_patch")),
+  ].join(""));
+  const seen = events(body);
+  assert.equal(seen.filter((event) => event.type === "response.function_call_arguments.done").length, 0);
+  assert.equal(seen.filter((event) => event.type === "response.output_item.done").length, 0);
+});
+
+test("unwraps custom-tool content wrappers before synthesizing done", async () => {
+  const customAdded = {
+    type: "response.output_item.added",
+    output_index: 0,
+    item: {
+      type: "custom_tool_call",
+      id: "c1",
+      call_id: "c1",
+      name: "apply_patch",
+      input: "",
+      status: "in_progress",
+    },
+  };
+  const body = await run([
+    block(customAdded),
+    block({
+      type: "response.function_call_arguments.delta",
+      item_id: "c1",
+      output_index: 0,
+      delta: "{\"content\":\"*** Begin\"}",
+    }),
+    block(toolAdded(1, "c2", "apply_patch")),
+  ].join(""));
+  const done = events(body).find((event) => event.type === "response.custom_tool_call_input.done");
+  assert.equal(done.item_id, "c1");
+  assert.equal(done.input, "*** Begin");
+});
+
+test("oversized unterminated SSE frames disable rewriting", async () => {
+  const stream = new EarlyToolItemDoneTransform();
+  let output = "";
+  stream.setEncoding("utf8");
+  stream.on("data", (chunk) => {
+    output += chunk;
+  });
+  const ended = once(stream, "end");
+  stream.write(Buffer.alloc(MAX_SSE_FRAME_BYTES + 1, 0x61));
+  stream.write(block(toolAdded(0, "c1", "apply_patch")));
+  stream.write(block({ type: "response.function_call_arguments.delta", item_id: "c1", output_index: 0, delta: "aaa" }));
+  stream.write(block(toolAdded(1, "c2", "apply_patch")));
+  stream.end();
+  await ended;
+  const seen = events(output);
+  assert.equal(seen.filter((event) => event.type === "response.function_call_arguments.done").length, 0);
 });

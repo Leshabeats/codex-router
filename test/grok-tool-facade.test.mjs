@@ -20,6 +20,7 @@ import {
   compileReadFileCommand,
   compileRunTerminalCommand,
   encodeGrokFacadeHistory,
+  rewriteGrokFacadeToolChoice,
   SHELL_NOT_EDITOR_COMMAND,
   grokEditFacadeEnabled,
   GREP_TOOL_NAME,
@@ -53,7 +54,7 @@ const replacePatch = serializeStructuredPatch({
   }],
 });
 
-function setup(route = { slug: "grok-oauth/grok-4.6" }, structuredPatch = true, extraTools = []) {
+function setup(route = { slug: "grok-oauth/grok-4.6" }, structuredPatch = true, extraTools = [], facadeOptions = { patchHook: true }) {
   const flattened = flattenNamespaceTools([native, execTool, ...extraTools]);
   const bridged = bridgeCustomTools(
     flattened.tools,
@@ -63,7 +64,7 @@ function setup(route = { slug: "grok-oauth/grok-4.6" }, structuredPatch = true, 
     undefined,
     { codecs },
   );
-  const tools = applyGrokEditFacade(bridged.tools, flattened.namespaces, route, structuredPatch);
+  const tools = applyGrokEditFacade(bridged.tools, flattened.namespaces, route, structuredPatch, facadeOptions);
   return {
     ...bridged,
     tools,
@@ -133,20 +134,24 @@ test("search_replace and write are added beside apply_patch without colliding", 
 
 test("read_file and grep compile to bounded exec_command payloads", () => {
   assert.equal(
-    compileReadFileCommand(JSON.stringify({ target_file: "/tmp/notes.txt" })),
+    compileReadFileCommand(JSON.stringify({ target_file: "/tmp/notes.txt" }), undefined, "linux"),
     JSON.stringify({ cmd: "sed -n '1,400p' '/tmp/notes.txt'" }),
   );
   assert.equal(
-    compileReadFileCommand(JSON.stringify({ target_file: "/tmp/a.txt", offset: 10, limit: 5 })),
+    compileReadFileCommand(JSON.stringify({ target_file: "/tmp/a.txt", offset: 10, limit: 5 }), undefined, "linux"),
     JSON.stringify({ cmd: "sed -n '10,14p' '/tmp/a.txt'" }),
   );
   assert.equal(
-    compileGrepCommand(JSON.stringify({ pattern: "SelectCompat", path: "smid", glob: "*.js" })),
+    compileGrepCommand(JSON.stringify({ pattern: "SelectCompat", path: "smid", glob: "*.js" }), undefined, "linux"),
     JSON.stringify({ cmd: "rg --line-number --color never --max-count 50 -e 'SelectCompat' --glob '*.js' -- 'smid' | head -n 50" }),
+  );
+  assert.match(
+    compileReadFileCommand(JSON.stringify({ target_file: "notes.txt" }), undefined, "win32"),
+    /Get-Content -LiteralPath 'notes.txt'/,
   );
   assert.equal(compileReadFileCommand(JSON.stringify({ target_file: "a\nb" })), undefined);
   assert.equal(
-    compileListDirCommand(JSON.stringify({ target_directory: "smid/app" })),
+    compileListDirCommand(JSON.stringify({ target_directory: "smid/app" }), undefined, "linux"),
     JSON.stringify({ cmd: "ls -la 'smid/app'" }),
   );
   assert.equal(
@@ -157,8 +162,8 @@ test("read_file and grep compile to bounded exec_command payloads", () => {
 
 test("history restores Codex exec/apply_patch calls back to Grok tool names", () => {
   const encoded = encodeGrokFacadeHistory([
-    { type: "function_call", call_id: "1", name: "exec_command", arguments: compileReadFileCommand(JSON.stringify({ target_file: "/tmp/a.js", offset: 1, limit: 40 })) },
-    { type: "function_call", call_id: "2", name: "exec_command", arguments: compileGrepCommand(JSON.stringify({ pattern: "foo", path: "smid" })) },
+    { type: "function_call", call_id: "1", name: "exec_command", arguments: compileReadFileCommand(JSON.stringify({ target_file: "/tmp/a.js", offset: 1, limit: 40 }), undefined, "linux") },
+    { type: "function_call", call_id: "2", name: "exec_command", arguments: compileGrepCommand(JSON.stringify({ pattern: "foo", path: "smid" }), undefined, "linux") },
     { type: "function_call", call_id: "3", name: "exec_command", arguments: JSON.stringify({ cmd: "yarn test" }) },
     { type: "function_call", call_id: "4", name: "apply_patch", arguments: JSON.stringify({ path: "a.js", old_string: "a", new_string: "b" }) },
   ]);
@@ -195,8 +200,46 @@ test("run_terminal_command canonicalizes file reads and refuses file writes", ()
   );
   assert.equal(compileListDirCommand(JSON.stringify({ unexpected: true })), undefined);
   assert.equal(
-    compileReadFileCommand(JSON.stringify({ target_file: "--expression=w victim", offset: 1, limit: 10 })),
+    compileReadFileCommand(JSON.stringify({ target_file: "--expression=w victim", offset: 1, limit: 10 }), undefined, "linux"),
     JSON.stringify({ cmd: "sed -n '1,10p' './--expression=w victim'" }),
+  );
+  assert.equal(compileRunTerminalCommand(JSON.stringify({ command: "rm marker", workingDirectory: "sub" })), undefined);
+});
+
+test("write is omitted without the existence-checking hook", () => {
+  const names = setup(undefined, true, [], {}).tools.map((tool) => tool.name);
+  assert.ok(names.includes(SEARCH_REPLACE_TOOL_NAME));
+  assert.ok(!names.includes(WRITE_TOOL_NAME));
+});
+
+test("legacy apply_patch history and forced native choices keep façade identities", () => {
+  const fromPatch = encodeGrokFacadeHistory([
+    {
+      type: "function_call",
+      call_id: "8",
+      name: "apply_patch",
+      arguments: JSON.stringify({
+        input: "*** Begin Patch\n*** Update File: a.js\n@@\n-a\n+b\n*** End Patch",
+      }),
+    },
+    {
+      type: "function_call",
+      call_id: "9",
+      name: "apply_patch",
+      arguments: JSON.stringify({
+        input: "*** Begin Patch\n*** Add File: new.js\n+ok\n*** End Patch",
+      }),
+    },
+  ]);
+  assert.equal(fromPatch[0].name, SEARCH_REPLACE_TOOL_NAME);
+  assert.equal(fromPatch[1].name, WRITE_TOOL_NAME);
+  assert.deepEqual(
+    rewriteGrokFacadeToolChoice({ type: "function", name: "exec_command" }),
+    { type: "function", name: RUN_TERMINAL_COMMAND_TOOL_NAME },
+  );
+  assert.deepEqual(
+    rewriteGrokFacadeToolChoice({ type: "function", name: "apply_patch" }),
+    { type: "function", name: SEARCH_REPLACE_TOOL_NAME },
   );
 });
 
@@ -217,8 +260,65 @@ test("read_file restores to native exec_command with a bounded sed command", asy
   const done = events.find((event) => event.type === "response.output_item.done");
   assert.equal(done.item.type, "function_call");
   assert.equal(done.item.name, "exec_command");
-  assert.equal(done.item.arguments, JSON.stringify({ cmd: "sed -n '1,40p' '/tmp/SelectCompat/index.js'" }));
+  assert.equal(done.item.arguments, compileReadFileCommand(args));
   assert.equal(done.item.call_id, "call_edit");
+});
+
+test("namespaced exec_command restores to namespace/name not the flattened spelling", async () => {
+  const namespaced = {
+    type: "namespace",
+    name: "functions",
+    tools: [{ type: "function", name: "exec_command", parameters: { type: "object" } }],
+  };
+  const flattened = flattenNamespaceTools([native, namespaced]);
+  const bridged = bridgeCustomTools(
+    flattened.tools,
+    [],
+    flattened.namespaces,
+    undefined,
+    undefined,
+    { codecs },
+  );
+  const tools = applyGrokEditFacade(
+    bridged.tools,
+    flattened.namespaces,
+    { slug: "grok-oauth/grok-4.6" },
+    true,
+    { patchHook: true },
+  );
+  const bridge = { ...bridged, tools, namespaces: flattened.namespaces };
+  const args = JSON.stringify({ target_file: "/tmp/a.js", offset: 1, limit: 10 });
+  const events = await relay(bridge, READ_FILE_TOOL_NAME, args);
+  const done = events.find((event) => event.type === "response.output_item.done");
+  assert.equal(done.item.type, "function_call");
+  assert.equal(done.item.name, "exec_command");
+  assert.equal(done.item.namespace, "functions");
+});
+
+test("shell_command is not used as the native exec identity", () => {
+  const flattened = flattenNamespaceTools([
+    native,
+    { type: "function", name: "shell_command", parameters: { type: "object" } },
+  ]);
+  const bridged = bridgeCustomTools(
+    flattened.tools,
+    [],
+    flattened.namespaces,
+    undefined,
+    undefined,
+    { codecs },
+  );
+  const tools = applyGrokEditFacade(
+    bridged.tools,
+    flattened.namespaces,
+    { slug: "grok-oauth/grok-4.6" },
+    true,
+    { patchHook: true },
+  );
+  const names = tools.map((tool) => tool.name);
+  assert.ok(names.includes(SEARCH_REPLACE_TOOL_NAME));
+  assert.ok(!names.includes(READ_FILE_TOOL_NAME));
+  assert.ok(!names.includes("shell_command"));
 });
 
 test("run_terminal_command restores to native exec_command", async () => {

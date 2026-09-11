@@ -530,6 +530,9 @@ export function registerFunctionRelays(namespaces, relays) {
     if (!providerName || !nativeName || typeof relay.rewriteArguments !== "function") continue;
     existing.set(providerName, {
       nativeName,
+      ...(typeof relay.nativeNamespace === "string" && relay.nativeNamespace
+        ? { nativeNamespace: relay.nativeNamespace }
+        : {}),
       rewriteArguments: relay.rewriteArguments,
       maxArgumentBytes: Number.isInteger(relay.maxArgumentBytes) && relay.maxArgumentBytes > 0
         ? relay.maxArgumentBytes
@@ -2102,6 +2105,30 @@ function sanitizeSpawnAgentModel(item, lookups) {
 // name (some models emit the unqualified form) is restored only when it is
 // unambiguous across every flattened namespace; a collision stays untouched
 // rather than guessing which runtime owns it.
+function functionRelayIdentityMatches(item, relay) {
+  if (!relay || item?.type !== "function_call" || item.name !== relay.nativeName) return false;
+  if (typeof relay.nativeNamespace === "string" && relay.nativeNamespace) {
+    return item.namespace === relay.nativeNamespace;
+  }
+  return item.namespace === undefined;
+}
+
+function restoreFunctionRelayCall(item, relay, argumentsText) {
+  const {
+    name: _name,
+    namespace: _namespace,
+    arguments: _arguments,
+    encrypted_function_args: _encryptedFunctionArgs,
+    ...rest
+  } = item;
+  return {
+    ...rest,
+    name: relay.nativeName,
+    ...(relay.nativeNamespace ? { namespace: relay.nativeNamespace } : {}),
+    arguments: argumentsText,
+  };
+}
+
 function rewriteFunctionCallArguments(item) {
   if (!item || typeof item !== "object") return item;
   if (!jsonArgumentsAreUnambiguous(item.arguments, { allowEmpty: true })) return item;
@@ -2238,22 +2265,11 @@ function rewriteNamespaceFunctionCallItem(
     : undefined;
   if (functionRelay) {
     if (allowIncompleteToolSearch && (item.arguments === undefined || item.arguments === "")) {
-      const {
-        name: _name,
-        arguments: _arguments,
-        ...rest
-      } = item;
-      return { ...rest, name: functionRelay.nativeName, arguments: item.arguments ?? "" };
+      return restoreFunctionRelayCall(item, functionRelay, item.arguments ?? "");
     }
     const rewrittenArguments = functionRelay.rewriteArguments(item.arguments);
     if (typeof rewrittenArguments !== "string") return undefined;
-    const {
-      name: _name,
-      arguments: _arguments,
-      encrypted_function_args: _encryptedFunctionArgs,
-      ...rest
-    } = item;
-    return { ...rest, name: functionRelay.nativeName, arguments: rewrittenArguments };
+    return restoreFunctionRelayCall(item, functionRelay, rewrittenArguments);
   }
   const customTool = rewriteCustomToolFunctionCallItem(
     item,
@@ -3133,10 +3149,7 @@ export class NamespaceToolCallTransform extends Transform {
       (kind === "custom" &&
         !customCallIdentityMatches(sourceItem, item, this.#lookups)) ||
       (kind === "function_codec" &&
-        (item.type !== "function_call" ||
-          item.namespace !== undefined ||
-          !functionRelay ||
-          item.name !== functionRelay.nativeName)) ||
+        !functionRelayIdentityMatches(item, functionRelay)) ||
       (kind === "tool_search" &&
         (item.name !== undefined ||
           item.namespace !== undefined ||
@@ -3263,10 +3276,7 @@ export class NamespaceToolCallTransform extends Transform {
     } else if (kind === "function_codec") {
       const relay = this.#lookups.functionRelays?.get(sourceItem.name);
       if (
-        item.type !== "function_call" ||
-        item.namespace !== undefined ||
-        !relay ||
-        item.name !== relay.nativeName ||
+        !functionRelayIdentityMatches(item, relay) ||
         typeof item.arguments !== "string"
       ) {
         return "incomplete atomic function relay call";
