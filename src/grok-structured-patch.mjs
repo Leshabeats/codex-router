@@ -132,24 +132,35 @@ export function serializeStructuredPatch(value) {
 
 /** Reject duplicate JSON keys rather than accepting JSON.parse's last value. */
 export function compileStructuredPatchArguments(argumentsText) {
-  if (typeof argumentsText !== "string") reject("json_string_required");
-  if (Buffer.byteLength(argumentsText, "utf8") > MAX_STRUCTURED_PATCH_BYTES) reject("arguments_too_large");
-  if (!jsonArgumentsAreUnambiguous(argumentsText)) reject("ambiguous_or_invalid_json");
-  let value;
-  try {
-    value = JSON.parse(argumentsText);
-  } catch {
-    reject("ambiguous_or_invalid_json");
-  }
-  return serializeStructuredPatch(normalizeGrokEdit(value));
+  return serializeStructuredPatch(normalizeGrokEdit(parseArgumentObject(argumentsText)));
 }
 
 function splitLogicalLines(text) {
   if (typeof text !== "string") reject("string_required");
+  if (/\r/u.test(text)) reject("crlf_unrepresentable");
   if (text === "") return [];
-  const lines = text.split(/\r?\n/u);
+  const lines = text.split("\n");
   if (lines[lines.length - 1] === "") lines.pop();
   return lines;
+}
+
+function parseArgumentObject(argumentsText) {
+  if (typeof argumentsText !== "string") reject("json_string_required");
+  if (Buffer.byteLength(argumentsText, "utf8") > MAX_STRUCTURED_PATCH_BYTES) reject("arguments_too_large");
+  if (!jsonArgumentsAreUnambiguous(argumentsText)) reject("ambiguous_or_invalid_json");
+  try {
+    return JSON.parse(argumentsText);
+  } catch {
+    reject("ambiguous_or_invalid_json");
+  }
+}
+
+export function compileSearchReplaceArguments(argumentsText) {
+  return serializeStructuredPatch(searchReplaceToOperations(parseArgumentObject(argumentsText)));
+}
+
+export function compileWriteArguments(argumentsText) {
+  return serializeStructuredPatch(writeToOperations(parseArgumentObject(argumentsText)));
 }
 
 function searchReplaceToOperations(value) {
@@ -158,6 +169,7 @@ function searchReplaceToOperations(value) {
     reject("boolean_required");
   }
   if (value.replace_all === true) reject("replace_all_unsupported");
+  if (typeof value.old_string !== "string" || value.old_string.length === 0) reject("empty_old_string");
   if (value.old_string === value.new_string) reject("no_change");
   const removed = splitLogicalLines(value.old_string);
   const added = splitLogicalLines(value.new_string);

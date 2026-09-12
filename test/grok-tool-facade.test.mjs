@@ -300,12 +300,29 @@ test("run_terminal_command canonicalizes file reads and refuses file writes", ()
     JSON.stringify({ cmd: "sed -n '1,10p' './--expression=w victim'" }),
   );
   assert.equal(compileRunTerminalCommand(JSON.stringify({ command: "rm marker", workingDirectory: "sub" })), undefined);
+  assert.equal(compileRunTerminalCommand(JSON.stringify({ command: "true", working_directory: "" })), undefined);
+  assert.equal(classifyShellCommand("Set-Content -LiteralPath main.js -Value 'oops'").kind, "write");
+  assert.equal(classifyShellCommand("'x' | Out-File main.js").kind, "write");
+  assert.equal(classifyShellCommand("cat 'a' 'b'").kind, "process");
+  assert.equal(classifyShellCommand("head 'README.md'").args.limit, 10);
+  assert.equal(
+    compileRunTerminalCommand(JSON.stringify({ command: "cat 'a' 'b'" })),
+    JSON.stringify({ cmd: "cat 'a' 'b'" }),
+  );
 });
 
 test("write is omitted without the existence-checking hook", () => {
   const names = setup(undefined, true, [], {}).tools.map((tool) => tool.name);
-  assert.ok(names.includes(SEARCH_REPLACE_TOOL_NAME));
+  assert.ok(!names.includes(SEARCH_REPLACE_TOOL_NAME));
   assert.ok(!names.includes(WRITE_TOOL_NAME));
+});
+
+test("exec_command stays visible when run_terminal_command already exists", () => {
+  const names = setup(undefined, true, [
+    { type: "function", name: RUN_TERMINAL_COMMAND_TOOL_NAME, parameters: { type: "object" } },
+  ]).tools.map((tool) => tool.name);
+  assert.ok(names.includes(RUN_TERMINAL_COMMAND_TOOL_NAME));
+  assert.ok(names.includes("exec_command"));
 });
 
 test("legacy apply_patch history and forced native choices keep façade identities", () => {
@@ -327,8 +344,8 @@ test("legacy apply_patch history and forced native choices keep façade identiti
       }),
     },
   ]);
-  assert.equal(fromPatch[0].name, SEARCH_REPLACE_TOOL_NAME);
-  assert.equal(fromPatch[1].name, WRITE_TOOL_NAME);
+  assert.equal(fromPatch[0].name, "apply_patch");
+  assert.equal(fromPatch[1].name, "apply_patch");
   assert.deepEqual(
     rewriteGrokFacadeToolChoice({ type: "function", name: "exec_command" }),
     { type: "function", name: RUN_TERMINAL_COMMAND_TOOL_NAME },

@@ -1,6 +1,7 @@
 import { jsonArgumentsAreUnambiguous, registerCustomToolRelays, registerFunctionRelays } from "./namespace-relay.mjs";
 import {
-  compileStructuredPatchArguments,
+  compileSearchReplaceArguments,
+  compileWriteArguments,
   GROK_STRUCTURED_PATCH_CODEC,
   MAX_STRUCTURED_PATCH_BYTES,
 } from "./grok-structured-patch.mjs";
@@ -21,8 +22,8 @@ export const GROK_FACADE_TOOL_NAMES = [
   RUN_TERMINAL_COMMAND_TOOL_NAME,
 ];
 export const DEFAULT_READ_LIMIT = 400;
+export const DEFAULT_HEAD_LIMIT = 10;
 export const MAX_READ_LIMIT = 2000;
-const HIDDEN_NATIVE_TOOLS = new Set(["exec_command", "shell_command"]);
 
 const pathSchema = { type: "string", minLength: 1, maxLength: 65536 };
 const bodySchema = { type: "string", maxLength: MAX_STRUCTURED_PATCH_BYTES };
@@ -48,11 +49,11 @@ export const WRITE_PARAMETERS = objectSchema({
 const facadeCodec = {
   version: GROK_STRUCTURED_PATCH_CODEC.version,
   maxArgumentBytes: MAX_STRUCTURED_PATCH_BYTES,
-  decodeArguments: compileStructuredPatchArguments,
 };
 
 export const SEARCH_REPLACE_CODEC = {
   ...facadeCodec,
+  decodeArguments: compileSearchReplaceArguments,
   parameters: SEARCH_REPLACE_PARAMETERS,
   description() {
     return [
@@ -65,6 +66,7 @@ export const SEARCH_REPLACE_CODEC = {
 
 export const WRITE_CODEC = {
   ...facadeCodec,
+  decodeArguments: compileWriteArguments,
   parameters: WRITE_PARAMETERS,
   description() {
     return [
@@ -345,6 +347,37 @@ function pathOperand(rest) {
   return { path: trimmed };
 }
 
+function unquotePosixWord(value) {
+  if (typeof value !== "string" || !value.startsWith("'")) return undefined;
+  let index = 1;
+  let out = "";
+  while (index < value.length) {
+    if (value.startsWith(`'\\''`, index)) {
+      out += "'";
+      index += 4;
+      continue;
+    }
+    if (value[index] === "'") {
+      index += 1;
+      return index === value.length ? out : undefined;
+    }
+    out += value[index];
+    index += 1;
+  }
+  return undefined;
+}
+
+function singleOperandPath(rest) {
+  const operand = pathOperand(rest);
+  if (operand.option || operand.none) return operand;
+  const raw = operand.path;
+  const posix = unquotePosixWord(raw);
+  if (posix !== undefined) return posix ? { path: posix } : { multi: true };
+  if (raw.startsWith("'") || raw.startsWith('"') || /\s/.test(raw)) return { multi: true };
+  if (!/^[\w./@+-]+$/u.test(raw)) return { multi: true };
+  return { path: raw };
+}
+
 function singleLineCommand(command) {
   const trimmed = command.trim();
   if (!trimmed || /[\n;&|]/.test(trimmed) || trimmed.includes("&&") || trimmed.includes("||")) {
@@ -368,7 +401,8 @@ export function classifyShellCommand(command) {
   if (typeof command !== "string" || command.includes("\0")) return { kind: "process" };
   if (
     /\.write_text\b|\btee\s|>>|open\([^)]*['\"]w/.test(command) ||
-    /\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|writeSync)\s*\(/.test(command)
+    /\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|writeSync)\s*\(/.test(command) ||
+    /\b(?:Set-Content|Add-Content|Out-File|Set-Item|Clear-Content)\b/i.test(command)
   ) {
     return { kind: "write" };
   }
@@ -421,19 +455,15 @@ export function classifyShellCommand(command) {
   }
   const cat = /^cat(?:\s+(.*))?$/u.exec(line);
   if (cat) {
-    const operand = pathOperand(cat[1]);
-    if (operand.option || operand.none) return { kind: "process" };
-    const target_file = unquotedOrPosix(operand.path);
-    if (!target_file) return { kind: "process" };
-    return { kind: "read_file", args: { target_file } };
+    const operand = singleOperandPath(cat[1]);
+    if (operand.option || operand.none || operand.multi) return { kind: "process" };
+    return { kind: "read_file", args: { target_file: operand.path } };
   }
   const head = /^head(?:\s+(.*))?$/u.exec(line);
   if (head) {
-    const operand = pathOperand(head[1]);
-    if (operand.option || operand.none) return { kind: "process" };
-    const target_file = unquotedOrPosix(operand.path);
-    if (!target_file) return { kind: "process" };
-    return { kind: "read_file", args: { target_file, offset: 1, limit: DEFAULT_READ_LIMIT } };
+    const operand = singleOperandPath(head[1]);
+    if (operand.option || operand.none || operand.multi) return { kind: "process" };
+    return { kind: "read_file", args: { target_file: operand.path, offset: 1, limit: DEFAULT_HEAD_LIMIT } };
   }
   const rg = /^(?:rg|grep) (?:-[nI]+\s+)?(.+)$/u.exec(line);
   if (rg && !/\snode_modules\/.*dist/.test(line)) {
@@ -460,14 +490,14 @@ export function classifyShellCommand(command) {
   }
   const canonicalLs = /^ls -la (.+)$/u.exec(line);
   if (canonicalLs) {
-    const target_directory = unquotedOrPosix(canonicalLs[1]);
-    if (target_directory) return { kind: "list_dir", args: { target_directory } };
+    const operand = singleOperandPath(canonicalLs[1]);
+    if (operand.path) return { kind: "list_dir", args: { target_directory: operand.path } };
   }
   const ls = /^ls(?:\s+(.*))?$/u.exec(line);
   if (ls) {
-    const operand = pathOperand(ls[1]);
-    if (operand.option) return { kind: "process" };
-    const target_directory = operand.path ? unquotedOrPosix(operand.path) : ".";
+    const operand = singleOperandPath(ls[1]);
+    if (operand.option || operand.multi) return { kind: "process" };
+    const target_directory = operand.none ? "." : operand.path;
     if (!target_directory) return { kind: "process" };
     return { kind: "list_dir", args: { target_directory } };
   }
@@ -478,7 +508,7 @@ export function compileRunTerminalCommand(argumentsText, platform = process.plat
   const value = parseExactObject(argumentsText, ["command"], ["working_directory"]);
   if (!value || typeof value.command !== "string" || !value.command) return undefined;
   if (value.command.includes("\0")) return undefined;
-  if (Object.hasOwn(value, "working_directory") && typeof value.working_directory !== "string") {
+  if (Object.hasOwn(value, "working_directory") && (typeof value.working_directory !== "string" || value.working_directory.length === 0)) {
     return undefined;
   }
   const workdir = value.working_directory;
@@ -580,11 +610,7 @@ export function encodeGrokFacadeHistory(input, nativeExec, installed) {
         return { ...rest, name, arguments: item.arguments };
       }
       if (typeof value.input === "string" && value.input.includes("*** Begin Patch")) {
-        const name = value.input.includes("*** Add File:") ? WRITE_TOOL_NAME : SEARCH_REPLACE_TOOL_NAME;
-        if (!facadeAliasOffered(name, installed)) return item;
-        changed = true;
-        const { name: _name, ...rest } = item;
-        return { ...rest, name, arguments: item.arguments };
+        return item;
       }
     }
     return item;
@@ -592,9 +618,12 @@ export function encodeGrokFacadeHistory(input, nativeExec, installed) {
   return changed ? routed : input;
 }
 
-function hideNativeTools(tools, nativeExec) {
-  const hide = new Set(HIDDEN_NATIVE_TOOLS);
-  if (nativeExec?.nativeNamespace) hide.add(`${nativeExec.nativeNamespace}__exec_command`);
+function hideNativeTools(tools, nativeExec, installed) {
+  const hide = new Set(["shell_command"]);
+  if (installed instanceof Set && installed.has(RUN_TERMINAL_COMMAND_TOOL_NAME)) {
+    hide.add("exec_command");
+    if (nativeExec?.nativeNamespace) hide.add(`${nativeExec.nativeNamespace}__exec_command`);
+  }
   return tools.filter((tool) => {
     if (typeof tool?.name !== "string" || !hide.has(tool.name)) return true;
     return tool.type === "custom";
@@ -618,7 +647,7 @@ export function applyGrokEditFacade(tools, namespaces, route, structuredPatch, o
   const installed = options.installed instanceof Set ? options.installed : new Set();
   for (const tool of FACADE_TOOLS) {
     if (existing.has(tool.name)) continue;
-    if (tool.name === WRITE_TOOL_NAME && !allowWrite) continue;
+    if ((tool.name === WRITE_TOOL_NAME || tool.name === SEARCH_REPLACE_TOOL_NAME) && !allowWrite) continue;
     aliases.push({
       providerName: tool.name,
       nativeName: "apply_patch",
@@ -706,6 +735,6 @@ export function applyGrokEditFacade(tools, namespaces, route, structuredPatch, o
   if (functionRelays.length && !registerFunctionRelays(namespaces, functionRelays)) {
     return aliases.length ? [...tools, ...extra.filter((tool) => tool.name === SEARCH_REPLACE_TOOL_NAME || tool.name === WRITE_TOOL_NAME)] : tools;
   }
-  if (extra.length === 0) return hideNativeTools(tools, nativeExec);
-  return hideNativeTools([...tools, ...extra], nativeExec);
+  if (extra.length === 0) return hideNativeTools(tools, nativeExec, installed);
+  return hideNativeTools([...tools, ...extra], nativeExec, installed);
 }

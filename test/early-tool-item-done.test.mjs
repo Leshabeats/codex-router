@@ -194,6 +194,17 @@ test("delayed id-less argument-done for a closed output_index is dropped", async
   assert.equal(seen.filter((event) => event.output_index === 0 && event.type === "response.function_call_arguments.done").length, 1);
 });
 
+test("bare CR SSE frames still close the previous tool", async () => {
+  const crBlock = (event) => `event: ${event.type}\rdata: ${JSON.stringify(event)}\r\r`;
+  const body = await run([
+    crBlock(toolAdded(0, "c1", "apply_patch")),
+    crBlock({ type: "response.function_call_arguments.delta", item_id: "c1", output_index: 0, delta: "aaa" }),
+    crBlock(toolAdded(1, "c2", "apply_patch")),
+  ].join(""));
+  const seen = events(body.replace(/\r\r/g, "\n\n").replace(/\r/g, "\n"));
+  assert.ok(seen.some((event) => event.type === "response.output_item.done" && event.output_index === 0));
+});
+
 test("repeated SSE event fields disable rewriting", async () => {
   const duplicate = "event: response.output_item.added\nevent: response.output_item.added\ndata: " + JSON.stringify({
     type: "response.output_item.added",

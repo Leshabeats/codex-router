@@ -2267,6 +2267,12 @@ function rewriteNamespaceFunctionCallItem(
     if (allowIncompleteToolSearch && (item.arguments === undefined || item.arguments === "")) {
       return restoreFunctionRelayCall(item, functionRelay, item.arguments ?? "");
     }
+    if (
+      typeof item.arguments !== "string" ||
+      Buffer.byteLength(item.arguments, "utf8") > functionRelay.maxArgumentBytes
+    ) {
+      return undefined;
+    }
     const rewrittenArguments = functionRelay.rewriteArguments(item.arguments);
     if (typeof rewrittenArguments !== "string") return undefined;
     return restoreFunctionRelayCall(item, functionRelay, rewrittenArguments);

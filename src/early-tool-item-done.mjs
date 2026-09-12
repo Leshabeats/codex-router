@@ -8,6 +8,7 @@ import { Transform } from "node:stream";
 
 const LF_SEP = Buffer.from("\n\n");
 const CRLF_SEP = Buffer.from("\r\n\r\n");
+const CR_SEP = Buffer.from("\r\r");
 const TOOL_TYPES = new Set(["function_call", "custom_tool_call"]);
 const TERMINAL_TYPES = new Set(["response.completed", "response.done"]);
 const ARG_DELTA_TYPES = new Set([
@@ -21,18 +22,23 @@ const ARG_DONE_TYPES = new Set([
 export const MAX_SSE_FRAME_BYTES = 8 * 1024 * 1024;
 
 function findFrameEnd(buffer) {
+  const candidates = [];
   const crlf = buffer.indexOf(CRLF_SEP);
   const lf = buffer.indexOf(LF_SEP);
-  if (crlf !== -1 && (lf === -1 || crlf <= lf)) return { index: crlf, separator: CRLF_SEP };
-  if (lf !== -1) return { index: lf, separator: LF_SEP };
-  return undefined;
+  const cr = buffer.indexOf(CR_SEP);
+  if (crlf !== -1) candidates.push({ index: crlf, separator: CRLF_SEP });
+  if (lf !== -1) candidates.push({ index: lf, separator: LF_SEP });
+  if (cr !== -1) candidates.push({ index: cr, separator: CR_SEP });
+  if (!candidates.length) return undefined;
+  candidates.sort((left, right) => left.index - right.index || right.separator.length - left.separator.length);
+  return candidates[0];
 }
 
 function parseBlock(block) {
   let eventName;
   let eventFields = 0;
   const dataLines = [];
-  for (const line of block.split(/\r?\n/)) {
+  for (const line of block.split(/\r\n|\n|\r/)) {
     if (line.startsWith("event:")) {
       eventFields += 1;
       if (eventFields > 1) return { conflict: true };
@@ -165,9 +171,11 @@ export class EarlyToolItemDoneTransform extends Transform {
       this.push(Buffer.from(original));
       return;
     }
-    const text = original.toString("utf8");
-    if (separator.length === 4) this.#newline = "\r\n";
-    const parsed = parseBlock(text.replace(/\r?\n\r?\n$/u, "").replace(/\r?\n$/u, ""));
+    const text = original.subarray(0, Math.max(0, original.length - separator.length)).toString("utf8");
+    if (separator.equals(CRLF_SEP)) this.#newline = "\r\n";
+    else if (separator.equals(CR_SEP)) this.#newline = "\r";
+    else this.#newline = "\n";
+    const parsed = parseBlock(text);
     if (!parsed || parsed.terminal || parsed.conflict) {
       if (parsed?.conflict) {
         this.#passthrough = true;

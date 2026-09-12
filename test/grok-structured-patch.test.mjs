@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  compileSearchReplaceArguments,
   compileStructuredPatchArguments,
+  compileWriteArguments,
   GROK_STRUCTURED_PATCH_PARAMETERS,
   MAX_STRUCTURED_PATCH_BYTES,
   serializeStructuredPatch,
@@ -164,6 +166,22 @@ test("search_replace and write shapes compile to native add/update patches", () 
       path: "notes.txt", old_string: "hello", new_string: "hello\n",
     })),
     { code: "trailing_newline_unrepresentable" },
+  );
+  assert.throws(
+    () => compileSearchReplaceArguments(JSON.stringify({
+      path: "notes.txt", old_string: "", new_string: "hello",
+    })),
+    { code: "empty_old_string" },
+  );
+  assert.throws(
+    () => compileWriteArguments(JSON.stringify({ path: "new.txt", contents: "a\r\nb\r\n" })),
+    { code: "crlf_unrepresentable" },
+  );
+  assert.throws(
+    () => compileSearchReplaceArguments(JSON.stringify({
+      operations: [{ op: "delete", path: "victim" }],
+    })),
+    { code: "unknown_field" },
   );
 });
 

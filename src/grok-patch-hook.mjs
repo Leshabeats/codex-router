@@ -1,4 +1,4 @@
-import { readFileSync, realpathSync, statSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import {
   compileStructuredPatchArguments,
@@ -22,7 +22,7 @@ function patchWorkingDirectory(event) {
   return typeof cwd === "string" && cwd.length > 0 ? cwd : process.cwd();
 }
 
-function workspaceContainedFile(cwd, target) {
+function workspaceCandidate(cwd, target) {
   if (typeof cwd !== "string" || typeof target !== "string" || !cwd || !target) return undefined;
   if (cwd.includes("\0") || target.includes("\0")) return undefined;
   let root;
@@ -32,17 +32,53 @@ function workspaceContainedFile(cwd, target) {
     return undefined;
   }
   const candidate = resolve(root, target);
-  const lexical = relative(root, candidate);
-  if (pathEscapesWorkspace(lexical)) return undefined;
-  let real;
+  if (pathEscapesWorkspace(relative(root, candidate))) return undefined;
+  return candidate;
+}
+
+function workspacePathExists(cwd, target) {
+  const candidate = workspaceCandidate(cwd, target);
+  if (!candidate) return false;
   try {
-    real = realpathSync(candidate);
+    lstatSync(candidate);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function readWorkspaceFile(cwd, target) {
+  const candidate = workspaceCandidate(cwd, target);
+  if (!candidate) return undefined;
+  let fd;
+  try {
+    const flags = constants.O_RDONLY | (constants.O_NOFOLLOW || 0);
+    if (!constants.O_NOFOLLOW) {
+      if (lstatSync(candidate).isSymbolicLink()) return undefined;
+    }
+    fd = openSync(candidate, flags);
+    const info = fstatSync(fd);
+    if (!info.isFile()) return undefined;
+    if (info.size > MAX_STRUCTURED_PATCH_BYTES) return { tooLarge: true };
+    const buffer = Buffer.alloc(info.size);
+    let offset = 0;
+    while (offset < info.size) {
+      const n = readSync(fd, buffer, offset, info.size - offset, offset);
+      if (n === 0) break;
+      offset += n;
+    }
+    return { contents: buffer.toString("utf8") };
   } catch {
     return undefined;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // already closed
+      }
+    }
   }
-  const contained = relative(root, real);
-  if (pathEscapesWorkspace(contained)) return undefined;
-  return real;
 }
 
 function pathEscapesWorkspace(relativePath) {
@@ -57,7 +93,7 @@ function addFileTargetExists(patch, event) {
     const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
     if (!line.startsWith(ADD_FILE_HEADER)) continue;
     const target = line.slice(ADD_FILE_HEADER.length).trim();
-    if (workspaceContainedFile(cwd, target)) return true;
+    if (workspacePathExists(cwd, target)) return true;
   }
   return false;
 }
@@ -102,19 +138,12 @@ function searchReplaceMatchProblem(raw, event) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   if (typeof value.old_string !== "string" || typeof value.path !== "string") return undefined;
   const cwd = patchWorkingDirectory(event);
-  const target = workspaceContainedFile(cwd, value.path);
-  if (!target) return OLD_STRING_NOT_FOUND_REASON;
-  try {
-    const info = statSync(target);
-    if (!info.isFile()) return OLD_STRING_NOT_FOUND_REASON;
-    if (info.size > MAX_STRUCTURED_PATCH_BYTES) return OLD_STRING_FILE_TOO_LARGE_REASON;
-    const contents = readFileSync(target, "utf8");
-    const count = lineAlignedMatchCount(contents, value.old_string);
-    if (count === 0) return OLD_STRING_NOT_FOUND_REASON;
-    if (count > 1) return OLD_STRING_NOT_UNIQUE_REASON;
-  } catch {
-    return OLD_STRING_NOT_FOUND_REASON;
-  }
+  const file = readWorkspaceFile(cwd, value.path);
+  if (!file) return OLD_STRING_NOT_FOUND_REASON;
+  if (file.tooLarge) return OLD_STRING_FILE_TOO_LARGE_REASON;
+  const count = lineAlignedMatchCount(file.contents, value.old_string);
+  if (count === 0) return OLD_STRING_NOT_FOUND_REASON;
+  if (count > 1) return OLD_STRING_NOT_UNIQUE_REASON;
   return undefined;
 }
 
