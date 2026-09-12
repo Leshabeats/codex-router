@@ -288,6 +288,7 @@ test("run_terminal_command canonicalizes file reads and refuses file writes", ()
   assert.equal(classifyShellCommand("git log --pretty='format:%h > %s'").kind, "process");
   assert.equal(classifyShellCommand("git log --pretty='format:%h >> %s'").kind, "process");
   assert.equal(classifyShellCommand("sed -i 's/old/new/' file").kind, "write");
+  assert.equal(classifyShellCommand("sed -Ei 's/old/new/' file").kind, "write");
   assert.equal(classifyShellCommand("printf '%s\\n' 'a>b'").kind, "process");
   assert.equal(classifyShellCommand("cat --help").kind, "process");
   assert.equal(classifyShellCommand("head --help").kind, "process");
@@ -372,6 +373,10 @@ test("legacy apply_patch history and forced native choices keep façade identiti
   assert.deepEqual(
     rewriteGrokFacadeToolChoice({ type: "function", name: "apply_patch" }),
     { type: "function", name: SEARCH_REPLACE_TOOL_NAME },
+  );
+  assert.deepEqual(
+    rewriteGrokFacadeToolChoice({ type: "function", namespace: "mcp", name: "apply_patch" }),
+    { type: "function", namespace: "mcp", name: "apply_patch" },
   );
   const unrelated = encodeGrokFacadeHistory([
     { type: "function_call", call_id: "mcp", name: "mcp__x__exec_command", arguments: JSON.stringify({ cmd: "true" }) },

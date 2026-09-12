@@ -38,20 +38,29 @@ function findFrameEnd(buffer) {
   return undefined;
 }
 
+function sseField(line) {
+  const colon = line.indexOf(":");
+  if (colon === -1) return { name: line, value: "" };
+  let value = line.slice(colon + 1);
+  if (value.startsWith(" ")) value = value.slice(1);
+  return { name: line.slice(0, colon), value };
+}
+
 function parseBlock(block) {
   let eventName;
   let eventFields = 0;
   const dataLines = [];
-  for (const line of block.split(/\r\n|\n|\r/)) {
-    if (line.startsWith("event:")) {
+  for (const raw of block.split(/\r\n|\n|\r/)) {
+    if (!raw) continue;
+    const { name, value } = sseField(raw);
+    if (name === "event") {
       eventFields += 1;
       if (eventFields > 1) return { conflict: true };
-      eventName = line.slice(6).trim();
+      eventName = value.trim();
     }
-    if (line.startsWith("data:")) {
+    if (name === "data") {
       if (dataLines.length) return { conflict: true };
-      const value = line.slice(5);
-      dataLines.push(value.startsWith(" ") ? value.slice(1) : value);
+      dataLines.push(value);
     }
   }
   if (!dataLines.length) return undefined;
@@ -87,41 +96,55 @@ function unwrapCustomInput(text) {
 
 export class EarlyToolItemDoneTransform extends Transform {
   #buffer = Buffer.alloc(0);
-  #length = 0;
+  #start = 0;
+  #end = 0;
   #open;
   #closed = new Set();
   #closedIndexes = new Set();
   #newline = "\n";
   #passthrough = false;
+  #sequence;
 
   #view() {
-    return this.#buffer.subarray(0, this.#length);
+    return this.#buffer.subarray(this.#start, this.#end);
+  }
+
+  #compact() {
+    if (this.#start === 0) return;
+    this.#buffer.copyWithin(0, this.#start, this.#end);
+    this.#end -= this.#start;
+    this.#start = 0;
   }
 
   #append(piece) {
-    const needed = this.#length + piece.length;
-    if (needed > this.#buffer.length) {
-      const next = Buffer.allocUnsafe(Math.max(this.#buffer.length * 2, 4096, needed));
-      if (this.#length) this.#buffer.copy(next, 0, 0, this.#length);
-      this.#buffer = next;
+    if (this.#end + piece.length > this.#buffer.length) {
+      this.#compact();
+      const needed = this.#end + piece.length;
+      if (needed > this.#buffer.length) {
+        const next = Buffer.allocUnsafe(Math.max(this.#buffer.length * 2, 4096, needed));
+        if (this.#end) this.#buffer.copy(next, 0, 0, this.#end);
+        this.#buffer = next;
+      }
     }
-    piece.copy(this.#buffer, this.#length);
-    this.#length += piece.length;
+    piece.copy(this.#buffer, this.#end);
+    this.#end += piece.length;
   }
 
   #consume(n) {
     if (n <= 0) return;
-    if (n >= this.#length) {
-      this.#length = 0;
+    this.#start += n;
+    if (this.#start >= this.#end) {
+      this.#start = 0;
+      this.#end = 0;
       return;
     }
-    this.#buffer.copyWithin(0, n, this.#length);
-    this.#length -= n;
+    if (this.#start > 8192 && this.#start > this.#end - this.#start) this.#compact();
   }
 
   #release() {
     const original = Buffer.from(this.#view());
-    this.#length = 0;
+    this.#start = 0;
+    this.#end = 0;
     return original;
   }
 
@@ -132,9 +155,9 @@ export class EarlyToolItemDoneTransform extends Transform {
       return;
     }
     const piece = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding);
-    if (this.#length + piece.length > MAX_SSE_FRAME_BYTES) {
+    if (this.#end - this.#start + piece.length > MAX_SSE_FRAME_BYTES) {
       this.#passthrough = true;
-      if (this.#length) this.push(this.#release());
+      if (this.#end > this.#start) this.push(this.#release());
       this.push(piece);
       callback();
       return;
@@ -150,7 +173,7 @@ export class EarlyToolItemDoneTransform extends Transform {
   }
 
   #drain(flush) {
-    while (this.#length) {
+    while (this.#end > this.#start) {
       if (this.#passthrough) {
         this.push(this.#release());
         return;
@@ -158,7 +181,7 @@ export class EarlyToolItemDoneTransform extends Transform {
       const found = findFrameEnd(this.#view());
       if (!found) {
         if (!flush) return;
-        if (this.#length > MAX_SSE_FRAME_BYTES) this.#passthrough = true;
+        if (this.#end - this.#start > MAX_SSE_FRAME_BYTES) this.#passthrough = true;
         const original = this.#release();
         if (this.#passthrough) this.push(original);
         else this.#handle(original, Buffer.alloc(0));
@@ -186,20 +209,24 @@ export class EarlyToolItemDoneTransform extends Transform {
       if (parsed?.conflict) {
         this.#passthrough = true;
         this.push(Buffer.from(original));
-        if (this.#length) this.push(this.#release());
+        if (this.#end > this.#start) this.push(this.#release());
         return;
       }
       this.push(Buffer.from(original));
       return;
     }
-    const event = parsed.event;
-    const type = event?.type;
+    const rawEvent = parsed.event;
+    const type = rawEvent?.type;
+    if (type === "response.output_item.added" && TOOL_TYPES.has(rawEvent.item?.type)) {
+      this.#closeOpen();
+    }
+    const event = this.#stamp(rawEvent);
+    const originalOut = event === rawEvent ? original : Buffer.from(frameFor(type, event, this.#newline));
     if (TERMINAL_TYPES.has(type)) {
-      this.push(Buffer.from(original));
+      this.push(originalOut);
       return;
     }
     if (type === "response.output_item.added" && TOOL_TYPES.has(event.item?.type)) {
-      this.#closeOpen();
       this.#open = {
         itemId: typeof event.item.id === "string" ? event.item.id : undefined,
         callId: typeof event.item.call_id === "string" ? event.item.call_id : undefined,
@@ -214,7 +241,7 @@ export class EarlyToolItemDoneTransform extends Transform {
         this.#disableRewrite(original);
         return;
       }
-      this.push(Buffer.from(original));
+      this.push(originalOut);
       return;
     }
     if (ARG_DELTA_TYPES.has(type) && this.#matchesOpen(event)) {
@@ -225,7 +252,7 @@ export class EarlyToolItemDoneTransform extends Transform {
       }
       if (this.#open.kind === "custom_tool_call") this.#open.input += piece;
       else this.#open.arguments += piece;
-      this.push(Buffer.from(original));
+      this.push(originalOut);
       return;
     }
     if (ARG_DONE_TYPES.has(type)) {
@@ -252,7 +279,7 @@ export class EarlyToolItemDoneTransform extends Transform {
         this.#open.input = nextInput;
         this.#open.argumentsDone = true;
       }
-      this.push(Buffer.from(original));
+      this.push(originalOut);
       return;
     }
     if (type === "response.output_item.done") {
@@ -262,10 +289,25 @@ export class EarlyToolItemDoneTransform extends Transform {
       if (id) this.#closed.add(id);
       if (typeof event.output_index === "number") this.#closedIndexes.add(event.output_index);
       if (this.#open && this.#sameOpenIdentity(id, event.output_index)) this.#open = undefined;
-      this.push(Buffer.from(original));
+      this.push(originalOut);
       return;
     }
-    this.push(Buffer.from(original));
+    this.push(originalOut);
+  }
+
+  #stamp(event) {
+    if (!event || typeof event !== "object") return event;
+    if (typeof event.sequence_number === "number") {
+      if (this.#sequence !== undefined && event.sequence_number <= this.#sequence) {
+        this.#sequence += 1;
+        return { ...event, sequence_number: this.#sequence };
+      }
+      this.#sequence = event.sequence_number;
+      return event;
+    }
+    if (this.#sequence === undefined) return event;
+    this.#sequence += 1;
+    return { ...event, sequence_number: this.#sequence };
   }
 
   #suppliedIdentity(id) {
@@ -293,7 +335,7 @@ export class EarlyToolItemDoneTransform extends Transform {
     this.#passthrough = true;
     this.#open = undefined;
     this.push(Buffer.from(original));
-    if (this.#length) this.push(this.#release());
+    if (this.#end > this.#start) this.push(this.#release());
   }
 
   #closeOpen() {
@@ -323,15 +365,16 @@ export class EarlyToolItemDoneTransform extends Transform {
       const doneType = open.kind === "custom_tool_call"
         ? "response.custom_tool_call_input.done"
         : "response.function_call_arguments.done";
-      const doneBody = open.kind === "custom_tool_call"
-        ? { item_id: lifecycleId, output_index: open.outputIndex, input: customInput }
-        : { item_id: lifecycleId, output_index: open.outputIndex, arguments: open.arguments };
+      const doneBody = this.#stamp(open.kind === "custom_tool_call"
+        ? { type: doneType, item_id: lifecycleId, output_index: open.outputIndex, input: customInput }
+        : { type: doneType, item_id: lifecycleId, output_index: open.outputIndex, arguments: open.arguments });
       this.push(Buffer.from(frameFor(doneType, doneBody, this.#newline)));
     }
-    this.push(Buffer.from(frameFor("response.output_item.done", {
+    this.push(Buffer.from(frameFor("response.output_item.done", this.#stamp({
+      type: "response.output_item.done",
       output_index: open.outputIndex,
       item,
-    }, this.#newline)));
+    }), this.#newline)));
     this.#open = undefined;
   }
 }

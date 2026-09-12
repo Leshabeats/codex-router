@@ -137,6 +137,16 @@ function pathEscapesWorkspace(relativePath) {
   return relativePath === ".." || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath);
 }
 
+function openedPath(fd) {
+  try {
+    if (process.platform === "linux") return realpathSync(`/proc/self/fd/${fd}`);
+    if (process.platform === "darwin") return realpathSync(`/dev/fd/${fd}`);
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
 // Grok subagents emit whole-file Add File for paths that already exist.
 // Router compile cannot see the worktree; this client hook can existsSync.
 function addFileTargetProblem(patch, event) {
@@ -160,20 +170,18 @@ function deny(reason) {
   } };
 }
 
-function logicalLines(text) {
-  if (text === "") return [];
-  const lines = text.split(/\r?\n/u);
-  if (lines[lines.length - 1] === "") lines.pop();
-  return lines;
-}
-
-function lineAlignedMatchCount(contents, needle) {
-  const fileLines = logicalLines(contents);
-  const needleLines = logicalLines(needle);
-  if (needleLines.length === 0) return 0;
+function exactLineOccurrences(contents, needle) {
+  if (!needle) return 0;
   let count = 0;
-  for (let i = 0; i <= fileLines.length - needleLines.length; i += 1) {
-    if (needleLines.every((line, offset) => fileLines[i + offset] === line)) count += 1;
+  let index = 0;
+  while (index <= contents.length) {
+    const found = contents.indexOf(needle, index);
+    if (found === -1) break;
+    const startOk = found === 0 || contents[found - 1] === "\n";
+    const end = found + needle.length;
+    const endOk = needle.endsWith("\n") || end === contents.length || contents[end] === "\n";
+    if (startOk && endOk) count += 1;
+    index = found + Math.max(needle.length, 1);
   }
   return count;
 }
@@ -191,7 +199,7 @@ function searchReplaceMatchProblem(raw, event) {
   const file = readWorkspaceFile(cwd, value.path);
   if (!file) return OLD_STRING_NOT_FOUND_REASON;
   if (file.tooLarge) return OLD_STRING_FILE_TOO_LARGE_REASON;
-  const count = lineAlignedMatchCount(file.contents, value.old_string);
+  const count = exactLineOccurrences(file.contents, value.old_string);
   if (count === 0) return OLD_STRING_NOT_FOUND_REASON;
   if (count > 1) return OLD_STRING_NOT_UNIQUE_REASON;
   return undefined;

@@ -167,6 +167,9 @@ function searchReplaceToOperations(value) {
   object(value, ["path", "old_string", "new_string"]);
   if (typeof value.old_string !== "string" || value.old_string.length === 0) reject("empty_old_string");
   if (value.old_string === value.new_string) reject("no_change");
+  if (/(?:\n)$/u.test(value.old_string) !== /(?:\n)$/u.test(value.new_string)) {
+    reject("trailing_newline_unrepresentable");
+  }
   const removed = splitLogicalLines(value.old_string);
   const added = splitLogicalLines(value.new_string);
   if (removed.length === 0 && added.length === 0) reject("no_change");
@@ -216,6 +219,7 @@ function parseOperationsField(operations) {
 function mergeUpdateOperations(value) {
   const operations = parseOperationsField(value.operations);
   if (!Array.isArray(operations)) return { ...value, operations };
+  if (operations.length < 1 || operations.length > MAX_OPERATIONS) reject("array_bounds");
   for (const operation of operations) {
     serializeStructuredPatch({ operations: [operation] });
   }

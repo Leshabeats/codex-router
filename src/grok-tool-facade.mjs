@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { jsonArgumentsAreUnambiguous, registerCustomToolRelays, registerFunctionRelays } from "./namespace-relay.mjs";
 import {
   compileSearchReplaceArguments,
@@ -227,6 +228,19 @@ const RUN_TERMINAL_COMMAND_PARAMETERS = objectSchema({
   working_directory: pathSchema,
 }, ["command"]);
 
+let ripgrepCached;
+
+function ripgrepAvailable() {
+  if (ripgrepCached !== undefined) return ripgrepCached;
+  try {
+    const result = spawnSync("rg", ["--version"], { encoding: "utf8", timeout: 3000, windowsHide: true });
+    ripgrepCached = result.status === 0;
+  } catch {
+    ripgrepCached = false;
+  }
+  return ripgrepCached;
+}
+
 function isOrdinaryExecFunction(tool) {
   if (tool?.type !== "function") return false;
   const params = tool.parameters;
@@ -234,7 +248,10 @@ function isOrdinaryExecFunction(tool) {
   const properties = params.properties;
   if (!properties || typeof properties !== "object" || Array.isArray(properties)) return false;
   const cmd = properties.cmd;
-  return Boolean(cmd && (cmd.type === undefined || cmd.type === "string"));
+  if (!cmd || (cmd.type && cmd.type !== "string")) return false;
+  const required = params.required;
+  if (Array.isArray(required) && required.some((key) => key !== "cmd" && key !== "workdir")) return false;
+  return true;
 }
 
 function ordinaryExecNamed(tool, name, namespace) {
@@ -284,6 +301,7 @@ export function compileListDirCommand(argumentsText, workdir, platform = process
 export function rewriteGrokFacadeToolChoice(toolChoice, installed) {
   if (!toolChoice || typeof toolChoice !== "object") return toolChoice;
   const offered = (name) => !(installed instanceof Set) || installed.has(name);
+  if (toolChoice.namespace) return toolChoice;
   if (toolChoice.type === "function" && (toolChoice.name === "exec_command" || toolChoice.name === "shell_command")) {
     return offered(RUN_TERMINAL_COMMAND_TOOL_NAME)
       ? { ...toolChoice, name: RUN_TERMINAL_COMMAND_TOOL_NAME }
@@ -406,7 +424,7 @@ export function classifyShellCommand(command) {
     /\.write_text\b|\btee\s|open\([^)]*['\"]w/.test(command) ||
     /\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|writeSync)\s*\(/.test(command) ||
     /\b(?:Set-Content|Add-Content|Out-File|Set-Item|Clear-Content)\b/i.test(command) ||
-    /\bsed\b[^\n;|&]*\s(?:-i\b|--in-place\b)/.test(command)
+    /(?:^|[\s;|&])sed(?:\s+-[A-Za-z]*i[A-Za-z0-9.]*|\s+--in-place\b)/.test(command)
   ) {
     return { kind: "write" };
   }
@@ -606,7 +624,7 @@ export function encodeGrokFacadeHistory(input, nativeExec, installed) {
     if (item.namespace === undefined && item.name === "apply_patch") {
       const value = parseFacadeObject(item.arguments);
       if (!value) return item;
-      if (Object.hasOwn(value, "old_string") || Object.hasOwn(value, "contents") || Object.hasOwn(value, "operations")) {
+      if (Object.hasOwn(value, "old_string") || Object.hasOwn(value, "contents")) {
         const name = Object.hasOwn(value, "contents") ? WRITE_TOOL_NAME : SEARCH_REPLACE_TOOL_NAME;
         if (!facadeAliasOffered(name, installed)) return item;
         changed = true;
@@ -684,7 +702,7 @@ export function applyGrokEditFacade(tools, namespaces, route, structuredPatch, o
       });
       installed.add(READ_FILE_TOOL_NAME);
     }
-    if (!existing.has(GREP_TOOL_NAME)) {
+    if (!existing.has(GREP_TOOL_NAME) && (process.platform !== "win32" || ripgrepAvailable())) {
       functionRelays.push({
         providerName: GREP_TOOL_NAME,
         nativeName: nativeExec.nativeName,

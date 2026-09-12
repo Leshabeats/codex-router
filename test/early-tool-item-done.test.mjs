@@ -216,6 +216,28 @@ test("bare CR SSE frames still close the previous tool", async () => {
   assert.ok(seen.some((event) => event.type === "response.output_item.done" && event.output_index === 0));
 });
 
+test("synthesized closes continue sequence_number", async () => {
+  const body = await run([
+    block({ ...toolAdded(0, "c1", "apply_patch"), sequence_number: 10 }),
+    block({ type: "response.function_call_arguments.delta", item_id: "c1", output_index: 0, delta: "aaa", sequence_number: 11 }),
+    block({ ...toolAdded(1, "c2", "apply_patch"), sequence_number: 12 }),
+  ].join(""));
+  assert.deepEqual(events(body).map((event) => event.sequence_number), [10, 11, 12, 13, 14]);
+});
+
+test("colonless SSE data fields count as data fields", async () => {
+  const duplicate = "event: response.output_item.added\ndata\ndata: " + JSON.stringify({
+    type: "response.output_item.added",
+    output_index: 0,
+    item: { type: "function_call", id: "c1", call_id: "c1", name: "apply_patch", arguments: "", status: "in_progress" },
+  }) + "\n\n";
+  const body = await run([
+    duplicate,
+    block(toolAdded(1, "c2", "apply_patch")),
+  ].join(""));
+  assert.equal(events(body).filter((event) => event.type === "response.function_call_arguments.done").length, 0);
+});
+
 test("repeated SSE data fields disable rewriting", async () => {
   const duplicate = "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\"}\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"c1\",\"call_id\":\"c1\",\"name\":\"apply_patch\",\"arguments\":\"\",\"status\":\"in_progress\"}}\n\n";
   const body = await run([

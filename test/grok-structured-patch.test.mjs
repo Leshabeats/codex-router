@@ -168,6 +168,12 @@ test("search_replace and write shapes compile to native add/update patches", () 
     { code: "trailing_newline_unrepresentable" },
   );
   assert.throws(
+    () => compileStructuredPatchArguments(JSON.stringify({
+      path: "notes.txt", old_string: "a\n", new_string: "b",
+    })),
+    { code: "trailing_newline_unrepresentable" },
+  );
+  assert.throws(
     () => compileSearchReplaceArguments(JSON.stringify({
       path: "notes.txt", old_string: "", new_string: "hello",
     })),
