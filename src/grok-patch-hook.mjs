@@ -12,8 +12,11 @@ import { GROK_PATCH_HOOK_PREFIX } from "./grok-patch-hook-transport.mjs";
 export const MAX_GROK_PATCH_HOOK_INPUT_BYTES = MAX_STRUCTURED_PATCH_BYTES * 8;
 
 const ADD_FILE_HEADER = "*** Add File:";
+const UPDATE_FILE_HEADER = "*** Update File:";
+const DELETE_FILE_HEADER = "*** Delete File:";
 const ADD_FILE_EXISTS_REASON = "file exists; use search_replace";
 const PATH_OUTSIDE_REASON = "path is outside the workspace";
+const TRAILING_NEWLINE_REASON = "trailing newline cannot be preserved";
 const OLD_STRING_NOT_FOUND_REASON = "old_string not found";
 const OLD_STRING_NOT_UNIQUE_REASON = "old_string is not unique; narrow the match";
 const OLD_STRING_FILE_TOO_LARGE_REASON = "file too large to verify unique match";
@@ -153,11 +156,19 @@ function addFileTargetProblem(patch, event) {
   const cwd = patchWorkingDirectory(event);
   for (const rawLine of patch.split("\n")) {
     const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
-    if (!line.startsWith(ADD_FILE_HEADER)) continue;
-    const target = line.slice(ADD_FILE_HEADER.length).trim();
+    let target;
+    let add = false;
+    if (line.startsWith(ADD_FILE_HEADER)) {
+      target = line.slice(ADD_FILE_HEADER.length).trim();
+      add = true;
+    } else if (line.startsWith(UPDATE_FILE_HEADER)) {
+      target = line.slice(UPDATE_FILE_HEADER.length).trim();
+    } else if (line.startsWith(DELETE_FILE_HEADER)) {
+      target = line.slice(DELETE_FILE_HEADER.length).trim();
+    } else continue;
     const status = inspectWorkspacePath(cwd, target);
     if (status === "outside") return PATH_OUTSIDE_REASON;
-    if (status === "exists") return ADD_FILE_EXISTS_REASON;
+    if (add && status === "exists") return ADD_FILE_EXISTS_REASON;
   }
   return undefined;
 }
@@ -181,7 +192,7 @@ function exactLineOccurrences(contents, needle) {
     const end = found + needle.length;
     const endOk = needle.endsWith("\n") || end === contents.length || contents[end] === "\n";
     if (startOk && endOk) count += 1;
-    index = found + Math.max(needle.length, 1);
+    index = found + 1;
   }
   return count;
 }
@@ -202,6 +213,9 @@ function searchReplaceMatchProblem(raw, event) {
   const count = exactLineOccurrences(file.contents, value.old_string);
   if (count === 0) return OLD_STRING_NOT_FOUND_REASON;
   if (count > 1) return OLD_STRING_NOT_UNIQUE_REASON;
+  if (!file.contents.endsWith("\n") && !value.old_string.endsWith("\n")) {
+    return TRAILING_NEWLINE_REASON;
+  }
   return undefined;
 }
 

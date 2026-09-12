@@ -27,8 +27,8 @@ function newlineLength(buffer, index) {
   return 0;
 }
 
-function findFrameEnd(buffer) {
-  for (let index = 0; index < buffer.length; index += 1) {
+function findFrameEnd(buffer, from = 0) {
+  for (let index = Math.max(0, from); index < buffer.length; index += 1) {
     const first = newlineLength(buffer, index);
     if (!first) continue;
     const second = newlineLength(buffer, index + first);
@@ -104,6 +104,7 @@ export class EarlyToolItemDoneTransform extends Transform {
   #newline = "\n";
   #passthrough = false;
   #sequence;
+  #searchFrom = 0;
 
   #view() {
     return this.#buffer.subarray(this.#start, this.#end);
@@ -149,12 +150,13 @@ export class EarlyToolItemDoneTransform extends Transform {
   }
 
   _transform(chunk, encoding, callback) {
+    const piece = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding);
     if (this.#passthrough) {
-      this.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding));
+      this.#append(piece);
+      this.#drain(false);
       callback();
       return;
     }
-    const piece = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding);
     if (this.#end - this.#start + piece.length > MAX_SSE_FRAME_BYTES) {
       this.#passthrough = true;
       if (this.#end > this.#start) this.push(this.#release());
@@ -178,8 +180,9 @@ export class EarlyToolItemDoneTransform extends Transform {
         this.push(this.#release());
         return;
       }
-      const found = findFrameEnd(this.#view());
+      const found = findFrameEnd(this.#view(), this.#searchFrom);
       if (!found) {
+        this.#searchFrom = Math.max(0, this.#end - this.#start - 2);
         if (!flush) return;
         if (this.#end - this.#start > MAX_SSE_FRAME_BYTES) this.#passthrough = true;
         const original = this.#release();
@@ -190,26 +193,32 @@ export class EarlyToolItemDoneTransform extends Transform {
       const end = found.index + found.separator.length;
       const original = Buffer.from(this.#view().subarray(0, end));
       this.#consume(end);
+      this.#searchFrom = 0;
       this.#handle(original, found.separator);
     }
   }
 
   #handle(original, separator) {
-    if (this.#passthrough) {
-      this.push(Buffer.from(original));
-      return;
-    }
     const text = original.subarray(0, Math.max(0, original.length - separator.length)).toString("utf8");
     const firstNewline = newlineLength(separator, 0);
     if (firstNewline === 2) this.#newline = "\r\n";
     else if (separator[0] === CR) this.#newline = "\r";
     else this.#newline = "\n";
+    if (this.#passthrough) {
+      const parsedPass = parseBlock(text);
+      if (parsedPass?.event) {
+        const event = this.#stamp(parsedPass.event);
+        this.push(event === parsedPass.event ? original : Buffer.from(frameFor(event.type, event, this.#newline)));
+        return;
+      }
+      this.push(original);
+      return;
+    }
     const parsed = parseBlock(text);
     if (!parsed || parsed.terminal || parsed.conflict) {
       if (parsed?.conflict) {
         this.#passthrough = true;
-        this.push(Buffer.from(original));
-        if (this.#end > this.#start) this.push(this.#release());
+        this.push(original);
         return;
       }
       this.push(Buffer.from(original));

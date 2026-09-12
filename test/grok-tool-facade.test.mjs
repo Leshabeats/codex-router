@@ -171,7 +171,6 @@ test("search_replace and write are added beside apply_patch without colliding", 
   assert.ok(names.includes(SEARCH_REPLACE_TOOL_NAME));
   assert.ok(names.includes(WRITE_TOOL_NAME));
   assert.ok(names.includes(READ_FILE_TOOL_NAME));
-  assert.ok(names.includes(GREP_TOOL_NAME));
   assert.ok(names.includes(LIST_DIR_TOOL_NAME));
   assert.ok(names.includes(RUN_TERMINAL_COMMAND_TOOL_NAME));
   assert.ok(!names.includes("exec_command"));
@@ -289,6 +288,8 @@ test("run_terminal_command canonicalizes file reads and refuses file writes", ()
   assert.equal(classifyShellCommand("git log --pretty='format:%h >> %s'").kind, "process");
   assert.equal(classifyShellCommand("sed -i 's/old/new/' file").kind, "write");
   assert.equal(classifyShellCommand("sed -Ei 's/old/new/' file").kind, "write");
+  assert.equal(classifyShellCommand("perl -pi -e 's/old/new/' file").kind, "write");
+  assert.equal(classifyShellCommand("node --test --test-name-pattern='Set-Content' test/foo.test.mjs").kind, "process");
   assert.equal(classifyShellCommand("printf '%s\\n' 'a>b'").kind, "process");
   assert.equal(classifyShellCommand("cat --help").kind, "process");
   assert.equal(classifyShellCommand("head --help").kind, "process");

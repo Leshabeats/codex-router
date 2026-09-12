@@ -251,6 +251,7 @@ function isOrdinaryExecFunction(tool) {
   if (!cmd || (cmd.type && cmd.type !== "string")) return false;
   const required = params.required;
   if (Array.isArray(required) && required.some((key) => key !== "cmd" && key !== "workdir")) return false;
+  if (params.additionalProperties === false && properties.workdir === undefined) return false;
   return true;
 }
 
@@ -418,13 +419,38 @@ function standalonePathRead(command) {
   return undefined;
 }
 
+function unquotedCommandText(command) {
+  let out = "";
+  let index = 0;
+  while (index < command.length) {
+    const char = command[index];
+    if (char === "\\" && index + 1 < command.length) {
+      out += " ";
+      index += 2;
+      continue;
+    }
+    if (char === "'") {
+      index += 1;
+      while (index < command.length && command[index] !== "'") index += 1;
+      index += 1;
+      out += " ";
+      continue;
+    }
+    out += char;
+    index += 1;
+  }
+  return out;
+}
+
 export function classifyShellCommand(command) {
   if (typeof command !== "string" || command.includes("\0")) return { kind: "process" };
+  const exposed = unquotedCommandText(command);
   if (
-    /\.write_text\b|\btee\s|open\([^)]*['\"]w/.test(command) ||
-    /\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|writeSync)\s*\(/.test(command) ||
-    /\b(?:Set-Content|Add-Content|Out-File|Set-Item|Clear-Content)\b/i.test(command) ||
-    /(?:^|[\s;|&])sed(?:\s+-[A-Za-z]*i[A-Za-z0-9.]*|\s+--in-place\b)/.test(command)
+    /\.write_text\b|\btee\s|open\([^)]*['\"]w/.test(exposed) ||
+    /\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|writeSync)\s*\(/.test(exposed) ||
+    /\b(?:Set-Content|Add-Content|Out-File|Set-Item|Clear-Content)\b/i.test(exposed) ||
+    /(?:^|[\s;|&])sed(?:\s+-[A-Za-z]*i[A-Za-z0-9.]*|\s+--in-place\b)/.test(exposed) ||
+    /(?:^|[\s;|&])perl(?:\s+-[A-Za-z]*i[A-Za-z]*)/.test(exposed)
   ) {
     return { kind: "write" };
   }
@@ -640,9 +666,12 @@ export function encodeGrokFacadeHistory(input, nativeExec, installed) {
   return changed ? routed : input;
 }
 
-function hideNativeTools(tools, nativeExec, installed) {
+function hideNativeTools(tools, nativeExec, installed, existing) {
   const hide = new Set(["shell_command"]);
-  if (installed instanceof Set && installed.has(RUN_TERMINAL_COMMAND_TOOL_NAME)) {
+  const readCollided = existing instanceof Set && (
+    existing.has(READ_FILE_TOOL_NAME) || existing.has(GREP_TOOL_NAME) || existing.has(LIST_DIR_TOOL_NAME)
+  );
+  if (installed instanceof Set && installed.has(RUN_TERMINAL_COMMAND_TOOL_NAME) && !readCollided) {
     hide.add("exec_command");
     if (nativeExec?.nativeNamespace) hide.add(`${nativeExec.nativeNamespace}__exec_command`);
   }
@@ -702,7 +731,7 @@ export function applyGrokEditFacade(tools, namespaces, route, structuredPatch, o
       });
       installed.add(READ_FILE_TOOL_NAME);
     }
-    if (!existing.has(GREP_TOOL_NAME) && (process.platform !== "win32" || ripgrepAvailable())) {
+    if (!existing.has(GREP_TOOL_NAME) && ripgrepAvailable()) {
       functionRelays.push({
         providerName: GREP_TOOL_NAME,
         nativeName: nativeExec.nativeName,
@@ -757,6 +786,6 @@ export function applyGrokEditFacade(tools, namespaces, route, structuredPatch, o
   if (functionRelays.length && !registerFunctionRelays(namespaces, functionRelays)) {
     return aliases.length ? [...tools, ...extra.filter((tool) => tool.name === SEARCH_REPLACE_TOOL_NAME || tool.name === WRITE_TOOL_NAME)] : tools;
   }
-  if (extra.length === 0) return hideNativeTools(tools, nativeExec, installed);
-  return hideNativeTools([...tools, ...extra], nativeExec, installed);
+  if (extra.length === 0) return hideNativeTools(tools, nativeExec, installed, existing);
+  return hideNativeTools([...tools, ...extra], nativeExec, installed, existing);
 }

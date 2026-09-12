@@ -225,6 +225,25 @@ test("synthesized closes continue sequence_number", async () => {
   assert.deepEqual(events(body).map((event) => event.sequence_number), [10, 11, 12, 13, 14]);
 });
 
+test("passthrough after conflict keeps sequence numbers monotonic", async () => {
+  const conflict = "event: response.output_item.added\nevent: response.output_item.added\ndata: " + JSON.stringify({
+    type: "response.output_item.added",
+    sequence_number: 12,
+    output_index: 1,
+    item: { type: "function_call", id: "c2", call_id: "c2", name: "apply_patch", arguments: "", status: "in_progress" },
+  }) + "\n\n";
+  const body = await run([
+    block({ ...toolAdded(0, "c1", "apply_patch"), sequence_number: 10 }),
+    block({ type: "response.function_call_arguments.delta", item_id: "c1", output_index: 0, delta: "aaa", sequence_number: 11 }),
+    conflict,
+    block({ type: "response.function_call_arguments.delta", item_id: "c2", output_index: 1, delta: "bbb", sequence_number: 13 }),
+  ].join(""));
+  const seqs = events(body).map((event) => event.sequence_number).filter((value) => typeof value === "number");
+  for (let index = 1; index < seqs.length; index += 1) {
+    assert.ok(seqs[index] > seqs[index - 1], String(seqs));
+  }
+});
+
 test("colonless SSE data fields count as data fields", async () => {
   const duplicate = "event: response.output_item.added\ndata\ndata: " + JSON.stringify({
     type: "response.output_item.added",

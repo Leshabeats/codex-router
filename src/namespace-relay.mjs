@@ -2263,7 +2263,7 @@ function rewriteNamespaceFunctionCallItem(
   const functionRelay = lookups.functionRelays instanceof Map
     ? lookups.functionRelays.get(item.name)
     : undefined;
-  if (functionRelay) {
+  if (functionRelay && item.namespace === undefined) {
     if (allowIncompleteToolSearch && (item.arguments === undefined || item.arguments === "")) {
       return restoreFunctionRelayCall(item, functionRelay, item.arguments ?? "");
     }
