@@ -226,14 +226,30 @@ const RUN_TERMINAL_COMMAND_PARAMETERS = objectSchema({
   working_directory: pathSchema,
 }, ["command"]);
 
+function isOrdinaryExecFunction(tool) {
+  return tool?.type === "function" && (tool.parameters === undefined || (
+    tool.parameters && typeof tool.parameters === "object" && !Array.isArray(tool.parameters)
+  ));
+}
+
+function ordinaryExecNamed(tool, name, namespace) {
+  if (!isOrdinaryExecFunction(tool) || tool.name !== name) return false;
+  if (namespace === undefined) return tool.namespace === undefined;
+  return tool.namespace === namespace;
+}
+
 export function nativeExecRelayTarget(tools, namespaces) {
   if (!Array.isArray(tools)) return undefined;
-  const exact = tools.find((tool) => tool?.name === "exec_command" && tool.namespace === undefined);
+  const exact = tools.find((tool) => ordinaryExecNamed(tool, "exec_command"));
   if (exact) return { nativeName: "exec_command" };
   if (!(namespaces instanceof Map)) return undefined;
   const owners = [];
   for (const [namespace, names] of namespaces) {
-    if (typeof namespace === "string" && namespace && names instanceof Set && names.has("exec_command")) {
+    if (typeof namespace !== "string" || !namespace || !(names instanceof Set) || !names.has("exec_command")) {
+      continue;
+    }
+    const flattened = `${namespace}__exec_command`;
+    if (tools.some((tool) => ordinaryExecNamed(tool, flattened) || ordinaryExecNamed(tool, "exec_command", namespace))) {
       owners.push(namespace);
     }
   }
@@ -309,7 +325,10 @@ function standalonePathRead(command) {
 
 export function classifyShellCommand(command) {
   if (typeof command !== "string" || command.includes("\0")) return { kind: "process" };
-  if (/\.write_text\b|\btee\s|>>|open\([^)]*['\"]w/.test(command)) {
+  if (
+    /\.write_text\b|\btee\s|>>|open\([^)]*['\"]w/.test(command) ||
+    /\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|writeSync)\s*\(/.test(command)
+  ) {
     return { kind: "write" };
   }
   if (/(?:^|[^>])>(?!>|&)/.test(command)) {
@@ -521,7 +540,10 @@ export function encodeGrokFacadeHistory(input, nativeExec) {
 function hideNativeTools(tools, nativeExec) {
   const hide = new Set(HIDDEN_NATIVE_TOOLS);
   if (nativeExec?.nativeNamespace) hide.add(`${nativeExec.nativeNamespace}__exec_command`);
-  return tools.filter((tool) => typeof tool?.name !== "string" || !hide.has(tool.name));
+  return tools.filter((tool) => {
+    if (typeof tool?.name !== "string" || !hide.has(tool.name)) return true;
+    return tool.type === "custom";
+  });
 }
 
 export function grokEditFacadeEnabled(route, structuredPatch) {

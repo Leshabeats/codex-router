@@ -71,6 +71,7 @@ import {
   grokEditFacadeEnabled,
   nativeExecRelayTarget,
   rewriteGrokFacadeToolChoice,
+  WRITE_TOOL_NAME,
 } from "./grok-tool-facade.mjs";
 import { applyInstructionOverlay } from "./instruction-overlays.mjs";
 import { ResponsesHeartbeatTransform } from "./responses-heartbeat.mjs";
@@ -3438,7 +3439,7 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
   ) {
     routed.instructions = applyInstructionOverlay(
       typeof payload.instructions === "string" ? payload.instructions : "",
-      "grok-file-tools",
+      installedFacade.has(WRITE_TOOL_NAME) ? "grok-file-tools-write" : "grok-file-tools",
     );
   }
   applyRoutedServiceTier(routed, payload, route);

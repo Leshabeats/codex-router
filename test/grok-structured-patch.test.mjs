@@ -153,6 +153,18 @@ test("search_replace and write shapes compile to native add/update patches", () 
     () => compileStructuredPatchArguments(JSON.stringify({ path: "new.txt", contents: "hello" })),
     { code: "missing_trailing_newline" },
   );
+  assert.throws(
+    () => compileStructuredPatchArguments(JSON.stringify({
+      path: "notes.txt", old_string: "hello\n", new_string: "hello",
+    })),
+    { code: "trailing_newline_unrepresentable" },
+  );
+  assert.throws(
+    () => compileStructuredPatchArguments(JSON.stringify({
+      path: "notes.txt", old_string: "hello", new_string: "hello\n",
+    })),
+    { code: "trailing_newline_unrepresentable" },
+  );
 });
 
 test("schema only offers add/update/delete with typed lines, no raw patch escape hatch", () => {

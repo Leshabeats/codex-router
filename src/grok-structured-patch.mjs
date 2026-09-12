@@ -162,6 +162,9 @@ function searchReplaceToOperations(value) {
   const removed = splitLogicalLines(value.old_string);
   const added = splitLogicalLines(value.new_string);
   if (removed.length === 0 && added.length === 0) reject("no_change");
+  if (removed.length === added.length && removed.every((text, index) => text === added[index])) {
+    reject("trailing_newline_unrepresentable");
+  }
   return {
     operations: [{
       op: "update",

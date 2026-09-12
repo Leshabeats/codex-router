@@ -109,6 +109,40 @@ test("native exec lookup ignores missing tool lists", () => {
   assert.equal(nativeExecRelayTarget({ name: "exec_command" }), undefined);
 });
 
+test("facade binds only to ordinary function exec_command", () => {
+  const custom = { type: "custom", name: "exec_command", format: { type: "grammar", syntax: "lark", definition: "cmd" } };
+  assert.equal(nativeExecRelayTarget([custom]), undefined);
+  assert.deepEqual(
+    nativeExecRelayTarget([{ type: "function", name: "exec_command", parameters: { type: "object" } }]),
+    { nativeName: "exec_command" },
+  );
+  const namespaces = new Map([["functions", new Set(["exec_command"])]]);
+  assert.equal(
+    nativeExecRelayTarget([{ type: "custom", name: "functions__exec_command" }], namespaces),
+    undefined,
+  );
+  const flattened = flattenNamespaceTools([native, custom]);
+  const bridged = bridgeCustomTools(
+    flattened.tools,
+    [],
+    flattened.namespaces,
+    undefined,
+    undefined,
+    { codecs },
+  );
+  const tools = applyGrokEditFacade(
+    bridged.tools,
+    flattened.namespaces,
+    { slug: "grok-oauth/grok-4.6" },
+    true,
+    { patchHook: true },
+  );
+  const names = tools.map((tool) => tool.name);
+  assert.ok(names.includes("exec_command"));
+  assert.ok(!names.includes(READ_FILE_TOOL_NAME));
+  assert.ok(!names.includes(RUN_TERMINAL_COMMAND_TOOL_NAME));
+});
+
 test("facade is only offered on Grok 4.6 structured-patch turns", () => {
   assert.equal(grokEditFacadeEnabled({ slug: "grok-oauth/grok-4.6" }, true), true);
   assert.equal(grokEditFacadeEnabled({ slug: "grok-oauth/grok-4.6" }, false), false);
@@ -234,6 +268,18 @@ test("run_terminal_command canonicalizes file reads and refuses file writes", ()
   assert.equal(classifyShellCommand("printf x>main.py").kind, "write");
   assert.equal(classifyShellCommand("echo err 2>Dockerfile").kind, "write");
   assert.equal(classifyShellCommand("git status 2>&1").kind, "process");
+  assert.equal(
+    classifyShellCommand("node -e \"require('fs').writeFileSync('main.js','...')\"").kind,
+    "write",
+  );
+  assert.equal(
+    classifyShellCommand("node -e \"require('fs').promises.writeFile('main.js','...')\"").kind,
+    "write",
+  );
+  assert.equal(
+    classifyShellCommand("node -e \"require('fs').readFileSync('main.js')\"").kind,
+    "process",
+  );
   assert.equal(
     compileRunTerminalCommand(JSON.stringify({ command: "cat 'a.txt'", working_directory: "sub" })),
     compileReadFileCommand(JSON.stringify({ target_file: "a.txt" }), "sub"),

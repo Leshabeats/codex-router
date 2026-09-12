@@ -238,19 +238,27 @@ export class EarlyToolItemDoneTransform extends Transform {
       const id = event.item?.id || event.item?.call_id;
       if (id && this.#closed.has(id)) return;
       if (id) this.#closed.add(id);
-      if (this.#open && (id === this.#open.itemId || id === this.#open.callId || event.output_index === this.#open.outputIndex)) {
-        this.#open = undefined;
-      }
+      if (this.#open && this.#sameOpenIdentity(id, event.output_index)) this.#open = undefined;
       this.push(Buffer.from(original));
       return;
     }
     this.push(Buffer.from(original));
   }
 
-  #matchesOpen(event) {
+  #suppliedIdentity(id) {
+    return typeof id === "string" && id.length > 0;
+  }
+
+  #sameOpenIdentity(id, outputIndex) {
     if (!this.#open) return false;
-    const id = event.item_id;
-    return id === this.#open.itemId || id === this.#open.callId || event.output_index === this.#open.outputIndex;
+    if (this.#suppliedIdentity(id)) {
+      return id === this.#open.itemId || id === this.#open.callId;
+    }
+    return outputIndex === this.#open.outputIndex;
+  }
+
+  #matchesOpen(event) {
+    return this.#sameOpenIdentity(event.item_id, event.output_index);
   }
 
   #exceedsArgumentBound(extra = "", text) {

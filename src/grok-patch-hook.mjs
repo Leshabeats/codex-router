@@ -1,5 +1,5 @@
 import { readFileSync, realpathSync, statSync } from "node:fs";
-import { isAbsolute, relative, resolve } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import {
   compileStructuredPatchArguments,
   MAX_STRUCTURED_PATCH_BYTES,
@@ -33,7 +33,7 @@ function workspaceContainedFile(cwd, target) {
   }
   const candidate = resolve(root, target);
   const lexical = relative(root, candidate);
-  if (lexical.startsWith("..") || isAbsolute(lexical)) return undefined;
+  if (pathEscapesWorkspace(lexical)) return undefined;
   let real;
   try {
     real = realpathSync(candidate);
@@ -41,8 +41,12 @@ function workspaceContainedFile(cwd, target) {
     return undefined;
   }
   const contained = relative(root, real);
-  if (contained.startsWith("..") || isAbsolute(contained)) return undefined;
+  if (pathEscapesWorkspace(contained)) return undefined;
   return real;
+}
+
+function pathEscapesWorkspace(relativePath) {
+  return relativePath === ".." || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath);
 }
 
 // Grok subagents emit whole-file Add File for paths that already exist.

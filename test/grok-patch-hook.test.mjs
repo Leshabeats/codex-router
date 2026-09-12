@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { Readable } from "node:stream";
@@ -165,6 +165,24 @@ test("hook uniqueness reads stay inside the workspace", () => {
     } finally {
       rmSync(outside, { force: true });
     }
+  });
+});
+
+test("contained paths whose names begin with two dots stay inside the workspace", () => {
+  withTempCwd((cwd) => {
+    writeFileSync(join(cwd, "..env"), "hello\n");
+    mkdirSync(join(cwd, "..cache"));
+    writeFileSync(join(cwd, "..cache", "data"), "hello\n");
+    const envReplace = JSON.stringify({ path: "..env", old_string: "hello", new_string: "hello world" });
+    assert.equal(adaptHookInput({ ...event(envReplace), cwd }).hookSpecificOutput.permissionDecision, "allow");
+    const cacheReplace = JSON.stringify({
+      path: join("..cache", "data"), old_string: "hello", new_string: "hello world",
+    });
+    assert.equal(adaptHookInput({ ...event(cacheReplace), cwd }).hookSpecificOutput.permissionDecision, "allow");
+    const existingDot = JSON.stringify({ operations: [{ op: "add", path: "..env", lines: ["x"] }] });
+    const denied = adaptHookInput({ ...event(existingDot), cwd }).hookSpecificOutput;
+    assert.equal(denied.permissionDecision, "deny");
+    assert.equal(denied.permissionDecisionReason, "file exists; use search_replace");
   });
 });
 

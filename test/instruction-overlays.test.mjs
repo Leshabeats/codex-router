@@ -26,4 +26,9 @@ test("Grok file-tool overlay is available without replacing the catalog MCP over
   assert.match(gated, /read_file/);
   assert.match(gated, /run_terminal_command is only for processes/i);
   assert.match(gated, /Do not dump minified node_modules/i);
+  assert.doesNotMatch(gated, /Create files with write/);
+  assert.doesNotMatch(gated, /write is create-only/);
+  const withWrite = applyInstructionOverlay("Base instructions.", "grok-file-tools-write");
+  assert.match(withWrite, /Create files with write/);
+  assert.match(withWrite, /write is create-only/);
 });

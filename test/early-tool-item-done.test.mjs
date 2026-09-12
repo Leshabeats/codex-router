@@ -79,6 +79,44 @@ test("closes the first tool item when the next tool is added", async () => {
   assert.equal(seen[firstDone].item.arguments, "*** Begin");
 });
 
+test("argument events with a different item id are not attributed by output_index", async () => {
+  const body = await run([
+    block(toolAdded(0, "c1", "apply_patch")),
+    block({
+      type: "response.function_call_arguments.delta",
+      item_id: "other",
+      output_index: 0,
+      delta: "FOREIGN",
+    }),
+    block({
+      type: "response.function_call_arguments.done",
+      item_id: "other",
+      output_index: 0,
+      arguments: "FOREIGN",
+    }),
+    block(toolAdded(1, "c2", "apply_patch")),
+  ].join(""));
+  const seen = events(body);
+  const firstDone = seen.find((event) => event.type === "response.output_item.done" && event.output_index === 0);
+  assert.equal(firstDone.item.id, "c1");
+  assert.equal(firstDone.item.arguments, "");
+  assert.equal(
+    seen.find((event) => event.type === "response.function_call_arguments.done" && event.item_id === "c1").arguments,
+    "",
+  );
+});
+
+test("argument events without an id may still match the open output_index", async () => {
+  const body = await run([
+    block(toolAdded(0, "c1", "apply_patch")),
+    block({ type: "response.function_call_arguments.delta", output_index: 0, delta: "aaa" }),
+    block(toolAdded(1, "c2", "apply_patch")),
+  ].join(""));
+  const done = events(body).find((event) => event.type === "response.function_call_arguments.done");
+  assert.equal(done.item_id, "c1");
+  assert.equal(done.arguments, "aaa");
+});
+
 test("synthesized argument-done uses the item id not the call id", async () => {
   const body = await run([
     block(toolAdded(0, "fc_1", "apply_patch", "call_1")),
