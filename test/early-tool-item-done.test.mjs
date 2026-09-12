@@ -182,6 +182,32 @@ test("does not complete an open tool call on stream EOF", async () => {
   assert.equal(seen.filter((event) => event.type === "response.output_item.done").length, 0);
 });
 
+test("delayed id-less argument-done for a closed output_index is dropped", async () => {
+  const body = await run([
+    block(toolAdded(0, "c1", "apply_patch")),
+    block({ type: "response.function_call_arguments.delta", item_id: "c1", output_index: 0, delta: "aaa" }),
+    block(toolAdded(1, "c2", "apply_patch")),
+    block({ type: "response.function_call_arguments.done", output_index: 0, arguments: "aaa" }),
+  ].join(""));
+  const seen = events(body);
+  assert.equal(seen.filter((event) => event.type === "response.function_call_arguments.done").length, 1);
+  assert.equal(seen.filter((event) => event.output_index === 0 && event.type === "response.function_call_arguments.done").length, 1);
+});
+
+test("repeated SSE event fields disable rewriting", async () => {
+  const duplicate = "event: response.output_item.added\nevent: response.output_item.added\ndata: " + JSON.stringify({
+    type: "response.output_item.added",
+    output_index: 0,
+    item: { type: "function_call", id: "c1", call_id: "c1", name: "apply_patch", arguments: "", status: "in_progress" },
+  }) + "\n\n";
+  const body = await run([
+    duplicate,
+    block(toolAdded(1, "c2", "apply_patch")),
+  ].join(""));
+  const seen = events(body);
+  assert.equal(seen.filter((event) => event.type === "response.function_call_arguments.done").length, 0);
+});
+
 test("event/body type conflicts disable rewriting", async () => {
   const conflict = `event: response.output_item.added\ndata: ${JSON.stringify({
     type: "response.function_call_arguments.delta",

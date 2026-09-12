@@ -304,6 +304,47 @@ function unquotedOrPosix(token) {
   return unquotePosix(trimmed) ?? (/^[\w./@+-]+$/u.test(trimmed) ? trimmed : undefined);
 }
 
+function unquotedFileRedirect(command) {
+  let i = 0;
+  while (i < command.length) {
+    const char = command[i];
+    if (char === "\\" && i + 1 < command.length) {
+      i += 2;
+      continue;
+    }
+    if (char === "'") {
+      i += 1;
+      while (i < command.length && command[i] !== "'") i += 1;
+      i += 1;
+      continue;
+    }
+    if (char === '"') {
+      i += 1;
+      while (i < command.length && command[i] !== '"') {
+        if (command[i] === "\\") i += 1;
+        i += 1;
+      }
+      i += 1;
+      continue;
+    }
+    if (char === ">") {
+      const next = command[i + 1];
+      if (next !== "&") return true;
+    }
+    i += 1;
+  }
+  return false;
+}
+
+function pathOperand(rest) {
+  const trimmed = typeof rest === "string" ? rest.trim() : "";
+  if (!trimmed) return { none: true };
+  if (trimmed.startsWith("-- ")) return { path: trimmed.slice(3).trim() };
+  if (trimmed === "--") return { none: true };
+  if (trimmed.startsWith("-")) return { option: true };
+  return { path: trimmed };
+}
+
 function singleLineCommand(command) {
   const trimmed = command.trim();
   if (!trimmed || /[\n;&|]/.test(trimmed) || trimmed.includes("&&") || trimmed.includes("||")) {
@@ -331,7 +372,7 @@ export function classifyShellCommand(command) {
   ) {
     return { kind: "write" };
   }
-  if (/(?:^|[^>])>(?!>|&)/.test(command)) {
+  if (unquotedFileRedirect(command)) {
     return { kind: "write" };
   }
   const standalone = standalonePathRead(command);
@@ -378,20 +419,21 @@ export function classifyShellCommand(command) {
       args: { target_file, offset: Number(sed[1]), limit: Number(sed[2]) - Number(sed[1]) + 1 },
     };
   }
-  const cat = /^cat(?: --)? (.+)$/u.exec(line);
+  const cat = /^cat(?:\s+(.*))?$/u.exec(line);
   if (cat) {
-    const target_file = unquotedOrPosix(cat[1]);
+    const operand = pathOperand(cat[1]);
+    if (operand.option || operand.none) return { kind: "process" };
+    const target_file = unquotedOrPosix(operand.path);
     if (!target_file) return { kind: "process" };
     return { kind: "read_file", args: { target_file } };
   }
-  const head = /^head(?: -n (\d+))?(?: --)? (.+)$/u.exec(line);
+  const head = /^head(?:\s+(.*))?$/u.exec(line);
   if (head) {
-    const target_file = unquotedOrPosix(head[2]);
+    const operand = pathOperand(head[1]);
+    if (operand.option || operand.none) return { kind: "process" };
+    const target_file = unquotedOrPosix(operand.path);
     if (!target_file) return { kind: "process" };
-    return {
-      kind: "read_file",
-      args: { target_file, offset: 1, limit: head[1] ? Number(head[1]) : DEFAULT_READ_LIMIT },
-    };
+    return { kind: "read_file", args: { target_file, offset: 1, limit: DEFAULT_READ_LIMIT } };
   }
   const rg = /^(?:rg|grep) (?:-[nI]+\s+)?(.+)$/u.exec(line);
   if (rg && !/\snode_modules\/.*dist/.test(line)) {
@@ -416,9 +458,16 @@ export function classifyShellCommand(command) {
       if (pattern && path) return { kind: "grep", args: { pattern, path } };
     }
   }
-  const ls = /^ls(?: -la)?(?: --)?(?: (.+))?$/u.exec(line);
+  const canonicalLs = /^ls -la (.+)$/u.exec(line);
+  if (canonicalLs) {
+    const target_directory = unquotedOrPosix(canonicalLs[1]);
+    if (target_directory) return { kind: "list_dir", args: { target_directory } };
+  }
+  const ls = /^ls(?:\s+(.*))?$/u.exec(line);
   if (ls) {
-    const target_directory = ls[1] ? unquotedOrPosix(ls[1]) : ".";
+    const operand = pathOperand(ls[1]);
+    if (operand.option) return { kind: "process" };
+    const target_directory = operand.path ? unquotedOrPosix(operand.path) : ".";
     if (!target_directory) return { kind: "process" };
     return { kind: "list_dir", args: { target_directory } };
   }
@@ -504,14 +553,18 @@ function isNativeExecHistory(item, nativeExec) {
   return item.namespace === undefined && item.name === target.nativeName;
 }
 
-export function encodeGrokFacadeHistory(input, nativeExec) {
+function facadeAliasOffered(name, installed) {
+  return !(installed instanceof Set) || installed.has(name);
+}
+
+export function encodeGrokFacadeHistory(input, nativeExec, installed) {
   if (!Array.isArray(input)) return input;
   let changed = false;
   const routed = input.map((item) => {
     if (item?.type !== "function_call" || typeof item.name !== "string") return item;
     if (isNativeExecHistory(item, nativeExec)) {
       const encoded = encodeExecCommandHistory(item.arguments);
-      if (!encoded) return item;
+      if (!encoded || !facadeAliasOffered(encoded.name, installed)) return item;
       changed = true;
       const { name: _name, arguments: _arguments, ...rest } = item;
       return { ...rest, name: encoded.name, arguments: encoded.arguments };
@@ -520,15 +573,17 @@ export function encodeGrokFacadeHistory(input, nativeExec) {
       const value = parseFacadeObject(item.arguments);
       if (!value) return item;
       if (Object.hasOwn(value, "old_string") || Object.hasOwn(value, "contents") || Object.hasOwn(value, "operations")) {
+        const name = Object.hasOwn(value, "contents") ? WRITE_TOOL_NAME : SEARCH_REPLACE_TOOL_NAME;
+        if (!facadeAliasOffered(name, installed)) return item;
         changed = true;
         const { name: _name, ...rest } = item;
-        const name = Object.hasOwn(value, "contents") ? WRITE_TOOL_NAME : SEARCH_REPLACE_TOOL_NAME;
         return { ...rest, name, arguments: item.arguments };
       }
       if (typeof value.input === "string" && value.input.includes("*** Begin Patch")) {
+        const name = value.input.includes("*** Add File:") ? WRITE_TOOL_NAME : SEARCH_REPLACE_TOOL_NAME;
+        if (!facadeAliasOffered(name, installed)) return item;
         changed = true;
         const { name: _name, ...rest } = item;
-        const name = value.input.includes("*** Add File:") ? WRITE_TOOL_NAME : SEARCH_REPLACE_TOOL_NAME;
         return { ...rest, name, arguments: item.arguments };
       }
     }

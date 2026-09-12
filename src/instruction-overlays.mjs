@@ -1,9 +1,47 @@
+function englishList(items) {
+  if (items.length === 1) return items[0];
+  if (items.length === 2) return `${items[0]} and ${items[1]}`;
+  return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`;
+}
+
 function grokFileToolsOverlay(includeWrite) {
-  return `## Workspace files
-- Read local files with read_file, grep, and list_dir. Edit existing files with search_replace.${includeWrite ? " Create files with write." : ""}
-- Existing files: search_replace hunks, not whole-file rewrites${includeWrite ? "; write is create-only" : ""}.
-- run_terminal_command is only for processes such as git, tests, and installs. Do not read or write workspace files through the shell.
-- Do not dump minified node_modules or package dist to understand a local adapter. Read the workspace adapter and its tests first.`;
+  return grokFileToolsOverlayFor(new Set([
+    "read_file",
+    "grep",
+    "list_dir",
+    "search_replace",
+    "run_terminal_command",
+    ...(includeWrite ? ["write"] : []),
+  ]));
+}
+
+export function grokFileToolsOverlayFor(installed) {
+  const names = installed instanceof Set ? installed : new Set();
+  const readers = ["read_file", "grep", "list_dir"].filter((name) => names.has(name));
+  const hasSearch = names.has("search_replace");
+  const hasWrite = names.has("write");
+  const hasRun = names.has("run_terminal_command");
+  if (!hasSearch && !hasWrite && readers.length === 0 && !hasRun) return "";
+  const lines = ["## Workspace files"];
+  const lead = [];
+  if (readers.length) lead.push(`Read local files with ${englishList(readers)}.`);
+  if (hasSearch) lead.push("Edit existing files with search_replace.");
+  if (hasWrite) lead.push("Create files with write.");
+  if (lead.length) lines.push(`- ${lead.join(" ")}`);
+  if (hasSearch) {
+    lines.push(`- Existing files: search_replace hunks, not whole-file rewrites${hasWrite ? "; write is create-only" : ""}.`);
+  }
+  if (hasRun) {
+    lines.push("- run_terminal_command is only for processes such as git, tests, and installs. Do not read or write workspace files through the shell.");
+  }
+  lines.push("- Do not dump minified node_modules or package dist to understand a local adapter. Read the workspace adapter and its tests first.");
+  return lines.join("\n");
+}
+
+export function applyGrokFileToolsOverlay(text, installed) {
+  const overlay = grokFileToolsOverlayFor(installed);
+  if (!overlay || typeof text !== "string") return text;
+  return `${text}\n\n${overlay}`;
 }
 
 const GROK_FILE_TOOLS_OVERLAY = grokFileToolsOverlay(false);

@@ -30,9 +30,14 @@ function findFrameEnd(buffer) {
 
 function parseBlock(block) {
   let eventName;
+  let eventFields = 0;
   const dataLines = [];
   for (const line of block.split(/\r?\n/)) {
-    if (line.startsWith("event:")) eventName = line.slice(6).trim();
+    if (line.startsWith("event:")) {
+      eventFields += 1;
+      if (eventFields > 1) return { conflict: true };
+      eventName = line.slice(6).trim();
+    }
     if (line.startsWith("data:")) {
       const value = line.slice(5);
       dataLines.push(value.startsWith(" ") ? value.slice(1) : value);
@@ -74,6 +79,7 @@ export class EarlyToolItemDoneTransform extends Transform {
   #length = 0;
   #open;
   #closed = new Set();
+  #closedIndexes = new Set();
   #newline = "\n";
   #passthrough = false;
 
@@ -211,6 +217,7 @@ export class EarlyToolItemDoneTransform extends Transform {
     if (ARG_DONE_TYPES.has(type)) {
       const id = event.item_id;
       if (id && this.#closed.has(id)) return;
+      if (!this.#suppliedIdentity(id) && this.#closedIndexes.has(event.output_index)) return;
       if (this.#matchesOpen(event)) {
         const nextArguments = typeof event.arguments === "string" ? event.arguments : this.#open.arguments;
         let nextInput = typeof event.input === "string" ? event.input : this.#open.input;
@@ -237,7 +244,9 @@ export class EarlyToolItemDoneTransform extends Transform {
     if (type === "response.output_item.done") {
       const id = event.item?.id || event.item?.call_id;
       if (id && this.#closed.has(id)) return;
+      if (!this.#suppliedIdentity(id) && this.#closedIndexes.has(event.output_index)) return;
       if (id) this.#closed.add(id);
+      if (typeof event.output_index === "number") this.#closedIndexes.add(event.output_index);
       if (this.#open && this.#sameOpenIdentity(id, event.output_index)) this.#open = undefined;
       this.push(Buffer.from(original));
       return;
@@ -275,13 +284,19 @@ export class EarlyToolItemDoneTransform extends Transform {
 
   #closeOpen() {
     const open = this.#open;
-    if (!open || (open.itemId && this.#closed.has(open.itemId)) || (open.callId && this.#closed.has(open.callId))) {
+    if (
+      !open ||
+      (open.itemId && this.#closed.has(open.itemId)) ||
+      (open.callId && this.#closed.has(open.callId)) ||
+      (typeof open.outputIndex === "number" && this.#closedIndexes.has(open.outputIndex))
+    ) {
       this.#open = undefined;
       return;
     }
     const lifecycleId = open.itemId || open.callId;
     if (lifecycleId) this.#closed.add(lifecycleId);
     if (open.callId) this.#closed.add(open.callId);
+    if (typeof open.outputIndex === "number") this.#closedIndexes.add(open.outputIndex);
     const customInput = unwrapCustomInput(open.input);
     const item = {
       ...open.item,

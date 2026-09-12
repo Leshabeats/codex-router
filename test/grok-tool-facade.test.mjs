@@ -268,6 +268,16 @@ test("run_terminal_command canonicalizes file reads and refuses file writes", ()
   assert.equal(classifyShellCommand("printf x>main.py").kind, "write");
   assert.equal(classifyShellCommand("echo err 2>Dockerfile").kind, "write");
   assert.equal(classifyShellCommand("git status 2>&1").kind, "process");
+  assert.equal(classifyShellCommand("git log --pretty='format:%h > %s'").kind, "process");
+  assert.equal(classifyShellCommand("printf '%s\\n' 'a>b'").kind, "process");
+  assert.equal(classifyShellCommand("cat --help").kind, "process");
+  assert.equal(classifyShellCommand("head --help").kind, "process");
+  assert.equal(classifyShellCommand("ls --help").kind, "process");
+  assert.equal(classifyShellCommand("cat -- --help").kind, "read_file");
+  assert.equal(
+    compileRunTerminalCommand(JSON.stringify({ command: "cat --help" })),
+    JSON.stringify({ cmd: "cat --help" }),
+  );
   assert.equal(
     classifyShellCommand("node -e \"require('fs').writeFileSync('main.js','...')\"").kind,
     "write",
@@ -336,6 +346,17 @@ test("legacy apply_patch history and forced native choices keep façade identiti
   assert.equal(unrelated[1].name, "mcp__x__apply_patch");
   assert.equal(unrelated[2].name, "apply_patch");
   assert.equal(unrelated[2].namespace, "mcp");
+  const colliding = encodeGrokFacadeHistory([
+    {
+      type: "function_call",
+      call_id: "10",
+      name: "apply_patch",
+      arguments: JSON.stringify({
+        input: "*** Begin Patch\n*** Update File: a.js\n@@\n-a\n+b\n*** End Patch",
+      }),
+    },
+  ], { nativeName: "exec_command" }, new Set());
+  assert.equal(colliding[0].name, "apply_patch");
   assert.deepEqual(
     rewriteGrokFacadeToolChoice({ type: "function", name: "apply_patch" }, new Set()),
     { type: "function", name: "apply_patch" },

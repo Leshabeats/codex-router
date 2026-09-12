@@ -71,9 +71,8 @@ import {
   grokEditFacadeEnabled,
   nativeExecRelayTarget,
   rewriteGrokFacadeToolChoice,
-  WRITE_TOOL_NAME,
 } from "./grok-tool-facade.mjs";
-import { applyInstructionOverlay } from "./instruction-overlays.mjs";
+import { applyGrokFileToolsOverlay } from "./instruction-overlays.mjs";
 import { ResponsesHeartbeatTransform } from "./responses-heartbeat.mjs";
 import { translatedToolMessageCompatTransform } from "./deepseek-tool-message-compat.mjs";
 import {
@@ -3346,7 +3345,7 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
         patchHook,
         installed: installedFacade,
       });
-      routedInput = encodeGrokFacadeHistory(routedInput, nativeExec);
+      routedInput = encodeGrokFacadeHistory(routedInput, nativeExec, installedFacade);
       routedToolChoice = rewriteGrokFacadeToolChoice(routedToolChoice, installedFacade);
       facadeNameCollision = GROK_FACADE_TOOL_NAMES.some((name) => incomingFacadeNames.has(name));
     }
@@ -3437,9 +3436,9 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
     installedFacade.size > 0 &&
     !facadeNameCollision
   ) {
-    routed.instructions = applyInstructionOverlay(
+    routed.instructions = applyGrokFileToolsOverlay(
       typeof payload.instructions === "string" ? payload.instructions : "",
-      installedFacade.has(WRITE_TOOL_NAME) ? "grok-file-tools-write" : "grok-file-tools",
+      installedFacade,
     );
   }
   applyRoutedServiceTier(routed, payload, route);
