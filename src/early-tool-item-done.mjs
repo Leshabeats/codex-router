@@ -6,9 +6,8 @@ import { Transform } from "node:stream";
 // in one Grok turn appear in the same millisecond. This transform closes the
 // previous tool item as soon as the next output_item.added arrives.
 
-const LF_SEP = Buffer.from("\n\n");
-const CRLF_SEP = Buffer.from("\r\n\r\n");
-const CR_SEP = Buffer.from("\r\r");
+const LF = 10;
+const CR = 13;
 const TOOL_TYPES = new Set(["function_call", "custom_tool_call"]);
 const TERMINAL_TYPES = new Set(["response.completed", "response.done"]);
 const ARG_DELTA_TYPES = new Set([
@@ -21,17 +20,22 @@ const ARG_DONE_TYPES = new Set([
 ]);
 export const MAX_SSE_FRAME_BYTES = 8 * 1024 * 1024;
 
+function newlineLength(buffer, index) {
+  if (index >= buffer.length) return 0;
+  if (buffer[index] === CR && buffer[index + 1] === LF) return 2;
+  if (buffer[index] === CR || buffer[index] === LF) return 1;
+  return 0;
+}
+
 function findFrameEnd(buffer) {
-  const candidates = [];
-  const crlf = buffer.indexOf(CRLF_SEP);
-  const lf = buffer.indexOf(LF_SEP);
-  const cr = buffer.indexOf(CR_SEP);
-  if (crlf !== -1) candidates.push({ index: crlf, separator: CRLF_SEP });
-  if (lf !== -1) candidates.push({ index: lf, separator: LF_SEP });
-  if (cr !== -1) candidates.push({ index: cr, separator: CR_SEP });
-  if (!candidates.length) return undefined;
-  candidates.sort((left, right) => left.index - right.index || right.separator.length - left.separator.length);
-  return candidates[0];
+  for (let index = 0; index < buffer.length; index += 1) {
+    const first = newlineLength(buffer, index);
+    if (!first) continue;
+    const second = newlineLength(buffer, index + first);
+    if (!second) continue;
+    return { index, separator: Buffer.from(buffer.subarray(index, index + first + second)) };
+  }
+  return undefined;
 }
 
 function parseBlock(block) {
@@ -172,8 +176,9 @@ export class EarlyToolItemDoneTransform extends Transform {
       return;
     }
     const text = original.subarray(0, Math.max(0, original.length - separator.length)).toString("utf8");
-    if (separator.equals(CRLF_SEP)) this.#newline = "\r\n";
-    else if (separator.equals(CR_SEP)) this.#newline = "\r";
+    const firstNewline = newlineLength(separator, 0);
+    if (firstNewline === 2) this.#newline = "\r\n";
+    else if (separator[0] === CR) this.#newline = "\r";
     else this.#newline = "\n";
     const parsed = parseBlock(text);
     if (!parsed || parsed.terminal || parsed.conflict) {

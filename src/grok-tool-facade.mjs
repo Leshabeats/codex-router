@@ -229,9 +229,13 @@ const RUN_TERMINAL_COMMAND_PARAMETERS = objectSchema({
 }, ["command"]);
 
 function isOrdinaryExecFunction(tool) {
-  return tool?.type === "function" && (tool.parameters === undefined || (
-    tool.parameters && typeof tool.parameters === "object" && !Array.isArray(tool.parameters)
-  ));
+  if (tool?.type !== "function") return false;
+  const params = tool.parameters;
+  if (!params || typeof params !== "object" || Array.isArray(params)) return false;
+  const properties = params.properties;
+  if (!properties || typeof properties !== "object" || Array.isArray(properties)) return false;
+  const cmd = properties.cmd ?? properties.command;
+  return Boolean(cmd && (cmd.type === undefined || cmd.type === "string"));
 }
 
 function ordinaryExecNamed(tool, name, namespace) {
@@ -330,8 +334,8 @@ function unquotedFileRedirect(command) {
       continue;
     }
     if (char === ">") {
-      const next = command[i + 1];
-      if (next !== "&") return true;
+      const after = command.slice(i + 1);
+      if (after.startsWith(">") || !/^&(?:[0-9]|-)/.test(after)) return true;
     }
     i += 1;
   }

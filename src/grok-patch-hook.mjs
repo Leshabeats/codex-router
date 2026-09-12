@@ -1,5 +1,5 @@
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync } from "node:fs";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   compileStructuredPatchArguments,
   MAX_STRUCTURED_PATCH_BYTES,
@@ -13,6 +13,7 @@ export const MAX_GROK_PATCH_HOOK_INPUT_BYTES = MAX_STRUCTURED_PATCH_BYTES * 8;
 
 const ADD_FILE_HEADER = "*** Add File:";
 const ADD_FILE_EXISTS_REASON = "file exists; use search_replace";
+const PATH_OUTSIDE_REASON = "path is outside the workspace";
 const OLD_STRING_NOT_FOUND_REASON = "old_string not found";
 const OLD_STRING_NOT_UNIQUE_REASON = "old_string is not unique; narrow the match";
 const OLD_STRING_FILE_TOO_LARGE_REASON = "file too large to verify unique match";
@@ -22,29 +23,37 @@ function patchWorkingDirectory(event) {
   return typeof cwd === "string" && cwd.length > 0 ? cwd : process.cwd();
 }
 
-function workspaceCandidate(cwd, target) {
-  if (typeof cwd !== "string" || typeof target !== "string" || !cwd || !target) return undefined;
-  if (cwd.includes("\0") || target.includes("\0")) return undefined;
+function inspectWorkspacePath(cwd, target) {
+  if (typeof cwd !== "string" || typeof target !== "string" || !cwd || !target) return "outside";
+  if (cwd.includes("\0") || target.includes("\0")) return "outside";
   let root;
   try {
     root = realpathSync(cwd);
   } catch {
-    return undefined;
+    return "outside";
   }
   const candidate = resolve(root, target);
-  if (pathEscapesWorkspace(relative(root, candidate))) return undefined;
-  return candidate;
+  if (pathEscapesWorkspace(relative(root, candidate))) return "outside";
+  const relativePath = relative(root, candidate);
+  const parts = relativePath === "" ? [] : relativePath.split(sep);
+  let current = root;
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index];
+    if (!part || part === ".") continue;
+    current = join(current, part);
+    let info;
+    try {
+      info = lstatSync(current);
+    } catch {
+      return index === parts.length - 1 ? "missing" : "outside";
+    }
+    if (info.isSymbolicLink()) return "outside";
+  }
+  return "exists";
 }
 
-function workspacePathExists(cwd, target) {
-  const candidate = workspaceCandidate(cwd, target);
-  if (!candidate) return false;
-  try {
-    lstatSync(candidate);
-    return true;
-  } catch {
-    return false;
-  }
+function workspaceCandidate(cwd, target) {
+  return inspectWorkspacePath(cwd, target) === "exists" ? resolve(realpathSync(cwd), target) : undefined;
 }
 
 function readWorkspaceFile(cwd, target) {
@@ -87,19 +96,17 @@ function pathEscapesWorkspace(relativePath) {
 
 // Grok subagents emit whole-file Add File for paths that already exist.
 // Router compile cannot see the worktree; this client hook can existsSync.
-function addFileTargetExists(patch, event) {
+function addFileTargetProblem(patch, event) {
   const cwd = patchWorkingDirectory(event);
   for (const rawLine of patch.split("\n")) {
     const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
     if (!line.startsWith(ADD_FILE_HEADER)) continue;
     const target = line.slice(ADD_FILE_HEADER.length).trim();
-    if (workspacePathExists(cwd, target)) return true;
+    const status = inspectWorkspacePath(cwd, target);
+    if (status === "outside") return PATH_OUTSIDE_REASON;
+    if (status === "exists") return ADD_FILE_EXISTS_REASON;
   }
-  return false;
-}
-
-function denyExistingAddFile() {
-  return deny(ADD_FILE_EXISTS_REASON);
+  return undefined;
 }
 
 function deny(reason) {
@@ -161,7 +168,8 @@ export function adaptHookInput(event) {
       const matchProblem = searchReplaceMatchProblem(raw, event);
       if (matchProblem) return deny(matchProblem);
       const patch = compileStructuredPatchArguments(raw);
-      if (addFileTargetExists(patch, event)) return denyExistingAddFile();
+      const addProblem = addFileTargetProblem(patch, event);
+      if (addProblem) return deny(addProblem);
       return { hookSpecificOutput: {
         hookEventName: "PreToolUse",
         permissionDecision: "allow",
@@ -180,7 +188,8 @@ export function adaptHookInput(event) {
       } };
     }
   }
-  if (addFileTargetExists(command, event)) return denyExistingAddFile();
+  const addProblem = addFileTargetProblem(command, event);
+  if (addProblem) return deny(addProblem);
   return {};
 }
 

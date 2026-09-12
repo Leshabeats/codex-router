@@ -194,6 +194,17 @@ test("delayed id-less argument-done for a closed output_index is dropped", async
   assert.equal(seen.filter((event) => event.output_index === 0 && event.type === "response.function_call_arguments.done").length, 1);
 });
 
+test("mixed SSE blank lines still close the previous tool", async () => {
+  const mixed = (event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\r\n`;
+  const body = await run([
+    mixed(toolAdded(0, "c1", "apply_patch")),
+    mixed({ type: "response.function_call_arguments.delta", item_id: "c1", output_index: 0, delta: "aaa" }),
+    mixed(toolAdded(1, "c2", "apply_patch")),
+  ].join(""));
+  const seen = events(body.replace(/\r\n/g, "\n"));
+  assert.ok(seen.some((event) => event.type === "response.output_item.done" && event.output_index === 0));
+});
+
 test("bare CR SSE frames still close the previous tool", async () => {
   const crBlock = (event) => `event: ${event.type}\rdata: ${JSON.stringify(event)}\r\r`;
   const body = await run([

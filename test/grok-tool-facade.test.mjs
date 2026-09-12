@@ -41,7 +41,11 @@ const native = {
   format: { type: "grammar", syntax: "lark", definition: "native grammar unchanged" },
 };
 const codecs = new Map([["apply_patch", GROK_STRUCTURED_PATCH_CODEC]]);
-const execTool = { type: "function", name: "exec_command", parameters: { type: "object" } };
+const execParams = {
+  type: "object",
+  properties: { cmd: { type: "string" }, workdir: { type: "string" } },
+};
+const execTool = { type: "function", name: "exec_command", parameters: execParams };
 const replaceArgs = JSON.stringify({
   path: "notes.txt",
   old_string: "hello",
@@ -113,8 +117,12 @@ test("facade binds only to ordinary function exec_command", () => {
   const custom = { type: "custom", name: "exec_command", format: { type: "grammar", syntax: "lark", definition: "cmd" } };
   assert.equal(nativeExecRelayTarget([custom]), undefined);
   assert.deepEqual(
-    nativeExecRelayTarget([{ type: "function", name: "exec_command", parameters: { type: "object" } }]),
+    nativeExecRelayTarget([{ type: "function", name: "exec_command", parameters: execParams }]),
     { nativeName: "exec_command" },
+  );
+  assert.equal(
+    nativeExecRelayTarget([{ type: "function", name: "exec_command", parameters: { type: "object" } }]),
+    undefined,
   );
   const namespaces = new Map([["functions", new Set(["exec_command"])]]);
   assert.equal(
@@ -268,6 +276,7 @@ test("run_terminal_command canonicalizes file reads and refuses file writes", ()
   assert.equal(classifyShellCommand("printf x>main.py").kind, "write");
   assert.equal(classifyShellCommand("echo err 2>Dockerfile").kind, "write");
   assert.equal(classifyShellCommand("git status 2>&1").kind, "process");
+  assert.equal(classifyShellCommand("printf owned >&main.js").kind, "write");
   assert.equal(classifyShellCommand("git log --pretty='format:%h > %s'").kind, "process");
   assert.equal(classifyShellCommand("printf '%s\\n' 'a>b'").kind, "process");
   assert.equal(classifyShellCommand("cat --help").kind, "process");
@@ -411,7 +420,7 @@ test("namespaced exec_command restores to namespace/name not the flattened spell
   const namespaced = {
     type: "namespace",
     name: "functions",
-    tools: [{ type: "function", name: "exec_command", parameters: { type: "object" } }],
+    tools: [{ type: "function", name: "exec_command", parameters: execParams }],
   };
   const flattened = flattenNamespaceTools([native, namespaced]);
   const bridged = bridgeCustomTools(
