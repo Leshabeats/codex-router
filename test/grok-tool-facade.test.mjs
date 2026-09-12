@@ -124,6 +124,14 @@ test("facade binds only to ordinary function exec_command", () => {
     nativeExecRelayTarget([{ type: "function", name: "exec_command", parameters: { type: "object" } }]),
     undefined,
   );
+  assert.equal(
+    nativeExecRelayTarget([{
+      type: "function",
+      name: "exec_command",
+      parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"], additionalProperties: false },
+    }]),
+    undefined,
+  );
   const namespaces = new Map([["functions", new Set(["exec_command"])]]);
   assert.equal(
     nativeExecRelayTarget([{ type: "custom", name: "functions__exec_command" }], namespaces),
@@ -278,6 +286,8 @@ test("run_terminal_command canonicalizes file reads and refuses file writes", ()
   assert.equal(classifyShellCommand("git status 2>&1").kind, "process");
   assert.equal(classifyShellCommand("printf owned >&main.js").kind, "write");
   assert.equal(classifyShellCommand("git log --pretty='format:%h > %s'").kind, "process");
+  assert.equal(classifyShellCommand("git log --pretty='format:%h >> %s'").kind, "process");
+  assert.equal(classifyShellCommand("sed -i 's/old/new/' file").kind, "write");
   assert.equal(classifyShellCommand("printf '%s\\n' 'a>b'").kind, "process");
   assert.equal(classifyShellCommand("cat --help").kind, "process");
   assert.equal(classifyShellCommand("head --help").kind, "process");
@@ -372,6 +382,17 @@ test("legacy apply_patch history and forced native choices keep façade identiti
   assert.equal(unrelated[1].name, "mcp__x__apply_patch");
   assert.equal(unrelated[2].name, "apply_patch");
   assert.equal(unrelated[2].namespace, "mcp");
+  const namespacedExec = encodeGrokFacadeHistory([
+    {
+      type: "function_call",
+      call_id: "ns-exec",
+      namespace: "functions",
+      name: "exec_command",
+      arguments: JSON.stringify({ cmd: "yarn test" }),
+    },
+  ], { nativeName: "exec_command", nativeNamespace: "functions" });
+  assert.equal(namespacedExec[0].name, RUN_TERMINAL_COMMAND_TOOL_NAME);
+  assert.equal(namespacedExec[0].namespace, undefined);
   const colliding = encodeGrokFacadeHistory([
     {
       type: "function_call",

@@ -49,6 +49,7 @@ function parseBlock(block) {
       eventName = line.slice(6).trim();
     }
     if (line.startsWith("data:")) {
+      if (dataLines.length) return { conflict: true };
       const value = line.slice(5);
       dataLines.push(value.startsWith(" ") ? value.slice(1) : value);
     }

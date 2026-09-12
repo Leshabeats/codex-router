@@ -216,6 +216,16 @@ test("bare CR SSE frames still close the previous tool", async () => {
   assert.ok(seen.some((event) => event.type === "response.output_item.done" && event.output_index === 0));
 });
 
+test("repeated SSE data fields disable rewriting", async () => {
+  const duplicate = "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\"}\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"c1\",\"call_id\":\"c1\",\"name\":\"apply_patch\",\"arguments\":\"\",\"status\":\"in_progress\"}}\n\n";
+  const body = await run([
+    duplicate,
+    block(toolAdded(1, "c2", "apply_patch")),
+  ].join(""));
+  const seen = events(body);
+  assert.equal(seen.filter((event) => event.type === "response.function_call_arguments.done").length, 0);
+});
+
 test("repeated SSE event fields disable rewriting", async () => {
   const duplicate = "event: response.output_item.added\nevent: response.output_item.added\ndata: " + JSON.stringify({
     type: "response.output_item.added",

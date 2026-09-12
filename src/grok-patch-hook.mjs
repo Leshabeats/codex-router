@@ -45,27 +45,70 @@ function inspectWorkspacePath(cwd, target) {
     try {
       info = lstatSync(current);
     } catch {
-      return index === parts.length - 1 ? "missing" : "outside";
+      return "missing";
     }
     if (info.isSymbolicLink()) return "outside";
   }
   return "exists";
 }
 
-function workspaceCandidate(cwd, target) {
-  return inspectWorkspacePath(cwd, target) === "exists" ? resolve(realpathSync(cwd), target) : undefined;
+function openRelative(dirFd, name, flags) {
+  if (typeof name !== "string" || !name || name === "." || name === ".." || /[\\/\0]/.test(name)) {
+    throw new Error("invalid path component");
+  }
+  if (process.platform === "linux") {
+    return openSync(`/proc/self/fd/${dirFd}/${name}`, flags);
+  }
+  const dirPath = realpathSync(`/dev/fd/${dirFd}`);
+  return openSync(join(dirPath, name), flags);
+}
+
+function openWorkspaceFile(cwd, target) {
+  if (inspectWorkspacePath(cwd, target) !== "exists") return undefined;
+  let root;
+  try {
+    root = realpathSync(cwd);
+  } catch {
+    return undefined;
+  }
+  const candidate = resolve(root, target);
+  if (process.platform !== "linux") {
+    try {
+      return openSync(candidate, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+    } catch {
+      return undefined;
+    }
+  }
+  const parts = relative(root, candidate).split(sep).filter((part) => part && part !== ".");
+  let fd;
+  try {
+    fd = openSync(root, constants.O_RDONLY | (constants.O_DIRECTORY || 0));
+    for (let index = 0; index < parts.length; index += 1) {
+      const last = index === parts.length - 1;
+      const flags = last
+        ? constants.O_RDONLY | (constants.O_NOFOLLOW || 0)
+        : constants.O_RDONLY | (constants.O_DIRECTORY || 0) | (constants.O_NOFOLLOW || 0);
+      const next = openRelative(fd, parts[index], flags);
+      closeSync(fd);
+      fd = next;
+    }
+    return fd;
+  } catch {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // already closed
+      }
+    }
+    return undefined;
+  }
 }
 
 function readWorkspaceFile(cwd, target) {
-  const candidate = workspaceCandidate(cwd, target);
-  if (!candidate) return undefined;
-  let fd;
+  const fd = openWorkspaceFile(cwd, target);
+  if (fd === undefined) return undefined;
   try {
-    const flags = constants.O_RDONLY | (constants.O_NOFOLLOW || 0);
-    if (!constants.O_NOFOLLOW) {
-      if (lstatSync(candidate).isSymbolicLink()) return undefined;
-    }
-    fd = openSync(candidate, flags);
     const info = fstatSync(fd);
     if (!info.isFile()) return undefined;
     if (info.size > MAX_STRUCTURED_PATCH_BYTES) return { tooLarge: true };

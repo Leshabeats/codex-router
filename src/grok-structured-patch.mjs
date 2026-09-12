@@ -164,11 +164,7 @@ export function compileWriteArguments(argumentsText) {
 }
 
 function searchReplaceToOperations(value) {
-  object(value, ["path", "old_string", "new_string"], ["replace_all"]);
-  if (Object.hasOwn(value, "replace_all") && typeof value.replace_all !== "boolean") {
-    reject("boolean_required");
-  }
-  if (value.replace_all === true) reject("replace_all_unsupported");
+  object(value, ["path", "old_string", "new_string"]);
   if (typeof value.old_string !== "string" || value.old_string.length === 0) reject("empty_old_string");
   if (value.old_string === value.new_string) reject("no_change");
   const removed = splitLogicalLines(value.old_string);

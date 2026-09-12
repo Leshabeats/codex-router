@@ -38,7 +38,6 @@ export const SEARCH_REPLACE_PARAMETERS = objectSchema({
   path: pathSchema,
   old_string: { ...bodySchema, minLength: 1 },
   new_string: bodySchema,
-  replace_all: { type: "boolean" },
 }, ["path", "old_string", "new_string"]);
 
 export const WRITE_PARAMETERS = objectSchema({
@@ -234,7 +233,7 @@ function isOrdinaryExecFunction(tool) {
   if (!params || typeof params !== "object" || Array.isArray(params)) return false;
   const properties = params.properties;
   if (!properties || typeof properties !== "object" || Array.isArray(properties)) return false;
-  const cmd = properties.cmd ?? properties.command;
+  const cmd = properties.cmd;
   return Boolean(cmd && (cmd.type === undefined || cmd.type === "string"));
 }
 
@@ -404,9 +403,10 @@ function standalonePathRead(command) {
 export function classifyShellCommand(command) {
   if (typeof command !== "string" || command.includes("\0")) return { kind: "process" };
   if (
-    /\.write_text\b|\btee\s|>>|open\([^)]*['\"]w/.test(command) ||
+    /\.write_text\b|\btee\s|open\([^)]*['\"]w/.test(command) ||
     /\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|writeSync)\s*\(/.test(command) ||
-    /\b(?:Set-Content|Add-Content|Out-File|Set-Item|Clear-Content)\b/i.test(command)
+    /\b(?:Set-Content|Add-Content|Out-File|Set-Item|Clear-Content)\b/i.test(command) ||
+    /\bsed\b[^\n;|&]*\s(?:-i\b|--in-place\b)/.test(command)
   ) {
     return { kind: "write" };
   }
@@ -600,7 +600,7 @@ export function encodeGrokFacadeHistory(input, nativeExec, installed) {
       const encoded = encodeExecCommandHistory(item.arguments);
       if (!encoded || !facadeAliasOffered(encoded.name, installed)) return item;
       changed = true;
-      const { name: _name, arguments: _arguments, ...rest } = item;
+      const { name: _name, arguments: _arguments, namespace: _namespace, ...rest } = item;
       return { ...rest, name: encoded.name, arguments: encoded.arguments };
     }
     if (item.namespace === undefined && item.name === "apply_patch") {
@@ -610,7 +610,7 @@ export function encodeGrokFacadeHistory(input, nativeExec, installed) {
         const name = Object.hasOwn(value, "contents") ? WRITE_TOOL_NAME : SEARCH_REPLACE_TOOL_NAME;
         if (!facadeAliasOffered(name, installed)) return item;
         changed = true;
-        const { name: _name, ...rest } = item;
+        const { name: _name, namespace: _namespace, ...rest } = item;
         return { ...rest, name, arguments: item.arguments };
       }
       if (typeof value.input === "string" && value.input.includes("*** Begin Patch")) {

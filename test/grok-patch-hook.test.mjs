@@ -144,6 +144,14 @@ test("search_replace, write, and operations-as-string payloads compile through t
   assert.equal(adaptHookInput(event(nested)).hookSpecificOutput.updatedInput.command, patch);
 });
 
+test("Add File into a missing nested workspace directory is allowed", () => {
+  withTempCwd((cwd) => {
+    const written = JSON.stringify({ path: "newdir/file.txt", contents: "x\n" });
+    const output = adaptHookInput({ ...event(written), cwd }).hookSpecificOutput;
+    assert.equal(output.permissionDecision, "allow");
+  });
+});
+
 test("Add File outside the workspace is denied rather than treated as absent", () => {
   withTempCwd((cwd) => {
     const written = JSON.stringify({ path: "../outside-created.txt", contents: "x\n" });

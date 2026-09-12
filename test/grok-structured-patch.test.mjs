@@ -130,7 +130,7 @@ test("search_replace rejects replace_all and invalid duplicate updates", () => {
     () => compileStructuredPatchArguments(JSON.stringify({
       path: "x", old_string: "a", new_string: "b", replace_all: true,
     })),
-    { code: "replace_all_unsupported" },
+    { code: "unknown_field" },
   );
   const valid = update([removeLine("a"), addLine("b")]);
   const invalid = { op: "update", path: "notes.txt", hunks: "nope" };
