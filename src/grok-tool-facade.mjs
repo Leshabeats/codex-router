@@ -43,7 +43,7 @@ export const SEARCH_REPLACE_PARAMETERS = objectSchema({
 
 export const WRITE_PARAMETERS = objectSchema({
   path: pathSchema,
-  contents: bodySchema,
+  contents: { ...bodySchema, pattern: "^(?:|[\\s\\S]*\\n)$" },
 }, ["path", "contents"]);
 
 const facadeCodec = {
@@ -71,6 +71,7 @@ export const WRITE_CODEC = {
   description() {
     return [
       "Create a new file with the given contents.",
+      "contents must be empty or end with a newline.",
       "Fails if the path already exists; change existing files with search_replace.",
     ].join(" ");
   },
@@ -430,10 +431,15 @@ function unquotedCommandText(command) {
       continue;
     }
     if (char === "'") {
+      const keep = /(?:^|[\s;|&])-(?:c|e)\s*$/.test(out);
       index += 1;
-      while (index < command.length && command[index] !== "'") index += 1;
+      let inner = "";
+      while (index < command.length && command[index] !== "'") {
+        inner += command[index];
+        index += 1;
+      }
       index += 1;
-      out += " ";
+      out += keep ? ` ${inner} ` : " ";
       continue;
     }
     out += char;
@@ -667,7 +673,7 @@ export function encodeGrokFacadeHistory(input, nativeExec, installed) {
 }
 
 function hideNativeTools(tools, nativeExec, installed, existing) {
-  const hide = new Set(["shell_command"]);
+  const hide = new Set();
   const readCollided = existing instanceof Set && (
     existing.has(READ_FILE_TOOL_NAME) || existing.has(GREP_TOOL_NAME) || existing.has(LIST_DIR_TOOL_NAME)
   );

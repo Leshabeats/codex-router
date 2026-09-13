@@ -51,6 +51,7 @@ function inspectWorkspacePath(cwd, target) {
       return "missing";
     }
     if (info.isSymbolicLink()) return "outside";
+    if (index === parts.length - 1 && !info.isFile()) return "missing";
   }
   return "exists";
 }

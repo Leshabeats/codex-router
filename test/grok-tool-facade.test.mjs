@@ -289,6 +289,10 @@ test("run_terminal_command canonicalizes file reads and refuses file writes", ()
   assert.equal(classifyShellCommand("sed -i 's/old/new/' file").kind, "write");
   assert.equal(classifyShellCommand("sed -Ei 's/old/new/' file").kind, "write");
   assert.equal(classifyShellCommand("perl -pi -e 's/old/new/' file").kind, "write");
+  assert.equal(
+    classifyShellCommand("python3 -c 'from pathlib import Path; Path(\"x\").write_text(\"oops\")'").kind,
+    "write",
+  );
   assert.equal(classifyShellCommand("node --test --test-name-pattern='Set-Content' test/foo.test.mjs").kind, "process");
   assert.equal(classifyShellCommand("printf '%s\\n' 'a>b'").kind, "process");
   assert.equal(classifyShellCommand("cat --help").kind, "process");
@@ -505,7 +509,7 @@ test("shell_command is not used as the native exec identity", () => {
   const names = tools.map((tool) => tool.name);
   assert.ok(names.includes(SEARCH_REPLACE_TOOL_NAME));
   assert.ok(!names.includes(READ_FILE_TOOL_NAME));
-  assert.ok(!names.includes("shell_command"));
+  assert.ok(names.includes("shell_command"));
 });
 
 test("function relay terminal summary must match the closed arguments", async () => {

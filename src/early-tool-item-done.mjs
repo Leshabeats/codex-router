@@ -245,8 +245,13 @@ export class EarlyToolItemDoneTransform extends Transform {
         input: typeof event.item.input === "string" ? event.item.input : "",
         kind: event.item.type,
         argumentsDone: false,
+        argBytes: Buffer.byteLength(
+          event.item.type === "custom_tool_call"
+            ? (typeof event.item.input === "string" ? event.item.input : "")
+            : (typeof event.item.arguments === "string" ? event.item.arguments : ""),
+        ),
       };
-      if (this.#exceedsArgumentBound()) {
+      if (this.#open.argBytes > MAX_SSE_FRAME_BYTES) {
         this.#disableRewrite(original);
         return;
       }
@@ -255,10 +260,12 @@ export class EarlyToolItemDoneTransform extends Transform {
     }
     if (ARG_DELTA_TYPES.has(type) && this.#matchesOpen(event)) {
       const piece = typeof event.delta === "string" ? event.delta : "";
-      if (this.#exceedsArgumentBound(piece)) {
+      const added = Buffer.byteLength(piece);
+      if (this.#open.argBytes + added > MAX_SSE_FRAME_BYTES) {
         this.#disableRewrite(original);
         return;
       }
+      this.#open.argBytes += added;
       if (this.#open.kind === "custom_tool_call") this.#open.input += piece;
       else this.#open.arguments += piece;
       this.push(originalOut);
@@ -280,10 +287,12 @@ export class EarlyToolItemDoneTransform extends Transform {
           nextInput = unwrapCustomInput(wrapped);
         }
         const next = this.#open.kind === "custom_tool_call" ? nextInput : nextArguments;
-        if (this.#exceedsArgumentBound("", next)) {
+        const nextBytes = Buffer.byteLength(next);
+        if (nextBytes > MAX_SSE_FRAME_BYTES) {
           this.#disableRewrite(original);
           return;
         }
+        this.#open.argBytes = nextBytes;
         this.#open.arguments = nextArguments;
         this.#open.input = nextInput;
         this.#open.argumentsDone = true;
@@ -333,11 +342,6 @@ export class EarlyToolItemDoneTransform extends Transform {
 
   #matchesOpen(event) {
     return this.#sameOpenIdentity(event.item_id, event.output_index);
-  }
-
-  #exceedsArgumentBound(extra = "", text) {
-    const current = text ?? (this.#open.kind === "custom_tool_call" ? this.#open.input : this.#open.arguments);
-    return Buffer.byteLength(current) + Buffer.byteLength(extra) > MAX_SSE_FRAME_BYTES;
   }
 
   #disableRewrite(original) {
